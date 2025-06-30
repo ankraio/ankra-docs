@@ -41,7 +41,7 @@ Welcome to the Ankra Mintlify documentation starter! This project provides a rob
   ```json
   {
     "tab": "API Reference",
-    "openapi": "https://charizard.ankra.dev/openapi.json"
+    "openapi": "https://platform.ankra.app/openapi.json"
   }
   ```
 
