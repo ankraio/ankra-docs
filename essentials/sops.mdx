@@ -1,0 +1,332 @@
+---
+title: SOPS Encryption
+description: Encrypt sensitive values in your Stacks with SOPS for secure GitOps workflows
+---
+
+<Note>
+SOPS (Secrets OPerationS) encryption allows you to securely store sensitive values like passwords, API keys, and credentials in your GitOps repository. Encrypted values are automatically decrypted during deployment.
+</Note>
+
+## What is SOPS?
+
+[SOPS](https://github.com/getsops/sops) is an editor for encrypted files that supports YAML, JSON, ENV, INI and BINARY formats. Ankra uses SOPS with [AGE](https://github.com/FiloSottile/age) encryption to protect sensitive values in your Stack configurations.
+
+### How It Works
+
+```
+┌─────────────────┐     ┌─────────────────┐     ┌─────────────────┐
+│   Stack Editor  │────▶│   Git Repo      │────▶│   Cluster       │
+│   (Plaintext)   │     │   (Encrypted)   │     │   (Decrypted)   │
+└─────────────────┘     └─────────────────┘     └─────────────────┘
+       │                        │                        │
+       │  Encrypt with         │  Store safely          │  Decrypt with
+       │  AGE public key       │  in version control    │  AGE private key
+       └────────────────────────────────────────────────┘
+```
+
+1. **In the Stack Builder**: You enter secrets in plaintext
+2. **On Save**: Ankra encrypts marked fields with your organisation's AGE public key
+3. **In Git**: Encrypted values appear as `ENC[AES256_GCM,...]` - safe to commit
+4. **On Deploy**: ArgoCD's helm-secrets plugin decrypts values using the private key
+
+---
+
+## Setting Up SOPS
+
+SOPS encryption works at two levels: organisation (key management) and cluster (decryption capability).
+
+### Step 1: Initialize Organisation Encryption
+
+<Steps>
+  <Step title="Navigate to Encryption Settings">
+    Go to **Organisation Settings** → **Encryption**.
+  </Step>
+  <Step title="Initialize Encryption">
+    Click **Initialize Encryption**. This generates an AGE key pair:
+    - **Public key**: Used to encrypt values (visible to you)
+    - **Private key**: Used to decrypt values (stored securely in Ankra's vault)
+  </Step>
+  <Step title="Copy the Public Key">
+    The AGE public key is displayed. You can copy it for use with external SOPS tools if needed.
+  </Step>
+</Steps>
+
+The public key looks like: `age1ql3z7hjy54pw3hyww5ayyfg7zqgvc7w3j2elw8zmrj2kg5sfn9aqmcac8p`
+
+### Step 2: Enable Cluster Decryption
+
+For each cluster that needs to decrypt SOPS-encrypted values:
+
+<Steps>
+  <Step title="Navigate to Cluster Encryption Settings">
+    Go to your cluster → **Settings** → **Encryption**.
+  </Step>
+  <Step title="Enable SOPS Decryption">
+    Toggle on **Enable SOPS Decryption**.
+  </Step>
+  <Step title="Wait for Deployment">
+    Ankra deploys the decryption key to your cluster and configures ArgoCD with helm-secrets.
+  </Step>
+</Steps>
+
+<Warning>
+SOPS decryption requires ArgoCD to be installed on the cluster. If ArgoCD is not detected, the toggle will be disabled.
+</Warning>
+
+---
+
+## Encrypting Values in Stacks
+
+### Using the Stack Builder
+
+When editing a manifest or add-on values in the Stack Builder:
+
+1. Look for the **Encrypted Keys (SOPS)** section
+2. Add key names that should be encrypted (e.g., `password`, `apiKey`, `token`)
+3. Enter the plaintext value as normal
+4. On save, Ankra encrypts those specific keys
+
+<Tip>
+Only the specified keys are encrypted. Other values remain in plaintext for easy review and debugging.
+</Tip>
+
+### Common Keys to Encrypt
+
+| Key Name | Use Case |
+|----------|----------|
+| `password` | Database passwords, admin credentials |
+| `apiKey` | Third-party API keys |
+| `token` | Authentication tokens, tunnel tokens |
+| `secretKey` | Encryption keys, signing keys |
+| `connectionString` | Database connection strings with credentials |
+| `privateKey` | SSH keys, TLS private keys |
+
+### Example: Encrypting a Database Password
+
+**Before encryption** (what you see in the editor):
+
+```yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: postgres-credentials
+  namespace: database
+type: Opaque
+stringData:
+  username: app_user
+  password: super-secret-password
+```
+
+**After encryption** (what's stored in Git):
+
+```yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: postgres-credentials
+  namespace: database
+type: Opaque
+stringData:
+  username: app_user
+  password: ENC[AES256_GCM,data:vxvYs7vKw+bPqNWO3tE=,iv:...,tag:...,type:str]
+sops:
+  age:
+    - recipient: age1ql3z7hjy54pw3hyww5ayyfg7zqgvc7w3j2elw8zmrj2kg5sfn9aqmcac8p
+      enc: |
+        -----BEGIN AGE ENCRYPTED FILE-----
+        YWdlLWVuY3J5cHRpb24ub3JnL3YxCi0+IFgyNTUxOSBxVEdI...
+        -----END AGE ENCRYPTED FILE-----
+  encrypted_regex: ^(password)$
+  version: 3.9.4
+```
+
+---
+
+## Encrypting Helm Values
+
+For add-ons (Helm charts), you can encrypt specific values:
+
+1. Open the add-on in the Stack Builder
+2. In the values editor, find the **Encrypted Keys (SOPS)** section
+3. Add paths to sensitive values
+
+### Helm Values Path Examples
+
+| Path | Description |
+|------|-------------|
+| `adminPassword` | Top-level key |
+| `auth.password` | Nested key (uses dot notation) |
+| `credentials.apiKey` | Deeply nested key |
+
+**Example**: Encrypting Grafana admin password
+
+```yaml
+# Values for grafana chart
+adminUser: admin
+adminPassword: my-grafana-password  # ← This gets encrypted
+persistence:
+  enabled: true
+```
+
+Add `adminPassword` to the encrypted keys list.
+
+---
+
+## Key Rotation
+
+Periodically rotating encryption keys is a security best practice.
+
+### Initiating Key Rotation
+
+<Steps>
+  <Step title="Go to Encryption Settings">
+    Navigate to **Organisation Settings** → **Encryption**.
+  </Step>
+  <Step title="Click Rotate Keys">
+    This generates a new AGE key pair while preserving the old one temporarily.
+  </Step>
+  <Step title="Re-encrypt Existing Content">
+    Before confirming, you must re-encrypt all existing SOPS-encrypted content in your Git repositories with the new public key.
+  </Step>
+  <Step title="Confirm Rotation">
+    Once all content is re-encrypted, click **Confirm Rotation** to finalize. The old private key is then securely deleted.
+  </Step>
+</Steps>
+
+<Warning>
+**Critical**: You must re-encrypt all content before confirming rotation. Failing to do so will result in decryption failures for content encrypted with the old key.
+</Warning>
+
+### Cancelling Key Rotation
+
+If you need to abort a rotation in progress, click **Cancel Rotation**. The new key pair is discarded and the existing key remains active.
+
+---
+
+## How Decryption Works
+
+When SOPS is enabled on a cluster, Ankra:
+
+1. **Deploys the AGE private key** as a Kubernetes Secret in the ArgoCD namespace
+2. **Configures helm-secrets plugin** on the ArgoCD repo-server
+3. **Sets up automatic decryption** during Helm template rendering
+
+### What Gets Deployed
+
+| Component | Namespace | Purpose |
+|-----------|-----------|---------|
+| `ankra-sops-age-key` Secret | `argocd` | Stores the AGE private key |
+| helm-secrets plugin | ArgoCD repo-server | Enables SOPS decryption in Helm |
+| SOPS binary | ArgoCD repo-server | Performs the actual decryption |
+
+### ArgoCD Integration
+
+The helm-secrets plugin is automatically configured with:
+
+- `HELM_SECRETS_BACKEND=sops` - Use SOPS for decryption
+- `SOPS_AGE_KEY_FILE=/ankra-sops-age-key/age.agekey` - Path to the private key
+- Support for `secrets://` value file scheme
+
+---
+
+## Best Practices
+
+<Tip>
+**Encrypt only what's necessary**: Only mark truly sensitive values for encryption. Non-sensitive configuration should remain in plaintext for easier debugging.
+</Tip>
+
+<Tip>
+**Use consistent key names**: Stick to standard names like `password`, `apiKey`, `token` across your Stacks for consistency.
+</Tip>
+
+<Tip>
+**Enable SOPS on all clusters**: If you're using GitOps, enable SOPS decryption on all clusters that will deploy encrypted Stacks.
+</Tip>
+
+<Tip>
+**Rotate keys periodically**: Consider rotating keys quarterly or after team member departures.
+</Tip>
+
+---
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="Deployment Fails with Decryption Error">
+    1. Verify SOPS is enabled on the cluster (**Settings** → **Encryption**)
+    2. Check that ArgoCD repo-server has restarted after enabling SOPS
+    3. Ensure the content was encrypted with the current organisation key (not a rotated key)
+
+    ```bash
+    # Check ArgoCD repo-server logs
+    kubectl logs -n argocd -l app.kubernetes.io/component=repo-server | grep -i sops
+    ```
+  </Accordion>
+  <Accordion title="SOPS Toggle is Disabled">
+    The cluster doesn't have ArgoCD installed. Install ArgoCD first, then enable SOPS:
+
+    1. Create a Stack with the ArgoCD add-on
+    2. Deploy and wait for ArgoCD to become ready
+    3. Return to **Settings** → **Encryption** and enable SOPS
+  </Accordion>
+  <Accordion title="Values Not Being Encrypted">
+    1. Check that the key name matches exactly (case-sensitive)
+    2. Verify SOPS is initialized at the organisation level
+    3. Ensure the key is added to the **Encrypted Keys** list before saving
+
+    Keys must be top-level or specified with dot notation for nested paths.
+  </Accordion>
+  <Accordion title="Key Rotation Stuck">
+    If you initiated key rotation but can't complete it:
+
+    1. **Cancel the rotation** if you haven't re-encrypted content yet
+    2. If content is already re-encrypted, verify by checking the `sops.age.recipient` field matches the new public key
+    3. Click **Confirm Rotation** to finalize
+  </Accordion>
+</AccordionGroup>
+
+---
+
+## AI Prompts
+
+Press `⌘+J` to open the AI Assistant and use these prompts:
+
+<AccordionGroup>
+  <Accordion title="Set Up SOPS for a Stack">
+    ```
+    I have a Stack with database credentials. Help me encrypt
+    the password field with SOPS before pushing to Git.
+    ```
+  </Accordion>
+  <Accordion title="Enable SOPS on a Cluster">
+    ```
+    Enable SOPS decryption on my cluster so I can deploy
+    encrypted Stacks.
+    ```
+  </Accordion>
+  <Accordion title="Troubleshoot Decryption Failure">
+    ```
+    My Stack deployment is failing with a SOPS decryption error.
+    Help me troubleshoot.
+    ```
+  </Accordion>
+</AccordionGroup>
+
+---
+
+## Related
+
+<CardGroup cols={2}>
+  <Card title="Stacks" icon="cubes" href="/essentials/stacks">
+    Build and deploy reusable Stack configurations.
+  </Card>
+  <Card title="GitOps" icon="git-alt" href="/essentials/cluster-gitops-multiple">
+    Sync Stacks with Git repositories.
+  </Card>
+  <Card title="Cloudflare Tunnel" icon="cloud" href="/guides/cloudflare-tunnel">
+    Encrypt tunnel tokens with SOPS.
+  </Card>
+  <Card title="Manifests" icon="file-code" href="/essentials/manifests">
+    Create custom Kubernetes resources with encryption.
+  </Card>
+</CardGroup>

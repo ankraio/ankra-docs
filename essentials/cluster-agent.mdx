@@ -1,0 +1,272 @@
+---
+title: Ankra Agent
+description: Learn how the Ankra Agent connects your Kubernetes cluster to the platform.
+---
+
+The Ankra Agent is a lightweight service that runs inside your Kubernetes cluster, enabling real-time communication with the Ankra platform. It provides secure, bidirectional connectivity for resource browsing, deployments, and cluster management.
+
+<Note>
+The agent requires **cluster-admin** permissions to manage all Kubernetes resources and deploy add-ons.
+</Note>
+
+---
+
+## What the Agent Does
+
+<CardGroup cols={2}>
+  <Card title="Real-time Resource Streaming" icon="satellite-dish">
+    Browse Deployments, Pods, Services, and 20+ resource types with live updates.
+  </Card>
+  <Card title="Pod Log Streaming" icon="terminal">
+    View container logs in real-time directly from the Ankra dashboard.
+  </Card>
+  <Card title="Helm Management" icon="box">
+    Deploy, upgrade, and manage Helm releases across your cluster.
+  </Card>
+  <Card title="Add-on Deployment" icon="layer-group">
+    Install stacks and add-ons with ArgoCD integration for GitOps.
+  </Card>
+</CardGroup>
+
+---
+
+## Installation
+
+When you import a cluster, Ankra generates a Helm install command with a unique token:
+
+```bash
+helm upgrade --install ankra-agent oci://ghcr.io/ankraio/ankra-agent/ankra-agent \
+  --namespace ankra \
+  --create-namespace \
+  --set config.token="YOUR_UNIQUE_TOKEN"
+```
+
+The agent will connect to the platform and your cluster will appear online within seconds.
+
+### Verify Installation
+
+Check the agent is running:
+
+```bash
+kubectl get pods -n ankra
+```
+
+View agent logs:
+
+```bash
+kubectl logs -n ankra -l app.kubernetes.io/name=ankra-agent -f
+```
+
+---
+
+## Configuration Reference
+
+### Required Settings
+
+| Parameter | Description |
+|-----------|-------------|
+| `config.token` | Authentication token (provided during cluster import) |
+| `config.ankra_url` | Platform URL (default: `https://platform.ankra.app`) |
+
+### Using an Existing Secret
+
+For production environments, store the token in a Kubernetes secret:
+
+```bash
+kubectl create secret generic ankra-agent-secret \
+  --namespace ankra \
+  --from-literal=token=YOUR_UNIQUE_TOKEN
+```
+
+Then reference it in your Helm install:
+
+```bash
+helm upgrade --install ankra-agent oci://ghcr.io/ankraio/ankra-agent/ankra-agent \
+  --namespace ankra \
+  --set config.existing_secret_name=ankra-agent-secret \
+  --set config.secret_key=token
+```
+
+### Performance Tuning
+
+For large clusters (1000+ resources), adjust these settings:
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `nats_worker_max_workers` | `15` | Worker threads for command processing |
+| `resources.limits.memory` | `200Mi` | Memory limit |
+| `resources.requests.memory` | `100Mi` | Memory request |
+| `replica_count` | `1` | Number of agent replicas |
+
+Example for large clusters:
+
+```bash
+helm upgrade --install ankra-agent oci://ghcr.io/ankraio/ankra-agent/ankra-agent \
+  --namespace ankra \
+  --set config.token="YOUR_TOKEN" \
+  --set nats_worker_max_workers=25 \
+  --set resources.limits.memory=512Mi \
+  --set resources.requests.memory=256Mi
+```
+
+### All Helm Values
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `config.ankra_url` | `https://platform.ankra.app` | Platform API URL |
+| `config.token` | `""` | Agent authentication token |
+| `config.existing_secret_name` | `""` | Name of existing K8s secret |
+| `config.secret_key` | `""` | Key in existing secret containing token |
+| `log_level` | `INFO` | Log level (DEBUG, INFO, WARNING, ERROR) |
+| `nats_worker_max_workers` | `15` | NATS worker threads |
+| `replica_count` | `1` | Number of agent pods |
+| `terminationGracePeriodSeconds` | `600` | Graceful shutdown timeout |
+| `resources.limits.memory` | `200Mi` | Memory limit |
+| `resources.requests.memory` | `100Mi` | Memory request |
+
+---
+
+## Architecture
+
+The agent uses a NATS-based architecture for real-time communication:
+
+```
+┌─────────────────┐         ┌──────────────────┐
+│  Ankra Portal   │◄───────►│  Ankra Platform  │
+└─────────────────┘   HTTPS └────────┬─────────┘
+                                     │
+                                     │ NATS JetStream
+                                     │
+                              ┌──────▼─────────┐
+                              │  Ankra Agent   │
+                              │  (in-cluster)  │
+                              └──────┬─────────┘
+                                     │
+                                     │ Kubernetes API
+                                     │
+                              ┌──────▼─────────┐
+                              │   Your Cluster │
+                              └────────────────┘
+```
+
+**Key features:**
+- **Outbound connections only** - The agent initiates all connections, no inbound ports required
+- **Real-time streaming** - Resource data streams efficiently using pagination
+- **Automatic reconnection** - Handles network interruptions gracefully
+- **Health monitoring** - Exposes `/health` and `/ready` endpoints on port 8080
+
+---
+
+## Network Requirements
+
+The agent requires outbound connectivity to:
+
+| Endpoint | Port | Purpose |
+|----------|------|---------|
+| `platform.ankra.app` | 443 | API communication |
+| `connect.ngs.global` | 4222 | NATS real-time streaming |
+
+No inbound ports need to be opened on your cluster.
+
+---
+
+## Upgrading the Agent
+
+### From the Platform
+
+Click **Upgrade Agent** in the cluster settings. The agent will self-upgrade using Helm.
+
+### Manually
+
+```bash
+helm upgrade ankra-agent oci://ghcr.io/ankraio/ankra-agent/ankra-agent \
+  --namespace ankra \
+  --reuse-values
+```
+
+Check the current agent version:
+
+```bash
+kubectl get deployment -n ankra ankra-agent -o jsonpath='{.spec.template.spec.containers[0].image}'
+```
+
+---
+
+## Troubleshooting
+
+### Agent Not Connecting
+
+1. **Check agent pods are running:**
+   ```bash
+   kubectl get pods -n ankra
+   ```
+
+2. **View agent logs:**
+   ```bash
+   kubectl logs -n ankra -l app.kubernetes.io/name=ankra-agent --tail=100
+   ```
+
+3. **Verify network connectivity:**
+   ```bash
+   kubectl run --rm -it --restart=Never debug --image=curlimages/curl -- \
+     curl -s https://platform.ankra.app/health
+   ```
+
+4. **Check the token is set:**
+   ```bash
+   kubectl get secret -n ankra ankra-agent -o jsonpath='{.data.token}' | base64 -d
+   ```
+
+### Common Issues
+
+| Issue | Cause | Solution |
+|-------|-------|----------|
+| Cluster shows Offline | Agent not running or network blocked | Check pods and firewall rules |
+| Token invalid | Token expired or revoked | Go to Clusters → Your Cluster → Settings → Generate Command to get a new install command |
+| Connection refused | Outbound network blocked | Allow connections to `platform.ankra.app:443` |
+| Resources not loading | Agent memory limits too low | Increase `resources.limits.memory` |
+
+### Health Checks
+
+The agent exposes health endpoints:
+
+```bash
+kubectl port-forward -n ankra svc/ankra-agent 8080:8080
+curl http://localhost:8080/health
+curl http://localhost:8080/ready
+```
+
+---
+
+## Uninstalling
+
+To remove the agent from your cluster:
+
+```bash
+helm uninstall ankra-agent -n ankra
+kubectl delete namespace ankra
+```
+
+<Warning>
+Uninstalling the agent will disconnect your cluster from Ankra. You'll need to re-import it to reconnect.
+</Warning>
+
+---
+
+## Security
+
+### RBAC Requirements
+
+The agent requires cluster-admin permissions to:
+- Browse all Kubernetes resources
+- Deploy Helm charts and manifests
+- Manage ArgoCD applications
+- Stream pod logs
+
+The Helm chart creates a `ClusterRoleBinding` with the necessary permissions.
+
+### Token Security
+
+- Tokens are unique per cluster
+- Tokens can be revoked by deleting the cluster from Ankra
+- Store tokens in Kubernetes secrets (not in Helm values) for production
