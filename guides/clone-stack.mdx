@@ -1,0 +1,292 @@
+---
+title: Clone Stacks Between Clusters
+description: Learn how to clone stacks from one cluster to another for consistent deployments across environments
+---
+
+<Note>
+Cloning stacks allows you to replicate your infrastructure configurations across multiple clusters. Cloned stacks are created as drafts, giving you the opportunity to review and customize them before deployment.
+</Note>
+
+<Card title="AI Prompts" icon="wand-magic-sparkles" href="#ai-prompts">
+  Use these prompts with the AI Assistant (`Cmd+J`) to clone stacks with natural language.
+</Card>
+
+---
+
+## Overview
+
+Stack cloning is useful when you want to:
+
+| Use Case | Example |
+|----------|---------|
+| **Promote configurations** | Clone a tested stack from staging to production |
+| **Standardize environments** | Replicate your monitoring stack across all clusters |
+| **Create templates** | Use a well-configured stack as a starting point for new clusters |
+| **Disaster recovery** | Quickly replicate infrastructure to a backup cluster |
+
+<Warning>
+**Security Note:** Encrypted values (secrets) are not transferred during cloning for security reasons. You'll need to reconfigure them in the target cluster. This includes passwords, API keys, and any values encrypted with SOPS.
+</Warning>
+
+---
+
+## Prerequisites
+
+- At least two clusters imported into Ankra
+- A deployed stack in the source cluster that you want to clone
+- Access to both the source and target clusters
+
+---
+
+## Clone Using the Dashboard
+
+<Steps>
+  <Step title="Navigate to Source Stack">
+    Go to your source cluster and navigate to **Stacks**. Find the stack you want to clone.
+  </Step>
+  <Step title="Open Clone Dialog">
+    Click the menu icon (three dots) on the stack card and select **Clone to Cluster**.
+    
+    <Frame caption="Clone to Cluster option in the stack menu">
+      <img src="/images/clone-stack-menu.png" alt="Clone to Cluster menu option" />
+    </Frame>
+  </Step>
+  <Step title="Select Target Cluster">
+    In the dialog that appears:
+    1. Choose the destination cluster from the dropdown
+    2. Optionally modify the stack name
+    3. Choose whether to include addon configurations
+  </Step>
+  <Step title="Review Warnings">
+    If your stack contains encrypted values, you'll see a warning. These values will need to be reconfigured after cloning.
+  </Step>
+  <Step title="Clone the Stack">
+    Click **Clone Stack**. You'll be redirected to the draft in the target cluster.
+  </Step>
+  <Step title="Configure and Deploy">
+    In the target cluster:
+    1. Review the cloned configuration
+    2. Add any missing secrets or encrypted values
+    3. Adjust cluster-specific settings if needed
+    4. Click **Deploy** when ready
+  </Step>
+</Steps>
+
+---
+
+## Clone Using the CLI
+
+The Ankra CLI provides a `clone` command for scripting and automation.
+
+### Basic Usage
+
+```bash
+# Select the source cluster first
+ankra cluster select my-source-cluster
+
+# Clone a stack to another cluster
+ankra cluster stacks clone monitoring-stack --to production-cluster
+```
+
+### Command Options
+
+| Flag | Short | Description |
+|------|-------|-------------|
+| `--to` | `-t` | Target cluster name or ID (required) |
+| `--name` | `-n` | Custom name for the cloned stack |
+| `--include-config` | | Include addon configurations (default: true) |
+
+### Examples
+
+**Clone with a custom name:**
+```bash
+ankra cluster stacks clone my-stack --to production --name my-stack-prod
+```
+
+**Clone without addon configurations:**
+```bash
+ankra cluster stacks clone my-stack --to production --include-config=false
+```
+
+**Clone using cluster IDs:**
+```bash
+ankra cluster stacks clone monitoring-stack --to 550e8400-e29b-41d4-a716-446655440000
+```
+
+### CLI Output
+
+```
+Cloning stack 'monitoring-stack' to cluster 'production'...
+
+Stack cloned successfully!
+  Draft ID:    a1b2c3d4-e5f6-7890-abcd-ef1234567890
+  Stack Name:  monitoring-stack
+  Addons:      3
+  Manifests:   2
+
+Warnings:
+  - Addon 'grafana' had encrypted configuration that needs to be reconfigured.
+
+The stack has been created as a draft. Open the Ankra dashboard to review and deploy.
+```
+
+---
+
+## What Gets Cloned
+
+| Component | Cloned | Notes |
+|-----------|:------:|-------|
+| Stack name & description | Yes | Can be renamed during clone |
+| Stack variables | Yes | Transferred as-is |
+| Manifests | Yes | YAML content (encrypted values cleared) |
+| Addons | Yes | Chart references and versions |
+| Addon configurations | Optional | Use `--include-config` flag |
+| Encrypted secrets | No | Must be reconfigured |
+| Deployment state | No | Created as draft |
+| Resource positions | No | Auto-layouted in target |
+| Dependencies | Yes | Parent relationships preserved by name |
+
+---
+
+## Handling Encrypted Values
+
+When you clone a stack that contains encrypted values:
+
+1. **Manifests:** Encrypted fields are replaced with placeholder values
+2. **Addon configurations:** Values containing encrypted paths are cleared
+3. **Warnings:** You'll see specific warnings about which resources need attention
+
+<AccordionGroup>
+  <Accordion title="Re-encrypting Secrets After Clone">
+    After cloning, you'll need to re-encrypt secrets for the target cluster:
+    
+    1. Open the cloned draft in the target cluster
+    2. Navigate to each manifest or addon that had encrypted values
+    3. Enter the new secret values
+    4. Use the SOPS button to encrypt them with the target cluster's key
+    5. Save and deploy
+    
+    <Tip>
+    Each cluster has its own SOPS encryption key. Values encrypted in one cluster cannot be decrypted in another - this is by design for security.
+    </Tip>
+  </Accordion>
+  <Accordion title="Automating Secret Configuration">
+    For automated deployments, consider:
+    
+    - Using external secrets management (e.g., Vault, AWS Secrets Manager)
+    - Storing secrets in environment-specific configuration
+    - Using Kubernetes ExternalSecrets operator
+  </Accordion>
+</AccordionGroup>
+
+---
+
+## Common Workflows
+
+<AccordionGroup>
+  <Accordion title="Staging to Production Promotion">
+    ```bash
+    # Test in staging first
+    ankra cluster select staging
+    ankra cluster stacks list
+    
+    # Clone to production when ready
+    ankra cluster stacks clone my-app-stack --to production
+    
+    # Switch to production and configure secrets
+    ankra cluster select production
+    # ... configure in dashboard
+    ```
+  </Accordion>
+  <Accordion title="Standardizing Multiple Clusters">
+    Clone your standard monitoring stack to all clusters:
+    
+    ```bash
+    ankra cluster select template-cluster
+    
+    for cluster in dev staging production; do
+      ankra cluster stacks clone observability --to $cluster --name observability
+      echo "Cloned to $cluster"
+    done
+    ```
+  </Accordion>
+  <Accordion title="Creating a Backup Configuration">
+    ```bash
+    # Clone critical stacks to a DR cluster
+    ankra cluster select primary
+    ankra cluster stacks clone core-services --to dr-cluster
+    ankra cluster stacks clone monitoring --to dr-cluster
+    ankra cluster stacks clone ingress --to dr-cluster
+    ```
+  </Accordion>
+</AccordionGroup>
+
+---
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="Clone Failed: Stack Not Found">
+    Ensure the source stack is deployed (not just a draft) and you have the correct stack name:
+    
+    ```bash
+    ankra cluster stacks list
+    ```
+  </Accordion>
+  <Accordion title="Clone Failed: Access Denied">
+    Verify you have access to both the source and target clusters. You must be a member of both clusters' organizations.
+  </Accordion>
+  <Accordion title="Clone Failed: Target Cluster Unavailable">
+    The clone operation only creates a draft in the database - it doesn't require the target cluster to be online. Check your network connection to the Ankra API.
+  </Accordion>
+  <Accordion title="Missing Resources After Clone">
+    If addons or manifests are missing:
+    
+    1. Check if the source stack had resources in a `deleting` or `deleted` state
+    2. Verify the clone included addon configurations (`--include-config=true`)
+    3. Check the warnings for any resources that couldn't be cloned
+  </Accordion>
+</AccordionGroup>
+
+---
+
+## AI Prompts
+
+Press `Cmd+J` to open the AI Assistant and use these prompts:
+
+<AccordionGroup>
+  <Accordion title="Clone Stack">
+    ```
+    Clone the monitoring stack to my production cluster
+    ```
+  </Accordion>
+  <Accordion title="Duplicate and Modify">
+    ```
+    Clone the ingress stack from staging to production and rename it to prod-ingress
+    ```
+  </Accordion>
+  <Accordion title="Replicate to Multiple Clusters">
+    ```
+    Help me clone my observability stack to all my clusters
+    ```
+  </Accordion>
+</AccordionGroup>
+
+---
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Stack Templates" icon="copy" href="/essentials/stack-templates">
+    Create reusable templates for common stack configurations.
+  </Card>
+  <Card title="SOPS Encryption" icon="lock" href="/essentials/sops">
+    Learn how to encrypt secrets in your stacks.
+  </Card>
+  <Card title="GitOps Sync" icon="git-alt" href="/essentials/cluster-gitops">
+    Sync your stack configurations to a Git repository.
+  </Card>
+  <Card title="Ankra CLI" icon="terminal" href="/integrations/ankra-cli">
+    Learn more CLI commands for stack management.
+  </Card>
+</CardGroup>
