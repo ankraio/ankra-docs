@@ -15,8 +15,8 @@ Before creating a Hetzner cluster, you need two credentials:
   <Card title="Hetzner API Credential" icon="key">
     A Hetzner Cloud API token with read/write permissions. See [Hetzner Credentials](/integrations/credentials#hetzner-api-credentials).
   </Card>
-  <Card title="SSH Key Credential" icon="lock">
-    An SSH public key for server access. You can provide your own or let Ankra generate one. See [SSH Key Credentials](/integrations/credentials#ssh-key-credentials).
+  <Card title="SSH Key Credentials" icon="lock">
+    One or more SSH public keys for server access. You can provide your own or let Ankra generate one. Multiple keys can be attached to a single cluster. See [SSH Key Credentials](/integrations/credentials#ssh-key-credentials).
   </Card>
 </CardGroup>
 
@@ -37,7 +37,7 @@ Before creating a Hetzner cluster, you need two credentials:
     Fill in the cluster configuration:
     - **Name** — A unique name for your cluster
     - **Hetzner Credential** — Select your Hetzner API credential
-    - **SSH Key** — Select your SSH key credential
+    - **SSH Keys** — Select one or more SSH key credentials
     - **Location** — Hetzner datacenter (e.g., `fsn1`, `nbg1`, `hel1`)
     - **Control Plane** — Count and server type (e.g., `cx33`)
     - **Workers** — Count and server type
@@ -55,11 +55,22 @@ Before creating a Hetzner cluster, you need two credentials:
 ankra credentials hetzner create --name my-hetzner-token  # securely prompts for token
 ankra credentials hetzner ssh-key create --name my-ssh-key --generate
 
-# Create the cluster
+# Create the cluster with one SSH key
 ankra cluster hetzner create \
   --name my-cluster \
   --credential-id <hetzner-credential-id> \
   --ssh-key-credential-id <ssh-key-credential-id> \
+  --location fsn1 \
+  --control-plane-count 1 \
+  --control-plane-server-type cx33 \
+  --worker-count 2 \
+  --worker-server-type cx33
+
+# Or with multiple SSH keys
+ankra cluster hetzner create \
+  --name my-cluster \
+  --credential-id <hetzner-credential-id> \
+  --ssh-key-credential-ids <key-id-1>,<key-id-2>,<key-id-3> \
   --location fsn1 \
   --control-plane-count 1 \
   --control-plane-server-type cx33 \
@@ -76,7 +87,7 @@ curl -X POST https://platform.ankra.app/api/v1/clusters/hetzner \
   -d '{
     "name": "my-cluster",
     "credential_id": "<hetzner-credential-id>",
-    "ssh_key_credential_id": "<ssh-key-credential-id>",
+    "ssh_key_credential_ids": ["<key-id-1>", "<key-id-2>"],
     "location": "fsn1",
     "control_plane_count": 1,
     "control_plane_server_type": "cx33",
@@ -86,6 +97,10 @@ curl -X POST https://platform.ankra.app/api/v1/clusters/hetzner \
   }'
 ```
 
+<Note>
+The singular `ssh_key_credential_id` field is still accepted for backward compatibility. If both fields are provided, they are merged.
+</Note>
+
 ---
 
 ## Cluster Configuration Options
@@ -94,7 +109,8 @@ curl -X POST https://platform.ankra.app/api/v1/clusters/hetzner \
 |-----------|---------|-------------|
 | `name` | *required* | Unique cluster name |
 | `credential_id` | *required* | Hetzner API credential ID |
-| `ssh_key_credential_id` | *required* | SSH key credential ID |
+| `ssh_key_credential_ids` | *required* | Array of SSH key credential IDs |
+| `ssh_key_credential_id` | — | Single SSH key credential ID (backward compatible, use `ssh_key_credential_ids` for multiple) |
 | `location` | *required* | Hetzner datacenter location |
 | `network_ip_range` | `10.0.0.0/16` | Private network IP range |
 | `subnet_range` | `10.0.1.0/24` | Subnet range within the network |
@@ -116,6 +132,44 @@ curl -X POST https://platform.ankra.app/api/v1/clusters/hetzner \
 | `ash` | Ashburn, USA |
 | `hil` | Hillsboro, USA |
 | `sin` | Singapore |
+
+---
+
+## Access Settings
+
+The **Access** tab in cluster settings provides SSH access commands and SSH key management for Hetzner clusters.
+
+### SSH Access
+
+The Access page displays copy-pasteable commands for connecting to your cluster:
+
+**SSH to the control plane** via the bastion host:
+
+```bash
+ssh -J root@<bastion-ip> root@<control-plane-ip>
+```
+
+**Port-forward the Kubernetes API** for local `kubectl` access:
+
+```bash
+ssh -L 6443:<control-plane-ip>:6443 -N root@<bastion-ip>
+```
+
+After running the port-forward command, configure `kubectl` to use `https://localhost:6443`.
+
+The Access page also shows the network topology with the bastion host and all control plane nodes.
+
+### Managing SSH Keys
+
+You can add or remove SSH key credentials from a running cluster in **Settings > Access**. Changes are synced to all servers on the next reconciliation — SSH keys are registered with the Hetzner API and `authorized_keys` is updated on all nodes.
+
+SSH keys can also be managed via the API:
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/v1/clusters/hetzner/{id}/ssh-keys` | GET | List current and available SSH keys |
+| `/api/v1/clusters/hetzner/{id}/ssh-keys` | PUT | Update SSH keys on the cluster |
+| `/api/v1/clusters/hetzner/{id}/access-info` | GET | Get bastion and control plane IPs |
 
 ---
 
@@ -273,9 +327,16 @@ A Hetzner cluster provisions the following infrastructure:
 | **Private Network** | Isolated network for inter-node communication |
 | **Control Plane(s)** | Kubernetes control plane nodes |
 | **Worker(s)** | Kubernetes worker nodes for running workloads |
-| **SSH Keys** | Deployed to all servers for access |
+| **SSH Keys** | Deployed to all servers for access (multiple keys supported) |
+| **External Cloud Provider** | k3s is configured with `cloud-provider=external` for Hetzner CCM compatibility |
 
 All nodes are deployed within a private Hetzner network. The bastion host provides the only external SSH access point.
+
+### External Cloud Provider
+
+Hetzner clusters are provisioned with `--kubelet-arg=cloud-provider=external` and `--disable-cloud-controller`. This configures k3s to delegate node initialization to an external Cloud Controller Manager (CCM).
+
+The `node.cloudprovider.kubernetes.io/uninitialized` taint is automatically removed during provisioning so the Ankra Agent can schedule immediately. You can deploy the [Hetzner Cloud Controller Manager](https://github.com/hetznercloud/hcloud-cloud-controller-manager) as an Ankra Stack to enable features like automatic node metadata, load balancers, and route management.
 
 ---
 
@@ -289,6 +350,7 @@ All nodes are deployed within a private Hetzner network. The bastion host provid
 | Cannot scale workers | Ensure cluster is online and no operations are running |
 | Invalid API token | Re-validate at [Hetzner Console](https://console.hetzner.cloud) |
 | Server type unavailable | Try a different location or server type |
+| Node has `uninitialized` taint | The taint is removed automatically; if it persists, trigger a reconciliation from the cluster settings |
 
 ### Hetzner API Quota
 
