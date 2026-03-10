@@ -91,14 +91,17 @@ curl -X POST https://platform.ankra.app/api/v1/clusters/hetzner \
     "location": "fsn1",
     "control_plane_count": 1,
     "control_plane_server_type": "cx33",
-    "worker_count": 2,
-    "worker_server_type": "cx33",
+    "node_groups": [
+      {"name": "default", "instance_type": "cx33", "count": 2},
+      {"name": "gpu-workers", "instance_type": "ccx33", "count": 1, "labels": {"gpu": "true"}, "taints": [{"key": "gpu", "value": "true", "effect": "NoSchedule"}]}
+    ],
     "distribution": "k3s"
   }'
 ```
 
 <Note>
-The singular `ssh_key_credential_id` field is still accepted for backward compatibility. If both fields are provided, they are merged.
+The `worker_count` and `worker_server_type` fields are still accepted for backward compatibility. If `node_groups` is provided, it takes precedence.
+The singular `ssh_key_credential_id` field is also still accepted. If both fields are provided, they are merged.
 </Note>
 
 ---
@@ -117,8 +120,9 @@ The singular `ssh_key_credential_id` field is still accepted for backward compat
 | `bastion_server_type` | `cx23` | Server type for the bastion host |
 | `control_plane_count` | `1` | Number of control plane nodes |
 | `control_plane_server_type` | `cx33` | Server type for control planes |
-| `worker_count` | `1` | Number of worker nodes (1–10) |
-| `worker_server_type` | `cx33` | Server type for workers |
+| `worker_count` | `1` | Number of worker nodes (legacy, use `node_groups` instead) |
+| `worker_server_type` | `cx33` | Server type for workers (legacy, use `node_groups` instead) |
+| `node_groups` | — | Array of node group definitions (see [Node Groups](#node-groups)) |
 | `distribution` | `k3s` | Kubernetes distribution |
 | `kubernetes_version` | *latest* | Kubernetes version (optional) |
 
@@ -173,24 +177,31 @@ SSH keys can also be managed via the API:
 
 ---
 
-## Scaling Workers
+## Node Groups
 
-You can scale worker nodes between 1 and 10 for any online Hetzner cluster. Scaling up adds new servers and installs Kubernetes. Scaling down removes workers starting from the highest index.
+Node groups let you organize worker nodes into logical groups with independent instance types, counts, labels, and taints. Each group can be scaled, upgraded, and configured independently.
 
-<Warning>
-The cluster must be online with no active operations before scaling.
-</Warning>
+### Via the Platform UI
 
-### Check Current Workers
+Navigate to cluster **Settings** > **Nodes** to manage node groups. From this tab you can:
+
+- View all node groups with their instance type, count, labels, and taints
+- Add new node groups with a name, instance type, count, and optional labels/taints
+- Scale individual groups up or down (0–100 nodes)
+- Upgrade the instance type (upgrade only — see [Instance Type Changes](#instance-type-changes))
+- Edit labels and taints per group
+- Delete a node group and all its nodes
+
+### List Node Groups
 
 <CodeGroup>
 
 ```bash CLI
-ankra cluster hetzner workers <cluster_id>
+ankra cluster hetzner node-group list <cluster_id>
 ```
 
 ```bash cURL
-curl https://platform.ankra.app/api/v1/clusters/hetzner/<cluster_id>/worker-count \
+curl https://platform.ankra.app/api/v1/clusters/hetzner/<cluster_id>/node-groups \
   -H "Authorization: Bearer $ANKRA_API_TOKEN"
 ```
 
@@ -199,21 +210,154 @@ curl https://platform.ankra.app/api/v1/clusters/hetzner/<cluster_id>/worker-coun
 Response:
 ```json
 {
-  "worker_count": 2,
-  "min": 1,
-  "max": 10
+  "node_groups": [
+    {
+      "name": "default",
+      "instance_type": "cx33",
+      "count": 2,
+      "min": 0,
+      "max": 100,
+      "labels": {},
+      "taints": []
+    }
+  ]
 }
 ```
 
-### Scale Workers
+### Add a Node Group
 
 <CodeGroup>
 
 ```bash CLI
+ankra cluster hetzner node-group add <cluster_id> \
+  --name gpu-workers \
+  --instance-type ccx33 \
+  --count 3
+```
+
+```bash cURL
+curl -X POST https://platform.ankra.app/api/v1/clusters/hetzner/<cluster_id>/node-groups \
+  -H "Authorization: Bearer $ANKRA_API_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "gpu-workers",
+    "instance_type": "ccx33",
+    "count": 3,
+    "labels": {"workload": "gpu"},
+    "taints": [{"key": "gpu", "value": "true", "effect": "NoSchedule"}]
+  }'
+```
+
+</CodeGroup>
+
+### Scale a Node Group
+
+<CodeGroup>
+
+```bash CLI
+ankra cluster hetzner node-group scale <cluster_id> default 4
+```
+
+```bash cURL
+curl -X PUT https://platform.ankra.app/api/v1/clusters/hetzner/<cluster_id>/node-groups/default/scale \
+  -H "Authorization: Bearer $ANKRA_API_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"count": 4}'
+```
+
+</CodeGroup>
+
+Node groups can be scaled to 0 nodes. This keeps the group definition but removes all servers.
+
+### Instance Type Changes
+
+<Warning>
+Instance type upgrades are **irreversible**. Once upgraded, the server disk is enlarged and cannot be shrunk. You cannot downgrade a node group to a smaller instance type.
+
+To use a smaller instance type, create a new node group with the desired type and delete the old one.
+</Warning>
+
+<CodeGroup>
+
+```bash CLI
+ankra cluster hetzner node-group upgrade <cluster_id> default cx43
+```
+
+```bash cURL
+curl -X PUT https://platform.ankra.app/api/v1/clusters/hetzner/<cluster_id>/node-groups/default/instance-type \
+  -H "Authorization: Bearer $ANKRA_API_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"instance_type": "cx43"}'
+```
+
+</CodeGroup>
+
+Each node is powered off, resized, and powered back on. This causes brief downtime for workloads on those nodes.
+
+### Delete a Node Group
+
+<CodeGroup>
+
+```bash CLI
+ankra cluster hetzner node-group delete <cluster_id> gpu-workers
+```
+
+```bash cURL
+curl -X DELETE https://platform.ankra.app/api/v1/clusters/hetzner/<cluster_id>/node-groups/gpu-workers \
+  -H "Authorization: Bearer $ANKRA_API_TOKEN"
+```
+
+</CodeGroup>
+
+<Warning>
+Deleting a node group removes all its servers. Workloads running on those nodes will be evicted.
+</Warning>
+
+### Update Labels and Taints
+
+```bash
+# Update labels
+curl -X PUT https://platform.ankra.app/api/v1/clusters/hetzner/<cluster_id>/node-groups/default/labels \
+  -H "Authorization: Bearer $ANKRA_API_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"labels": {"env": "production", "tier": "backend"}}'
+
+# Update taints
+curl -X PUT https://platform.ankra.app/api/v1/clusters/hetzner/<cluster_id>/node-groups/default/taints \
+  -H "Authorization: Bearer $ANKRA_API_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"taints": [{"key": "dedicated", "value": "ml", "effect": "NoSchedule"}]}'
+```
+
+### Node Group API Reference
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/v1/clusters/hetzner/{id}/node-groups` | GET | List all node groups |
+| `/api/v1/clusters/hetzner/{id}/node-groups` | POST | Add a node group |
+| `/api/v1/clusters/hetzner/{id}/node-groups/{name}/scale` | PUT | Scale a node group |
+| `/api/v1/clusters/hetzner/{id}/node-groups/{name}/instance-type` | PUT | Upgrade instance type |
+| `/api/v1/clusters/hetzner/{id}/node-groups/{name}/labels` | PUT | Update labels |
+| `/api/v1/clusters/hetzner/{id}/node-groups/{name}/taints` | PUT | Update taints |
+| `/api/v1/clusters/hetzner/{id}/node-groups/{name}` | DELETE | Delete a node group |
+
+---
+
+## Legacy Worker Scaling
+
+The legacy `scale-workers` and `worker-count` endpoints still work for backward compatibility. They operate on all workers as a single pool.
+
+<CodeGroup>
+
+```bash CLI
+ankra cluster hetzner workers <cluster_id>
 ankra cluster hetzner scale <cluster_id> 4
 ```
 
 ```bash cURL
+curl https://platform.ankra.app/api/v1/clusters/hetzner/<cluster_id>/worker-count \
+  -H "Authorization: Bearer $ANKRA_API_TOKEN"
+
 curl -X POST https://platform.ankra.app/api/v1/clusters/hetzner/<cluster_id>/scale-workers \
   -H "Authorization: Bearer $ANKRA_API_TOKEN" \
   -H "Content-Type: application/json" \
@@ -222,13 +366,9 @@ curl -X POST https://platform.ankra.app/api/v1/clusters/hetzner/<cluster_id>/sca
 
 </CodeGroup>
 
-Response:
-```json
-{
-  "previous_count": 2,
-  "new_count": 4
-}
-```
+<Note>
+For new clusters, prefer using [Node Groups](#node-groups) for more granular control.
+</Note>
 
 ---
 
@@ -326,7 +466,7 @@ A Hetzner cluster provisions the following infrastructure:
 | **Bastion Host** | Jump server for secure SSH access to cluster nodes |
 | **Private Network** | Isolated network for inter-node communication |
 | **Control Plane(s)** | Kubernetes control plane nodes |
-| **Worker(s)** | Kubernetes worker nodes for running workloads |
+| **Worker(s)** | Kubernetes worker nodes organized in [node groups](#node-groups), each with independent instance types, labels, and taints |
 | **SSH Keys** | Deployed to all servers for access (multiple keys supported) |
 | **External Cloud Provider** | k3s is configured with `cloud-provider=external` for Hetzner CCM compatibility |
 
@@ -336,7 +476,138 @@ All nodes are deployed within a private Hetzner network. The bastion host provid
 
 Hetzner clusters are provisioned with `--kubelet-arg=cloud-provider=external` and `--disable-cloud-controller`. This configures k3s to delegate node initialization to an external Cloud Controller Manager (CCM).
 
-The `node.cloudprovider.kubernetes.io/uninitialized` taint is automatically removed during provisioning so the Ankra Agent can schedule immediately. You can deploy the [Hetzner Cloud Controller Manager](https://github.com/hetznercloud/hcloud-cloud-controller-manager) as an Ankra Stack to enable features like automatic node metadata, load balancers, and route management.
+The `node.cloudprovider.kubernetes.io/uninitialized` taint is automatically removed during provisioning so the Ankra Agent can schedule immediately.
+
+---
+
+## Hetzner Cloud Controller Manager (hcloud-ccm)
+
+The [Hetzner Cloud Controller Manager](https://github.com/hetznercloud/hcloud-cloud-controller-manager) integrates your cluster with Hetzner Cloud APIs to provide:
+
+- **Node metadata** — automatic zone, region, and instance type labels on nodes
+- **Load Balancers** — Kubernetes `LoadBalancer` services backed by Hetzner Cloud Load Balancers
+- **Node lifecycle** — automatic removal of deleted nodes from the cluster
+- **Route management** — pod network routes via Hetzner Cloud Networks
+
+### Deploy with AI
+
+The fastest way to set up hcloud-ccm is to ask the Ankra AI Assistant. Open the chat (`⌘+J`) on your cluster and prompt:
+
+```
+Set up the Hetzner Cloud Controller Manager for this cluster with a Hetzner API token secret and the hcloud-ccm Helm chart.
+```
+
+The AI will create a draft stack containing:
+
+1. A **Kubernetes Secret** manifest with your Hetzner API token (placeholder value for you to fill in)
+2. The **hcloud-ccm Helm chart** configured for your cluster's network
+
+<Steps>
+  <Step title="Review the Draft">
+    The AI creates the stack as a draft in the Stack Builder. Review the node diagram — you'll see the Secret and the hcloud-ccm chart with a dependency arrow (the chart depends on the secret).
+  </Step>
+  <Step title="Add Your Hetzner Token">
+    Click the Secret node in the diagram and replace the placeholder token value with your actual Hetzner Cloud API token (the same one used to provision the cluster, or a separate read/write token).
+  </Step>
+  <Step title="Deploy">
+    Click **Deploy** to publish the draft. Ankra deploys the secret first, then the CCM chart.
+  </Step>
+</Steps>
+
+<Tip>
+You can also ask the AI more specific questions like "Set up hcloud-ccm with load balancer support using my existing Hetzner token secret" or "Configure CCM with the network name from my cluster."
+</Tip>
+
+### Manual Setup
+
+If you prefer to configure it manually, add the hcloud-ccm Helm chart from the `https://charts.hetzner.cloud` registry:
+
+1. Add the Hetzner Helm registry in **Registries** (URL: `https://charts.hetzner.cloud`)
+2. Create a stack with:
+   - A **Secret** in the `kube-system` namespace named `hcloud` with key `token` containing your Hetzner API token
+   - The **hcloud-cloud-controller-manager** chart from the Hetzner registry, deployed to `kube-system`, with values:
+     ```yaml
+     networking:
+       enabled: true
+       clusterCIDR: "10.244.0.0/16"
+     env:
+       HCLOUD_TOKEN:
+         valueFrom:
+           secretKeyRef:
+             name: hcloud
+             key: token
+     ```
+
+---
+
+## Hetzner CSI Driver (hcloud-csi)
+
+The [Hetzner CSI Driver](https://github.com/hetznercloud/csi-driver) provides persistent storage for your workloads using Hetzner Cloud Volumes:
+
+- **Dynamic provisioning** — create Hetzner Cloud Volumes on demand via `PersistentVolumeClaim`
+- **Volume expansion** — resize volumes without downtime
+- **Storage classes** — `hcloud-volumes` StorageClass available out of the box
+
+### Deploy with AI
+
+Open the chat (`⌘+J`) and prompt:
+
+```
+Set up the Hetzner CSI driver for persistent storage on this cluster.
+```
+
+The AI will create a draft stack with the hcloud-csi Helm chart configured to use the same Hetzner API token secret as the CCM. If you've already deployed the `hcloud` secret for CCM, the AI will reference it automatically.
+
+### Manual Setup
+
+Add the **hcloud-csi** chart from the Hetzner Helm registry (`https://charts.hetzner.cloud`) to a stack:
+
+- Deploy to the `kube-system` namespace
+- The chart reads the Hetzner API token from the same `hcloud` secret used by CCM
+- Values:
+  ```yaml
+  storageClasses:
+    - name: hcloud-volumes
+      defaultStorageClass: true
+      reclaimPolicy: Delete
+  ```
+
+Once deployed, create PersistentVolumeClaims with `storageClassName: hcloud-volumes`:
+
+```yaml
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: my-data
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: hcloud-volumes
+  resources:
+    requests:
+      storage: 10Gi
+```
+
+---
+
+## Recommended Stack: CCM + CSI Together
+
+For a production Hetzner cluster, deploy both hcloud-ccm and hcloud-csi together. Ask the AI:
+
+```
+Set up a complete Hetzner cloud integration stack with CCM for load balancers and CSI for persistent volumes.
+```
+
+The AI creates a single stack draft with three components in the correct dependency order:
+
+1. **hcloud Secret** — your Hetzner API token
+2. **hcloud-ccm** — Cloud Controller Manager (depends on the secret)
+3. **hcloud-csi** — CSI Driver (depends on the secret)
+
+Review the draft in the Stack Builder, add your token to the secret, and deploy. The dependency DAG ensures the secret is created before either chart is installed.
+
+<Tip>
+The AI Assistant has full context about your cluster's configuration (network name, location, node groups) and uses it to pre-fill Helm values correctly. This is the recommended way to set up Hetzner integrations.
+</Tip>
 
 ---
 
@@ -347,10 +618,15 @@ The `node.cloudprovider.kubernetes.io/uninitialized` taint is automatically remo
 | Issue | Solution |
 |-------|----------|
 | Cluster stuck in provisioning | Check Hetzner API token permissions and quota |
-| Cannot scale workers | Ensure cluster is online and no operations are running |
+| Cannot scale workers | Ensure no operations are running |
 | Invalid API token | Re-validate at [Hetzner Console](https://console.hetzner.cloud) |
 | Server type unavailable | Try a different location or server type |
-| Node has `uninitialized` taint | The taint is removed automatically; if it persists, trigger a reconciliation from the cluster settings |
+| Cannot downgrade instance type | Hetzner disks cannot be shrunk. Create a new node group with the desired type and delete the old one |
+| `412: error during placement` | Hetzner capacity issue at that location. Retry later or try a different server type |
+| Node has `uninitialized` taint | The taint is removed automatically; if it persists, deploy hcloud-ccm or trigger a reconciliation |
+| LoadBalancer service stuck in `Pending` | Deploy the [Hetzner Cloud Controller Manager](#hetzner-cloud-controller-manager-hcloud-ccm) |
+| PVCs stuck in `Pending` | Deploy the [Hetzner CSI Driver](#hetzner-csi-driver-hcloud-csi) |
+| CCM/CSI pods in `CrashLoopBackOff` | Check that the `hcloud` secret in `kube-system` contains a valid Hetzner API token |
 
 ### Hetzner API Quota
 
