@@ -54,6 +54,7 @@ Before creating a Hetzner cluster, you need two credentials:
  **Control Plane** Count and server type (e.g., `cx33`)
  **Workers** Count and server type
  **Distribution** Kubernetes distribution (`k3s`)
+ **Include Ingress** Optionally deploy an ingress stack (ingress-nginx, cert-manager, Let's Encrypt)
   </Step>
   <Step title="Create">
     Click **Create** to start provisioning. The cluster will appear with an **offline** state until provisioning completes.
@@ -107,7 +108,8 @@ d '{
       {"name": "default", "instance_type": "cx33", "count": 2},
       {"name": "gpu-workers", "instance_type": "ccx33", "count": 1, "labels": {"gpu": "true"}, "taints": [{"key": "gpu", "value": "true", "effect": "NoSchedule"}]}
     ],
-    "distribution": "k3s"
+    "distribution": "k3s",
+    "include_ingress": true
   }'
 ```
 
@@ -137,6 +139,10 @@ The singular `ssh_key_credential_id` field is also still accepted. If both field
 | `node_groups` | | Array of node group definitions (see [Node Groups](#node-groups)) |
 | `distribution` | `k3s` | Kubernetes distribution |
 | `kubernetes_version` | *latest* | Kubernetes version (optional) |
+| `include_ingress` | `false` | Deploy the ingress stack (ingress-nginx + cert-manager + Let's Encrypt) |
+| `gitops_credential_name` | | GitHub credential name for GitOps integration |
+| `gitops_repository` | | GitHub repository for GitOps (e.g., `org/repo`) |
+| `gitops_branch` | `master` | Branch for GitOps pushes |
 
 ### Hetzner Locations
 
@@ -454,6 +460,17 @@ Deprovisioning deletes all Hetzner resources (servers, networks, SSH keys) and r
 This action is irreversible. All data on the cluster will be permanently deleted.
 </Warning>
 
+<Warning>
+**Clean up Hetzner Cloud resources before deprovisioning.** The Hetzner CCM and CSI driver create resources in your Hetzner Cloud project (Load Balancers, Volumes) that Ankra does not manage or track. These resources will **not** be automatically deleted when you deprovision the cluster and will continue to incur charges.
+
+Before deprovisioning, delete any Kubernetes resources that created Hetzner Cloud objects:
+- Delete all `Service` resources of type `LoadBalancer` (these create Hetzner Cloud Load Balancers via the CCM)
+- Delete all `PersistentVolumeClaim` resources using the `hcloud-volumes` StorageClass (these create Hetzner Cloud Volumes via the CSI driver)
+- Delete any addons or Helm releases that create LoadBalancer services or PVCs (e.g., ingress-nginx, databases, monitoring stacks)
+
+Alternatively, check your [Hetzner Console](https://console.hetzner.cloud) after deprovisioning and manually delete any orphaned Load Balancers and Volumes associated with the cluster.
+</Warning>
+
 <CodeGroup>
 
 ```bash CLI
@@ -484,105 +501,112 @@ A Hetzner cluster provisions the following infrastructure:
 
 All nodes are deployed within a private Hetzner network. The bastion host provides the only external SSH access point.
 
+### Automatic Cloud Integration (hcloud Stack)
+
+Ankra automatically deploys a **hcloud stack** during cluster provisioning. This stack includes:
+
+1. **`hcloud` namespace** — dedicated namespace for Hetzner cloud components
+2. **`hcloud-token` secret** — contains your Hetzner API token and network ID, sourced from the credential used to create the cluster
+3. **[hcloud-cloud-controller-manager](https://github.com/hetznercloud/hcloud-cloud-controller-manager)** — integrates the cluster with Hetzner Cloud APIs (node metadata, load balancers, node lifecycle)
+4. **[hcloud-csi](https://github.com/hetznercloud/csi-driver)** — provides persistent storage using Hetzner Cloud Volumes
+
+The hcloud stack is deployed automatically after the Ankra Agent is installed. The CCM and CSI charts both depend on the `hcloud-token` secret, and Ankra ensures the correct dependency order.
+
+<Note>
+You do not need to manually set up the CCM or CSI driver — they are provisioned as part of cluster creation using the same Hetzner API credential you provided.
+</Note>
+
 ### External Cloud Provider
 
-Hetzner clusters are provisioned with `--kubelet-arg=cloud-provider=external` and `--disable-cloud-controller`. This configures k3s to delegate node initialization to an external Cloud Controller Manager (CCM).
+Hetzner clusters are provisioned with `--kubelet-arg=cloud-provider=external` and `--disable-cloud-controller`. This configures k3s to delegate node initialization to the Hetzner Cloud Controller Manager.
 
-The `node.cloudprovider.kubernetes.io/uninitialized` taint is automatically removed during provisioning so the Ankra Agent can schedule immediately.
+When nodes first join the cluster, they carry a `node.cloudprovider.kubernetes.io/uninitialized` taint that prevents workload scheduling. The CCM removes this taint after initializing each node with its Hetzner provider ID, zone labels, and instance metadata. The Ankra Agent tolerates this taint so it can schedule immediately and begin managing the cluster before the CCM is fully running.
 
 ---
 
 ## Hetzner Cloud Controller Manager (hcloud-ccm)
 
-The [Hetzner Cloud Controller Manager](https://github.com/hetznercloud/hcloud-cloud-controller-manager) integrates your cluster with Hetzner Cloud APIs to provide:
+The [Hetzner Cloud Controller Manager](https://github.com/hetznercloud/hcloud-cloud-controller-manager) is automatically deployed as part of the hcloud stack and provides:
 
-- **Node metadata** automatic zone, region, and instance type labels on nodes
-- **Load Balancers** Kubernetes `LoadBalancer` services backed by Hetzner Cloud Load Balancers
-- **Node lifecycle** automatic removal of deleted nodes from the cluster
-- **Route management** pod network routes via Hetzner Cloud Networks
+- **Node metadata** — automatic zone, region, and instance type labels on nodes
+- **Load Balancers** — Kubernetes `LoadBalancer` services backed by Hetzner Cloud Load Balancers
+- **Node lifecycle** — automatic removal of deleted nodes from the cluster
+- **Route management** — pod network routes via Hetzner Cloud Networks
 
-### Deploy with AI
+The CCM is deployed in the `hcloud` namespace with 3 replicas and a PodDisruptionBudget. It reads the Hetzner API token from the `hcloud-token` secret that Ankra creates automatically.
 
-The fastest way to set up hcloud-ccm is to ask the Ankra AI Assistant. Open the chat (`⌘+J`) on your cluster and prompt:
+### CCM Configuration
 
+The default CCM values configured by Ankra:
+
+```yaml
+replicaCount: 3
+env:
+  HCLOUD_TOKEN:
+    valueFrom:
+      secretKeyRef:
+        name: hcloud-token
+  HCLOUD_NETWORK_ROUTES_ENABLED:
+    value: "false"
+  HCLOUD_LOAD_BALANCERS_ENABLED:
+    value: "true"
+  HCLOUD_LOAD_BALANCERS_USE_PRIVATE_IP:
+    value: "true"
+  HCLOUD_LOAD_BALANCERS_DISABLE_PRIVATE_INGRESS:
+    value: "true"
+  HCLOUD_LOAD_BALANCERS_LOCATION:
+    value: "<your-cluster-location>"
+networking:
+  enabled: true
+  clusterCIDR: "10.0.0.0/16"
+  network:
+    valueFrom:
+      secretKeyRef:
+        name: hcloud-token
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1
 ```
-Set up the Hetzner Cloud Controller Manager for this cluster with a Hetzner API token secret and the hcloud-ccm Helm chart.
-```
 
-The AI will create a draft stack containing:
+To customize the CCM configuration after creation, edit the `hcloud-cloud-controller-manager` addon in the `hcloud` stack via the Stack Builder.
 
-1. A **Kubernetes Secret** manifest with your Hetzner API token (placeholder value for you to fill in)
-2. The **hcloud-ccm Helm chart** configured for your cluster's network
-
-<Steps>
-  <Step title="Review the Draft">
-    The AI creates the stack as a draft in the Stack Builder. Review the node diagram you'll see the Secret and the hcloud-ccm chart with a dependency arrow (the chart depends on the secret).
-  </Step>
-  <Step title="Add Your Hetzner Token">
-    Click the Secret node in the diagram and replace the placeholder token value with your actual Hetzner Cloud API token (the same one used to provision the cluster, or a separate read/write token).
-  </Step>
-  <Step title="Deploy">
-    Click **Deploy** to publish the draft. Ankra deploys the secret first, then the CCM chart.
-  </Step>
-</Steps>
-
-<Tip>
-You can also ask the AI more specific questions like "Set up hcloud-ccm with load balancer support using my existing Hetzner token secret" or "Configure CCM with the network name from my cluster."
-</Tip>
-
-### Manual Setup
-
-If you prefer to configure it manually, add the hcloud-ccm Helm chart from the `https://charts.hetzner.cloud` registry:
-
-1. Add the Hetzner Helm registry in **Registries** (URL: `https://charts.hetzner.cloud`)
-2. Create a stack with:
- A **Secret** in the `kube-system` namespace named `hcloud` with key `token` containing your Hetzner API token
- The **hcloud-cloud-controller-manager** chart from the Hetzner registry, deployed to `kube-system`, with values:
-     ```yaml
-     networking:
-       enabled: true
-       clusterCIDR: "10.244.0.0/16"
-     env:
-       HCLOUD_TOKEN:
-         valueFrom:
-           secretKeyRef:
-             name: hcloud
-             key: token
-     ```
+<Note>
+The CCM creates Hetzner Cloud Load Balancers when you create Kubernetes `Service` resources of type `LoadBalancer`. These Load Balancers are managed by Hetzner Cloud, not by Ankra. Delete LoadBalancer services before [deprovisioning](#deprovisioning) to avoid orphaned resources and unexpected charges.
+</Note>
 
 ---
 
 ## Hetzner CSI Driver (hcloud-csi)
 
-The [Hetzner CSI Driver](https://github.com/hetznercloud/csi-driver) provides persistent storage for your workloads using Hetzner Cloud Volumes:
+The [Hetzner CSI Driver](https://github.com/hetznercloud/csi-driver) is automatically deployed as part of the hcloud stack and provides:
 
-- **Dynamic provisioning** create Hetzner Cloud Volumes on demand via `PersistentVolumeClaim`
-- **Volume expansion** resize volumes without downtime
-- **Storage classes** `hcloud-volumes` StorageClass available out of the box
+- **Dynamic provisioning** — create Hetzner Cloud Volumes on demand via `PersistentVolumeClaim`
+- **Volume expansion** — resize volumes without downtime
+- **Storage classes** — `hcloud-volumes` StorageClass available out of the box
 
-### Deploy with AI
+### CSI Configuration
 
-Open the chat (`⌘+J`) and prompt:
+The default CSI values configured by Ankra:
 
+```yaml
+controller:
+  replicaCount: 3
+  hcloudToken:
+    existingSecret:
+      name: hcloud-token
+  podDisruptionBudget:
+    enabled: true
+node:
+  hostNetwork: true
+  hcloudToken:
+    existingSecret:
+      name: hcloud-token
+      key: token
+storageClasses:
+  - name: hcloud-volumes
+    defaultStorageClass: true
+    reclaimPolicy: Retain
 ```
-Set up the Hetzner CSI driver for persistent storage on this cluster.
-```
-
-The AI will create a draft stack with the hcloud-csi Helm chart configured to use the same Hetzner API token secret as the CCM. If you've already deployed the `hcloud` secret for CCM, the AI will reference it automatically.
-
-### Manual Setup
-
-Add the **hcloud-csi** chart from the Hetzner Helm registry (`https://charts.hetzner.cloud`) to a stack:
-
-- Deploy to the `kube-system` namespace
-- The chart reads the Hetzner API token from the same `hcloud` secret used by CCM
-- Values:
-  ```yaml
-  storageClasses:
- name: hcloud-volumes
-      defaultStorageClass: true
-      reclaimPolicy: Delete
-  ```
 
 Once deployed, create PersistentVolumeClaims with `storageClassName: hcloud-volumes`:
 
@@ -599,27 +623,117 @@ spec:
       storage: 10Gi
 ```
 
+<Note>
+The CSI driver creates Hetzner Cloud Volumes when you create PersistentVolumeClaims using the `hcloud-volumes` StorageClass. These Volumes are managed by Hetzner Cloud, not by Ankra. The default `reclaimPolicy` is `Retain`, meaning Hetzner Volumes are **not** deleted when PVCs are removed. Delete PVCs and their backing Hetzner Volumes before [deprovisioning](#deprovisioning) to avoid orphaned resources and unexpected charges.
+</Note>
+
 ---
 
-## Recommended Stack: CCM + CSI Together
+## Ingress Stack (Optional)
 
-For a production Hetzner cluster, deploy both hcloud-ccm and hcloud-csi together. Ask the AI:
+When `include_ingress` is enabled during cluster creation, Ankra deploys an ingress stack alongside the hcloud stack. The ingress stack includes:
 
+1. **[ingress-nginx](https://kubernetes.github.io/ingress-nginx/)** — NGINX-based Ingress controller with a Hetzner Cloud Load Balancer
+2. **[cert-manager](https://cert-manager.io/)** — automated TLS certificate management
+3. **Let's Encrypt ClusterIssuer** — a `letsencrypt-prod` ClusterIssuer configured for HTTP-01 validation
+
+### Ingress Configuration
+
+The ingress-nginx controller is pre-configured with Hetzner Load Balancer annotations:
+
+```yaml
+controller:
+  replicaCount: 2
+  service:
+    annotations:
+      load-balancer.hetzner.cloud/location: "<your-cluster-location>"
+      load-balancer.hetzner.cloud/use-private-ip: "true"
+  podDisruptionBudget:
+    enabled: true
+    minAvailable: 1
 ```
-Set up a complete Hetzner cloud integration stack with CCM for load balancers and CSI for persistent volumes.
+
+cert-manager is deployed with CRDs enabled and 2 replicas:
+
+```yaml
+crds:
+  enabled: true
+replicaCount: 2
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1
 ```
 
-The AI creates a single stack draft with three components in the correct dependency order:
+### Using Ingress with TLS
 
-1. **hcloud Secret** your Hetzner API token
-2. **hcloud-ccm** Cloud Controller Manager (depends on the secret)
-3. **hcloud-csi** CSI Driver (depends on the secret)
+Once the ingress stack is deployed, create Ingress resources with automatic TLS:
 
-Review the draft in the Stack Builder, add your token to the secret, and deploy. The dependency DAG ensures the secret is created before either chart is installed.
+```yaml
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: my-app
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts:
+        - app.example.com
+      secretName: my-app-tls
+  rules:
+    - host: app.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: my-app
+                port:
+                  number: 80
+```
 
 <Tip>
-The AI Assistant has full context about your cluster's configuration (network name, location, node groups) and uses it to pre-fill Helm values correctly. This is the recommended way to set up Hetzner integrations.
+Point your DNS record for `app.example.com` to the Hetzner Load Balancer IP (created automatically by ingress-nginx). cert-manager will handle the Let's Encrypt certificate issuance and renewal.
 </Tip>
+
+---
+
+## GitOps Integration
+
+Hetzner clusters support optional GitOps integration with GitHub. When configured, Ankra pushes the cluster's stack state to a Git repository, enabling version-controlled infrastructure.
+
+To enable GitOps during cluster creation, provide:
+
+| Parameter | Description |
+|-----------|-------------|
+| `gitops_credential_name` | Name of a GitHub credential registered in Ankra |
+| `gitops_repository` | GitHub repository (e.g., `my-org/my-cluster-config`) |
+| `gitops_branch` | Branch to push to (default: `master`) |
+
+```bash
+curlX POST https://platform.ankra.app/api/v1/clusters/hetzner \
+H "Authorization: Bearer $ANKRA_API_TOKEN" \
+H "Content-Type: application/json" \
+d '{
+    "name": "my-cluster",
+    "credential_id": "<hetzner-credential-id>",
+    "ssh_key_credential_ids": ["<ssh-key-id>"],
+    "location": "fsn1",
+    "control_plane_count": 3,
+    "control_plane_server_type": "cx33",
+    "node_groups": [
+      {"name": "default", "instance_type": "cx33", "count": 2}
+    ],
+    "include_ingress": true,
+    "gitops_credential_name": "my-github-token",
+    "gitops_repository": "my-org/cluster-state",
+    "gitops_branch": "main"
+  }'
+```
+
+When GitOps is enabled, Ankra commits the hcloud stack (and ingress stack, if included) to the repository after creation.
 
 ---
 
@@ -635,10 +749,11 @@ The AI Assistant has full context about your cluster's configuration (network na
 | Server type unavailable | Try a different location or server type |
 | Cannot downgrade instance type | Hetzner disks cannot be shrunk. Create a new node group with the desired type and delete the old one |
 | `412: error during placement` | Hetzner capacity issue at that location. Retry later or try a different server type |
-| Node has `uninitialized` taint | The taint is removed automatically; if it persists, deploy hcloud-ccm or trigger a reconciliation |
-| LoadBalancer service stuck in `Pending` | Deploy the [Hetzner Cloud Controller Manager](#hetzner-cloud-controller-manager-hcloud-ccm) |
-| PVCs stuck in `Pending` | Deploy the [Hetzner CSI Driver](#hetzner-csi-driver-hcloud-csi) |
-| CCM/CSI pods in `CrashLoopBackOff` | Check that the `hcloud` secret in `kube-system` contains a valid Hetzner API token |
+| Node has `uninitialized` taint | The CCM removes this taint automatically after initializing the node. If it persists, check that the CCM pods are running in the `hcloud` namespace |
+| LoadBalancer service stuck in `Pending` | Verify the CCM is running: `kubectl get pods -n hcloud`. Check CCM logs for Hetzner API errors |
+| PVCs stuck in `Pending` | Verify the CSI driver is running: `kubectl get pods -n hcloud`. Check that the `hcloud-volumes` StorageClass exists |
+| CCM/CSI pods in `CrashLoopBackOff` | Check that the `hcloud-token` secret in the `hcloud` namespace contains a valid Hetzner API token: `kubectl get secret -n hcloud hcloud-token -o yaml` |
+| Ankra Agent pod `Pending` | Check node taints — the agent tolerates the `uninitialized` taint but if all nodes are unschedulable for other reasons, verify node status with `kubectl describe nodes` |
 
 ### Hetzner API Quota
 
