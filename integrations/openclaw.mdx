@@ -1,0 +1,565 @@
+---
+title: OpenClaw
+description: Deploy OpenClaw on any Kubernetes cluster as an Ankra stack, and connect it to Ankra by adding the CLI as a skill for AI-powered infrastructure management.
+---
+
+## Overview
+
+[OpenClaw](https://openclaws.io/) is an autonomous AI agent that works across chat platforms like Slack, Discord, and Telegram. By adding the Ankra CLI as an OpenClaw skill, your agent can manage clusters, deploy stacks, troubleshoot issues, and chat with Ankra's AI -- all from your preferred messaging app.
+
+This guide covers two things:
+1. **Deploying OpenClaw** on any Kubernetes cluster as an Ankra stack
+2. **Connecting OpenClaw to Ankra** by adding the Ankra CLI as a skill
+
+**What this enables:**
+- Deploy OpenClaw to any Kubernetes cluster with a single stack
+- Ask your OpenClaw agent to list clusters, check status, or scale workers
+- Deploy and manage stacks through natural language
+- Run Ankra AI chat queries from any OpenClaw-connected platform
+- Manage credentials, charts, and tokens via conversation
+
+---
+
+## Part 1: Deploy OpenClaw as an Ankra Stack
+
+Deploy OpenClaw to any Kubernetes cluster managed by Ankra using the Stack Builder. This gives you a self-hosted, containerized AI agent running inside your infrastructure.
+
+### Prerequisites
+
+- A cluster imported into Ankra with the agent connected
+- An API key from [Anthropic](https://console.anthropic.com/) or [OpenAI](https://platform.openai.com/)
+- A Helm registry added for the OpenClaw chart repository (`https://charts.openclaw.ai`)
+
+<Tip>
+If you haven't added the OpenClaw Helm registry yet, go to **Settings** → **Registries** → **Add Registry** and enter `https://charts.openclaw.ai`.
+</Tip>
+
+### Step 1: Create the Stack
+
+<Steps>
+  <Step title="Open Stack Builder">
+    Navigate to your cluster → **Stacks** → **Create Stack**.
+  </Step>
+  <Step title="Name Your Stack">
+    Name it `openclaw` or `ai-agent`.
+  </Step>
+</Steps>
+
+### Step 2: Add the OpenClaw Chart
+
+<Steps>
+  <Step title="Add the Chart">
+    Click **+ Add** → search for `openclaw` from the OpenClaw registry.
+  </Step>
+  <Step title="Configure Core Settings">
+    Click the component and set these values:
+
+    ```yaml
+    replicaCount: 1
+
+    image:
+      repository: ghcr.io/openclaw/openclaw
+      tag: "latest"
+
+    config:
+      model: "claude-sonnet-4-20250514"
+      port: 8789
+      logLevel: "info"
+    ```
+
+    <Warning>
+    OpenClaw runs as a single instance -- it does not support horizontal scaling. Keep `replicaCount: 1`.
+    </Warning>
+  </Step>
+  <Step title="Configure API Key">
+    For quick setup, set the key directly:
+
+    ```yaml
+    config:
+      anthropicApiKey: "sk-ant-..."
+    ```
+
+    For production, use a Kubernetes Secret instead (see [Production Setup](#production-api-key-management) below).
+  </Step>
+  <Step title="Configure Resources">
+    ```yaml
+    resources:
+      requests:
+        memory: 512Mi
+        cpu: 250m
+      limits:
+        memory: 1Gi
+        cpu: 1000m
+    ```
+  </Step>
+  <Step title="Enable Persistent Storage">
+    OpenClaw stores workspace data and conversation memory. Enable persistence so this survives pod restarts:
+
+    ```yaml
+    persistence:
+      enabled: true
+      size: 5Gi
+    ```
+  </Step>
+</Steps>
+
+<Tip>
+**Encrypt sensitive values with SOPS:** In the manifest edit view, click the **SOPS** button to encrypt your API key. This ensures the key is stored encrypted in your GitOps repository. See [SOPS Encryption](/essentials/sops) for setup instructions.
+</Tip>
+
+### Step 3: Expose the Gateway (Optional)
+
+If you want to access OpenClaw from outside the cluster, configure an ingress:
+
+```yaml
+ingress:
+  enabled: true
+  className: "nginx"
+  annotations:
+    cert-manager.io/cluster-issuer: "letsencrypt-prod"
+  hosts:
+    - host: openclaw.your-domain.com
+      paths:
+        - path: /
+          pathType: Prefix
+  tls:
+    - secretName: openclaw-tls
+      hosts:
+        - openclaw.your-domain.com
+```
+
+Alternatively, use port-forwarding for local access:
+
+```bash
+kubectl port-forward svc/openclaw 8789:8789 -n openclaw
+```
+
+### Step 4: Deploy
+
+<Steps>
+  <Step title="Review">
+    Your stack should contain the `openclaw` chart with your configured values.
+  </Step>
+  <Step title="Save and Deploy">
+    Click **Save**, then **Deploy**. Watch progress in **Operations**.
+  </Step>
+  <Step title="Verify">
+    After 1-2 minutes, the OpenClaw pod should be running:
+
+    ```bash
+    kubectl get pods -n openclaw
+    ```
+
+    ```
+    NAME                        READY   STATUS    RESTARTS   AGE
+    openclaw-6f8d9b7c4-x2k9p   1/1     Running   0          90s
+    ```
+  </Step>
+</Steps>
+
+### Production API Key Management
+
+For production deployments, store your API key in a Kubernetes Secret rather than in plain-text values:
+
+<Steps>
+  <Step title="Create the Secret">
+    ```bash
+    kubectl create secret generic openclaw-api-key \
+      --from-literal=anthropic-api-key="sk-ant-..." \
+      -n openclaw
+    ```
+  </Step>
+  <Step title="Reference in Values">
+    ```yaml
+    config:
+      anthropicApiKey: ""
+
+    existingSecret:
+      name: openclaw-api-key
+      anthropicApiKeyKey: anthropic-api-key
+    ```
+  </Step>
+</Steps>
+
+### Security Hardening
+
+Lock down the OpenClaw pod with security contexts:
+
+```yaml
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  fsGroup: 1000
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL
+```
+
+<Warning>
+OpenClaw has shell access and can read files inside its container. Kubernetes provides meaningful isolation through container boundaries and network policies. For sensitive environments, apply a `NetworkPolicy` to restrict egress to only the AI provider API endpoints your model requires.
+</Warning>
+
+### Network Policy Example
+
+Restrict OpenClaw's network access to only Anthropic's API:
+
+```yaml
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: openclaw-egress
+  namespace: openclaw
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: openclaw
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+      ports:
+        - protocol: TCP
+          port: 443
+    - to:
+        - namespaceSelector: {}
+      ports:
+        - protocol: UDP
+          port: 53
+```
+
+You can add this as a manifest in your stack alongside the OpenClaw chart.
+
+### Connect a Chat Platform
+
+Once OpenClaw is running in your cluster, connect it to your team's chat:
+
+| Platform | Configuration |
+|----------|--------------|
+| **Slack** | Set `config.slackBotToken` and `config.slackAppToken` in your values, or use `existingSecret` |
+| **Discord** | Set `config.discordToken` in your values |
+| **Telegram** | Set `config.telegramToken` in your values |
+
+<Tip>
+Store all chat platform tokens in a Kubernetes Secret and reference them via `existingSecret` for production use.
+</Tip>
+
+### AI Prompts
+
+Press `⌘+J` in the Stack Builder to get AI help with your OpenClaw deployment:
+
+<AccordionGroup>
+  <Accordion title="Basic OpenClaw Deployment">
+    ```
+    Deploy OpenClaw to my cluster with Anthropic API key,
+    persistent storage, and basic resource limits.
+    ```
+  </Accordion>
+  <Accordion title="Production OpenClaw with Slack">
+    ```
+    Deploy OpenClaw for production with:
+    - API key stored in a Kubernetes Secret
+    - Slack bot integration
+    - Network policy restricting egress to Anthropic API
+    - Security hardening with non-root user
+    - Ingress with TLS on openclaw.mycompany.com
+    ```
+  </Accordion>
+  <Accordion title="OpenClaw with Ankra CLI Skill">
+    ```
+    Deploy OpenClaw with the Ankra CLI pre-installed so
+    it can manage my clusters. Include the Ankra API token
+    as an environment variable from a Secret.
+    ```
+  </Accordion>
+</AccordionGroup>
+
+---
+
+## Part 2: Add Ankra CLI as an OpenClaw Skill
+
+Once OpenClaw is running (either via the stack above or any other installation), you can give it the ability to manage your Ankra infrastructure by adding the CLI as a skill.
+
+### Prerequisites
+
+- [OpenClaw](https://openclaws.io/) installed and running (or deployed as a stack above)
+- [Ankra CLI](/integrations/ankra-cli) installed and authenticated
+- An Ankra API token (for non-interactive auth)
+
+### Step 1: Install and Authenticate the Ankra CLI
+
+If you haven't already, install the Ankra CLI:
+
+```bash
+bash <(curl -sL https://github.com/ankraio/ankra-cli/releases/latest/download/install.sh)
+```
+
+Create an API token for OpenClaw to use (this avoids browser-based SSO, which doesn't work in headless environments):
+
+```bash
+ankra login
+ankra tokens create openclaw-agent
+```
+
+Save the returned token -- you'll need it in the next step.
+
+### Step 2: Create the Ankra Skill
+
+Create the skill directory and manifest:
+
+```bash
+mkdir -p ~/.openclaw/skills/ankra
+```
+
+Create `~/.openclaw/skills/ankra/SKILL.md` with the following content:
+
+```markdown
+---
+name: ankra
+version: 1.0.0
+author: your-org
+description: >
+  Manage Kubernetes clusters and infrastructure on the Ankra platform.
+  Use when the user wants to list clusters, deploy stacks, check cluster health,
+  manage addons, search Helm charts, scale workers, or troubleshoot Kubernetes issues.
+permissions:
+  - shell
+  - network
+config:
+  api_token:
+    type: string
+    required: true
+    description: "Ankra API token for authentication"
+    secret: true
+---
+
+# Ankra Platform Management
+
+You have access to the `ankra` CLI to manage Kubernetes clusters on the Ankra platform.
+
+## Available Commands
+
+### Cluster Operations
+- `ankra cluster list` -- List all clusters
+- `ankra cluster get <name>` -- Get cluster details
+- `ankra cluster select` -- Select a cluster (use `--name` for non-interactive)
+- `ankra cluster reconcile [name]` -- Trigger reconciliation
+
+### AI Chat
+- `ankra chat "<question>"` -- Ask Ankra AI about your infrastructure
+- `ankra chat health` -- Get cluster health summary
+- `ankra chat health --ai` -- Get AI-analyzed cluster health
+
+### Stack Management
+- `ankra cluster stacks list` -- List stacks
+- `ankra cluster stacks create <name>` -- Create a stack
+- `ankra cluster stacks delete <name>` -- Delete a stack
+- `ankra cluster stacks history <name>` -- View stack change history
+
+### Helm Charts
+- `ankra charts search <query>` -- Search for charts
+- `ankra charts info <name>` -- Get chart details
+- `ankra charts list` -- List available charts
+
+### Hetzner Cluster Provisioning
+- `ankra cluster hetzner create --name <n> --credential-id <id> --location <loc>` -- Create cluster
+- `ankra cluster hetzner workers <id>` -- Get worker count
+- `ankra cluster hetzner node-group list <id>` -- List node groups
+- `ankra cluster hetzner node-group scale <id> <group> <count>` -- Scale a node group
+- `ankra cluster hetzner deprovision <id>` -- Deprovision cluster
+
+### OVH Cluster Provisioning
+- `ankra cluster ovh create --name <n> --credential-id <id> --region <r>` -- Create cluster
+- `ankra cluster ovh workers <id>` -- Get worker count
+- `ankra cluster ovh scale <id> <count>` -- Scale workers
+
+### UpCloud Cluster Provisioning
+- `ankra cluster upcloud create --name <n> --credential-id <id> --zone <z>` -- Create cluster
+- `ankra cluster upcloud workers <id>` -- Get worker count
+- `ankra cluster upcloud scale <id> <count>` -- Scale workers
+
+### Credentials
+- `ankra credentials list` -- List all credentials
+- `ankra credentials get <id>` -- Get credential details
+
+### API Tokens
+- `ankra tokens list` -- List API tokens
+- `ankra tokens create <name>` -- Create a token
+- `ankra tokens revoke <id>` -- Revoke a token
+
+## Guardrails
+
+- Always confirm with the user before running destructive operations like `deprovision`, `delete`, or `scale` (down).
+- When scaling workers, show the current count first and ask for confirmation.
+- Never expose API tokens or credentials in responses.
+- For cluster creation, list the parameters back to the user and ask for confirmation before executing.
+- Prefer `ankra chat` for troubleshooting questions -- it has access to live cluster data.
+```
+
+### Step 3: Configure the Skill
+
+Add the Ankra skill to your OpenClaw configuration at `~/.openclaw/openclaw.json`:
+
+```json
+{
+  "skills": {
+    "entries": {
+      "ankra": {
+        "enabled": true,
+        "apiKey": "your-ankra-api-token",
+        "env": {
+          "ANKRA_API_TOKEN": "your-ankra-api-token"
+        }
+      }
+    }
+  }
+}
+```
+
+Replace `your-ankra-api-token` with the token you created in Step 1.
+
+<Tip>
+If you already have other skills configured, just add the `ankra` entry to your existing `entries` object.
+</Tip>
+
+### Step 4: Verify the Integration
+
+Restart OpenClaw or wait for the skill watcher to pick up the changes, then test:
+
+```
+You: List my Ankra clusters
+Agent: Running `ankra cluster list`...
+
+NAME              PROVIDER   STATE     WORKERS
+staging-cluster   hetzner    running   3
+production        ovh        running   5
+```
+
+Try a few more:
+
+```
+You: What's the health of my staging cluster?
+Agent: Running `ankra chat health` on staging-cluster...
+```
+
+```
+You: Scale the staging cluster to 5 workers
+Agent: The staging cluster currently has 3 workers. Scale to 5? (y/n)
+You: y
+Agent: Running `ankra cluster hetzner node-group scale <id> default 5`...
+```
+
+### Example Conversations
+
+#### Deploy a monitoring stack
+
+```
+You: Create a monitoring stack on my staging cluster
+Agent: I'll create a new stack called "monitoring" on staging-cluster.
+       Running `ankra cluster stacks create monitoring`... Done.
+       Would you like to search for Prometheus or Grafana charts to add?
+```
+
+#### Troubleshoot a failing deployment
+
+```
+You: Why are pods crashing on production?
+Agent: Let me check with Ankra AI...
+       Running `ankra chat "Why are pods in CrashLoopBackOff?"` on production...
+       
+       Ankra AI found 2 pods in CrashLoopBackOff in the api namespace:
+       - api-server-7d8f9: OOMKilled (memory limit 256Mi, usage peaked at 312Mi)
+       - api-worker-3k9d2: exit code 1, missing DATABASE_URL env var
+```
+
+#### Check cluster costs
+
+```
+You: How many workers are running across all my clusters?
+Agent: Running `ankra cluster list` and checking workers...
+
+       staging-cluster (hetzner): 3 workers (cx33)
+       production (ovh): 5 workers (b2-15)
+       dev-sandbox (hetzner): 1 worker (cx22)
+       
+       Total: 9 workers across 3 clusters.
+```
+
+### Sandboxed Environments
+
+If you run OpenClaw in sandboxed mode (Docker), the `ANKRA_API_TOKEN` environment variable won't be inherited automatically. Add it to your sandbox config:
+
+```json
+{
+  "agents": {
+    "defaults": {
+      "sandbox": {
+        "docker": {
+          "env": {
+            "ANKRA_API_TOKEN": "your-ankra-api-token"
+          }
+        }
+      }
+    }
+  }
+}
+```
+
+You'll also need to ensure the `ankra` binary is available inside the container. Either mount it or install it in a custom image:
+
+```dockerfile
+FROM openclaw/sandbox:latest
+RUN bash <(curl -sL https://github.com/ankraio/ankra-cli/releases/latest/download/install.sh)
+```
+
+---
+
+## Troubleshooting
+
+### Stack Deployment Issues
+
+| Issue | Solution |
+|-------|----------|
+| Pod stuck in `Pending` | Check for insufficient resources with `kubectl describe pod -n openclaw`. Increase node capacity or reduce resource requests. |
+| `CrashLoopBackOff` | Check logs with `kubectl logs -n openclaw -l app.kubernetes.io/name=openclaw`. Usually a missing or invalid API key. |
+| Ingress not working | Verify your ingress controller is installed and the `className` matches. Check cert-manager logs for TLS issues. |
+| PVC not binding | Ensure a StorageClass exists. Run `kubectl get storageclass` to verify. |
+| Helm chart not found | Confirm the OpenClaw registry (`https://charts.openclaw.ai`) is added under **Settings** → **Registries**. |
+
+### Skill Integration Issues
+
+| Issue | Solution |
+|-------|----------|
+| "ankra: command not found" | Ensure the Ankra CLI is installed and in PATH. Run `which ankra` to verify. |
+| "Unauthorized" errors | Check that `ANKRA_API_TOKEN` is set correctly. Re-create the token with `ankra tokens create`. |
+| Skill not appearing | Verify the file is at `~/.openclaw/skills/ankra/SKILL.md` and OpenClaw's skill watcher is enabled. |
+| Commands hang | The CLI may be waiting for interactive input. Ensure you're using `--name` flags for non-interactive selection. |
+| Sandbox can't reach Ankra API | Add `network` to the sandbox's allowed permissions and ensure DNS resolution works inside the container. |
+
+<Note>
+The Ankra CLI stores its config at `~/.ankra.yaml`. When using API token auth via `ANKRA_API_TOKEN`, no config file is needed.
+</Note>
+
+---
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Stacks" icon="layer-group" href="/essentials/stacks">
+    Learn more about building and managing stacks in Ankra.
+  </Card>
+  <Card title="SOPS Encryption" icon="lock" href="/essentials/sops">
+    Encrypt sensitive values in your stack configuration.
+  </Card>
+  <Card title="Ankra CLI" icon="terminal" href="/integrations/ankra-cli">
+    Full CLI reference for all Ankra commands.
+  </Card>
+  <Card title="Monitoring Stack" icon="chart-line" href="/guides/monitoring-stack">
+    Add observability alongside your OpenClaw deployment.
+  </Card>
+</CardGroup>
