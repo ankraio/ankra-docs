@@ -23,6 +23,10 @@ Ankra supports provisioning fully managed Kubernetes clusters on [Hetzner Cloud]
 
 Before creating a Hetzner cluster, you need two credentials:
 
+<Tip>
+Don't have a Hetzner account? [Sign up for Hetzner Cloud](https://hetzner.cloud/?ref=jmvDfwl8QEmF) to get started.
+</Tip>
+
 <CardGroup cols={2}>
   <Card title="Hetzner API Credential" icon="key">
     A Hetzner Cloud API token with read/write permissions. See [Hetzner Credentials](/integrations/credentials#hetzner-api-credentials).
@@ -361,6 +365,42 @@ d '{"taints": [{"key": "dedicated", "value": "ml", "effect": "NoSchedule"}]}'
 
 ---
 
+## Scaling Up After Termination
+
+When a cluster's Kubernetes has been [deleted](#delete-kubernetes), all infrastructure is destroyed but the cluster record remains in Ankra. You can bring the cluster back online by adding a new node group.
+
+### How It Works
+
+<Steps>
+  <Step title="Add a Node Group">
+    Use the UI, CLI, or API to add a node group to the terminated cluster (same as adding to a running cluster).
+  </Step>
+  <Step title="Ankra Restores Infrastructure">
+    Ankra detects the cluster is stopped and automatically restores the full control plane:
+    - Private network and subnet
+    - SSH keys
+    - Bastion host
+    - Control plane servers (same count and type as before termination)
+    - Kubernetes (k3s) installation on all control plane nodes
+  </Step>
+  <Step title="Workers Join the Cluster">
+    The new node group workers are created and join the restored Kubernetes cluster. The worker k8s jobs wait for the first control plane to be ready before attempting to join.
+  </Step>
+  <Step title="Stacks Reconcile">
+    Once the Ankra Agent is deployed and connected, stacks and addons configured in Ankra begin reconciling automatically.
+  </Step>
+</Steps>
+
+<Note>
+The restored cluster gets entirely fresh infrastructure — new Hetzner servers, new IP addresses, new k3s installation. Data from before the termination is not preserved on the servers. Persistent data stored in Hetzner Volumes (via the CSI driver) is preserved if the volumes were not deleted.
+</Note>
+
+<Note>
+Only the control plane configuration from before termination is restored. Previously existing worker node groups are **not** restored — the node group you add is the only worker pool. Add additional node groups as needed.
+</Note>
+
+---
+
 ## Legacy Worker Scaling
 
 The legacy `scale-workers` and `worker-count` endpoints still work for backward compatibility. They operate on all workers as a single pool.
@@ -452,23 +492,48 @@ Response:
 
 ---
 
-## Deprovisioning
+## Cluster Lifecycle
 
-Deprovisioning deletes all Hetzner resources (servers, networks, SSH keys) and removes the cluster from Ankra.
+### Delete Kubernetes
+
+Deleting the Kubernetes layer destroys all Hetzner infrastructure (servers, networks, SSH keys) but keeps the cluster registered in Ankra. The cluster moves to a **stopped** state and can be brought back online by adding a node group.
+
+This is useful for cost savings when a cluster is not needed temporarily — you stop paying for Hetzner servers while preserving the cluster configuration, credentials, and history in Ankra.
+
+**What happens when you delete Kubernetes:**
+
+- All Hetzner servers (control planes, workers, bastion) are deleted from Hetzner Cloud
+- Network and SSH keys are deleted from Hetzner Cloud
+- All cloud resources are marked as stopped in Ankra
+- The cluster record, credentials, and stacks remain in Ankra
+- You stop incurring Hetzner infrastructure charges
+
+**What happens when you add a node group to a stopped cluster:**
+
+- Ankra automatically restores the control plane infrastructure (bastion, network, SSH keys, control plane servers)
+- Kubernetes is installed on the restored control planes
+- The new node group workers are created and join the cluster
+- Stacks and addons begin reconciling once the cluster is online
+
+The restored cluster gets fresh infrastructure — new servers, new IPs, new k3s installation. Workloads from before the deletion are not preserved. Stacks and addons configured in Ankra will be redeployed automatically.
+
+### Terminate Cluster
+
+Terminating a cluster permanently deletes all Hetzner resources and removes the cluster from Ankra entirely. The cluster cannot be recovered.
 
 <Warning>
-This action is irreversible. All data on the cluster will be permanently deleted.
+This action is irreversible. All data on the cluster will be permanently deleted, and the cluster record is removed from Ankra.
 </Warning>
 
 <Warning>
-**Clean up Hetzner Cloud resources before deprovisioning.** The Hetzner CCM and CSI driver create resources in your Hetzner Cloud project (Load Balancers, Volumes) that Ankra does not manage or track. These resources will **not** be automatically deleted when you deprovision the cluster and will continue to incur charges.
+**Clean up Hetzner Cloud resources before terminating.** The Hetzner CCM and CSI driver create resources in your Hetzner Cloud project (Load Balancers, Volumes) that Ankra does not manage or track. These resources will **not** be automatically deleted when you terminate the cluster and will continue to incur charges.
 
-Before deprovisioning, delete any Kubernetes resources that created Hetzner Cloud objects:
+Before terminating, delete any Kubernetes resources that created Hetzner Cloud objects:
 - Delete all `Service` resources of type `LoadBalancer` (these create Hetzner Cloud Load Balancers via the CCM)
 - Delete all `PersistentVolumeClaim` resources using the `hcloud-volumes` StorageClass (these create Hetzner Cloud Volumes via the CSI driver)
 - Delete any addons or Helm releases that create LoadBalancer services or PVCs (e.g., ingress-nginx, databases, monitoring stacks)
 
-Alternatively, check your [Hetzner Console](https://console.hetzner.cloud) after deprovisioning and manually delete any orphaned Load Balancers and Volumes associated with the cluster.
+Alternatively, check your [Hetzner Console](https://console.hetzner.cloud) after terminating and manually delete any orphaned Load Balancers and Volumes associated with the cluster.
 </Warning>
 
 <CodeGroup>
