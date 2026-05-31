@@ -1,0 +1,130 @@
+---
+title: Deployment Engines
+description: How Ankra deploys and reconciles addons on your clusters.
+---
+
+## Overview
+
+Ankra supports two deployment engines for managing addons on your clusters:
+
+- **Native (`ankra_native`)**: The Ankra agent uses the Helm CLI directly to
+  install, upgrade, and reconcile chart-based addons. Releases are written to
+  standard Helm storage (`helm.sh/release.v1` Secrets).
+- **ArgoCD (`argo_cd`)**: The Ankra agent talks to an ArgoCD installation in
+  the cluster, which renders the chart and applies it via server-side apply.
+
+The engine is set per-addon, with a cluster-level default. New clusters
+created after the May 2026 release default to `ankra_native`. Existing
+clusters keep `argo_cd` until you opt in to migrate.
+
+## Why migrate?
+
+The native engine reduces the dependency surface on your cluster:
+
+- No `argocd-server`, `argocd-application-controller`, `argocd-repo-server`,
+  `argocd-redis`, `argocd-applicationset-controller`,
+  `argocd-notifications-controller`, or `argocd-dex-server` (~7 pods,
+  500-800 MB RAM reclaimed).
+- No JWT lifecycle. The agent's existing ServiceAccount is the only auth.
+- No NATS-proxied API round-trip for reading addon status; the agent pushes
+  drift state to the control plane directly.
+
+You can also `helm list`, `helm history`, `helm rollback`, and `helm get
+manifest` directly against your cluster - first-class debuggability.
+
+## Feature parity
+
+| Feature | ArgoCD | Native |
+|---------|--------|--------|
+| Self-heal on drift | Yes | Yes (per-addon `sync_policy.self_heal`) |
+| Prune orphaned resources | Yes | Yes (`auto_prune` + post-apply orphan sweep) |
+| `ignoreDifferences` (jsonPointers / jqPathExpressions / managedFieldsManagers) | Yes | Yes |
+| Sync windows | Yes | Yes (cron-style schedule + duration + timezone) |
+| Custom retry policy | Yes | Yes |
+| `strict_health_check` | Yes (Healthy only, not Progressing) | Yes (Healthy only, not Progressing) |
+| `revision_history_limit` | Yes | Yes (`--history-max`) |
+| SOPS-encrypted values | Yes (helm-secrets) | Yes (direct `sops --decrypt`) |
+| GitHub repos | Yes | Yes (HTTPS Contents API) |
+| Bitbucket Cloud repos | Yes | Yes (HTTPS `2.0` Contents API, OAuth refresh) |
+| Bitbucket DC repos | Yes | Yes (HTTPS `1.0` raw API) |
+| GHCR via git token fallback | Yes | Yes |
+| Multi-source applications | Yes | Not yet (single-source only) |
+| ApplicationSet | Yes | Not used |
+
+## Reconcile loop
+
+The native engine runs a periodic reconcile sweep on the agent. The platform
+schedules a `reconcile_native_releases` step every 60 seconds per cluster (via
+the `reconcile_addons` maintenance loop). Each sweep:
+
+1. Recovers any release stuck in `pending-*` for more than 10 minutes:
+   first attempts a fresh `helm upgrade --install --atomic`; if that fails,
+   rolls back to the last `deployed` revision.
+2. Detects drift against `helm get manifest` (live resources fetched in
+   parallel; Helm-injected metadata stripped from both sides before diff).
+3. If drift is detected and `sync_policy.self_heal=true`, marks the addon for
+   update so the existing reconciler re-runs `helm upgrade --install`.
+4. If `sync_policy.auto_prune=true`, deletes orphaned resources whose UID is
+   no longer in the rendered manifest.
+5. Publishes a NATS heartbeat to `agent.heartbeat.native_reconcile.{cluster_id}`
+   with `last_sweep_at`, `sweep_duration_seconds`, and `addons_inspected`.
+
+The platform consumes those heartbeats and exposes
+`ankra_native_engine_reconcile_loop_lag_seconds{cluster_id}` for alerting.
+
+## Sync windows
+
+Set `settings.sync_window.enabled=true` on the addon and provide a 5-field cron
+expression and duration. The agent will only run `create`/`update`/`self-heal`
+operations inside the configured window. Outside the window, jobs return
+immediately as `cancelled` with an "outside_sync_window" task message.
+
+## Migration
+
+When ready to migrate an existing cluster:
+
+1. Open the cluster's settings page in the portal.
+2. Click **Migrate to native engine**.
+3. Review the per-addon eligibility report. The preview surfaces:
+   - **CRD coverage** - addons whose live resources include kinds the native
+     engine does not yet have a health rule for are flagged.
+   - **In-flight ArgoCD sync** - blocks migration until the sync settles.
+   - **Single-source check** - multi-source `Application`s are not yet
+     migratable.
+4. Confirm; the migration runs per-addon, in parallel up to a small
+   concurrency limit, and is resumable across control-plane restarts.
+
+Each per-addon migration uses `helm upgrade --install --take-ownership` to
+adopt the live resources into Helm storage. Resource UIDs do not change; no
+Pod is recreated; the only on-cluster mutation is to add Helm's
+`app.kubernetes.io/managed-by=Helm` label and the
+`meta.helm.sh/release-name` / `meta.helm.sh/release-namespace` annotations.
+
+The `Application` CR is deleted only after the helm release verifies as
+`deployed`. Per-addon rollback (back to ArgoCD) is supported until you
+explicitly decommission ArgoCD on the cluster.
+
+## Decommissioning ArgoCD
+
+Once a cluster has zero remaining ArgoCD-managed addons, a
+**Decommission ArgoCD** button appears in the cluster settings. The
+decommission flow:
+
+- Migrates any remaining addons to the native engine and verifies they are
+  healthy.
+- Clears the Ankra-managed ArgoCD user credentials and session token stored
+  on the platform and forgets the `argo_user` resource.
+- Leaves the ArgoCD installation itself, the `argo_cd` resource, and any
+  ArgoCD `Application` CRs you own untouched.
+
+This deliberately stops short of uninstalling ArgoCD: many teams continue to
+use the same ArgoCD instance outside of Ankra (for application delivery,
+GitOps of bespoke workloads, etc.). If you no longer need ArgoCD on the
+cluster, uninstall it yourself with the same tooling you originally used to
+install it (`kubectl delete -f install.yaml`, `helm uninstall argocd`, or the
+upstream `argocd uninstall` command), and clean up the leftover
+`accounts.ankra` / `policy.csv` entries from the `argocd-cm` and
+`argocd-rbac-cm` ConfigMaps if you keep the ArgoCD installation running.
+
+The migration of addons is **one-way**: changing the cluster default
+deployment engine back to ArgoCD after decommission is not supported.

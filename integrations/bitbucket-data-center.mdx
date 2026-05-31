@@ -1,0 +1,94 @@
+---
+title: Bitbucket Data Center Integration
+description: Connect a self-hosted Bitbucket Data Center instance for GitOps workflows
+---
+
+<Note>
+Bitbucket Data Center support is currently available to design partners. Contact support to enable it for your environment by setting the `BITBUCKET_DC_ENABLED` flag.
+</Note>
+
+## Overview
+
+Bitbucket Data Center (BDC) integration enables Ankra to read from and write to a self-hosted Bitbucket Data Center installation, including instances behind self-signed certificates.
+
+Supported BDC versions: **9.x** and **10.x**.
+
+---
+
+## Authentication options
+
+You can authenticate Ankra against your BDC instance with either:
+
+| Mode | When to use |
+|---|---|
+| OAuth Application Link | Multiple users, full audit trail, traceable commits per user. |
+| Personal Access Token (PAT) | Single shared automation account. PAT must have `PROJECT_READ` permission across all projects Ankra needs to see. |
+
+---
+
+## Customer-side setup
+
+### OAuth Application Link
+
+<Steps>
+  <Step title="Register an Application Link">
+    On your BDC instance, navigate to **Administration → Application Links → Create link**. Enter the Ankra platform base URL.
+  </Step>
+  <Step title="Configure incoming authentication">
+    Choose **OAuth 2.0**. Set the redirect URI to `{platform-base-url}/org/bitbucket-dc/{installation_id}/callback` — Ankra will display the exact value during the wizard.
+  </Step>
+  <Step title="Capture client credentials">
+    Copy the generated `Client ID` and `Client secret`. You will paste them into the Ankra wizard.
+  </Step>
+</Steps>
+
+### Personal Access Token
+
+<Steps>
+  <Step title="Create the PAT">
+    On your BDC profile, **Manage account → Personal access tokens → Create**. Grant `Project read` on every project Ankra needs to see.
+  </Step>
+  <Step title="Capture the token">
+    Copy the token value. You will paste it into the Ankra wizard.
+  </Step>
+</Steps>
+
+---
+
+## TLS and self-signed certificates
+
+If your BDC instance uses a private CA, paste the CA certificate (PEM, max 64 KiB) into the wizard. Ankra validates the certificate before storing it and rejects anything that is not a valid CA cert. The certificate is stored as plaintext in `git_provider_installations.metadata.trusted_ca_pem` and is used by both the HTTPS API client and the Git push subprocess.
+
+Disabling TLS verification entirely is forbidden by policy.
+
+---
+
+## Push behaviour and rate limits
+
+- Atomic multi-file commits use a pure-Python `dulwich` push, falling back to the `git` CLI for repositories larger than `BITBUCKET_DC_GIT_FALLBACK_THRESHOLD_MB` (default 50 MiB).
+- A 5-minute, 10 GiB LRU clone cache lives at `/tmp/bb_dc_clones/` to amortise repeated commits to the same repo.
+- Push retries: 5 attempts with exponential backoff and jitter. Force pushes are forbidden.
+
+---
+
+## Webhook delivery
+
+- Per-installation URL: `{platform-base-url}/webhooks/bitbucket-dc/{installation_id}`.
+- Event filter: `repo:refs_changed`.
+- Signature: `X-Hub-Signature: sha256=<hmac>` validated on every request.
+
+---
+
+## Network requirements
+
+- Ankra → BDC: outbound HTTPS to the configured instance URL. Public reachability is recommended; Ankra cannot reach instances behind a VPN unless you provide a tunnel.
+- BDC → Ankra: outbound HTTPS to `{platform-base-url}` for webhook delivery. Allowlist the platform IP range in your egress firewall.
+
+---
+
+## Troubleshooting
+
+- **Probe fails** during Step 1 of the wizard: confirm the instance URL resolves publicly, is HTTPS, and is reachable from Ankra. Internal IP ranges (RFC1918, loopback, IMDS) are rejected by design.
+- **OAuth callback fails** with `invalid_grant`: the Application Link's redirect URI does not match the value Ankra used. Re-check the URI in the BDC admin UI.
+- **Webhook signatures fail**: rotate the per-installation webhook secret by deleting and re-adding the webhook resource.
+- **Push 409/400**: BDC reports a non-fast-forward push. Ankra retries automatically up to 5 times. Persistent failures usually mean another tool is force-pushing to the same branch concurrently.
