@@ -30,6 +30,7 @@ The Ankra CLI is a powerful command-line interface for interacting with the Ankr
 - **Credentials** Manage cloud provider and Git credentials
 - **API Tokens** Create, list, revoke, and delete API tokens
 - **Shell Completion** Generate completion scripts for bash, zsh, fish, and powershell
+- **Agent Skills** Install the curated Ankra Agent Skills into Cursor/Claude (works offline)
 - **Secure** Credentials stored locally in `~/.ankra.yaml`
 
 ## Installation
@@ -135,11 +136,30 @@ ankra org list
 ```
 
 #### org switch
-Switch to a different organisation.
+Switch to a different organisation. This persistently changes your selected
+organisation for all future commands.
 
 ```bash
 ankra org switch <org_id>
 ```
+
+#### Run a single command against another organisation
+
+Use the global `--org` flag (organisation name or ID) to scope a single command
+to a different organisation **without** changing your selected organisation. You
+can also set the `ANKRA_ORG` environment variable to scope a whole shell session.
+
+```bash
+ankra --org "Acme Corp" cluster list                  # by name, just this command
+ankra --org <org_id> get pods my-cluster               # by ID
+
+export ANKRA_ORG="Acme Corp"                           # for the whole session
+ankra cluster list
+```
+
+The override is applied per request; it never calls `ankra org switch`. You must
+be an active member of the target organisation, otherwise the API returns a
+permission error.
 
 #### org current
 Show the currently selected organisation.
@@ -179,6 +199,27 @@ Remove a user from the current organisation.
 ankra org remove <user_id>
 ankra org remove <user_id> -f   # skip confirmation
 ```
+
+#### org variables
+Manage organisation-scoped template variables. These are available to every
+cluster in the organisation as substitutions in stack manifests and addon
+values at deploy time, and are shadowed by cluster- or stack-scoped variables
+of the same name.
+
+```bash
+ankra org variables list                                       # list all
+ankra org variables get DB_HOST                                # show one
+ankra org variables set DB_HOST db.example.com                 # upsert
+ankra org variables set API_TOKEN -                            # value from stdin
+ankra org variables delete DB_HOST                             # delete (prompts)
+```
+
+| Subcommand | Notable flags |
+|------------|---------------|
+| `list` | `-o json\|yaml` |
+| `get` | `-o json\|yaml` |
+| `set` | `--description <text>` (creates or updates; pass `-` for the value to read from stdin) |
+| `delete` | `--yes` skips the confirmation prompt |
 
 ---
 
@@ -363,7 +404,20 @@ ankra delete cluster <name> -f   # skip confirmation
 
 ### SOPS Encryption
 
-Encrypt and decrypt manifest and addon configuration files using SOPS.
+Encrypt and decrypt manifest and addon configuration values using SOPS.
+
+All `encrypt` and `decrypt` subcommands support two modes:
+
+- **Cluster mode (default)** — fetch the resource from a live cluster, encrypt
+  or decrypt via the SOPS API, and (for encrypt) push the result back via the
+  partial-stack PATCH endpoint along with `encrypted_paths`. No local files
+  needed. The owning stack is resolved automatically.
+- **File mode (`-f cluster.yaml`)** — rewrite the local `from_file` referenced
+  by a `cluster.yaml`, updating `encrypted_paths` in the YAML. Used by GitOps
+  workflows where the source of truth lives on disk.
+
+The two modes are mutually exclusive. Without `-f`, the CLI uses the selected
+cluster (or the cluster passed via `--cluster <name|id>`).
 
 #### cluster sops-config
 Display the SOPS encryption configuration including the public key for the organisation.
@@ -373,46 +427,60 @@ ankra cluster sops-config
 ```
 
 #### cluster encrypt manifest
-Encrypt a specific key in a manifest file.
+Encrypt a specific key in a manifest.
 
 ```bash
+# Cluster mode (selected cluster)
+ankra cluster encrypt manifest <manifest_name> --key <key_name>
+
+# Cluster mode (specific cluster)
+ankra cluster encrypt manifest <manifest_name> --key <key_name> --cluster <name|id>
+
+# File mode
 ankra cluster encrypt manifest <manifest_name> --key <key_name> -f <cluster.yaml>
 ```
 
-**Example:**
-```bash
-ankra cluster encrypt manifest trinity-database-secret --key TRINITY_DB_PASSWORD -f cluster.yaml
-```
-
-This will:
-1. Find the manifest in the cluster YAML
-2. Read the referenced manifest file
-3. Encrypt the specified key using your organisation's SOPS key
-4. Update the manifest file with encrypted values
-5. Add the key to `encrypted_paths` in the cluster YAML
+| Flag | Description |
+|------|-------------|
+| `--key` | Key (path) to encrypt — required |
+| `--cluster` | Target cluster (name or ID); defaults to the active selection (cluster mode) |
+| `-f`, `--file` | Path to a local `cluster.yaml` (enables file mode) |
 
 #### cluster encrypt addon
-Encrypt a specific key in an addon configuration file.
+Encrypt a specific key in an addon's Helm values.
 
 ```bash
+# Cluster mode
+ankra cluster encrypt addon --name <addon_name> --key <key_name> [--cluster <name|id>] [--stack <stack>]
+
+# File mode
 ankra cluster encrypt addon --name <addon_name> --key <key_name> -f <cluster.yaml>
 ```
 
-**Example:**
-```bash
-ankra cluster encrypt addon --name grafana --key adminPassword -f cluster.yaml
-```
+| Flag | Description |
+|------|-------------|
+| `--name` | Addon name — required |
+| `--key` | Key (path) to encrypt — required |
+| `--cluster` | Target cluster (cluster mode) |
+| `--stack` | Required (cluster mode) when the addon exists in multiple stacks |
+| `-f`, `--file` | Path to a local `cluster.yaml` (enables file mode) |
 
 #### cluster decrypt manifest
-Decrypt and print a manifest file.
+Decrypt and print a manifest. Cluster mode fetches from the live cluster; file
+mode reads the referenced `from_file` from a local `cluster.yaml`.
 
 ```bash
+ankra cluster decrypt manifest <manifest_name> [--cluster <name|id>]
 ankra cluster decrypt manifest <manifest_name> -f <cluster.yaml>
 ```
 
-**Example:**
+#### cluster decrypt addon
+Decrypt and print an addon's Helm values. Cluster mode fetches from the live
+cluster; file mode reads the referenced `from_file` from a local `cluster.yaml`.
+
 ```bash
-ankra cluster decrypt manifest trinity-database-secret -f cluster.yaml
+ankra cluster decrypt addon --name <addon_name> [--cluster <name|id>] [--stack <stack>]
+ankra cluster decrypt addon --name <addon_name> -f <cluster.yaml>
 ```
 
 <Tip>
@@ -485,6 +553,49 @@ ankra cluster stacks clone my-stack --to production --include-config=false
 Encrypted values are not transferred during cloning. You'll need to reconfigure secrets in the target cluster.
 </Note>
 
+#### cluster stacks variables
+Manage stack-scoped variables — the most specific scope, shadowing cluster and
+organisation variables of the same name when this stack's manifests/addons are
+rendered. Edits travel through the same partial-stack PATCH used by
+`manifests upgrade` / `addons upgrade`.
+
+```bash
+ankra cluster stacks variables list <stack>                            # list
+ankra cluster stacks variables get <stack> DB_HOST                     # print value
+ankra cluster stacks variables set <stack> DB_HOST db.example.com      # upsert
+ankra cluster stacks variables set <stack> NEW_KEY new-val --dry-run   # preview
+ankra cluster stacks variables delete <stack> DB_HOST [--yes]          # delete
+```
+
+| Subcommand | Notable flags |
+|------------|---------------|
+| `list` | `--cluster <name\|id>`, `-o json\|yaml` |
+| `get` | `--cluster <name\|id>` |
+| `set` | `--cluster <name\|id>`, `--dry-run` (pass `-` for the value to read from stdin) |
+| `delete` | `--cluster <name\|id>`, `--yes` |
+
+#### cluster variables
+Manage cluster-scoped variables that are available to every stack on the
+cluster. Cluster variables shadow organisation variables of the same name on
+this cluster, and are shadowed by stack variables.
+
+```bash
+ankra cluster variables list                       # list (uses selected cluster)
+ankra cluster variables get DB_HOST --cluster prod
+ankra cluster variables set DB_HOST db.prod.example.com [--description <text>]
+ankra cluster variables delete DB_HOST [--yes]
+```
+
+| Subcommand | Notable flags |
+|------------|---------------|
+| `list` | `--cluster <name\|id>`, `-o json\|yaml` |
+| `get` | `--cluster <name\|id>`, `-o json\|yaml` |
+| `set` | `--cluster <name\|id>`, `--description <text>` (pass `-` for the value to read from stdin) |
+| `delete` | `--cluster <name\|id>`, `--yes` |
+
+**Resolution order:** when a variable name appears at multiple scopes, the
+most specific scope wins — stack > cluster > organisation.
+
 ---
 
 ### Addon Management
@@ -513,12 +624,59 @@ Get settings for a specific addon.
 ankra cluster addons settings <addon-name>
 ```
 
+#### cluster addons values
+Print the addon's current Helm values document. The decoded YAML is written to
+stdout, ready to pipe to a file or edit and re-apply.
+
+```bash
+ankra cluster addons values <addon-name>
+ankra cluster addons values <addon-name> -o raw   # base64-encoded form
+```
+
 #### cluster addons update
 Update settings for an addon from a JSON file.
 
 ```bash
 ankra cluster addons update <addon-name> -f <settings.json>
 ```
+
+#### cluster addons upgrade
+Upgrade an addon in-place by patching only the fields you supply: bump the chart
+version, mutate Helm values with helm-style `--set`, replace the whole values
+document, swap registry credentials, or change the namespace.
+
+```bash
+# Bump the chart version
+ankra cluster addons upgrade ankra-website --chart-version 1.0.146
+
+# Mutate a single Helm values field (the CLI fetches and patches existing values)
+ankra cluster addons upgrade website --set image.tag=1.0.146
+
+# Address a list item by a stable field instead of a numeric index
+ankra cluster addons upgrade website --set 'env[name=LOG_LEVEL].value=debug'
+
+# Edit dependency parents (controls deployment ordering inside the stack)
+ankra cluster addons upgrade infisical --add-parent name=infisical-ns,kind=manifest
+```
+
+| Flag | Description |
+|------|-------------|
+| `--chart-version` | New chart version to install |
+| `--set` | Mutate one Helm value (repeatable, helm-style; supports `foo[0]` and `foo[name=bar]` selectors) |
+| `--set-string` | Like `--set` but always treats the value as a string |
+| `--set-file` | Like `--set` but reads the value from a file (`key=path` or `key=@path`) |
+| `--add-parent` | Add a dependency parent `name=<n>,kind=<manifest\|addon>` (kind defaults to `manifest`; repeatable) |
+| `--remove-parent` | Remove a dependency parent (repeatable) |
+| `--set-parent` | Replace ALL dependency parents with the given set (repeatable) |
+| `--values-from-file` | Replace the entire values document from a file |
+| `--values -` | Replace the entire values document from stdin |
+| `--registry-name` / `--registry-url` / `--registry-credential-name` | Retag the addon's registry |
+| `--namespace` | Change the namespace (destructive: Helm reinstall) |
+| `--stack` | Required when the addon exists in multiple stacks |
+| `--dry-run` | Print the before/after spec without applying |
+| `-o json\|yaml` | Machine-readable output |
+
+`--set*` (mutate) and `--values-from-file` / `--values -` (replace) are mutually exclusive. `--set-parent` replaces the parent list wholesale and cannot be combined with `--add-parent`/`--remove-parent`; removing the last parent clears the link.
 
 #### cluster addons uninstall
 Uninstall an addon from the cluster.
@@ -613,6 +771,72 @@ List manifests for the active cluster, or show details for a specific manifest.
 ankra cluster manifests list
 ankra cluster manifests list <manifest-name>
 ```
+
+#### cluster manifests get
+Print a manifest's current Kubernetes YAML. The decoded content is written to
+stdout, ready to pipe to a file or edit and re-apply with `--from-file`.
+
+```bash
+ankra cluster manifests get <manifest-name>
+ankra cluster manifests get <manifest-name> -o raw   # base64-encoded form
+```
+
+#### cluster manifests upgrade
+Upgrade a manifest in-place. Replace the whole manifest from a file or stdin, or
+patch a single path inside the Kubernetes YAML with helm-style `--set` (for
+example, to bump a Deployment image tag).
+
+```bash
+# Bump a Deployment's image tag in place
+ankra cluster manifests upgrade web \
+  --set 'spec.template.spec.containers[name=app].image=nginx:1.27'
+
+# Pick a document when the manifest holds several
+ankra cluster manifests upgrade web \
+  --target-kind Deployment --target-name web \
+  --set 'spec.replicas=3'
+
+# Replace the whole manifest from a file
+ankra cluster manifests upgrade demo-namespace --from-file manifests/demo.yaml
+
+# Edit dependency parents (controls deployment ordering inside the stack)
+ankra cluster manifests upgrade web --add-parent name=infisical-ns,kind=manifest
+```
+
+| Flag | Description |
+|------|-------------|
+| `--set` | Mutate one path in the manifest YAML (repeatable; supports `containers[0]` and `containers[name=app]` selectors) |
+| `--set-string` | Like `--set` but always treats the value as a string |
+| `--set-file` | Like `--set` but reads the value from a file (`key=path` or `key=@path`) |
+| `--target-kind` | With `--set`: pick the document by Kubernetes kind (multi-doc manifests) |
+| `--target-name` | With `--set`: pick the document by `metadata.name` (multi-doc manifests) |
+| `--add-parent` | Add a dependency parent `name=<n>,kind=<manifest\|addon>` (kind defaults to `manifest`; repeatable) |
+| `--remove-parent` | Remove a dependency parent (repeatable) |
+| `--set-parent` | Replace ALL dependency parents with the given set (repeatable) |
+| `--from-file` | Replace the entire manifest from a file |
+| `--manifest -` | Replace the entire manifest from stdin |
+| `--namespace` | Change the manifest's namespace |
+| `--dry-run` | Print the before/after spec without applying |
+| `-o json\|yaml` | Machine-readable output |
+
+`--set*` MUTATE the existing manifest and are mutually exclusive with `--from-file` / `--manifest -`, which REPLACE it. A list selector that matches nothing fails with a clear error rather than guessing. Parent flags (`--add-parent` / `--remove-parent` / `--set-parent`) edit dependency parents; `--set-parent` replaces the list wholesale and cannot be combined with the others.
+
+#### cluster manifests delete
+Disconnect a manifest from its stack, removing its resources from the cluster.
+The owning stack is resolved automatically (manifest names are unique per
+cluster). A confirmation prompt protects the operation.
+
+```bash
+ankra cluster manifests delete <manifest-name>
+ankra cluster manifests delete <manifest-name> --yes       # skip confirmation
+ankra cluster manifests delete <manifest-name> --dry-run   # preview only
+```
+
+| Flag | Description |
+|------|-------------|
+| `--yes` | Skip the confirmation prompt |
+| `--dry-run` | Print the manifest that would be disconnected without making changes |
+| `--cluster` | Target cluster (name or ID); defaults to the active selection |
 
 ---
 
@@ -1383,6 +1607,31 @@ ankra completion powershell           # print powershell completion script
 ankra completion install              # install completions for current shell
 ankra completion install --shell zsh  # install for a specific shell
 ```
+
+---
+
+### Agent Skills
+
+Install the curated [Ankra Agent Skills](https://github.com/ankraio/ankra-skills) into a
+Cursor/Claude skills directory so your AI agent follows Ankra's recommended practices for the
+CLI, ImportCluster YAML, stacks/addons, GitOps, CI/CD, SOPS secrets, Helm registries,
+observability, alerts, Terraform, and cloud clusters. The skills are embedded in the CLI, so
+installation works offline.
+
+```bash
+ankra skills list                            # list available skills (marks installed ones)
+ankra skills install                         # install all into ~/.cursor/skills (personal)
+ankra skills install --project .             # install into ./.cursor/skills (project)
+ankra skills install ankra-cli ankra-gitops  # install only named skills
+ankra skills install --force                 # overwrite existing skills
+ankra skills uninstall                       # remove all Ankra skills
+ankra skills uninstall ankra-cli             # remove a named skill
+```
+
+<Note>
+`ankra skills` installs the static, curated skill set. To generate a SKILL.md describing one
+of your own clusters, use `ankra openclaw skill` instead.
+</Note>
 
 ---
 
