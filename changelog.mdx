@@ -3,6 +3,145 @@ title: "Changelog"
 description: "Product updates and announcements"
 rss: true
 ---
+<Update label="June 2026">
+# Watch Cluster Operations and Job Status Live from the CLI
+
+The Ankra CLI can now poll operations and their jobs in place, so you can follow a deploy or reconcile to completion without re-running a command in a loop.
+
+```bash
+# Refresh the operations table until everything reaches a terminal state
+ankra get operations --watch
+
+# Follow a single operation, refreshing every 3 seconds
+ankra get operations <operation_id> --watch --interval 3s
+
+# Track the per-job status for an operation as it runs
+ankra get jobs <operation_id> --watch
+```
+
+`--watch` redraws the screen on each poll (default every 5 seconds, tunable with `--interval`) and stops automatically once the operation — or every operation in the list — finishes, so the command exits cleanly instead of spinning forever. The new `ankra get jobs <operation_id>` command shows the operation summary plus each job's status, created, and updated times, and is watchable the same way. Statuses are colorized (green success, red failure, yellow running) to make in-progress work easy to spot at a glance.
+
+</Update>
+<Update label="May 2026">
+# Manage Variables at Org, Cluster, and Stack Scopes from the CLI
+
+The Ankra CLI now ships full CRUD for the variables that get substituted into stack manifests and addon values at deploy time, at all three scopes — organisation, cluster, and stack.
+
+```bash
+# Org-wide, available to every cluster
+ankra org variables set DB_HOST db.example.com --description "Primary DB"
+
+# Per-cluster, shadows org variables on that cluster
+ankra cluster variables set DB_HOST db.prod.example.com --cluster prod
+
+# Per-stack, the most specific scope
+ankra cluster stacks variables set demo-web-app FEATURE_FLAG enabled
+```
+
+Each scope has `list` / `get` / `set` / `delete`. `set` is an upsert — it creates or updates — and values can be read from stdin with `-`, so secrets can be piped in from a vault or password manager. Resolution at deploy time is **stack > cluster > organisation**, so a more specific scope shadows less specific ones for the same variable name. List/get support `-o json|yaml` for scripting, and `delete` prompts for confirmation (`--yes` to skip).
+
+[CLI Organisation Variables →](/integrations/ankra-cli#org-variables) · [Cluster Variables →](/integrations/ankra-cli#cluster-variables) · [Stack Variables →](/integrations/ankra-cli#cluster-stacks-variables)
+
+# SOPS Encrypt and Decrypt Directly Against Live Clusters
+
+`ankra cluster encrypt` and `ankra cluster decrypt` now work directly against a live cluster — no local `cluster.yaml` needed. Cluster mode fetches the current manifest or addon values, runs them through the SOPS API, and (for encrypt) pushes the result back via the same partial-stack PATCH used by `manifests upgrade` / `addons upgrade`, updating `encrypted_paths` automatically.
+
+- **Encrypt:** `ankra cluster encrypt manifest db-secret --key data.password`, `ankra cluster encrypt addon --name grafana --key adminPassword --cluster prod`
+- **Decrypt:** `ankra cluster decrypt manifest db-secret`, `ankra cluster decrypt addon --name grafana --cluster prod`
+
+The existing `-f cluster.yaml` file mode is unchanged and remains for GitOps workflows where the source of truth is on disk. The two modes are mutually exclusive; cluster mode is the default. A new `decrypt addon` brings the addon variant to parity with manifests.
+
+[CLI SOPS Encryption →](/integrations/ankra-cli#sops-encryption)
+
+# Manage Dependency Parents, Reads, and Manifest Deletes from the CLI
+
+The Ankra CLI now covers the rest of stack CRUD without hand-editing `ImportCluster.yaml`.
+
+- **Edit dependency parents** that control deployment ordering: `ankra cluster addons upgrade infisical --add-parent name=infisical-ns,kind=manifest`. `--remove-parent` and `--set-parent` are available on both `addons upgrade` and `manifests upgrade`.
+- **Read current content**: `ankra cluster addons values <name>` prints an addon's Helm values and `ankra cluster manifests get <name>` prints a manifest's YAML — both ready to pipe to a file, edit, and re-apply.
+- **Delete a manifest**: `ankra cluster manifests delete <name>` disconnects a manifest from its stack and removes its resources from the cluster, resolving the owning stack automatically and prompting for confirmation.
+
+[CLI Manifest Management →](/integrations/ankra-cli#manifest-management)
+
+# Run CLI Commands Against Any of Your Organisations
+
+The Ankra CLI now has a global `--org` flag (and an `ANKRA_ORG` environment variable) so you can run a single command against any organisation you belong to without switching your selected organisation first. Pass an organisation name or ID:
+
+- `ankra --org "Acme Corp" cluster list` runs just that command against another organisation.
+- `export ANKRA_ORG="Acme Corp"` scopes a whole shell session.
+
+The override is applied per request — it never changes the organisation `ankra org switch` selected, so scripts and parallel sessions targeting different organisations no longer step on each other. You must be an active member of the organisation you target.
+
+[CLI Organisation Management →](/integrations/ankra-cli#organisation-management)
+
+# Install Curated AI Agent Skills from the CLI
+
+`ankra skills` installs the curated Ankra Agent Skills into your Cursor/Claude skills directory, so your AI agent follows Ankra's recommended practices for the CLI, ImportCluster YAML, stacks/addons, GitOps, CI/CD, SOPS secrets, Helm registries, observability, alerts, Terraform, and cloud clusters. The skills are embedded in the CLI binary, so installation works offline and is versioned with the release.
+
+```bash
+ankra skills list                  # list available skills (marks installed ones)
+ankra skills install               # install all into ~/.cursor/skills (personal)
+ankra skills install --project .   # install into ./.cursor/skills (project)
+ankra skills install ankra-gitops  # install only named skills
+ankra skills uninstall             # remove all Ankra skills
+```
+
+Use `--project <dir>` for a per-project install (`./.cursor/skills`) and `--force` to overwrite existing skills. This is separate from `ankra openclaw skill`, which generates a SKILL.md describing one of your own clusters; `ankra skills` installs the static, curated skill set.
+
+[CLI Agent Skills →](/integrations/ankra-cli#agent-skills)
+
+# Edit Cluster Topology While Stopped
+
+Stopped cloud clusters (Hetzner, OVH, UpCloud) now expose the full Nodes settings tab. While the cluster stays offline you can:
+
+- Switch the control plane between **1** and **3** controllers (only 1 or 3 — etcd needs an odd number of voting members to form quorum).
+- Change the **controller instance type**. Because the cluster is recreated fresh on next start, downgrades are safe here — there is no live disk resize.
+- Add and remove **node groups**, scale them, change their worker instance type, and edit labels and taints.
+
+Changes are saved against the stopped topology and applied the next time you start the cluster from the General settings tab. Topology edits now also serialize against each other and against start/stop, so two operators clicking at the same time can't end up with a half-applied change.
+
+[Cluster Settings →](/essentials/cluster-settings#nodes-settings)
+
+# CLI Surgical Upgrades for Addons and Manifests
+
+The Ankra CLI now ships `ankra cluster addons upgrade` and `ankra cluster manifests upgrade` for in-place changes, removing the need to hand-edit a full `ImportCluster.yaml` to roll a chart version, tweak Helm values, or rotate a manifest.
+
+- **Mutate a single Helm values field** with helm-style `--set` (dotted paths, array indexing): `ankra cluster addons upgrade website --set image.tag=1.0.146`
+- **Replace the whole values document** with `--values-from-file`.
+- **Update a manifest** from a file or stdin with `ankra cluster manifests upgrade <name> --from-file <path>`.
+- **Atomic + GitOps friendly**: every invocation calls the partial-stack endpoint, locks the cluster, and produces a single git commit when gitops is enabled.
+- **`--dry-run`** prints a before/after preview without writing; supports `-o json|yaml` for CI gating.
+
+[CLI Changelog →](/integrations/ankra-cli-changelog)
+
+# In-Place `--set` Edits for Manifests
+
+`ankra cluster manifests upgrade` now accepts helm-style `--set`, `--set-string`, and `--set-file` to patch a single path inside a manifest's Kubernetes YAML — so bumping a Deployment image tag from CI no longer means rewriting the whole file.
+
+- **Patch one path**: `ankra cluster manifests upgrade web --set 'spec.template.spec.containers[name=app].image=nginx:1.27'`
+- **Multi-document manifests**: pick the document to edit with `--target-kind` and `--target-name`.
+- **Field selectors everywhere**: both manifest and addon `--set` paths can address a list item by a stable field — `containers[name=app]`, `env[name=LOG_LEVEL]` — instead of a fragile numeric index. A selector that matches nothing fails loudly rather than guessing, and numeric indexes still work.
+
+`--set*` mutate the existing content and are mutually exclusive with `--from-file` / `--manifest -`, which replace it.
+
+[CLI Manifest Management →](/integrations/ankra-cli#cluster-manifests-upgrade)
+
+## Hetzner: Resilient Cluster Updates
+
+Hetzner cluster update jobs are now self-healing. The reconciler persists install-time addresses (`bind-address`, `advertise-address`, `node-ip`) into `/etc/rancher/k3s/config.yaml` so k3s always restarts bound to the correct private IP, and version bumps now swap the k3s binary in place instead of re-running the upstream installer — which previously rewrote the systemd unit and wiped `K3S_URL` / `K3S_TOKEN` on joined nodes. Clusters that had drifted into authentication-error loops after an upgrade recover on the next reconcile.
+
+## Offline Cloud Clusters: Cleaner Reconciliation
+
+When a Hetzner, OVH, or UpCloud cluster is in the **stopped** state (after Delete Kubernetes), the reconciler now only acts on provider-owned resources — servers, networks, SSH keys, the k8s control plane. Addons, manifests, and other in-cluster resources are held until the cluster is back online, so you no longer see repeated failures for resources that have no API server to talk to.
+
+[Hetzner Cluster Lifecycle →](/essentials/hetzner-clusters#cluster-lifecycle)
+
+## Operations Page: Live Updates
+
+The cluster **Operations** page now refreshes itself in the background. Newly-triggered operations appear without a manual reload, and the status, duration, and finish time of in-flight operations update as they progress. The page polls faster while something is actively running and slows down once everything is idle, so you get near-real-time feedback while a deploy is happening without hammering the backend when nothing is going on.
+
+</Update>
+
 <Update label="April 2026">
 # Cluster Lifecycle: Delete Kubernetes & Scale Back Up, Multi-Stack Cloning
 
