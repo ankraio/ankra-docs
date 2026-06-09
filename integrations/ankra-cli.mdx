@@ -55,6 +55,46 @@ chmod +x ankra
 mv ankra ~/bin/ankra  # or /usr/local/bin/ankra
 ```
 
+### Upgrading the CLI
+
+The CLI can update itself in place with `ankra upgrade` (aliased as `ankra self-update`). The downloaded binary is verified against its published SHA-256 checksum before it replaces the running executable.
+
+```bash
+# Upgrade to the latest stable release
+ankra upgrade
+
+# Check whether a newer release exists without installing
+ankra upgrade --check
+
+# Pin an exact version (also works as a downgrade / rollback)
+ankra upgrade --version v0.3.0
+```
+
+| Flag | Description |
+|------|-------------|
+| `--version <tag>` | Install an exact release (e.g. `v0.3.0` or `0.3.0`); installs whether newer or older, so it doubles as a rollback |
+| `--check` | Report whether a newer release is available without installing |
+| `--beta` | Include pre-release versions for this run (overrides the saved channel) |
+| `--force` | Reinstall even if already on the target version |
+| `-y, --yes` | Skip the confirmation prompt |
+| `--allow-unverified` | Install even when no checksum is published (insecure) |
+
+<Tip>
+If the binary lives in a root-owned location, run `sudo ankra upgrade` or re-run the install script.
+</Tip>
+
+#### Beta (pre-release) channel
+
+Opt in to release candidates (such as `v0.3.0-rc.1`) so `ankra upgrade` resolves the newest release including pre-releases:
+
+```bash
+ankra config beta enable    # opt in
+ankra config beta status    # show current channel
+ankra config beta disable   # back to stable only
+```
+
+The channel preference is stored locally in `~/.ankra/settings.json` (separate from your credentials).
+
 ## Authentication
 
 ### SSO Login (Recommended)
@@ -324,6 +364,42 @@ Apply an ImportCluster YAML to the Ankra API.
 
 ```bash
 ankra cluster apply -f <file>
+
+# Validate the YAML locally (offline) without calling the API
+ankra cluster apply -f <file> --dry-run
+
+# Submit, then block until the platform finishes (with a timeout)
+ankra cluster apply -f <file> --wait --timeout 15m
+```
+
+| Flag | Description |
+|------|-------------|
+| `--dry-run` | Run the **local** structural, dependency, and YAML checks only, without calling the API. For server-side checks (chart existence, secret detection), use [`cluster validate`](#cluster-validate) |
+| `--wait` | Submit the change, then wait for the operation to finish and report success/failure (default: submit and return immediately) |
+| `--timeout` | Maximum time to wait when `--wait` is set (default `10m`) |
+
+<Note>
+Writes are submitted **asynchronously** by default - the command returns as soon as the platform accepts the change, and the work continues in the background. Add `--wait` to block until completion. Avoid resubmitting the same change while it may still be running.
+</Note>
+
+#### cluster draft
+Stage every stack in an ImportCluster YAML as reviewable **drafts** instead of deploying. Local checks run first (the same as `--dry-run`), then each stack is saved as a draft you can review, edit, and deploy from the stack builder. If the cluster doesn't exist yet it is imported first (drafts attach to an existing cluster). Stacks already matching desired state report "no changes".
+
+```bash
+ankra cluster draft -f <file>
+```
+
+#### cluster validate
+Validate an ImportCluster YAML without applying it. Local checks run first, then the file is sent to the Ankra API for server-side validation the offline checks can't do: chart existence in your connected Helm registries, plaintext Secret / unencrypted addon-value detection, and parent references resolved against a cluster's resources.
+
+```bash
+ankra cluster validate -f <file>
+
+# Treat plaintext secrets as errors instead of warnings
+ankra cluster validate -f <file> --strict-secrets
+
+# Validate against an existing cluster's deployed resources
+ankra cluster validate -f <file> --cluster <cluster-id>
 ```
 
 #### cluster clone
@@ -399,6 +475,54 @@ Delete a cluster by name.
 ankra delete cluster <name>
 ankra delete cluster <name> -f   # skip confirmation
 ```
+
+#### cluster kubeconfig
+
+Manage the Ankra entries in your local kubeconfig so you can run `kubectl` against a cluster through Ankra's API proxy. See [Accessing Clusters with kubectl](/essentials/kubeconfig) for the full flow.
+
+```bash
+# Add the selected cluster and make it active
+ankra cluster kubeconfig add --cluster my-cluster --use
+
+# Add every cluster you can access
+ankra cluster kubeconfig add --all
+
+# List and remove Ankra-managed contexts
+ankra cluster kubeconfig list
+ankra cluster kubeconfig remove --cluster my-cluster
+```
+
+By default `add` writes an exec-based context that fetches a short-lived token on demand (auto-refreshing, SSO-backed). Use `--embed-token` for a self-contained file, `--print` to write a standalone kubeconfig to stdout, and `--namespace` to set a default namespace. Other entries in your kubeconfig are left untouched.
+
+#### cluster kube-token
+
+Print a short-lived Kubernetes `ExecCredential` JSON. This is invoked by `kubectl` as a credential plugin (the default `cluster kubeconfig add` wires it up for you); you rarely run it directly.
+
+```bash
+ankra cluster kube-token --cluster <cluster-name-or-id>
+```
+
+#### cluster metrics
+
+Query the Prometheus metrics source configured for a cluster (Cluster Settings → Metrics), proxied through the agent. See [Prometheus integration](/integrations/prometheus).
+
+```bash
+# Instant PromQL query
+ankra cluster metrics query 'up'
+ankra cluster metrics query 'sum(rate(container_cpu_usage_seconds_total[5m])) by (pod)'
+
+# Range query
+ankra cluster metrics query-range 'rate(node_cpu_seconds_total[5m])' --range 6h --step 5m
+```
+
+| Flag | Description |
+|------|-------------|
+| `--cluster` | Cluster name (defaults to the selected cluster) |
+| `--range` | Duration relative to now for `query-range` (e.g. `15m`, `1h`, `6h`, `24h`, `7d`) |
+| `--start` / `--end` | Range bounds as Unix seconds (alternative to `--range`) |
+| `--step` | Resolution step for `query-range` (e.g. `30s`, `1m`, `5m`) |
+| `--timeout` | Query timeout in seconds |
+| `-o, --output` | `table` (default), `json`, or `yaml` |
 
 ---
 
@@ -1215,15 +1339,30 @@ ankra cluster ovh workers <cluster_id>
 ```
 
 #### cluster ovh node-group
-Manage node groups for an OVH cluster.
+Manage node groups for an OVH cluster. OVH node groups also support Kubernetes labels and taints, both when adding a group and as dedicated subcommands to update them later.
 
 ```bash
 ankra cluster ovh node-group list <cluster_id>
-ankra cluster ovh node-group add <cluster_id> --name <name> --instance-type <type> --count <n>
+ankra cluster ovh node-group add <cluster_id> --name <name> --instance-type <type> --count <n> \
+  --labels "team=platform,tier=backend" \
+  --taints "dedicated=gpu:NoSchedule"
 ankra cluster ovh node-group scale <cluster_id> <group_name> <count>
 ankra cluster ovh node-group upgrade <cluster_id> <group_name> <instance_type>
 ankra cluster ovh node-group delete <cluster_id> <group_name>
+
+# Update labels / taints on an existing group (empty value clears them)
+ankra cluster ovh node-group labels <cluster_id> <group_name> --labels "team=platform"
+ankra cluster ovh node-group taints <cluster_id> <group_name> --taints "dedicated=gpu:NoSchedule"
 ```
+
+| Flag | Description |
+|------|-------------|
+| `--labels` | Comma-separated `key=value` labels for the node group |
+| `--taints` | Comma-separated `key=value:Effect` taints (e.g. `dedicated=gpu:NoSchedule`) |
+
+<Note>
+Node-group mutations are submitted asynchronously. Add `--wait` (with an optional `--timeout`) to block until the operation completes instead of returning immediately.
+</Note>
 
 #### cluster ovh scale
 Scale all worker nodes up or down (legacy, prefer node groups via Settings > Nodes).
@@ -1592,6 +1731,49 @@ Delete a revoked API token.
 ```bash
 ankra tokens delete <token_id>
 ```
+
+---
+
+### Stack Profiles
+
+List, export, and import reusable [stack profiles](/essentials/stack-profiles) in the active organisation.
+
+```bash
+# List stack profiles
+ankra stack-profiles list
+
+# Export a profile version as ClusterInfrastructureAsCode YAML
+ankra stack-profiles export-iac <profile-id> --version 2 --output profile.yaml
+
+# Import a profile from exported IaC (file is a positional argument)
+ankra stack-profiles import profile.yaml --name my-profile --category general
+```
+
+---
+
+### Support
+
+Create and track [support requests](/essentials/support) for your organisation. Every request is reviewed by Ankra AI before it reaches the team; use `--force` on create to submit a flagged request anyway.
+
+```bash
+ankra support create --subject "Nodes NotReady" --description "..." --cluster prod
+ankra support list
+ankra support get <ticket-id>
+ankra support comment <ticket-id> --message "Any update?"
+ankra support attach <ticket-id> screenshot.png
+ankra support close <ticket-id>
+```
+
+| Command | Description |
+|---------|-------------|
+| `create` | Create a request (`--subject`, `--description` required; `--category`, `--severity`, `--cluster`, `--force`) |
+| `list` | List requests (`--status` repeatable, `-q/--query`, `--page`, `--page-size`) |
+| `get <id>` | Show a request and its replies |
+| `comment <id>` | Add a reply (`-m/--message`) |
+| `attach <id> <file>...` | Attach screenshots or images |
+| `close <id>` | Close a request (`--yes` to skip the prompt) |
+
+List/get/comment support `-o json|yaml` for scripting.
 
 ---
 

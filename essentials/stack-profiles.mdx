@@ -1,0 +1,128 @@
+---
+title: Stack Profiles
+description: Capture a working stack as a reusable, versioned, parameterised template - then roll it out to any cluster.
+---
+
+A Stack Profile is a reusable template captured from a real [stack](/essentials/stacks). Build a stack once, save it as a profile, and instantiate it on any cluster - with parameters filled in per environment. Profiles are versioned, so you can publish updates, diff versions, and see which deployments have drifted behind the latest.
+
+<Note>
+A profile is a **template**, not a running deployment. Instantiating a profile produces a stack draft on a target cluster, which you then review and commit like any other stack change.
+</Note>
+
+---
+
+## Why use profiles
+
+- **Standardise** a golden stack (monitoring, ingress, security baseline) and reuse it across clusters.
+- **Parameterise** the bits that differ per environment - domains, replica counts, sizes - instead of copy-pasting YAML.
+- **Version** changes with a changelog and channels, and **diff** any two versions.
+- **Track drift**: a profile shows how many instantiations are behind its latest version.
+
+---
+
+## Anatomy of a profile
+
+| Concept | Description |
+|---------|-------------|
+| **Version** | An immutable snapshot of the stack spec. Versions increment as you publish updates and carry a `channel` (e.g. `stable`) and an optional changelog. |
+| **Parameters** | Typed inputs callers fill in at instantiation. Each parameter has a `type` (`string`, `number`, `boolean`, `enum`, or `secret`), and may be `required`, have a `default`, an `enum` list, or a validation `pattern`. |
+| **Visibility** | `organisation` (default) keeps the profile private to your org; `public` shares it more widely. |
+| **Category & tags** | Metadata for organising and searching profiles. |
+| **Drafts** | An editable working copy used to build or edit a profile before publishing a version. |
+
+Secret-typed parameters and other sensitive values are redacted when a profile is captured, so credentials are never baked into a shared template.
+
+---
+
+## Create a profile
+
+You can create a profile two ways:
+
+<CardGroup cols={2}>
+  <Card title="From an existing stack" icon="wand-magic-sparkles">
+    Capture a profile directly from a stack already running on a cluster.
+    Optionally include addon configurations. This is the fastest path - build
+    and validate the stack first, then snapshot it.
+  </Card>
+  <Card title="Import" icon="file-import">
+    Import a profile from exported IaC content, for sharing across
+    organisations or storing in Git.
+  </Card>
+</CardGroup>
+
+```bash
+# Capture from a cluster's stack
+POST /org/stack-profiles
+{ "name": "platform-baseline", "source_cluster_id": "...", "stack_name": "platform", "include_addon_configurations": true }
+```
+
+### Build with drafts
+
+For more control, work in a draft: create a draft (optionally seeded from a cluster's stack), edit its spec and parameters, validate it, then publish it as a new version.
+
+<Steps>
+  <Step title="Create a draft">
+    `POST /org/stack-profiles/drafts` - optionally seeded from an existing profile or a source cluster stack.
+  </Step>
+  <Step title="Edit and validate">
+    Update the draft's spec and parameters, then `POST /org/stack-profiles/drafts/{draft_id}/validate` to surface any issues before publishing.
+  </Step>
+  <Step title="Publish a version">
+    `POST /org/stack-profiles/drafts/{draft_id}/publish` with a channel and changelog. This creates the profile (or a new version of it).
+  </Step>
+</Steps>
+
+---
+
+## Instantiate a profile
+
+Instantiating turns a profile into a stack on a target cluster:
+
+<Steps>
+  <Step title="Choose a profile and version">
+    Pick the profile and, optionally, a specific version (defaults to latest).
+  </Step>
+  <Step title="Bind parameters">
+    Supply values for the profile's parameters. Required parameters must be set; others fall back to their defaults.
+  </Step>
+  <Step title="Review the draft">
+    Instantiation creates a stack draft on the cluster (with the resolved addons and manifests). Review it.
+  </Step>
+  <Step title="Commit">
+    Commit the draft to deploy, exactly like any other [stack](/essentials/stacks) change.
+  </Step>
+</Steps>
+
+---
+
+## Versioning, diffing, and updates
+
+- **Save a new version** from an updated source stack, or by publishing an edited draft.
+- **Diff** any two versions to see what changed: `GET /org/stack-profiles/{profile_id}/diff?from_version=1&to_version=2`.
+- **Update tracking**: a profile reports `outdated_instantiation_count` and `has_update_available` so you can find deployments that are behind and re-instantiate them on the newer version.
+- **Export IaC** for a version to store the template in Git or move it between organisations.
+
+---
+
+## API
+
+All endpoints are under `/org/stack-profiles` and require authentication; write operations require a CSRF header for browser-originated requests.
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| `GET` | `/org/stack-profiles` | List profiles (paginated) |
+| `POST` | `/org/stack-profiles` | Create a profile from a cluster's stack |
+| `POST` | `/org/stack-profiles/import` | Import a profile from IaC content |
+| `GET` | `/org/stack-profiles/{profile_id}` | Profile detail, versions, and update status |
+| `PATCH` | `/org/stack-profiles/{profile_id}` | Update metadata (name, description, tags, visibility) |
+| `DELETE` | `/org/stack-profiles/{profile_id}` | Delete a profile |
+| `POST` | `/org/stack-profiles/{profile_id}/versions` | Save a new version from a source stack |
+| `GET` | `/org/stack-profiles/{profile_id}/versions/{version}` | Get a version's spec and parameters |
+| `GET` | `/org/stack-profiles/{profile_id}/versions/{version}/iac-export` | Export a version as IaC |
+| `GET` | `/org/stack-profiles/{profile_id}/diff` | Diff two versions |
+| `GET`/`POST` | `/org/stack-profiles/drafts` | List or create drafts |
+| `GET`/`POST`/`DELETE` | `/org/stack-profiles/drafts/{draft_id}` | Get, update, or delete a draft |
+| `POST` | `/org/stack-profiles/drafts/{draft_id}/validate` | Validate a draft |
+| `POST` | `/org/stack-profiles/drafts/{draft_id}/publish` | Publish a draft as a profile version |
+
+See [Stacks](/essentials/stacks) for the deploy/commit flow and the [API Reference](/api-reference/introduction) for full schemas.
