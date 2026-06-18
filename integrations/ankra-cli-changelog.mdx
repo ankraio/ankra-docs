@@ -4,69 +4,102 @@ description: Release history for the Ankra CLI
 mode: wide
 rss: true
 ---
+<Update label="v0.4.0">
+# Cluster Access (RBAC) and Provider-Agnostic Cloud Verbs
+
+Per-user cluster access management, cloud-agnostic lifecycle verbs that auto-detect the provider, and the deprecation of the provider-specific equivalents.
+
+## Cluster access (RBAC)
+
+`ankra cluster access list | grant | revoke` manages who can reach a cluster's Kubernetes API through the Ankra kube gateway (the access used by `cluster kubeconfig` and `cluster kube-token`). A grant maps an organisation member (by email) to a Kubernetes role — `view`, `edit`, `admin`, or `cluster-admin` — cluster-wide or limited to one namespace with `--namespace`. `list` shows each grant's RBAC reconcile status; `revoke` accepts a grant ID or an email (revoking every grant that member has on the cluster). Managing access requires organisation admin rights.
+
+```bash
+ankra cluster access grant user@example.com --cluster prod --role edit --namespace staging
+ankra cluster access list --cluster prod
+ankra cluster access revoke user@example.com --cluster prod
+```
+
+## Provider-agnostic cloud cluster verbs
+
+New cloud-agnostic verbs detect the provider (Hetzner, OVH, UpCloud) automatically from the cluster, so you no longer pick a provider namespace:
+
+- `ankra cluster upgrade <cluster_id> <target_version>` — upgrade the Kubernetes (k3s) version.
+- `ankra cluster scale <cluster_id> <worker_count>` — scale the default worker pool.
+- `ankra cluster node-group <list|add|scale|upgrade|delete>` — manage node groups.
+- `ankra cluster k3s-versions` — list the k3s versions available for `cluster upgrade`, with the stable channel highlighted.
+
+`ankra cluster deprovision` now accepts a cluster ID **or** name (previously name-only) and routes cloud clusters to the provider-specific teardown so cloud resources are released.
+
+## Support review before submit
+
+`ankra support create` now shows the AI review before submitting: the reasons a request was flagged, clarifying questions that would speed up triage, and any existing ticket that may already track the same problem. When the review flags the request or finds a possible duplicate you're asked to confirm; `--force` skips the prompt, and `-o json|yaml` callers get a `--force`-guidance error instead of a prompt.
+
+## Isolated `--config` state
+
+`--config <file>` now fully isolates per-invocation state: a config file with an unfamiliar or missing extension is parsed as YAML (instead of reading empty and dropping the saved token), and the active-cluster selection is keyed to the explicit `--config` path rather than `$HOME`, so parallel runs against different config files no longer clobber each other. If you previously ran with `--config` and relied on the `$HOME`-keyed selection, re-run `ankra cluster select` once.
+
+## Deprecated
+
+The provider-specific `ankra cluster {hetzner,ovh,upcloud} upgrade | scale | node-group | deprovision` commands are deprecated in favour of the cloud-agnostic verbs above. They still work and now print a runtime warning pointing at the replacement; they are scheduled for removal in v0.5.0. OVH's `node-group labels` / `node-group taints` remain — they have no provider-agnostic equivalent yet.
+
+</Update>
+
 <Update label="v0.3.0">
-# Drafts, Validation, Async Writes, kubectl Access, Self-Update, and OVH Parity
+# kubectl, Metrics, Support, Stack Profiles, and Cluster Validation
 
-A big release: stage changes as drafts, validate specs server-side, run `kubectl` through Ankra, query metrics, manage stack profiles and support tickets from the terminal, and keep the CLI current with a built-in self-update. Plus verified SOPS encryption and full OVH parity with the web UI.
+The first stable v0.3.0 release rounds out end-to-end terminal control of an Ankra cluster: connect kubectl directly, query metrics, file support tickets, manage reusable stack profiles, validate and stage cluster YAML, and self-update the CLI.
 
-## Verified SOPS encryption
+## Connect kubectl directly
 
-`ankra cluster encrypt manifest|addon` could previously produce files that only *looked* encrypted: a dotted `--key` such as `data.password` matched no YAML key during SOPS tree traversal, so the file gained `sops:` metadata while the secret value stayed plaintext base64. A dotted `--key` is now normalised to its last segment (`data.password` → `password`) with a notice, and after every encryption the CLI verifies the target key's value is real `ENC[...]` ciphertext — hard-failing before any file write or stack update when nothing was encrypted. If you encrypted keys with a dotted `--key` on an older CLI version, re-run the encrypt command to confirm the values are actually encrypted.
+`ankra cluster kubeconfig add | remove | list` and `ankra cluster kube-token` wire kubectl straight to an Ankra cluster through the kube gateway. `kube-token` prints a short-lived Kubernetes `ExecCredential` for use as a credential plugin; `kubeconfig add` writes an `ankra-*` context (exec-based by default, or `--embed-token`) with atomic `0600` writes that leave foreign entries untouched and use collision-safe context naming.
 
-## Draft and validate before you apply
+```bash
+ankra cluster kubeconfig add --cluster prod --use
+kubectl get pods
+```
 
-- `ankra cluster draft -f <file>` stages every stack in an ImportCluster YAML as reviewable drafts instead of deploying. Local checks run first; stacks already at desired state report "no changes". If the cluster doesn't exist yet it's imported first.
-- `ankra cluster validate -f <file>` runs server-side validation the offline checks can't do — chart existence in your connected registries, plaintext-secret detection, and parent references resolved against a cluster. `--strict-secrets` turns plaintext secrets into errors; `--cluster <id>` validates against a live cluster.
-- `ankra cluster apply` now validates referenced files and the parent/dependency tree (unique names, valid kinds, no cycles) before anything is sent to the API, and `ankra cluster apply --dry-run` / `ankra delete cluster --dry-run` run fully offline with no token — ready for pre-merge CI.
+## Cluster metrics
 
-## Asynchronous writes with `--wait`
+`ankra cluster metrics query | query-range` proxies a PromQL query (instant or range) to the cluster's Prometheus metrics source, with `table | json | yaml` output for ad-hoc inspection and CI.
 
-`ankra cluster apply` and the node-group mutation commands now submit asynchronously and return immediately. Add `--wait` (with an optional `--timeout`) to block until the platform finishes and report success or failure. Re-running with `--wait` is also how you follow a previously submitted change to completion.
+```bash
+ankra cluster metrics query 'up'
+ankra cluster metrics query-range 'rate(node_cpu_seconds_total[5m])' --range 6h --step 5m
+```
 
-## Run kubectl through Ankra
+## Support requests
 
-- `ankra cluster kubeconfig add|remove|list` manages Ankra contexts in your kubeconfig. By default `add` writes an auto-refreshing, SSO-backed exec context (no static credentials); `--all`, `--use`, `--embed-token`, `--print`, and `--namespace` are supported.
-- `ankra cluster kube-token` prints a short-lived `ExecCredential` for use as a kubectl credential plugin (wired up automatically by `kubeconfig add`).
+`ankra support create | list | get | comment | attach | close` opens and tracks Ankra support requests from the CLI, including image/screenshot attachments. Each request goes through a mandatory AI review; use `--force` to submit a request the reviewer flags.
 
-See [Accessing Clusters with kubectl](/essentials/kubeconfig).
+## Stack profiles
 
-## Query cluster metrics
+`ankra stack-profiles list | export-iac | import` manages reusable, organisation-level stack profiles as `ClusterInfrastructureAsCode` YAML (export a profile version, import one from a file).
 
-`ankra cluster metrics query <promql>` and `ankra cluster metrics query-range` run PromQL against the cluster's configured Prometheus source, proxied through the agent. Supports `--range`/`--start`/`--end`/`--step` and `-o table|json|yaml`.
+## Validate and stage cluster YAML
 
-## Stack profiles and support from the CLI
-
-- `ankra stack-profiles list|export-iac|import` manages reusable [stack profiles](/essentials/stack-profiles).
-- `ankra support create|list|get|comment|attach|close` files and tracks [support requests](/essentials/support), with AI review before submission (`--force` to override a flag).
-
-## OVH command parity with the web UI
-
-- `ankra cluster ovh regions --credential-id <id>` — list the regions a credential's project can actually deploy in.
-- `ankra cluster ovh stop <id>` and `ankra cluster ovh start <id> [--scope all|control_plane]` — stop a cluster's compute while keeping its configuration, then start it again later.
-- `ankra cluster ovh access-info <id>` — gateway and control-plane IPs with ready-to-use `ssh -J` jump and Kubernetes API port-forward commands.
-- `ankra cluster ovh ssh-keys get|set` — view and replace the SSH key credentials attached to a cluster.
-- `ankra cluster ovh node-group add ... --labels --taints`, plus `node-group labels` and `node-group taints` subcommands to update them later.
-- `ankra cluster ovh control-plane ...` and `ankra cluster ovh nodes ...` now work over the public API with a token-authenticated CLI session.
-
-## Watch operations and machine-readable output
-
-- `ankra cluster operations list --watch` polls until every execution reaches a terminal state (`--interval`, default 5s); `operations list` and `operations steps` support `-o json|yaml`.
-- Shared `-o json|yaml` output across commands for scripting and CI.
-- Unexpected platform errors now print a ready-made `ankra support create` command, so you can file a bug without leaving the terminal.
+- `ankra cluster validate -f cluster.yaml` runs the offline `apply --dry-run` checks plus server-side chart-existence, plaintext-secret, and parent-reference validation, with CI-friendly exit codes and `--strict-secrets`.
+- `ankra cluster draft -f cluster.yaml` stages every stack as a reviewable draft instead of applying it — nothing is deployed by the command.
+- `ankra cluster apply` gained offline dependency-tree and referenced-file validation, and `--dry-run` for `apply` / `delete cluster` is fully offline (no token), so it drops into pre-merge CI.
 
 ## Self-update and beta channel
 
-- `ankra upgrade` (alias `ankra self-update`) downloads and installs a release in place, verifying its SHA-256 checksum first. `--version` pins an exact release (and doubles as a rollback), `--check` reports availability, and `--force`/`--yes` control prompts.
-- `ankra config beta enable|disable|status` opts into pre-release (release candidate) versions for `ankra upgrade`.
+`ankra upgrade` downloads, SHA-256-verifies, and atomically swaps the binary, with `--version` pinning for upgrade, downgrade, and rollback (`--allow-unverified` for releases that predate published checksums). `ankra config beta enable|disable|status` opts into pre-release builds with semver-aware precedence (a stable release outranks its release candidates).
 
-## Fixes
+## Cloud create parity and OVH commands
 
-- `ankra credentials get` resolves a name to an ID (v2 platform-credential lookup before the legacy table).
-- `ankra org members` / `ankra org current` honour `--org` and validate the saved selection instead of sending a stale value.
-- An unknown `--cluster` name fails clearly instead of forwarding a non-UUID value and producing an opaque server-side error.
-- `ankra cluster apply` understands the `prometheus_metrics` spec field.
+- `cluster ovh | upcloud | hetzner create` gained `--external-cloud-provider` (per-cloud CCM + CSI) and `--include-networking` (Traefik + cert-manager), installed by default and reconciled directly, and committed to Git when `--gitops-credential-name` / `--gitops-repository` / `--gitops-branch` are set.
+- OVH reached web-UI parity: `ovh regions`, `ovh stop` / `ovh start`, `ovh access-info`, `ovh ssh-keys get|set`, `ovh node-group labels|taints`, and `ovh control-plane` / `ovh nodes`.
+
+## Operations and machine-readable output
+
+`ankra cluster operations list` gained `--watch` / `-w` (with a configurable `--interval`), and both `operations list` and `operations steps` gained `-o json|yaml`. A shared `-o json|yaml` flag now spans the commands that read or return data.
+
+## Security
+
+`ankra cluster encrypt manifest | addon` no longer produces files that only look encrypted: a dotted `--key` (e.g. `data.password`) is normalised to its last segment, and after every encryption the CLI verifies the target value is real `ENC[...]` ciphertext — hard-failing before any write or stack PATCH when SOPS encrypted nothing.
 
 </Update>
+
 <Update label="v0.2.5">
 # Variables, Live-Cluster SOPS, Dependency Parents, and Multi-Org
 

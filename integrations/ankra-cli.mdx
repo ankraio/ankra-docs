@@ -13,7 +13,10 @@ The Ankra CLI is a powerful command-line interface for interacting with the Ankr
 - **AI Chat** Interactive and one-shot AI-powered troubleshooting
 - **Organisation Management** List, switch, create organisations, manage members
 - **Cluster Management** List, select, reconcile, provision, deprovision, delete, and clone clusters
-- **Cluster Access** Grant, list, and revoke scoped kubectl access to a cluster through the Ankra gateway
+- **Cloud Cluster Lifecycle** Provider-agnostic `upgrade`, `scale`, `node-group`, and `k3s-versions` (Hetzner/OVH/UpCloud auto-detected)
+- **Cluster Access (RBAC)** Grant, list, and revoke per-user kube-gateway access
+- **kubectl Integration** Write `ankra-*` kubeconfig contexts and mint short-lived cluster tokens
+- **Cluster Metrics** Run instant and range PromQL queries against the cluster's Prometheus
 - **Kubernetes Resources** Browse pods, deployments, services, nodes, and other resources directly
 - **Pod Logs** Stream and tail pod logs with namespace and container filtering
 - **Stack Management** Create, list, rename, delete, clone between clusters, and view stack history
@@ -30,6 +33,7 @@ The Ankra CLI is a powerful command-line interface for interacting with the Ankr
 - **UpCloud** Provision and manage UpCloud Kubernetes clusters
 - **Credentials** Manage cloud provider and Git credentials
 - **API Tokens** Create, list, revoke, and delete API tokens
+- **Support Requests** Open and track AI-reviewed support tickets from the terminal
 - **Shell Completion** Generate completion scripts for bash, zsh, fish, and powershell
 - **Agent Skills** Install the curated Ankra Agent Skills into Cursor/Claude (works offline)
 - **Secure** Credentials stored locally in `~/.ankra.yaml`
@@ -144,6 +148,22 @@ ankra cluster select
 # 4. Start chatting with AI about your infrastructure
 ankra chat "What's the status of my deployments?"
 ```
+
+## Machine-readable output (`-o json|yaml`)
+
+Commands that read or return data support structured output via the shared `-o`/`--output` flag, so scripts and AI agents never have to parse tables or prose:
+
+- `-o json` prints the result as indented JSON; `-o yaml` emits the same data as YAML.
+- The kubectl-style commands (`cluster get ...`, `cluster helm releases`, `cluster metrics ...`) default to `-o table` and accept `json`/`yaml` as alternatives.
+
+```bash
+ankra cluster list -o json
+ankra cluster operations list -o json
+ankra cluster get pods -o json
+ankra org list -o json
+```
+
+Write commands (reconcile, provision, deprovision, scaling, node groups, token creation, …) also accept `-o json` and emit the API result — including operation IDs — so automation can poll `ankra cluster operations list <id> -o json` for completion. Asynchronous writes submitted without `--wait` emit `{"submitted": true, ...}`.
 
 ## Command Reference
 
@@ -446,13 +466,13 @@ ankra cluster provision <cluster-name>   # specific cluster
 ```
 
 #### cluster deprovision
-Deprovision (stop) a managed cluster.
+Deprovision (stop) a managed cluster. Accepts a cluster name **or** ID, and falls back to the selected cluster. For cloud clusters (Hetzner, OVH, UpCloud) it routes to the provider-specific teardown endpoint so cloud resources are released.
 
 ```bash
 ankra cluster deprovision                             # uses selected cluster
-ankra cluster deprovision <cluster-name>              # specific cluster
-ankra cluster deprovision <cluster-name> --auto-delete  # auto-delete after deprovision
-ankra cluster deprovision <cluster-name> --force        # force even if unexpected state
+ankra cluster deprovision <cluster-name|id>           # specific cluster
+ankra cluster deprovision <cluster-name|id> --auto-delete  # auto-delete after deprovision
+ankra cluster deprovision <cluster-name|id> --force        # force even if unexpected state
 ```
 
 | Flag | Description |
@@ -1095,6 +1115,125 @@ ankra cluster logs my-pod -n default --since 3600
 
 ---
 
+### Cluster Access (RBAC)
+
+Grant, list, and revoke per-user access to a cluster's Kubernetes API through the Ankra kube gateway — the same access that `cluster kubeconfig` and `cluster kube-token` use. A grant maps an organisation member (by email) to a Kubernetes role, cluster-wide or scoped to a single namespace. Managing access requires organisation admin rights. All subcommands accept `--cluster <name|id>` and default to the selected cluster.
+
+#### cluster access list
+List access grants and their RBAC reconcile status (pending, applied, failed, cluster offline).
+
+```bash
+ankra cluster access list --cluster my-cluster
+ankra cluster access list --cluster my-cluster -o json
+```
+
+#### cluster access grant
+Grant a member access. The role defaults to `view`; pass `--namespace` to limit the grant to one namespace.
+
+```bash
+ankra cluster access grant user@example.com --cluster my-cluster --role view
+ankra cluster access grant user@example.com --cluster my-cluster --role edit --namespace staging
+```
+
+| Flag | Description |
+|------|-------------|
+| `--role` | `view` (default), `edit`, `admin`, or `cluster-admin` |
+| `--namespace` | Limit the grant to one namespace (default: cluster-wide) |
+| `--cluster` | Target cluster (name or ID); defaults to the selected cluster |
+
+#### cluster access revoke
+Revoke by grant ID, or by email (revokes every grant that member has on the cluster).
+
+```bash
+ankra cluster access revoke user@example.com --cluster my-cluster
+ankra cluster access revoke 6f1f9aca-2c3d-4e5f-8a9b-0c1d2e3f4a5b --cluster my-cluster
+```
+
+---
+
+### Connect kubectl
+
+Wire `kubectl` straight to an Ankra-managed cluster through the kube gateway. `kubeconfig add` writes an `ankra-*` context into your kubeconfig with atomic `0600` writes that leave foreign clusters, users, and contexts untouched. By default it uses a client-go exec credential plugin that calls `cluster kube-token` to fetch a short-lived, SSO-backed token on demand — run `ankra login` once first.
+
+#### cluster kubeconfig add
+Add or update an Ankra context. Writes to `--kubeconfig` if given, otherwise the first entry of `$KUBECONFIG`, otherwise `~/.kube/config`.
+
+```bash
+ankra cluster kubeconfig add --cluster my-cluster --use         # exec-based context, set as current
+ankra cluster kubeconfig add --all                              # every cluster you can access
+ankra cluster kubeconfig add --cluster my-cluster --embed-token # embed a short-lived token instead of exec
+ankra cluster kubeconfig add --cluster my-cluster --print > my-cluster.yaml  # standalone file, don't touch ~/.kube/config
+```
+
+| Flag | Description |
+|------|-------------|
+| `--cluster` | Cluster name or ID (defaults to the selected cluster) |
+| `--all` | Add every cluster you can access |
+| `--embed-token` | Embed a short-lived token instead of the exec credential plugin |
+| `--namespace` | Default namespace for the context |
+| `--use` | Set the added context as the active `current-context` |
+| `--print` | Print a standalone kubeconfig to stdout instead of writing the file |
+| `--kubeconfig` | Path to the kubeconfig file (default: `$KUBECONFIG` or `~/.kube/config`) |
+| `--exec-command` | Executable kubectl invokes for credentials in exec mode (default: `ankra`) |
+| `--insecure-skip-tls-verify` | Skip TLS verification for the cluster server (dev only) |
+
+#### cluster kubeconfig list
+List the Ankra-managed contexts in your kubeconfig.
+
+```bash
+ankra cluster kubeconfig list
+```
+
+#### cluster kubeconfig remove
+Remove Ankra-managed contexts.
+
+```bash
+ankra cluster kubeconfig remove --cluster my-cluster
+ankra cluster kubeconfig remove --all
+```
+
+#### cluster kube-token
+Print a short-lived Kubernetes `ExecCredential` (JSON) for use as a kubeconfig credential plugin. This is normally invoked by `kubectl`, not by hand; `kubeconfig add` wires it up for you. It never prompts — run `ankra login` first.
+
+```bash
+ankra cluster kube-token --cluster my-cluster
+```
+
+---
+
+### Cluster Metrics
+
+Query the Prometheus metrics source configured for a cluster in **Cluster Settings → Metrics**. The query is proxied through the Ankra agent to the in-cluster Prometheus endpoint. `--cluster` defaults to the selected cluster.
+
+#### cluster metrics query
+Run an instant PromQL query.
+
+```bash
+ankra cluster metrics query 'up'
+ankra cluster metrics query 'sum(rate(container_cpu_usage_seconds_total[5m])) by (pod)' --cluster prod
+ankra cluster metrics query 'up' -o json
+```
+
+#### cluster metrics query-range
+Run a range PromQL query. Provide either `--range` (a duration relative to now) or both `--start` and `--end` (Unix seconds).
+
+```bash
+ankra cluster metrics query-range 'up' --range 1h
+ankra cluster metrics query-range 'rate(node_cpu_seconds_total[5m])' --range 6h --step 5m
+ankra cluster metrics query-range 'up' --start 1717000000 --end 1717003600 --step 1m
+```
+
+| Flag | Description |
+|------|-------------|
+| `--range` | Duration relative to now (e.g. `15m`, `1h`, `6h`, `24h`, `7d`) |
+| `--start` / `--end` | Range bounds as Unix seconds (use together) |
+| `--step` | Resolution step (e.g. `30s`, `1m`, `5m`); auto-chosen when omitted |
+| `--timeout` | Query timeout in seconds (default server-side) |
+| `--cluster` | Cluster name (defaults to the selected cluster) |
+| `--output` / `-o` | `table` (default), `json`, or `yaml` |
+
+---
+
 ### Helm Charts
 
 #### charts list
@@ -1237,9 +1376,59 @@ ankra helm credentials delete <name> -f   # skip confirmation
 
 ---
 
+### Cloud Cluster Management (provider-agnostic)
+
+These verbs detect the cloud provider (Hetzner, OVH, or UpCloud) automatically from the cluster, so you no longer need to remember which provider a cluster runs on. They are the **recommended replacement** for the provider-specific `cluster {hetzner,ovh,upcloud} ...` commands documented below, which are deprecated and now print a runtime warning.
+
+#### cluster k3s-versions
+List the k3s (Kubernetes) versions the platform can upgrade to, with the stable channel highlighted. Use one of these values with `cluster upgrade`.
+
+```bash
+ankra cluster k3s-versions
+```
+
+#### cluster upgrade
+Upgrade the Kubernetes (k3s) version on all nodes of a cloud cluster. Only Hetzner, OVH, and UpCloud clusters can be upgraded.
+
+```bash
+ankra cluster upgrade <cluster_id> <target_version>
+ankra cluster upgrade 62f4559a-a44d-46d7-aab3-a57c9dd6b4c6 v1.36.1+k3s1
+```
+
+#### cluster scale
+Scale the default worker pool of a cloud cluster up or down. To scale a named pool instead, use `cluster node-group scale`.
+
+```bash
+ankra cluster scale <cluster_id> <worker_count>
+ankra cluster scale 62f4559a-a44d-46d7-aab3-a57c9dd6b4c6 3
+```
+
+#### cluster node-group
+List, add, scale, upgrade, and delete node groups on a cloud cluster.
+
+```bash
+ankra cluster node-group list <cluster_id>
+ankra cluster node-group add <cluster_id> --name <name> --instance-type <type> --count <n>
+ankra cluster node-group scale <cluster_id> <group_name> <count>
+ankra cluster node-group upgrade <cluster_id> <group_name> <instance_type>
+ankra cluster node-group delete <cluster_id> <group_name>
+```
+
+The `add`, `scale`, `upgrade`, and `delete` mutations submit asynchronously by default (return on `202 Accepted`); add `--wait` to block until the platform finishes, bounded by `--timeout` (default 10m).
+
+<Note>
+OVH-specific node label and taint management (`node-group labels` / `node-group taints`) has no provider-agnostic equivalent yet — use `cluster ovh node-group labels|taints` for those.
+</Note>
+
+---
+
 ### Hetzner Clusters
 
 Provision, manage, and scale Kubernetes clusters on Hetzner Cloud.
+
+<Note>
+`hetzner scale`, `hetzner upgrade`, `hetzner deprovision`, and `hetzner node-group ...` are deprecated in favour of the provider-agnostic `ankra cluster scale | upgrade | deprovision | node-group` verbs above, which detect the provider automatically. They still work but print a runtime deprecation warning and are scheduled for removal in a future release.
+</Note>
 
 #### cluster hetzner create
 Create a new Hetzner cluster.
@@ -1268,6 +1457,13 @@ ankra cluster hetzner create \
 | `--subnet-range` | `10.0.1.0/24` | Subnet range |
 | `--distribution` | `k3s` | Kubernetes distribution |
 | `--kubernetes-version` | *latest* | Kubernetes version |
+| `--external-cloud-provider` | `true` | Install the Hetzner CCM + CSI (LoadBalancers, volumes). `=false` also disables `--include-networking` |
+| `--include-networking` | `true` | Install Traefik + cert-manager for ingress (requires `--external-cloud-provider`) |
+| `--gitops-credential-name` | | GitHub credential; with `--gitops-repository`, commits the generated cloud stack to Git |
+| `--gitops-repository` | | GitOps repository (e.g. `org/repo`) to commit the generated stack to |
+| `--gitops-branch` | `master` | GitOps branch to commit to |
+
+The cloud provider and networking install **by default** (reconciled directly, no GitOps required), and are additionally committed to Git when the `--gitops-*` flags are set.
 
 #### cluster hetzner deprovision
 Deprovision a Hetzner cluster and delete all associated resources.
@@ -1336,6 +1532,10 @@ ankra cluster hetzner upgrade abc-123 v1.35.1+k3s1
 
 Provision, manage, and scale Kubernetes clusters on OVH Cloud.
 
+<Note>
+`ovh scale`, `ovh upgrade`, `ovh deprovision`, and `ovh node-group list|add|scale|upgrade|delete` are deprecated in favour of the provider-agnostic `ankra cluster scale | upgrade | deprovision | node-group` verbs above. The OVH-only `node-group labels` / `node-group taints` subcommands are not deprecated (no provider-agnostic equivalent yet).
+</Note>
+
 #### cluster ovh create
 Create a new OVH cluster.
 
@@ -1364,6 +1564,13 @@ ankra cluster ovh create \
 | `--dhcp-end` | `10.0.1.200` | DHCP allocation range end |
 | `--distribution` | `k3s` | Kubernetes distribution |
 | `--kubernetes-version` | *latest* | Kubernetes version |
+| `--external-cloud-provider` | `true` | Install the OpenStack CCM + Cinder CSI (LoadBalancers, volumes). `=false` also disables `--include-networking` |
+| `--include-networking` | `true` | Install Traefik + cert-manager for ingress (requires `--external-cloud-provider`) |
+| `--gitops-credential-name` | | GitHub credential; with `--gitops-repository`, commits the generated cloud stack to Git |
+| `--gitops-repository` | | GitOps repository (e.g. `org/repo`) to commit the generated stack to |
+| `--gitops-branch` | `master` | GitOps branch to commit to |
+
+The cloud provider and networking install **by default** (reconciled directly, no GitOps required), and are additionally committed to Git when the `--gitops-*` flags are set.
 
 #### cluster ovh deprovision
 Deprovision an OVH cluster and delete all associated resources.
@@ -1497,6 +1704,10 @@ ankra cluster ovh nodes get <cluster_id> <node_id>
 
 Provision, manage, and scale Kubernetes clusters on UpCloud.
 
+<Note>
+`upcloud scale`, `upcloud upgrade`, `upcloud deprovision`, and `upcloud node-group ...` are deprecated in favour of the provider-agnostic `ankra cluster scale | upgrade | deprovision | node-group` verbs above, which detect the provider automatically.
+</Note>
+
 #### cluster upcloud create
 Create a new UpCloud cluster.
 
@@ -1522,6 +1733,13 @@ ankra cluster upcloud create \
 | `--network-ip-range` | `10.0.0.0/16` | Private network IP range |
 | `--distribution` | `k3s` | Kubernetes distribution |
 | `--kubernetes-version` | *latest* | Kubernetes version |
+| `--external-cloud-provider` | `true` | Install the UpCloud CCM + CSI (LoadBalancers, volumes). `=false` also disables `--include-networking` |
+| `--include-networking` | `true` | Install Traefik + cert-manager for ingress (requires `--external-cloud-provider`) |
+| `--gitops-credential-name` | | GitHub credential; with `--gitops-repository`, commits the generated cloud stack to Git |
+| `--gitops-repository` | | GitOps repository (e.g. `org/repo`) to commit the generated stack to |
+| `--gitops-branch` | `master` | GitOps branch to commit to |
+
+The cloud provider and networking install **by default** (reconciled directly, no GitOps required), and are additionally committed to Git when the `--gitops-*` flags are set.
 
 #### cluster upcloud deprovision
 Deprovision an UpCloud cluster and delete all associated resources.
@@ -1790,6 +2008,41 @@ ankra credentials delete <credential_id>
 
 ---
 
+### Stack Profiles
+
+Manage reusable, organisation-level stack profiles as `ClusterInfrastructureAsCode` YAML.
+
+#### stack-profiles list
+List stack profiles in the active organisation.
+
+```bash
+ankra stack-profiles list
+ankra stack-profiles list --search monitoring
+ankra stack-profiles list -o json
+```
+
+#### stack-profiles export-iac
+Export a profile version as `ClusterInfrastructureAsCode` YAML to stdout, or to a file with `-o`.
+
+```bash
+ankra stack-profiles export-iac <profile-id>                      # print to stdout
+ankra stack-profiles export-iac <profile-id> --version 2 -o profile.yaml
+```
+
+<Note>
+On `export-iac`, `-o`/`--output` is a **file path** (where to write the YAML), not an output format. This differs from the `-o json|yaml` flag used elsewhere.
+</Note>
+
+#### stack-profiles import
+Import a profile from a `ClusterInfrastructureAsCode` YAML file.
+
+```bash
+ankra stack-profiles import profile.yaml
+ankra stack-profiles import profile.yaml --name my-profile --category monitoring
+```
+
+---
+
 ### API Tokens
 
 **Aliases:** `ankra tokens`, `ankra token`
@@ -1825,46 +2078,45 @@ ankra tokens delete <token_id>
 
 ---
 
-### Stack Profiles
+### Support Requests
 
-List, export, and import reusable [stack profiles](/essentials/stack-profiles) in the active organisation.
+Open and track Ankra support requests from the terminal. Every request goes through a mandatory AI review before it reaches the team: the review may enrich the request, ask clarifying questions, or flag a low-quality or duplicate submission. When a request is flagged, `create` asks you to confirm before submitting; pass `--force` to submit anyway (required for `-o json|yaml`, which cannot prompt).
 
-```bash
-# List stack profiles
-ankra stack-profiles list
-
-# Export a profile version as ClusterInfrastructureAsCode YAML
-ankra stack-profiles export-iac <profile-id> --version 2 --output profile.yaml
-
-# Import a profile from exported IaC (file is a positional argument)
-ankra stack-profiles import profile.yaml --name my-profile --category general
-```
-
----
-
-### Support
-
-Create and track [support requests](/essentials/support) for your organisation. Every request is reviewed by Ankra AI before it reaches the team; use `--force` on create to submit a flagged request anyway.
+#### support create
+Create a support request. `--subject` and `--description` are required.
 
 ```bash
 ankra support create --subject "Nodes NotReady" --description "..." --cluster prod
-ankra support list
-ankra support get <ticket-id>
-ankra support comment <ticket-id> --message "Any update?"
-ankra support attach <ticket-id> screenshot.png
-ankra support close <ticket-id>
+ankra support create --subject "..." --description "..." --severity high --force
 ```
 
-| Command | Description |
-|---------|-------------|
-| `create` | Create a request (`--subject`, `--description` required; `--category`, `--severity`, `--cluster`, `--force`) |
-| `list` | List requests (`--status` repeatable, `-q/--query`, `--page`, `--page-size`) |
-| `get <id>` | Show a request and its replies |
-| `comment <id>` | Add a reply (`-m/--message`) |
-| `attach <id> <file>...` | Attach screenshots or images |
-| `close <id>` | Close a request (`--yes` to skip the prompt) |
+| Flag | Description |
+|------|-------------|
+| `--subject` | Short summary of the issue (required) |
+| `--description` | Detailed description (required) |
+| `--category` | `technical` (default), `account`, `billing`, `bug`, `feature_request`, `other` |
+| `--severity` | Optional: `low`, `medium`, `high`, `critical` |
+| `--cluster` | Optional related cluster (name or ID) |
+| `--force` | Submit even if the review flags the request or finds a possible duplicate |
+| `--output` / `-o` | `json` or `yaml` (default: human-readable) |
 
-List/get/comment support `-o json|yaml` for scripting.
+#### support list / get
+List your organisation's support requests, or show one with its replies.
+
+```bash
+ankra support list
+ankra support list --status open -q "nodes"
+ankra support get <ticket-id>
+```
+
+#### support comment / attach / close
+Reply to, attach images to, or close a request.
+
+```bash
+ankra support comment <ticket-id> --message "Any update?"
+ankra support attach <ticket-id> screenshot.png logs.png
+ankra support close <ticket-id> --yes
+```
 
 ---
 
