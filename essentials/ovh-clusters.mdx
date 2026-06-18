@@ -140,6 +140,10 @@ d '{
 | `SGP1` | Singapore |
 | `SYD1` | Sydney, Australia |
 
+<Note>
+The regions enabled on each OVH project differ. A region that is not enabled on the project's private network fails the reconcile during network setup. List the regions a credential can actually deploy in with `ankra cluster ovh regions --credential-id <credential_id>` before creating a cluster.
+</Note>
+
 ### OVH Instance Flavors
 
 | Flavor | vCPUs | RAM | Description |
@@ -170,6 +174,22 @@ Node groups let you organize worker nodes into logical groups with independent i
 | `/api/v1/clusters/ovh/{id}/node-groups/{name}/labels` | PUT | Update labels |
 | `/api/v1/clusters/ovh/{id}/node-groups/{name}/taints` | PUT | Update taints |
 | `/api/v1/clusters/ovh/{id}/node-groups/{name}` | DELETE | Delete a node group |
+
+From the CLI, a node group can be created with its Kubernetes labels and taints in one step, and existing groups can be scaled, re-flavored, relabeled, retainted, or deleted:
+
+```bash
+ankra cluster ovh node-group list <cluster_id>
+ankra cluster ovh node-group add <cluster_id> \
+  --name gpu --instance-type b2-30 --count 2 \
+  --labels tier=gold,workload=ml \
+  --taints dedicated=gpu:NoSchedule
+ankra cluster ovh node-group scale <cluster_id> gpu 3
+ankra cluster ovh node-group labels <cluster_id> gpu --labels tier=gold
+ankra cluster ovh node-group taints <cluster_id> gpu --taints dedicated=gpu:NoSchedule
+ankra cluster ovh node-group delete <cluster_id> gpu
+```
+
+Labels and taints are applied to every node in the group; passing an empty value clears them, and a taint effect defaults to `NoSchedule`.
 
 For detailed usage examples, see [Hetzner Node Groups](/essentials/hetzner-clusters#node-groups) the API is identical across all providers.
 
@@ -267,6 +287,134 @@ Response:
   "nodes_affected": 3
 }
 ```
+
+---
+
+## Stopping and Starting a Cluster
+
+You can stop an OVH cluster to release its compute (instances, gateway, and managed gateway) while keeping its configuration, networking definition, and SSH keys. Starting the cluster re-provisions the compute and reconciles it back to a running state. This is useful for pausing non-production clusters to save cost.
+
+When starting, use `--scope control_plane` to bring up only the control plane first (for example to inspect or repair it), or `--scope all` (the default) to provision the whole cluster.
+
+<CodeGroup>
+
+```bash CLI
+ankra cluster ovh stop <cluster_id>
+ankra cluster ovh start <cluster_id>                       # scope defaults to "all"
+ankra cluster ovh start <cluster_id> --scope control_plane # control plane only
+```
+
+```bash cURL
+curl -X POST https://platform.ankra.app/api/v1/clusters/ovh/<cluster_id>/stop \
+  -H "Authorization: Bearer $ANKRA_API_TOKEN"
+
+curl -X POST "https://platform.ankra.app/api/v1/clusters/ovh/<cluster_id>/start?scope=all" \
+  -H "Authorization: Bearer $ANKRA_API_TOKEN"
+```
+
+</CodeGroup>
+
+<Note>
+Stop and start are background operations. A start returns `409` if a stop or terminate operation is still running. The private network is preserved while stopped and reused on the next start.
+</Note>
+
+---
+
+## SSH Access and Keys
+
+`ankra cluster ovh access-info` prints the gateway (bastion) and control plane IPs along with ready-to-paste `ssh -J` jump and Kubernetes API port-forward commands, so you can reach nodes behind the gateway without looking up IPs by hand.
+
+<CodeGroup>
+
+```bash CLI
+ankra cluster ovh access-info <cluster_id>
+```
+
+```bash cURL
+curl https://platform.ankra.app/api/v1/clusters/ovh/<cluster_id>/access-info \
+  -H "Authorization: Bearer $ANKRA_API_TOKEN"
+```
+
+</CodeGroup>
+
+You can also view and replace the SSH key credentials attached to a cluster. Replacing the keys applies on the next reconciliation.
+
+<CodeGroup>
+
+```bash CLI
+ankra cluster ovh ssh-keys get <cluster_id>
+ankra cluster ovh ssh-keys set <cluster_id> --ssh-key-credential-ids <id>,<id>
+```
+
+```bash cURL
+curl https://platform.ankra.app/api/v1/clusters/ovh/<cluster_id>/ssh-keys \
+  -H "Authorization: Bearer $ANKRA_API_TOKEN"
+
+curl -X PUT https://platform.ankra.app/api/v1/clusters/ovh/<cluster_id>/ssh-keys \
+  -H "Authorization: Bearer $ANKRA_API_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"ssh_key_credential_ids": ["<ssh-key-credential-id>"]}'
+```
+
+</CodeGroup>
+
+---
+
+## Managing the Control Plane
+
+Inspect the control plane configuration, then change the node count or instance flavor. OVH control planes support a count of `1` or `3`.
+
+<CodeGroup>
+
+```bash CLI
+ankra cluster ovh control-plane get <cluster_id>
+ankra cluster ovh control-plane set-count <cluster_id> 3
+ankra cluster ovh control-plane set-instance-type <cluster_id> b2-15
+```
+
+```bash cURL
+curl https://platform.ankra.app/api/v1/clusters/ovh/<cluster_id>/control-plane \
+  -H "Authorization: Bearer $ANKRA_API_TOKEN"
+
+curl -X PUT https://platform.ankra.app/api/v1/clusters/ovh/<cluster_id>/control-plane \
+  -H "Authorization: Bearer $ANKRA_API_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"count": 3}'
+
+curl -X PUT https://platform.ankra.app/api/v1/clusters/ovh/<cluster_id>/control-plane/instance-type \
+  -H "Authorization: Bearer $ANKRA_API_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"instance_type": "b2-15"}'
+```
+
+</CodeGroup>
+
+<Warning>
+Control plane changes require the cluster to be **stopped** first. Changing the count or instance type on a running cluster returns `409` with "The cluster must be stopped" — stop it, apply the change, then start it again.
+</Warning>
+
+---
+
+## Inspecting Nodes
+
+List every node in the cluster or fetch the details of a single node by ID.
+
+<CodeGroup>
+
+```bash CLI
+ankra cluster ovh nodes list <cluster_id>
+ankra cluster ovh nodes get <cluster_id> <node_id>
+```
+
+```bash cURL
+curl https://platform.ankra.app/api/v1/clusters/ovh/<cluster_id>/nodes \
+  -H "Authorization: Bearer $ANKRA_API_TOKEN"
+
+curl https://platform.ankra.app/api/v1/clusters/ovh/<cluster_id>/nodes/<node_id> \
+  -H "Authorization: Bearer $ANKRA_API_TOKEN"
+```
+
+</CodeGroup>
 
 ---
 
