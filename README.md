@@ -1,70 +1,60 @@
-# Ankra Mintlify Documentation
+# Ankra Documentation
 
-Welcome to the Ankra Mintlify documentation starter! This project provides a robust foundation for building and customizing your API and product documentation using [Mintlify](https://mintlify.com/).
+Public documentation for the [Ankra platform](https://platform.ankra.app), published at [docs.ankra.ai](https://docs.ankra.ai) and built with [Mintlify](https://mintlify.com).
 
-## Features
+## Local development
 
-- Structured guide pages for onboarding and usage
-- Customizable navigation and theming
-- Auto-generated API Reference from OpenAPI specs
-- Rich component library for interactive docs
-- Easy local development and preview
+```bash
+npm install
+npm run dev        # live preview at http://localhost:3000
+```
 
-## Getting Started
+## Checks
 
-1. **Clone this repository**
-   Use this template to kickstart your own documentation project.
+Every PR runs these checks in CI (`.github/workflows/docs-ci.yml`). Run them locally before pushing:
 
-2. **Install Mintlify CLI**
-   The Mintlify CLI lets you preview and develop your docs locally.
-   Install globally with:
+```bash
+npm run check              # all of the below
+npm run check:nav          # every page reachable from docs.json, no dead nav entries
+npm run check:frontmatter  # every page has title + description
+npm run check:snippets     # code blocks free of corruption patterns, YAML parses, mermaid arrows valid
+npm run check:links        # Mintlify broken-link checker
+```
 
-   ```bash
-   npm i -g mintlify
-   ```
+Prose style is linted with [Vale](https://vale.sh) (`vale .`) using the rules in `.vale.ini` — warnings only for now.
 
-3. **Preview Documentation Locally**
-   From the root directory (where `docs.json` is located), run:
+## Repository layout
 
-   ```bash
-   mintlify dev
-   ```
+| Path | Contents |
+|------|----------|
+| `docs.json` | Navigation, theme, redirects, integrations |
+| `index.mdx`, `quickstart.mdx` | Landing page and getting-started tutorial |
+| `essentials/` | Feature documentation |
+| `guides/` | End-to-end task guides |
+| `integrations/` | CLI, Terraform, Git providers, registries |
+| `api-reference/` | API landing page (endpoints render from the live OpenAPI spec) |
+| `changelog.mdx` | Platform changelog |
+| `scripts/` | CI check scripts |
+| `images/` | Screenshots and static assets |
 
-   This will start a local server so you can view and edit your documentation in real time.
+The API Reference tab renders from the live spec at `https://platform.ankra.app/openapi.json` — there is intentionally no local OpenAPI copy to drift.
 
-## API Reference Integration
+## Writing docs
 
-- The API Reference tab is auto-generated from your OpenAPI specification.
-- To update the API docs, edit the `openapi` field in `docs.json` to point to your OpenAPI JSON or YAML file.
-- Example:
+Read [STYLEGUIDE.md](STYLEGUIDE.md) before writing. The short version:
 
-  ```json
-  {
-    "tab": "API Reference",
-    "openapi": "https://platform.ankra.app/openapi.json"
-  }
-  ```
+- UK English (`organisation`), "add-on" in prose, "Stack" capitalised when referring to the Ankra concept.
+- Every page needs `title` and `description` frontmatter.
+- Commands must be copy-pasteable — test them before committing.
+- Prefer one canonical page per topic and link to it; don't restate setup steps.
+- Spaced em-dashes (`word — word`), `bash` for shell fences.
 
 ## Deployment
 
-- Connect your GitHub repository to Mintlify for automatic deployments.
-- Changes pushed to your default branch will be published to your live documentation site.
+Merges to `master` deploy automatically via the Mintlify GitHub integration.
 
-## Troubleshooting
+## Contributing
 
-- **Mintlify CLI not running?**
-  Run `mintlify install` to re-install dependencies.
-- **404 errors?**
-  Ensure you are running the CLI in the directory containing `docs.json`.
-- **OpenAPI not loading?**
-  Double-check your `openapi` URL and ensure it is a valid OpenAPI 3.0+ document.
-
-## Resources
-
-- [Mintlify Documentation](https://mintlify.com/docs)
-- [Ankra](https://ankra.dev)
-- [OpenAPI Specification](https://swagger.io/specification/)
-
----
-
-For questions or support, reach out to the Ankra team or join the Mintlify community!
+1. Branch from `master`, make your change, run `npm run check`.
+2. Open a PR. CI must pass; a docs owner reviews.
+3. New product features should land with a docs PR — see the docs checklist in the product repos' PR templates.
