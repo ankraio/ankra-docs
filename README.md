@@ -4,9 +4,11 @@ Public documentation for the [Ankra platform](https://platform.ankra.app), publi
 
 ## Local development
 
+This repo uses [pnpm](https://pnpm.io) (pinned via the `packageManager` field; run `corepack enable` if you don't have it).
+
 ```bash
-npm install
-npm run dev        # live preview at http://localhost:3000
+pnpm install
+pnpm dev        # live preview at http://localhost:3000
 ```
 
 ## Checks
@@ -14,11 +16,11 @@ npm run dev        # live preview at http://localhost:3000
 Every PR runs these checks in CI (`.github/workflows/docs-ci.yml`). Run them locally before pushing:
 
 ```bash
-npm run check              # all of the below
-npm run check:nav          # every page reachable from docs.json, no dead nav entries
-npm run check:frontmatter  # every page has title + description
-npm run check:snippets     # code blocks free of corruption patterns, YAML parses, mermaid arrows valid
-npm run check:links        # Mintlify broken-link checker
+pnpm run check              # all of the below
+pnpm run check:nav          # every page reachable from docs.json, no dead nav entries
+pnpm run check:frontmatter  # every page has title + description
+pnpm run check:snippets     # code blocks free of corruption patterns, YAML parses, mermaid arrows valid
+pnpm run check:links        # Mintlify broken-link checker
 ```
 
 Prose style is linted with [Vale](https://vale.sh) (`vale .`) using the rules in `.vale.ini` — warnings only for now.
@@ -28,10 +30,13 @@ Prose style is linted with [Vale](https://vale.sh) (`vale .`) using the rules in
 | Path | Contents |
 |------|----------|
 | `docs.json` | Navigation, theme, redirects, integrations |
-| `index.mdx`, `quickstart.mdx` | Landing page and getting-started tutorial |
-| `essentials/` | Feature documentation |
-| `guides/` | End-to-end task guides |
-| `integrations/` | CLI, Terraform, Git providers, registries |
+| `index.mdx` | Landing page |
+| `get-started/` | Quickstart / getting-started tutorial |
+| `concepts/` | How Ankra works (stacks, add-ons, GitOps, agent, deployment engines) |
+| `guides/` | End-to-end task guides (provision, operate, deliver) |
+| `platform/` | UI feature pages (dashboard, Kubernetes browser, AI, settings) |
+| `reference/` | CLI (generated), ImportCluster schema, agent Helm values, provider tables |
+| `integrations/` | CLI overview, Terraform, Git providers, registries |
 | `api-reference/` | API landing page (endpoints render from the live OpenAPI spec) |
 | `changelog.mdx` | Platform changelog |
 | `scripts/` | CI check scripts |
@@ -72,6 +77,6 @@ Merges to `master` deploy automatically via the Mintlify GitHub integration.
 
 ## Contributing
 
-1. Branch from `master`, make your change, run `npm run check`.
+1. Branch from `master`, make your change, run `pnpm run check`.
 2. Open a PR. CI must pass; a docs owner reviews.
 3. New product features should land with a docs PR — see the docs checklist in the product repos' PR templates.
