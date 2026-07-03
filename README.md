@@ -49,6 +49,17 @@ Read [STYLEGUIDE.md](STYLEGUIDE.md) before writing. The short version:
 - Prefer one canonical page per topic and link to it; don't restate setup steps.
 - Spaced em-dashes (`word — word`), `bash` for shell fences.
 
+## Intentionally undocumented surfaces
+
+These product surfaces exist in code but are deliberately not publicly documented. If you ship changes to one and believe it should become public, open a docs PR that removes it from this list:
+
+| Surface | Reason |
+|---------|--------|
+| Linear integration (`admin_linear_oauth`, `linear_webhook`) | Internal/admin tooling |
+| Presence, feature flags, environment colors | Internal platform plumbing |
+| Cluster scheduler, platform engine playground, recent drafts API | Internal/experimental |
+| Agent shadow mode (`shadow.*` Helm values) | Engineering cutover tooling, not a user feature |
+
 ## Deployment
 
 Merges to `master` deploy automatically via the Mintlify GitHub integration.
