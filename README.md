@@ -60,6 +60,12 @@ These product surfaces exist in code but are deliberately not publicly documente
 | Cluster scheduler, platform engine playground, recent drafts API | Internal/experimental |
 | Agent shadow mode (`shadow.*` Helm values) | Engineering cutover tooling, not a user feature |
 
+## Analytics and feedback
+
+- Page analytics stream to PostHog (`integrations.posthog` in `docs.json`). Two dashboards are worth maintaining there (create/update manually in PostHog): **quickstart funnel** (landing → quickstart → provider/import guide) and **zero-result searches** (what readers looked for and didn't find).
+- The on-page feedback widget (`feedback` in `docs.json`) enables thumbs ratings, "suggest edit", and "raise issue" on every page.
+- `https://docs.ankra.ai/llms.txt` and `/llms-full.txt` are hosted automatically for AI assistants; the contextual menu offers "open in ChatGPT/Claude".
+
 ## Deployment
 
 Merges to `master` deploy automatically via the Mintlify GitHub integration.
