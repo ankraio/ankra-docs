@@ -1,0 +1,190 @@
+---
+title: ImportCluster YAML Schema
+description: Every field of the ImportCluster manifest — metadata, git_repository, stacks, manifests, add-ons, applications, parents, and SOPS encrypted_paths.
+---
+
+The `ImportCluster` manifest is the declarative entry point for onboarding a cluster into Ankra and describing its stacks. Apply it with the CLI:
+
+```bash
+ankra cluster apply -f cluster.yaml --cluster my-cluster
+```
+
+The same schema is what Ankra reads from a connected [GitOps repository](/concepts/gitops).
+
+## Full Example
+
+```yaml
+apiVersion: v1
+kind: ImportCluster
+metadata:
+  name: my-cluster
+  description: Importing my Kubernetes cluster
+spec:
+  git_repository:
+    provider: github
+    credential_name: my-git-credential
+    repository: my-org/my-gitops-repo
+    branch: main
+  stacks:
+    - name: logging
+      description: Stack for logging
+      manifests:
+        - name: namespace-fluent-bit
+          parents: []
+          from_file: "manifests/fluent-bit-namespace.yaml"
+        - name: configmap-fluent-bit
+          parents:
+            - manifest: namespace-fluent-bit
+          from_file: "manifests/fluent-bit-configmap.yaml"
+      addons:
+        - name: fluent-bit
+          chart_name: fluent-bit
+          chart_version: 0.49.1
+          repository_url: https://fluent.github.io/helm-charts
+          namespace: fluent-bit
+          parents:
+            - manifest: configmap-fluent-bit
+          configuration:
+            values: |-
+              service:
+                enabled: true
+```
+
+## Top Level
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `apiVersion` | yes | Always `v1` |
+| `kind` | yes | Always `ImportCluster` |
+| `metadata.name` | yes | Cluster name — letters, digits, and hyphens only |
+| `metadata.description` | no | Free-text description shown in the platform |
+| `spec` | yes | The cluster specification |
+
+## `spec.git_repository`
+
+Connect a Git repository so stacks are stored and synced from Git. Omit the block entirely for a non-GitOps import.
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `provider` | yes | `github`, `bitbucket_cloud`, or `bitbucket_data_center` |
+| `credential_name` | yes | Name of a Git credential registered in Ankra |
+| `repository` | yes | `owner/name` form, e.g. `my-org/my-gitops-repo` |
+| `branch` | yes | Branch Ankra reads from and pushes to |
+
+## `spec.stacks[]`
+
+Each stack groups related manifests, add-ons, and applications.
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `name` | yes | Stack name, unique within the cluster |
+| `description` | no | Free-text description |
+| `description_from_file` | no | Read the description from a file path in the repo |
+| `variables` | no | Map of stack-scoped variables, referenced as `${{ ankra.NAME }}` — highest precedence in the [variable hierarchy](/concepts/variables) |
+| `manifests` | no | List of [manifest entries](#specstacksmanifests) or `- include: <path>` directives |
+| `addons` | no | List of [add-on entries](#specstacksaddons) or `- include: <path>` directives |
+| `applications` | no | List of [application entries](#specstacksapplications) |
+
+### Include paths
+
+Instead of inline entries, reference files or folders in the repository. Ankra loads every YAML file found:
+
+```yaml
+stacks:
+  - name: platform-stack
+    manifests:
+      - include: manifests/
+    addons:
+      - include: addons/
+      - include: addons/extra/ingress.yaml
+```
+
+## `spec.stacks[].manifests[]`
+
+Raw Kubernetes YAML resources.
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `name` | yes | Manifest name, unique within the cluster |
+| `from_file` | one of | Repo-relative path to the YAML file (forward slashes, resolved from the manifest's location) |
+| `manifest` / `manifest_base64` | one of | Inline content (the CLI accepts plain YAML under `manifest:` and encodes it) |
+| `parents` | no | [Dependency edges](#parents) — deploy only after these succeed |
+| `encrypted_paths` | no | YAML paths within the manifest that are SOPS-encrypted; see [SOPS](/guides/sops) |
+| `force` | no | Replace the live object on conflict instead of failing (default `false`) |
+| `auto_remediate` | no | Re-apply automatically when drift is detected (default `false`) |
+| `dependencies_override` | no | Advanced: override computed dependency ordering |
+
+## `spec.stacks[].addons[]`
+
+Helm releases.
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `name` | yes | Add-on name, unique within the cluster |
+| `chart_name` | yes | Chart name in the registry |
+| `chart_version` | yes | Exact chart version — pin it, especially in production |
+| `repository_url` / `registry_name` | yes | Registry URL (or the name of a registry connected in Ankra) |
+| `namespace` | yes | Target namespace for the release |
+| `registry_credential_name` | no | Credential for private registries |
+| `configuration.values` / `values_base64` | no | Helm values, inline |
+| `configuration.from_file` | no | Repo-relative path to a values file |
+| `configuration.encrypted_paths` | no | Values paths that are SOPS-encrypted |
+| `parents` | no | [Dependency edges](#parents) |
+| `settings` | no | ArgoCD-backed sync behaviour — see below |
+| `namespace_migration_strategy` | no | How to handle a namespace change on update |
+| `job_configuration` | no | Per-add-on job timeouts (`read_job_timeout`, `update_job_timeout`, `delete_job_timeout`) |
+
+### `settings` defaults
+
+Sync behaviour maps to ArgoCD and defaults to fully automated. See [Add-on Settings](/concepts/addon-settings) for semantics.
+
+```yaml
+settings:
+  sync_policy:
+    automated: true
+    auto_prune: true
+    self_heal: true
+    sync_options:
+      - CreateNamespace=true
+      - ServerSideApply=true
+  retry_policy:
+    limit: 5
+    backoff_duration: 5s
+    backoff_factor: 2
+    backoff_max: 3m
+```
+
+## `spec.stacks[].applications[]`
+
+Deployments of [Applications](/concepts/applications) created in Ankra.
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `name` | yes | Application resource name |
+| `platform_application_id` | no | The Ankra application to deploy |
+| `platform_application_version` | no | Pinned application version |
+| `namespace` | no | Target namespace |
+| `parameters` | no | Map of application parameters |
+| `parents` | no | [Dependency edges](#parents) |
+
+## Parents
+
+`parents` are the dependency edges that control deployment order: a resource deploys only after all of its parents succeed. Two equivalent syntaxes are accepted:
+
+```yaml
+# Shorthand
+parents:
+  - manifest: namespace-fluent-bit
+  - addon: cert-manager
+
+# Explicit
+parents:
+  - name: namespace-fluent-bit
+    kind: manifest
+```
+
+`kind` must be `manifest` or `addon`, and the parent must be defined somewhere in the same file. Namespace manifests must be parents of everything deployed into that namespace.
+
+## Validation
+
+`ankra cluster apply` validates the file before sending anything: unknown fields, missing parents, and invalid parent kinds are rejected with the offending path. Use `--dry-run` to validate without applying.
