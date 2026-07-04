@@ -1,70 +1,82 @@
-# Ankra Mintlify Documentation
+# Ankra Documentation
 
-Welcome to the Ankra Mintlify documentation starter! This project provides a robust foundation for building and customizing your API and product documentation using [Mintlify](https://mintlify.com/).
+Public documentation for the [Ankra platform](https://platform.ankra.app), published at [docs.ankra.ai](https://docs.ankra.ai) and built with [Mintlify](https://mintlify.com).
 
-## Features
+## Local development
 
-- Structured guide pages for onboarding and usage
-- Customizable navigation and theming
-- Auto-generated API Reference from OpenAPI specs
-- Rich component library for interactive docs
-- Easy local development and preview
+This repo uses [pnpm](https://pnpm.io) (pinned via the `packageManager` field; run `corepack enable` if you don't have it).
 
-## Getting Started
+```bash
+pnpm install
+pnpm dev        # live preview at http://localhost:3000
+```
 
-1. **Clone this repository**
-   Use this template to kickstart your own documentation project.
+## Checks
 
-2. **Install Mintlify CLI**
-   The Mintlify CLI lets you preview and develop your docs locally.
-   Install globally with:
+Every PR runs these checks in CI (`.github/workflows/docs-ci.yml`). Run them locally before pushing:
 
-   ```bash
-   npm i -g mintlify
-   ```
+```bash
+pnpm run check              # all of the below
+pnpm run check:nav          # every page reachable from docs.json, no dead nav entries
+pnpm run check:frontmatter  # every page has title + description
+pnpm run check:snippets     # code blocks free of corruption patterns, YAML parses, mermaid arrows valid
+pnpm run check:links        # Mintlify broken-link checker
+```
 
-3. **Preview Documentation Locally**
-   From the root directory (where `docs.json` is located), run:
+Prose style is linted with [Vale](https://vale.sh) (`vale .`) using the rules in `.vale.ini` — warnings only for now.
 
-   ```bash
-   mintlify dev
-   ```
+## Repository layout
 
-   This will start a local server so you can view and edit your documentation in real time.
+| Path | Contents |
+|------|----------|
+| `docs.json` | Navigation, theme, redirects, integrations |
+| `index.mdx` | Landing page |
+| `get-started/` | Quickstart / getting-started tutorial |
+| `concepts/` | How Ankra works (stacks, add-ons, GitOps, agent, deployment engines) |
+| `guides/` | End-to-end task guides (provision, operate, deliver) |
+| `platform/` | UI feature pages (dashboard, Kubernetes browser, AI, settings) |
+| `reference/` | CLI (generated), ImportCluster schema, agent Helm values, provider tables |
+| `integrations/` | CLI overview, Terraform, Git providers, registries |
+| `api-reference/` | API landing page (endpoints render from the live OpenAPI spec) |
+| `changelog.mdx` | Platform changelog |
+| `scripts/` | CI check scripts |
+| `images/` | Screenshots and static assets |
 
-## API Reference Integration
+The API Reference tab renders from the live spec at `https://platform.ankra.app/openapi.json` — there is intentionally no local OpenAPI copy to drift.
 
-- The API Reference tab is auto-generated from your OpenAPI specification.
-- To update the API docs, edit the `openapi` field in `docs.json` to point to your OpenAPI JSON or YAML file.
-- Example:
+## Writing docs
 
-  ```json
-  {
-    "tab": "API Reference",
-    "openapi": "https://platform.ankra.app/openapi.json"
-  }
-  ```
+Read [STYLEGUIDE.md](STYLEGUIDE.md) before writing. The short version:
+
+- UK English (`organisation`), "add-on" in prose, "Stack" capitalised when referring to the Ankra concept.
+- Every page needs `title` and `description` frontmatter.
+- Commands must be copy-pasteable — test them before committing.
+- Prefer one canonical page per topic and link to it; don't restate setup steps.
+- Spaced em-dashes (`word — word`), `bash` for shell fences.
+
+## Intentionally undocumented surfaces
+
+These product surfaces exist in code but are deliberately not publicly documented. If you ship changes to one and believe it should become public, open a docs PR that removes it from this list:
+
+| Surface | Reason |
+|---------|--------|
+| Linear integration (`admin_linear_oauth`, `linear_webhook`) | Internal/admin tooling |
+| Presence, feature flags, environment colors | Internal platform plumbing |
+| Cluster scheduler, platform engine playground, recent drafts API | Internal/experimental |
+| Agent shadow mode (`shadow.*` Helm values) | Engineering cutover tooling, not a user feature |
+
+## Analytics and feedback
+
+- Page analytics stream to PostHog (`integrations.posthog` in `docs.json`). Two dashboards are worth maintaining there (create/update manually in PostHog): **quickstart funnel** (landing → quickstart → provider/import guide) and **zero-result searches** (what readers looked for and didn't find).
+- The on-page feedback widget (`feedback` in `docs.json`) enables thumbs ratings, "suggest edit", and "raise issue" on every page.
+- `https://docs.ankra.ai/llms.txt` and `/llms-full.txt` are hosted automatically for AI assistants; the contextual menu offers "open in ChatGPT/Claude".
 
 ## Deployment
 
-- Connect your GitHub repository to Mintlify for automatic deployments.
-- Changes pushed to your default branch will be published to your live documentation site.
+Merges to `master` deploy automatically via the Mintlify GitHub integration.
 
-## Troubleshooting
+## Contributing
 
-- **Mintlify CLI not running?**
-  Run `mintlify install` to re-install dependencies.
-- **404 errors?**
-  Ensure you are running the CLI in the directory containing `docs.json`.
-- **OpenAPI not loading?**
-  Double-check your `openapi` URL and ensure it is a valid OpenAPI 3.0+ document.
-
-## Resources
-
-- [Mintlify Documentation](https://mintlify.com/docs)
-- [Ankra](https://ankra.dev)
-- [OpenAPI Specification](https://swagger.io/specification/)
-
----
-
-For questions or support, reach out to the Ankra team or join the Mintlify community!
+1. Branch from `master`, make your change, run `pnpm run check`.
+2. Open a PR. CI must pass; a docs owner reviews.
+3. New product features should land with a docs PR — see the docs checklist in the product repos' PR templates.
