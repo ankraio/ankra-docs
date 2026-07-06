@@ -23,7 +23,7 @@ pnpm run check:snippets     # code blocks free of corruption patterns, YAML pars
 pnpm run check:links        # Mintlify broken-link checker
 ```
 
-Prose style is linted with [Vale](https://vale.sh) (`vale .`) using the rules in `.vale.ini` — warnings only for now.
+Prose style is linted with [Vale](https://vale.sh) (`vale .`) using the rules in `.vale.ini` - warnings only for now.
 
 ## Repository layout
 
@@ -42,7 +42,7 @@ Prose style is linted with [Vale](https://vale.sh) (`vale .`) using the rules in
 | `scripts/` | CI check scripts |
 | `images/` | Screenshots and static assets |
 
-The API Reference tab renders from the live spec at `https://platform.ankra.app/openapi.json` — there is intentionally no local OpenAPI copy to drift.
+The API Reference tab renders from the live spec at `https://platform.ankra.app/openapi.json` - there is intentionally no local OpenAPI copy to drift.
 
 ## Writing docs
 
@@ -50,9 +50,9 @@ Read [STYLEGUIDE.md](STYLEGUIDE.md) before writing. The short version:
 
 - UK English (`organisation`), "add-on" in prose, "Stack" capitalised when referring to the Ankra concept.
 - Every page needs `title` and `description` frontmatter.
-- Commands must be copy-pasteable — test them before committing.
+- Commands must be copy-pasteable - test them before committing.
 - Prefer one canonical page per topic and link to it; don't restate setup steps.
-- Spaced em-dashes (`word — word`), `bash` for shell fences.
+- Spaced hyphens as dashes (`word - word`, no em-dashes), `bash` for shell fences.
 
 ## Intentionally undocumented surfaces
 
@@ -79,4 +79,4 @@ Merges to `master` deploy automatically via the Mintlify GitHub integration.
 
 1. Branch from `master`, make your change, run `pnpm run check`.
 2. Open a PR. CI must pass; a docs owner reviews.
-3. New product features should land with a docs PR — see the docs checklist in the product repos' PR templates.
+3. New product features should land with a docs PR - see the docs checklist in the product repos' PR templates.
