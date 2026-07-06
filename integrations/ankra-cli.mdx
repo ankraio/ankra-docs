@@ -10,11 +10,13 @@ The Ankra CLI is a powerful command-line interface for interacting with the Ankr
 ## Features
 
 - **SSO Login** Browser-based authentication with PKCE
+- **Profile Authentication** Manage authenticator apps, recovery codes, and passkeys/security keys
 - **AI Chat** Interactive and one-shot AI-powered troubleshooting
 - **Organisation Management** List, switch, create organisations, manage members
 - **Cluster Management** List, select, reconcile, provision, deprovision, delete, and clone clusters
-- **Cloud Cluster Lifecycle** Provider-agnostic `upgrade`, `scale`, `node-group`, and `k3s-versions` (Hetzner/OVH/UpCloud auto-detected)
+- **Cloud Cluster Lifecycle** Provider-agnostic `upgrade`, `scale`, `node-group`, and `k3s-versions` (Hetzner/OVH/UpCloud/DigitalOcean auto-detected)
 - **Cluster Access (RBAC)** Grant, list, and revoke per-user kube-gateway access
+- **Cloud SSH Keys** View, replace, and re-sync SSH key credentials attached to cloud clusters
 - **kubectl Integration** Write `ankra-*` kubeconfig contexts and mint short-lived cluster tokens
 - **Cluster Metrics** Run instant and range PromQL queries against the cluster's Prometheus
 - **Kubernetes Resources** Browse pods, deployments, services, nodes, and other resources directly
@@ -31,11 +33,12 @@ The Ankra CLI is a powerful command-line interface for interacting with the Ankr
 - **Hetzner Cloud** Provision and manage Hetzner Kubernetes clusters
 - **OVH Cloud** Provision and manage OVH Kubernetes clusters
 - **UpCloud** Provision and manage UpCloud Kubernetes clusters
+- **DigitalOcean** Provision and manage DigitalOcean Kubernetes clusters
 - **Credentials** Manage cloud provider and Git credentials
 - **API Tokens** Create, list, revoke, and delete API tokens
 - **Support Requests** Open and track AI-reviewed support tickets from the terminal
 - **Shell Completion** Generate completion scripts for bash, zsh, fish, and powershell
-- **Agent Skills** Install the curated Ankra Agent Skills into Cursor/Claude (works offline)
+- **Agent Skills** Install the curated Ankra Agent Skills into Cursor or Claude Code (works offline)
 - **Secure** Credentials stored locally in `~/.ankra.yaml`
 
 ## Installation
@@ -113,7 +116,8 @@ ankra login
 This will:
 1. Open your browser to the Ankra login page
 2. After you authenticate, save your credentials locally
-3. You can then use all ankra CLI commands
+3. If your account requires MFA, open the browser challenge and wait for you to complete the second step
+4. You can then use all ankra CLI commands
 
 Your credentials are saved to `~/.ankra.yaml`.
 
@@ -181,6 +185,47 @@ Remove saved credentials from `~/.ankra.yaml`.
 
 ```bash
 ankra logout
+```
+
+### Profile Authentication
+
+Manage your own two-factor authentication settings from the CLI. Passkey and security-key creation opens **Profile → Authentication** in the browser because WebAuthn registration must happen in a browser, but the CLI can list and remove existing passkeys.
+
+#### profile auth status
+Show whether two-factor authentication is required, whether you are enrolled, how many recovery codes remain, and which passkeys/security keys are registered.
+
+```bash
+ankra profile auth status
+ankra profile auth status -o json
+```
+
+#### profile auth totp
+Set up or remove an authenticator app.
+
+```bash
+ankra profile auth totp start
+ankra profile auth totp confirm <6-digit-code>
+ankra profile auth totp remove --yes
+```
+
+`totp start` prints an `otpauth://` URI and manual secret for your authenticator app. `totp confirm` may print one-time recovery codes; save them immediately because they are not shown again.
+
+#### profile auth recovery-codes
+Generate a fresh set of one-time recovery codes. This invalidates the existing set.
+
+```bash
+ankra profile auth recovery-codes regenerate
+ankra profile auth recovery-codes regenerate --yes
+ankra profile auth recovery-codes regenerate -o json --yes
+```
+
+#### profile auth passkeys
+List or remove passkeys/security keys, or open the browser page to add one.
+
+```bash
+ankra profile auth passkeys list
+ankra profile auth passkeys remove <credential_id> --yes
+ankra profile auth passkeys open
 ```
 
 ---
@@ -372,6 +417,15 @@ Clear the active cluster selection.
 ankra cluster clear
 ```
 
+#### Run one cluster command against another cluster
+
+All `ankra cluster ...` subcommands inherit a `--cluster <name|id>` override. Use it to target a cluster for one command without changing the selected cluster saved by `ankra cluster select`.
+
+```bash
+ankra cluster --cluster production operations list
+ankra cluster --cluster 62f4559a-a44d-46d7-aab3-a57c9dd6b4c6 addons list
+```
+
 #### cluster reconcile
 Trigger cluster reconciliation to sync desired state with actual state.
 
@@ -466,7 +520,7 @@ ankra cluster provision <cluster-name>   # specific cluster
 ```
 
 #### cluster deprovision
-Deprovision (stop) a managed cluster. Accepts a cluster name **or** ID, and falls back to the selected cluster. For cloud clusters (Hetzner, OVH, UpCloud) it routes to the provider-specific teardown endpoint so cloud resources are released.
+Deprovision (stop) a managed cluster. Accepts a cluster name **or** ID, and falls back to the selected cluster. For cloud clusters (Hetzner, OVH, UpCloud, DigitalOcean) it routes to the provider-specific teardown endpoint so cloud resources are released.
 
 ```bash
 ankra cluster deprovision                             # uses selected cluster
@@ -680,13 +734,9 @@ ankra cluster stacks list
 ankra cluster stacks list <stack-name>  # show details for a specific stack
 ```
 
-#### cluster stacks create
-Create a new stack.
-
-```bash
-ankra cluster stacks create my-stack
-ankra cluster stacks create my-stack --description "Application stack"
-```
+<Note>
+`ankra cluster stacks create` has been removed. Add a new stack by editing your `cluster.yaml` and running `ankra cluster apply -f cluster.yaml`, or stage it for review with `ankra cluster draft -f cluster.yaml`.
+</Note>
 
 #### cluster stacks delete
 Delete a stack.
@@ -956,6 +1006,8 @@ ankra cluster operations list <execution_id>
 ankra cluster operations list --failed          # only failed/critical
 ankra cluster operations list --status running  # filter by status (repeatable)
 ankra cluster operations list --limit 100       # cap results (max 100, default 50)
+ankra cluster operations list --watch           # refresh until all listed executions finish
+ankra cluster operations list <execution_id> --watch --interval 3s
 ```
 
 | Flag | Description |
@@ -963,6 +1015,8 @@ ankra cluster operations list --limit 100       # cap results (max 100, default 
 | `--status` | Filter by execution status (repeatable), e.g. `failed`, `critical`, `running` |
 | `--failed` | Shortcut for `--status failed --status critical` |
 | `--limit` | Maximum number of executions to return (max 100, default 50) |
+| `--watch` / `-w` | Continuously poll and redraw until all rendered executions reach a terminal state |
+| `--interval` | Polling interval used with `--watch` (default `5s`, minimum `1s`) |
 
 #### cluster operations cancel
 Cancel one or more running executions. Alias: `stop`.
@@ -1400,6 +1454,39 @@ ankra helm registries create -f registry-spec.json
 |------|-------|-------------|
 | `--file` | `-f` | Path to registry spec JSON file (required) |
 
+#### helm registries update
+Update a Helm chart registry's automatic sync interval.
+
+```bash
+ankra helm registries update <name> --read-job-interval 3600
+```
+
+| Flag | Description |
+|------|-------------|
+| `--read-job-interval` | Seconds between automatic background syncs (required) |
+
+#### helm registries sync
+Trigger a manual sync for a Helm chart registry.
+
+```bash
+ankra helm registries sync <name>
+```
+
+The command prints how many sync jobs were created and the follow-up command to inspect them.
+
+#### helm registries sync-jobs
+List recent sync jobs for a Helm chart registry.
+
+```bash
+ankra helm registries sync-jobs <name>
+ankra helm registries sync-jobs <name> --page 2 --page-size 50
+```
+
+| Flag | Description |
+|------|-------------|
+| `--page` | Page number (default `1`) |
+| `--page-size` | Number of jobs per page (default `25`) |
+
 #### helm registries delete
 Delete a Helm chart registry.
 
@@ -1423,6 +1510,13 @@ List all Helm registry credentials.
 ankra helm credentials list
 ```
 
+#### helm credentials get
+Get details for a Helm registry credential.
+
+```bash
+ankra helm credentials get <name>
+```
+
 #### helm credentials create
 Create a Helm registry credential with username and password. The password is prompted interactively.
 
@@ -1435,6 +1529,18 @@ ankra helm credentials create --name my-cred --username user
 | Flag | Description |
 |------|-------------|
 | `--name` | Credential name (required) |
+| `--username` | Registry username (required) |
+
+#### helm credentials update
+Update a Helm registry credential's username and password. The password is prompted interactively.
+
+```bash
+ankra helm credentials update <name> --username user
+# Password: ****
+```
+
+| Flag | Description |
+|------|-------------|
 | `--username` | Registry username (required) |
 
 #### helm credentials delete
@@ -1453,7 +1559,7 @@ ankra helm credentials delete <name> -f   # skip confirmation
 
 ### Cloud Cluster Management (provider-agnostic)
 
-These verbs detect the cloud provider (Hetzner, OVH, or UpCloud) automatically from the cluster, so you no longer need to remember which provider a cluster runs on. They are the **recommended replacement** for the provider-specific `cluster {hetzner,ovh,upcloud} ...` commands documented below, which are deprecated and now print a runtime warning.
+These verbs detect the cloud provider (Hetzner, OVH, UpCloud, or DigitalOcean) automatically from the cluster, so you no longer need to remember which provider a cluster runs on. They are the **recommended replacement** for the provider-specific `cluster {hetzner,ovh,upcloud,digitalocean} ...` commands documented below, which are deprecated and now print a runtime warning.
 
 #### cluster k3s-versions
 List the k3s (Kubernetes) versions the platform can upgrade to, with the stable channel highlighted. Use one of these values with `cluster upgrade`.
@@ -1463,7 +1569,7 @@ ankra cluster k3s-versions
 ```
 
 #### cluster upgrade
-Upgrade the Kubernetes (k3s) version on all nodes of a cloud cluster. Only Hetzner, OVH, and UpCloud clusters can be upgraded.
+Upgrade the Kubernetes (k3s) version on all nodes of a cloud cluster. Only Hetzner, OVH, UpCloud, and DigitalOcean clusters can be upgraded.
 
 ```bash
 ankra cluster upgrade <cluster_id> <target_version>
@@ -1494,6 +1600,22 @@ The `add`, `scale`, `upgrade`, and `delete` mutations submit asynchronously by d
 <Note>
 OVH-specific node label and taint management (`node-group labels` / `node-group taints`) has no provider-agnostic equivalent yet — use `cluster ovh node-group labels|taints` for those.
 </Note>
+
+#### cluster ssh-keys
+View, replace, or re-sync the SSH key credentials attached to a Hetzner, OVH, UpCloud, or DigitalOcean cluster. The provider is detected from the cluster.
+
+```bash
+ankra cluster ssh-keys get <cluster_id>
+ankra cluster ssh-keys set <cluster_id> --ssh-key-credential-ids <id>,<id>
+ankra cluster ssh-keys set <cluster_id> --clear
+ankra cluster ssh-keys resync <cluster_id>
+```
+
+| Flag | Description |
+|------|-------------|
+| `--ssh-key-credential-ids` | SSH key credential IDs, comma-separated or repeatable |
+| `--clear` | Remove all user SSH keys; the Ankra-managed key is retained |
+| `-o, --output` | `json` or `yaml` |
 
 ---
 
@@ -1539,6 +1661,27 @@ ankra cluster hetzner create \
 | `--gitops-branch` | `master` | GitOps branch to commit to |
 
 The cloud provider and networking install **by default** (reconciled directly, no GitOps required), and are additionally committed to Git when the `--gitops-*` flags are set.
+
+#### cluster hetzner locations
+List the Hetzner locations available to a credential, so you pick a valid `--location` for `create`.
+
+```bash
+ankra cluster hetzner locations --credential-id <credential_id>
+```
+
+#### cluster hetzner server-types
+List Hetzner server types, optionally scoped to a location and filtered to available plans.
+
+```bash
+ankra cluster hetzner server-types --credential-id <credential_id>
+ankra cluster hetzner server-types --credential-id <credential_id> --location fsn1 --available-only
+```
+
+| Flag | Description |
+|------|-------------|
+| `--credential-id` | Hetzner API credential ID (required) |
+| `--location` | Optional location to check availability for |
+| `--available-only` | Hide server types that are not currently available |
 
 #### cluster hetzner deprovision
 Deprovision a Hetzner cluster and delete all associated resources.
@@ -1599,6 +1742,23 @@ ankra cluster hetzner upgrade <cluster_id> <target_version>
 ```bash
 # Upgrade to v1.35.1+k3s1
 ankra cluster hetzner upgrade abc-123 v1.35.1+k3s1
+```
+
+#### cluster hetzner control-plane
+Inspect and change the control plane. Hetzner supports a control-plane count of `1` or `3`. Changes require the cluster to be stopped first.
+
+```bash
+ankra cluster hetzner control-plane get <cluster_id>
+ankra cluster hetzner control-plane set-count <cluster_id> <count>
+ankra cluster hetzner control-plane set-instance-type <cluster_id> <instance_type>
+```
+
+#### cluster hetzner nodes
+List the cluster's nodes or show the details of a single node.
+
+```bash
+ankra cluster hetzner nodes list <cluster_id>
+ankra cluster hetzner nodes get <cluster_id> <node_id>
 ```
 
 ---
@@ -1823,6 +1983,15 @@ Deprovision an UpCloud cluster and delete all associated resources.
 ankra cluster upcloud deprovision <cluster_id>
 ```
 
+#### cluster upcloud stop / start
+Stop an UpCloud cluster's compute while keeping its configuration, then start it again later. Use `--scope control_plane` on start to bring up only the control plane first.
+
+```bash
+ankra cluster upcloud stop <cluster_id>
+ankra cluster upcloud start <cluster_id>                       # scope defaults to "all"
+ankra cluster upcloud start <cluster_id> --scope control_plane
+```
+
 #### cluster upcloud workers
 Get the current worker count and scaling limits.
 
@@ -1869,6 +2038,134 @@ Upgrade the Kubernetes (k3s) version on all nodes. Only supports upgrading one m
 
 ```bash
 ankra cluster upcloud upgrade <cluster_id> <target_version>
+```
+
+#### cluster upcloud control-plane
+Inspect and change the control plane. UpCloud supports a control-plane count of `1` or `3`. Changes require the cluster to be stopped first.
+
+```bash
+ankra cluster upcloud control-plane get <cluster_id>
+ankra cluster upcloud control-plane set-count <cluster_id> <count>
+ankra cluster upcloud control-plane set-instance-type <cluster_id> <instance_type>
+```
+
+#### cluster upcloud nodes
+List the cluster's nodes or show the details of a single node.
+
+```bash
+ankra cluster upcloud nodes list <cluster_id>
+ankra cluster upcloud nodes get <cluster_id> <node_id>
+```
+
+---
+
+### DigitalOcean Clusters
+
+Provision, manage, and scale Kubernetes clusters on DigitalOcean.
+
+<Note>
+`digitalocean scale`, `digitalocean upgrade`, `digitalocean deprovision`, and `digitalocean node-group ...` are deprecated in favour of the provider-agnostic `ankra cluster scale | upgrade | deprovision | node-group` verbs above, which detect the provider automatically.
+</Note>
+
+#### cluster digitalocean create
+Create a new DigitalOcean cluster.
+
+```bash
+ankra cluster digitalocean create \
+  --name my-cluster \
+  --credential-id <digitalocean-credential-id> \
+  --ssh-key-credential-id <ssh-key-credential-id> \
+  --region nyc3
+```
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--name` | *required* | Cluster name |
+| `--credential-id` | *required* | DigitalOcean API credential ID |
+| `--ssh-key-credential-id` | *required* | SSH key credential ID |
+| `--region` | *required* | DigitalOcean region (e.g., `nyc3`, `fra1`, `lon1`) |
+| `--control-plane-count` | `1` | Number of control plane nodes |
+| `--control-plane-size` | `s-2vcpu-4gb` | Droplet size for control plane nodes |
+| `--worker-count` | `1` | Number of worker nodes |
+| `--worker-size` | `s-2vcpu-4gb` | Droplet size for worker nodes |
+| `--bastion-size` | `s-1vcpu-1gb` | Droplet size for the bastion host |
+| `--network-ip-range` | `10.0.0.0/16` | Private VPC IP range |
+| `--distribution` | `k3s` | Kubernetes distribution (`k3s` or `kubeadm`) |
+| `--kubernetes-version` | *latest* | Kubernetes version |
+| `--external-cloud-provider` | `true` | Install the DigitalOcean CCM + CSI (LoadBalancers, volumes). `=false` also disables `--include-networking` |
+| `--include-networking` | `true` | Install Traefik + cert-manager for ingress (requires `--external-cloud-provider`) |
+| `--gitops-credential-name` | | GitHub credential; with `--gitops-repository`, commits the generated cloud stack to Git |
+| `--gitops-repository` | | GitOps repository (e.g. `org/repo`) to commit the generated stack to |
+| `--gitops-branch` | `master` | GitOps branch to commit to |
+
+#### cluster digitalocean regions
+List the DigitalOcean regions available to a credential.
+
+```bash
+ankra cluster digitalocean regions --credential-id <credential_id>
+```
+
+#### cluster digitalocean sizes
+List DigitalOcean droplet sizes, optionally scoped to a region and filtered to available plans.
+
+```bash
+ankra cluster digitalocean sizes --credential-id <credential_id>
+ankra cluster digitalocean sizes --credential-id <credential_id> --region nyc3 --available-only
+```
+
+#### cluster digitalocean deprovision
+Deprovision a DigitalOcean cluster and delete all associated resources.
+
+```bash
+ankra cluster digitalocean deprovision <cluster_id>
+```
+
+#### cluster digitalocean stop / start
+Stop a DigitalOcean cluster's compute while keeping its configuration, then start it again later. Use `--scope control_plane` on start to bring up only the control plane first.
+
+```bash
+ankra cluster digitalocean stop <cluster_id>
+ankra cluster digitalocean start <cluster_id>                       # scope defaults to "all"
+ankra cluster digitalocean start <cluster_id> --scope control_plane
+```
+
+#### cluster digitalocean workers
+Get the current worker count and scaling limits.
+
+```bash
+ankra cluster digitalocean workers <cluster_id>
+```
+
+#### cluster digitalocean node-group
+Manage node groups for a DigitalOcean cluster.
+
+```bash
+ankra cluster digitalocean node-group list <cluster_id>
+ankra cluster digitalocean node-group add <cluster_id> --name <name> --instance-type <size> --count <n>
+ankra cluster digitalocean node-group scale <cluster_id> <group_name> <count>
+ankra cluster digitalocean node-group upgrade <cluster_id> <group_name> <size>
+ankra cluster digitalocean node-group delete <cluster_id> <group_name>
+```
+
+#### cluster digitalocean scale
+Scale all worker nodes up or down (legacy, prefer `node-group scale`).
+
+```bash
+ankra cluster digitalocean scale <cluster_id> <worker_count>
+```
+
+#### cluster digitalocean k8s-version
+Get the current Kubernetes version and distribution.
+
+```bash
+ankra cluster digitalocean k8s-version <cluster_id>
+```
+
+#### cluster digitalocean upgrade
+Upgrade the Kubernetes version on all nodes.
+
+```bash
+ankra cluster digitalocean upgrade <cluster_id> <target_version>
 ```
 
 ---
@@ -2048,6 +2345,64 @@ When using `--generate`, the private key is displayed only once. Save it immedia
 
 ---
 
+### DigitalOcean Credentials
+
+Manage DigitalOcean API credentials and SSH key credentials.
+
+**Aliases:** `ankra credentials digitalocean`, `ankra creds do`
+
+#### credentials digitalocean list
+List all DigitalOcean API credentials.
+
+```bash
+ankra credentials digitalocean list
+```
+
+#### credentials digitalocean create
+Create a DigitalOcean API credential. You will be prompted securely for the API token (personal access tokens are prefixed with `dop_v1_`).
+
+```bash
+ankra credentials digitalocean create --name my-do-cred
+# DigitalOcean API Token: ****
+# DigitalOcean credential 'my-do-cred' created successfully!
+```
+
+| Flag | Description |
+|------|-------------|
+| `--name` | Credential name (required) |
+
+#### credentials digitalocean ssh-key list
+List all SSH key credentials.
+
+```bash
+ankra credentials digitalocean ssh-key list
+```
+
+**Aliases:** `ankra credentials digitalocean ssh-keys list`, `ankra credentials digitalocean ssh list`
+
+#### credentials digitalocean ssh-key create
+Create an SSH key credential for DigitalOcean clusters.
+
+```bash
+# Generate a new keypair
+ankra credentials digitalocean ssh-key create --name my-key --generate
+
+# Provide your own public key
+ankra credentials digitalocean ssh-key create --name my-key --public-key "ssh-ed25519 AAAA..."
+```
+
+| Flag | Description |
+|------|-------------|
+| `--name` | Credential name (required) |
+| `--public-key` | SSH public key string |
+| `--generate` | Generate a new keypair (private key returned once) |
+
+<Warning>
+When using `--generate`, the private key is displayed only once. Save it immediately.
+</Warning>
+
+---
+
 ### Credentials
 
 **Aliases:** `ankra credentials`, `ankra credential`, `ankra cred`, `ankra creds`
@@ -2172,6 +2527,7 @@ ankra support create --subject "..." --description "..." --severity high --force
 | `--category` | `technical` (default), `account`, `billing`, `bug`, `feature_request`, `other` |
 | `--severity` | Optional: `low`, `medium`, `high`, `critical` |
 | `--cluster` | Optional related cluster (name or ID) |
+| `--source` | Origin of the request: `cli` (default) or `agent` |
 | `--force` | Submit even if the review flags the request or finds a possible duplicate |
 | `--output` / `-o` | `json` or `yaml` (default: human-readable) |
 
@@ -2213,7 +2569,7 @@ ankra completion install --shell zsh  # install for a specific shell
 ### Agent Skills
 
 Install the curated [Ankra Agent Skills](https://github.com/ankraio/ankra-skills) into a
-Cursor/Claude skills directory so your AI agent follows Ankra's recommended practices for the
+Cursor or Claude Code skills directory so your AI agent follows Ankra's recommended practices for the
 CLI, ImportCluster YAML, stacks/addons, GitOps, CI/CD, SOPS secrets, Helm registries,
 observability, alerts, Terraform, and cloud clusters. The skills are embedded in the CLI, so
 installation works offline.
@@ -2221,17 +2577,39 @@ installation works offline.
 ```bash
 ankra skills list                            # list available skills (marks installed ones)
 ankra skills install                         # install all into ~/.cursor/skills (personal)
+ankra skills install --editor claude-code    # install all into ~/.claude/skills
 ankra skills install --project .             # install into ./.cursor/skills (project)
+ankra skills install --editor claude-code --project .  # install into ./.claude/skills
 ankra skills install ankra-cli ankra-gitops  # install only named skills
 ankra skills install --force                 # overwrite existing skills
+ankra skills install --source ./skills       # install from a local source directory
 ankra skills uninstall                       # remove all Ankra skills
 ankra skills uninstall ankra-cli             # remove a named skill
 ```
+
+`--source <dir>` is also accepted by `skills list` and `skills uninstall`, which is useful for testing a local copy of the curated skill set instead of the embedded copy. Use `--editor cursor` (default) or `--editor claude-code` to choose the target skills directory.
 
 <Note>
 `ankra skills` installs the static, curated skill set. To generate a SKILL.md describing one
 of your own clusters, use `ankra openclaw skill` instead.
 </Note>
+
+---
+
+### OpenClaw Integration
+
+Generate a cluster-specific `SKILL.md` for OpenClaw, or hand off an OpenClaw conversation to the Ankra portal.
+
+```bash
+ankra openclaw skill
+ankra openclaw skill --cluster prod --output ~/.openclaw/skills/ankra-prod.md
+ankra openclaw handoff <conversation-id>
+```
+
+| Flag | Description |
+|------|-------------|
+| `--cluster` | Target cluster name or ID (defaults to the selected cluster) |
+| `--output` / `-o` | Path to write `SKILL.md` for `openclaw skill` |
 
 ---
 
@@ -2244,6 +2622,7 @@ of your own clusters, use `ankra openclaw skill` instead.
 | `--base-url` | Base URL for the Ankra API |
 | `--config` | Config file (default: `~/.ankra.yaml`) |
 | `--token` | API token for authentication |
+| `--org` | Organisation name or ID to use for this command without changing the selected organisation |
 
 ## Configuration
 
