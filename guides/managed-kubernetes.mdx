@@ -1,0 +1,271 @@
+---
+title: Managed Kubernetes
+description: Provision, import, and operate provider-managed Kubernetes clusters - DOKS, UKS, GKE, OVHcloud MKS, AKS, and EKS - with Ankra.
+---
+
+Ankra provisions and manages **provider-native managed Kubernetes**: the cloud provider runs the control plane, and Ankra handles everything on top - node pools, Kubernetes upgrades, addons, stacks, GitOps, and AI-assisted operations.
+
+| Provider kind | Service | Credential |
+|---------------|---------|------------|
+| `doks` | [DigitalOcean Kubernetes (DOKS)](https://www.digitalocean.com/products/kubernetes) | DigitalOcean API token |
+| `uks` | [UpCloud Managed Kubernetes (UKS)](https://upcloud.com/products/managed-kubernetes) | UpCloud API token |
+| `gke` | [Google Kubernetes Engine (GKE)](https://cloud.google.com/kubernetes-engine) | GCP service account key |
+| `ovh_mks` | [OVHcloud Managed Kubernetes (MKS)](https://www.ovhcloud.com/en/public-cloud/kubernetes/) | OVHcloud application keys + Public Cloud project |
+| `aks` | [Azure Kubernetes Service (AKS)](https://azure.microsoft.com/en-us/products/kubernetes-service) | Azure service principal |
+| `eks` | [Amazon EKS](https://aws.amazon.com/eks/) | AWS credential (access keys or IAM role) |
+
+<Note>
+Managed clusters differ from Ankra's self-managed clusters (Hetzner, OVH, UpCloud, DigitalOcean droplets, Proxmox, Morpheus): there is no bastion, no SSH, and no control plane servers in your account to maintain. The provider operates the control plane; you pay the provider's rates for it and for the worker nodes.
+</Note>
+
+---
+
+## Prerequisites
+
+One provider credential, stored in Ankra. See [Credentials](/integrations/credentials) for the per-provider setup:
+
+- **DOKS** - [DigitalOcean API token](/integrations/credentials#digitalocean-api-credentials) with read/write
+- **UKS** - UpCloud API token
+- **GKE** - [GCP service account key](/integrations/credentials#google-cloud-gcp-credentials) with the **Kubernetes Engine Admin** (`roles/container.admin`) and **Service Account User** (`roles/iam.serviceAccountUser`) roles, and the **Kubernetes Engine API** enabled
+- **OVH MKS** - [OVHcloud application keys](/integrations/credentials#ovh-api-credentials) with a Public Cloud project (`project_id`)
+- **AKS** - [Azure service principal](/integrations/credentials#azure-credentials) with **Contributor** on the target subscription
+- **EKS** - [AWS credential](/integrations/credentials#aws-credentials) with permissions for EKS, EC2, and IAM role management
+
+GitOps is optional: connect a repository during creation and Ankra commits the cluster's stack definitions to Git.
+
+---
+
+## Live options and pricing
+
+Every choice in the create flow is fetched **live from the provider with your credential** - regions, Kubernetes versions (with support windows), node sizes, and prices, including spot capacity and quota-aware availability where the provider exposes it. Nothing is hardcoded, so new instance families and price changes show up automatically.
+
+<CodeGroup>
+
+```bash CLI
+ankra cluster managed options --provider eks --credential-id <aws-credential-id>
+```
+
+```bash cURL
+curl "https://platform.ankra.app/org/clusters/managed/eks/options?credential_id=<aws-credential-id>" \
+  -H "Authorization: Bearer $ANKRA_API_TOKEN"
+```
+
+</CodeGroup>
+
+The response lists `locations`, `versions` / `version_options` (with `supported_until` where the provider publishes it), `sizes` (vCPUs, memory, disk, GPU, monthly price), `cluster_plans`, and `capabilities` (spot, autoscaling, autopilot, private endpoint, HA control plane).
+
+---
+
+## Creating a managed cluster
+
+### Via the Platform UI
+
+<Steps>
+  <Step title="Navigate to Clusters">
+    Go to **Clusters** → **Create Cluster** and pick your provider's **Cloud Managed** action.
+  </Step>
+  <Step title="Credential & Location">
+    Select the provider credential and a region. Locations load live from the provider.
+  </Step>
+  <Step title="Node Pools">
+    Define one or more worker pools: name, node size (with live pricing and a monthly cost summary), count, labels, and - where supported - autoscaling bounds.
+  </Step>
+  <Step title="Kubernetes">
+    Pick a Kubernetes version (or keep the provider default) and any provider-specific control plane options - HA (DOKS), control-plane plan (UKS), release channel / Autopilot (GKE), plan and update policy (OVH MKS), network plugin, private cluster and SKU tier (AKS), or subnets and control-plane logging (EKS).
+  </Step>
+  <Step title="GitOps (optional)">
+    Connect a Git repository so the cluster's stacks are committed to Git.
+  </Step>
+  <Step title="Preflight & Create">
+    Ankra runs provider preflight checks (credential validity, quota, name availability) before submitting. Failures block creation; warnings are shown for review. A live progress view then tracks control plane provisioning, node pools, kubeconfig retrieval, and Ankra Agent installation.
+  </Step>
+</Steps>
+
+### Via the CLI
+
+```bash
+# see what the provider offers first
+ankra cluster managed options --provider gke --credential-id <gcp-credential-id>
+
+# create (preflight checks run automatically; --skip-preflight bypasses them)
+ankra cluster managed create \
+  --provider gke \
+  --name my-gke-cluster \
+  --credential-id <gcp-credential-id> \
+  --location europe-west1 \
+  --node-pool-name workers \
+  --node-pool-size e2-standard-2 \
+  --node-pool-count 2
+```
+
+The `--provider` flag accepts `doks`, `uks`, `gke`, `ovh-mks`, `aks`, and `eks`. Optional flags include `--kubernetes-version`, `--node-pool-autoscaling-min/--node-pool-autoscaling-max`, `--ha` (DOKS), `--cluster-plan` (UKS), `--description`, and the GitOps trio (`--gitops-credential-name`, `--gitops-repository`, `--gitops-branch`).
+
+### Via the API
+
+```bash
+curl -X POST https://platform.ankra.app/org/clusters/managed/aks \
+  -H "Authorization: Bearer $ANKRA_API_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "my-aks-cluster",
+    "credential_id": "<azure-credential-id>",
+    "location": "westeurope",
+    "kubernetes_version": "1.32.3",
+    "node_pools": [
+      {
+        "name": "workers",
+        "size": "Standard_D2s_v5",
+        "count": 2,
+        "autoscaling": {"enabled": true, "min_count": 2, "max_count": 5}
+      }
+    ],
+    "aks": {"network_plugin": "azure", "sku_tier": "Standard"}
+  }'
+```
+
+Run the same payload against `POST /org/clusters/managed/{provider}/preflight` first to get the provider checks without creating anything.
+
+### Provider-specific options
+
+| Provider | Options block | Fields |
+|----------|---------------|--------|
+| DOKS | top level | `ha` - highly available control plane |
+| UKS | top level | `cluster_plan` - development / production control plane plans; GPU pools take `gpu_plan.storage_size` |
+| GKE | `gke` | `release_channel` (`RAPID`, `REGULAR`, `STABLE`), `mode` (`standard` or `autopilot`) |
+| OVH MKS | `ovh_mks` | `plan` (`free`, `standard`), `private_network_id`, `anti_affinity`, `monthly_billed`, `update_policy` |
+| AKS | `aks` | `resource_group`, `network_plugin` (`azure`, `kubenet`), `private_cluster`, `sku_tier` (`Free`, `Standard`, `Premium`) |
+| EKS | `eks` | `subnet_ids`, `security_group_ids`, `enable_control_plane_logging` |
+
+<Note>
+**GKE Autopilot** clusters ignore node pool sizing - Google manages nodes automatically. **EKS** creates the required IAM roles for the cluster and node groups automatically and uses your default VPC subnets when `subnet_ids` is omitted.
+</Note>
+
+---
+
+## Importing existing clusters
+
+Already running managed Kubernetes? Discover clusters at the provider and adopt them into Ankra without touching them.
+
+<CodeGroup>
+
+```bash CLI
+# list clusters at the provider for a credential
+ankra cluster managed discover --provider eks --credential-id <aws-credential-id>
+
+# adopt one into Ankra
+ankra cluster managed import \
+  --provider eks \
+  --credential-id <aws-credential-id> \
+  --cluster-id <provider-cluster-id> \
+  --name imported-prod
+```
+
+```bash cURL
+curl "https://platform.ankra.app/org/clusters/managed/eks/discover?credential_id=<aws-credential-id>" \
+  -H "Authorization: Bearer $ANKRA_API_TOKEN"
+
+curl -X POST https://platform.ankra.app/org/clusters/managed/eks/import \
+  -H "Authorization: Bearer $ANKRA_API_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "credential_id": "<aws-credential-id>",
+    "provider_cluster_id": "<provider-cluster-id>",
+    "name": "imported-prod"
+  }'
+```
+
+</CodeGroup>
+
+In the portal, use **Clusters** → **Import Cluster** → your provider. Discovery marks clusters that are already imported, so you can't adopt the same cluster twice.
+
+After import, Ankra fetches the kubeconfig, installs the Ankra Agent, and the cluster gains the same day-2 operations as clusters Ankra created.
+
+---
+
+## Day-2 operations
+
+### Node pools
+
+<CodeGroup>
+
+```bash CLI
+# add a pool
+ankra cluster managed node-pool add <cluster_id> --provider doks --name pool-b --size s-4vcpu-8gb --count 2
+
+# scale a pool
+ankra cluster managed node-pool scale <cluster_id> workers --provider doks --count 5
+
+# update count and/or autoscaling bounds
+ankra cluster managed node-pool update <cluster_id> workers --provider doks \
+  --autoscaling-enabled --autoscaling-min 2 --autoscaling-max 10
+
+# delete a pool
+ankra cluster managed node-pool delete <cluster_id> pool-b --provider doks
+```
+
+```bash cURL
+curl -X PATCH https://platform.ankra.app/org/clusters/managed/doks/<cluster_id>/node-pools/workers \
+  -H "Authorization: Bearer $ANKRA_API_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"autoscaling": {"enabled": true, "min_count": 2, "max_count": 10}}'
+```
+
+</CodeGroup>
+
+Autoscaling is available on every provider except UKS (UpCloud does not support it). AKS pool names are lowercase alphanumeric and at most 12 characters.
+
+### Kubernetes upgrades
+
+Ankra lists the upgrade targets the provider actually offers for your cluster's current version:
+
+```bash
+ankra cluster managed upgrades <cluster_id> --provider aks
+ankra cluster managed upgrade <cluster_id> --provider aks --version 1.33.0
+```
+
+In the portal, **Settings** → **General** → **Kubernetes Version** shows available upgrades with their support windows. The provider upgrades the control plane first, then rolls node pools. Downgrades are not supported.
+
+### Deleting
+
+```bash
+ankra cluster managed delete <cluster_id> --provider aks
+```
+
+<Warning>
+Deleting a managed cluster destroys it at the provider - control plane, node pools, and workloads. Clean up provider-created LoadBalancers and volumes first if the CCM/CSI created any outside the cluster's own resource group or VPC.
+</Warning>
+
+### What does not apply to managed clusters
+
+Because the provider owns the control plane, some lifecycle operations that exist for [self-managed clusters](/platform/cluster-settings) are **not applicable** here:
+
+- **Stop / start** and **Delete Kubernetes** (deprovision) - there is no Ankra-managed compute to release; use the provider's own controls or delete the cluster.
+- **Control-plane topology editing** (controller count, control-plane instance type) - the provider sizes and manages the control plane. HA control planes, where offered, are selected at creation.
+- **Instance-type upgrade in place** - change node sizing by editing or replacing a node pool, not by resizing individual nodes.
+
+---
+
+## Ankra AI
+
+The Ankra AI assistant has full parity with the portal and CLI for managed Kubernetes. Ask it to:
+
+- *"What does a 3-node e2-standard-4 GKE cluster in europe-west1 cost?"* - it fetches live options and pricing with your credential
+- *"Create an AKS cluster in West Europe with autoscaling 2–5 nodes"* - it proposes the create for your confirmation
+- *"What EKS clusters exist in our AWS account?"* - it discovers clusters at the provider and shows which are already imported
+- *"Import the staging GKE cluster"* - it adopts a discovered cluster after you confirm
+
+Creates and imports always require an explicit confirmation in chat before anything is submitted.
+
+---
+
+## Troubleshooting
+
+| Issue | Solution |
+|-------|----------|
+| Options list is empty or fails | The credential is invalid or lacks API permissions - re-run **Test connection** on the credential |
+| Preflight reports a quota error | Raise the provider quota (vCPUs, clusters per region) or pick another region/size |
+| AKS create rejected with a name error | Pool names must be lowercase alphanumeric, max 12 characters; cluster names max 63 |
+| GKE create rejected with a name error | Cluster names are lowercase letters, numbers, hyphens; must start with a letter |
+| EKS cluster stuck creating | EKS control planes routinely take 10–15 minutes; node groups follow after |
+| Cluster shows offline after create | The agent installs as the last step - check the operation timeline on the cluster page |
+| Import says "already imported" | The cluster is connected to this or another Ankra organisation; find it in **Clusters** |

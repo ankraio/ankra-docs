@@ -1,0 +1,148 @@
+---
+title: Pipeline Agents
+description: Build CI-native infrastructure agents from plain pipeline jobs and the Ankra CLI - PR review, deploy watching, and scheduled health checks - with no framework or orchestration layer.
+---
+
+<Note>
+A **pipeline agent** is an ordinary CI job that calls the [Ankra CLI](/integrations/ankra-cli) - `ankra chat` for reasoning and `ankra cluster apply --wait` for deploys - and posts the result to a PR or Slack. There is no framework and no orchestration layer to run: your existing CI already provides the schedule, secrets, and logs.
+</Note>
+
+`ankra chat` is one-shot and scriptable. It runs with server-side access to your cluster context - logs, events, manifests, and stack history - so a single command can answer "what will this change do?" or "why did this deploy fail?" from inside a pipeline.
+
+---
+
+## Prerequisites
+
+- A CI system (GitHub Actions, GitLab CI, or any runner).
+- An [API token](/reference/tokens) stored as a CI secret (`ANKRA_API_TOKEN`). Scope it to the least privilege the job needs with [`--scopes`](/reference/cli/tokens).
+- The Ankra CLI installed in the job (`curl -fsSL https://get.ankra.io | sh` or the [direct download](/integrations/ankra-cli)).
+
+<Tip>
+Have the job exit on the CLI's [exit codes](/reference/cli): treat `3` (not found) as idempotent success, and re-authenticate on `6`.
+</Tip>
+
+---
+
+## Pattern 1 - PR review agent
+
+Validate cluster-definition changes against the **live** platform on every pull request, and comment with what will actually change - including capacity headroom.
+
+```yaml
+# .github/workflows/ankra-review.yml
+name: Ankra PR review
+on: pull_request
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Ankra CLI
+        run: curl -fsSL https://get.ankra.io | sh
+      - name: Review cluster changes
+        env:
+          ANKRA_API_TOKEN: ${{ secrets.ANKRA_API_TOKEN }}
+        run: |
+          ankra chat --cluster prod -o json \
+            "Review the cluster YAML in this repo against the live cluster. \
+             Summarise what will change and flag any capacity or quota risk." \
+            > review.json
+      - name: Comment on the PR
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs')
+            const review = JSON.parse(fs.readFileSync('review.json', 'utf8'))
+            github.rest.issues.createComment({
+              ...context.repo, issue_number: context.issue.number,
+              body: review.message,
+            })
+```
+
+---
+
+## Pattern 2 - Deploy watcher
+
+On merge, apply the change, **wait** for it to roll out, and post a root cause to Slack when it fails - instead of a red X with no explanation.
+
+```bash
+set -euo pipefail
+
+if ankra cluster apply cluster.yaml --wait --timeout 15m; then
+  echo "Rollout healthy"
+else
+  # The deploy failed or timed out - ask Ankra why, with full cluster context.
+  summary=$(ankra chat --cluster prod \
+    "The last apply failed. Give the root cause and the exact remediation.")
+  curl -X POST "$SLACK_WEBHOOK_URL" \
+    -H 'Content-Type: application/json' \
+    -d "$(jq -n --arg text ":rotating_light: Deploy failed on *prod*\n$summary" '{text: $text}')"
+  exit 1
+fi
+```
+
+`ankra cluster apply --wait` returns exit code `5` on `--timeout` expiry, so you can branch on a slow rollout separately from a hard failure.
+
+---
+
+## Pattern 3 - Scheduled health watcher
+
+Run every 30 minutes, stay **silent while healthy**, and post to Slack only when something degrades - so the channel stays signal, not noise.
+
+```yaml
+# .github/workflows/ankra-health.yml
+name: Ankra health watch
+on:
+  schedule:
+    - cron: "*/30 * * * *"
+jobs:
+  watch:
+    runs-on: ubuntu-latest
+    steps:
+      - run: curl -fsSL https://get.ankra.io | sh
+      - name: Check fleet health
+        env:
+          ANKRA_API_TOKEN: ${{ secrets.ANKRA_API_TOKEN }}
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+        run: |
+          report=$(ankra chat -o json \
+            "Check every cluster. Reply with the single word OK if all healthy, \
+             otherwise a short summary of what is degraded and why.")
+          status=$(echo "$report" | jq -r '.message')
+          if [ "$status" != "OK" ]; then
+            curl -X POST "$SLACK_WEBHOOK_URL" -H 'Content-Type: application/json' \
+              -d "$(jq -n --arg t ":warning: $status" '{text: $t}')"
+          fi
+```
+
+---
+
+## GitLab CI
+
+The same patterns run unchanged in GitLab CI - use `rules`/`only` for the PR trigger and a scheduled pipeline for the health watcher. See the [GitLab CI/CD guide](/guides/gitlab-cicd-pipeline) for the pipeline scaffolding.
+
+---
+
+## Keep agents read-only where you can
+
+- Review and health agents only need **read** scopes - pin the token with `--scopes clusters.read,stacks.read`.
+- Only the deploy watcher needs write (`stacks.deploy`). Give it a separate, narrowly scoped token.
+- `ankra chat` never mutates the cluster; all changes go through `ankra cluster apply` and your GitOps repo.
+
+---
+
+## Related
+
+<CardGroup cols={2}>
+  <Card title="Ankra CLI" icon="terminal" href="/integrations/ankra-cli">
+    Full command reference, including `chat` and `cluster apply`.
+  </Card>
+  <Card title="GitHub Actions" icon="github" href="/guides/cicd-pipeline">
+    Build a deployment pipeline.
+  </Card>
+  <Card title="GitLab CI/CD" icon="gitlab" href="/guides/gitlab-cicd-pipeline">
+    The same, on GitLab.
+  </Card>
+  <Card title="Webhooks & Alerts" icon="bell" href="/guides/alerts">
+    Route platform alerts to Slack and more.
+  </Card>
+</CardGroup>
