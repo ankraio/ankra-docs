@@ -14,7 +14,7 @@ The Ankra CLI is a powerful command-line interface for interacting with the Ankr
 - **AI Chat** Interactive and one-shot AI-powered troubleshooting
 - **Organisation Management** List, switch, create organisations, manage members
 - **Cluster Management** List, select, reconcile, provision, deprovision, delete, and clone clusters
-- **Cloud Cluster Lifecycle** Provider-agnostic `upgrade`, `scale`, `node-group`, and `k3s-versions` (Hetzner/OVH/UpCloud/DigitalOcean auto-detected)
+- **Cloud Cluster Lifecycle** Provider-agnostic `upgrade`, `scale`, `node-group`, and `k3s-versions` (Hetzner/OVH/UpCloud/DigitalOcean/Proxmox VE/Morpheus auto-detected)
 - **Cluster Access (RBAC)** Grant, list, and revoke per-user kube-gateway access
 - **Cloud SSH Keys** View, replace, and re-sync SSH key credentials attached to cloud clusters
 - **kubectl Integration** Write `ankra-*` kubeconfig contexts and mint short-lived cluster tokens
@@ -34,6 +34,8 @@ The Ankra CLI is a powerful command-line interface for interacting with the Ankr
 - **OVH Cloud** Provision and manage OVH Kubernetes clusters
 - **UpCloud** Provision and manage UpCloud Kubernetes clusters
 - **DigitalOcean** Provision and manage DigitalOcean Kubernetes clusters
+- **Proxmox VE** Provision and manage Kubernetes clusters on your own Proxmox VE infrastructure
+- **Morpheus** Provision and manage Kubernetes clusters through Morpheus
 - **Credentials** Manage cloud provider and Git credentials
 - **API Tokens** Create, list, revoke, and delete API tokens
 - **Support Requests** Open and track AI-reviewed support tickets from the terminal
@@ -115,9 +117,11 @@ ankra login
 
 This will:
 1. Open your browser to the Ankra login page
-2. After you authenticate, save your credentials locally
-3. If your account requires MFA, open the browser challenge and wait for you to complete the second step
-4. You can then use all ankra CLI commands
+2. After you authenticate, ask you to approve the sign-in in the browser — the approval page names the machine that ran `ankra login`
+3. If your account requires MFA, continue into the browser challenge and wait for you to complete the second step
+4. Save your credentials locally, after which you can use all ankra CLI commands
+
+The whole login happens between your browser and the platform — the CLI never opens a local network port. Only approve a sign-in that names a machine you just ran `ankra login` on.
 
 Your credentials are saved to `~/.ankra.yaml`.
 
@@ -1559,7 +1563,7 @@ ankra helm credentials delete <name> -f   # skip confirmation
 
 ### Cloud Cluster Management (provider-agnostic)
 
-These verbs detect the cloud provider (Hetzner, OVH, UpCloud, or DigitalOcean) automatically from the cluster, so you no longer need to remember which provider a cluster runs on. They are the **recommended replacement** for the provider-specific `cluster {hetzner,ovh,upcloud,digitalocean} ...` commands documented below, which are deprecated and now print a runtime warning.
+These verbs detect the cloud provider (Hetzner, OVH, UpCloud, DigitalOcean, Proxmox VE, or Morpheus) automatically from the cluster, so you no longer need to remember which provider a cluster runs on. They are the **recommended replacement** for the provider-specific `cluster {hetzner,ovh,upcloud,digitalocean} ...` lifecycle commands documented below, which are deprecated and now print a runtime warning.
 
 #### cluster k3s-versions
 List the k3s (Kubernetes) versions the platform can upgrade to, with the stable channel highlighted. Use one of these values with `cluster upgrade`.
@@ -1569,7 +1573,7 @@ ankra cluster k3s-versions
 ```
 
 #### cluster upgrade
-Upgrade the Kubernetes (k3s) version on all nodes of a cloud cluster. Only Hetzner, OVH, UpCloud, and DigitalOcean clusters can be upgraded.
+Upgrade the Kubernetes (k3s) version on all nodes of a cloud cluster. Only Hetzner, OVH, UpCloud, DigitalOcean, Proxmox VE, and Morpheus clusters can be upgraded.
 
 ```bash
 ankra cluster upgrade <cluster_id> <target_version>
@@ -1602,7 +1606,7 @@ OVH-specific node label and taint management (`node-group labels` / `node-group 
 </Note>
 
 #### cluster ssh-keys
-View, replace, or re-sync the SSH key credentials attached to a Hetzner, OVH, UpCloud, or DigitalOcean cluster. The provider is detected from the cluster.
+View, replace, or re-sync the SSH key credentials attached to a Hetzner, OVH, UpCloud, DigitalOcean, Proxmox VE, or Morpheus cluster. The provider is detected from the cluster.
 
 ```bash
 ankra cluster ssh-keys get <cluster_id>
@@ -2170,6 +2174,297 @@ ankra cluster digitalocean upgrade <cluster_id> <target_version>
 
 ---
 
+### Proxmox VE Clusters
+
+Provision, manage, and scale Kubernetes clusters on your own [Proxmox VE](/essentials/proxmox-clusters) infrastructure.
+
+<Note>
+For scaling, upgrades, deprovisioning, and node groups, prefer the provider-agnostic `ankra cluster scale | upgrade | deprovision | node-group` verbs above, which detect the provider automatically.
+</Note>
+
+#### cluster proxmox create
+Create a new Proxmox VE cluster.
+
+```bash
+ankra cluster proxmox create \
+  --name my-cluster \
+  --credential-id <proxmox-credential-id> \
+  --ssh-key-credential-id <ssh-key-credential-id> \
+  --node pve01 \
+  --storage local-lvm \
+  --bridge vmbr0
+```
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--name` | *required* | Cluster name |
+| `--credential-id` | *required* | Proxmox VE API credential ID |
+| `--ssh-key-credential-id` | *required* | SSH key credential ID |
+| `--node` | *required* | Proxmox node that hosts the cluster VMs (see `ankra cluster proxmox host-nodes`) |
+| `--bridge` | `vmbr0` | Existing network bridge with DHCP (see `ankra cluster proxmox bridges`) |
+| `--storage` | `local-lvm` | Proxmox storage for VM disks (see `ankra cluster proxmox storages`) |
+| `--template` | *auto-picked* | Cloud-init template VMID or name to clone (see `ankra cluster proxmox templates`) |
+| `--control-plane-count` | `1` | Number of control plane nodes (1, 3, or 5) |
+| `--control-plane-instance-type` | `px-medium` | Instance size for control plane nodes |
+| `--worker-count` | `1` | Number of worker nodes |
+| `--worker-instance-type` | `px-medium` | Instance size for worker nodes |
+| `--bastion-instance-type` | `px-small` | Instance size for the bastion VM |
+| `--distribution` | `k3s` | Kubernetes distribution (`k3s` or `kubeadm`) |
+| `--kubernetes-version` | *latest* | Kubernetes version |
+
+Instance sizes are fixed presets: `px-small` (2 vCPU / 4 GB / 40 GB), `px-medium` (4 / 8 / 80), `px-large` (8 / 16 / 160), and `px-xlarge` (16 / 32 / 320).
+
+#### cluster proxmox deprovision
+Deprovision a Proxmox VE cluster and delete all VMs Ankra created.
+
+```bash
+ankra cluster proxmox deprovision <cluster_id>
+```
+
+#### cluster proxmox stop / start
+Stop a Proxmox VE cluster's VMs while keeping its configuration, then start it again later. Use `--scope control_plane` on start to bring up only the control plane first.
+
+```bash
+ankra cluster proxmox stop <cluster_id>
+ankra cluster proxmox start <cluster_id>                       # scope defaults to "all"
+ankra cluster proxmox start <cluster_id> --scope control_plane
+```
+
+#### cluster proxmox workers
+Get the current worker count and scaling limits.
+
+```bash
+ankra cluster proxmox workers <cluster_id>
+```
+
+#### cluster proxmox node-group
+Manage node groups for a Proxmox VE cluster.
+
+```bash
+ankra cluster proxmox node-group list <cluster_id>
+ankra cluster proxmox node-group add <cluster_id> --name <name> --instance-type <size> --count <n>
+ankra cluster proxmox node-group scale <cluster_id> <group_name> <count>
+ankra cluster proxmox node-group upgrade <cluster_id> <group_name> <size>
+ankra cluster proxmox node-group delete <cluster_id> <group_name>
+```
+
+#### cluster proxmox scale
+Scale all worker nodes up or down (legacy, prefer `node-group scale`).
+
+```bash
+ankra cluster proxmox scale <cluster_id> <worker_count>
+```
+
+#### cluster proxmox k8s-version
+Get the current Kubernetes version and distribution.
+
+```bash
+ankra cluster proxmox k8s-version <cluster_id>
+```
+
+#### cluster proxmox upgrade
+Upgrade the Kubernetes version on all nodes.
+
+```bash
+ankra cluster proxmox upgrade <cluster_id> <target_version>
+```
+
+---
+
+### Morpheus Clusters
+
+Provision, manage, and scale Kubernetes clusters through [Morpheus](/essentials/morpheus-clusters).
+
+<Note>
+For scaling, upgrades, deprovisioning, and node groups, prefer the provider-agnostic `ankra cluster scale | upgrade | deprovision | node-group` verbs above, which detect the provider automatically.
+</Note>
+
+#### cluster morpheus create
+Create a new Morpheus cluster.
+
+All IDs are the numeric Morpheus IDs — discover them with `ankra cluster morpheus groups|clouds|networks|layouts|plans`.
+
+```bash
+ankra cluster morpheus create \
+  --name my-cluster \
+  --credential-id <morpheus-credential-id> \
+  --ssh-key-credential-id <ssh-key-credential-id> \
+  --group-id 1 \
+  --cloud-id 1 \
+  --network-id 2 \
+  --layout-id 42 \
+  --bastion-plan-id 101 \
+  --control-plane-plan-id 102 \
+  --worker-plan-id 102
+```
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--name` | *required* | Cluster name |
+| `--credential-id` | *required* | Morpheus API credential ID |
+| `--ssh-key-credential-id` | *required* | SSH key credential ID |
+| `--group-id` | *required* | Numeric ID of the Morpheus group to provision into |
+| `--cloud-id` | *required* | Numeric ID of the Morpheus cloud to provision into |
+| `--network-id` | *required* | Numeric ID of the Morpheus network with DHCP |
+| `--layout-id` | *required* | Numeric ID of the instance layout |
+| `--virtual-image-id` | | Numeric ID of a virtual image to pin (optional) |
+| `--bastion-plan-id` | *required* | Numeric service plan ID for the bastion instance |
+| `--control-plane-count` | `1` | Number of control plane nodes (1, 3, or 5) |
+| `--control-plane-plan-id` | *required* | Numeric service plan ID for control plane nodes |
+| `--worker-count` | `1` | Number of worker nodes |
+| `--worker-plan-id` | *required* | Numeric service plan ID for worker nodes |
+| `--distribution` | `k3s` | Kubernetes distribution (`k3s` or `kubeadm`) |
+| `--kubernetes-version` | *latest* | Kubernetes version |
+
+#### cluster morpheus deprovision
+Deprovision a Morpheus cluster and delete all instances Ankra created.
+
+```bash
+ankra cluster morpheus deprovision <cluster_id>
+```
+
+#### cluster morpheus stop / start
+Stop a Morpheus cluster's instances while keeping its configuration, then start it again later. Use `--scope control_plane` on start to bring up only the control plane first.
+
+```bash
+ankra cluster morpheus stop <cluster_id>
+ankra cluster morpheus start <cluster_id>                       # scope defaults to "all"
+ankra cluster morpheus start <cluster_id> --scope control_plane
+```
+
+#### cluster morpheus workers
+Get the current worker count and scaling limits.
+
+```bash
+ankra cluster morpheus workers <cluster_id>
+```
+
+#### cluster morpheus node-group
+Manage node groups for a Morpheus cluster. Numeric service plan IDs are used as instance types.
+
+```bash
+ankra cluster morpheus node-group list <cluster_id>
+ankra cluster morpheus node-group add <cluster_id> --name <name> --instance-type <numeric-plan-id> --count <n>
+ankra cluster morpheus node-group scale <cluster_id> <group_name> <count>
+ankra cluster morpheus node-group upgrade <cluster_id> <group_name> <numeric-plan-id>
+ankra cluster morpheus node-group delete <cluster_id> <group_name>
+```
+
+#### cluster morpheus scale
+Scale all worker nodes up or down (legacy, prefer `node-group scale`).
+
+```bash
+ankra cluster morpheus scale <cluster_id> <worker_count>
+```
+
+#### cluster morpheus k8s-version
+Get the current Kubernetes version and distribution.
+
+```bash
+ankra cluster morpheus k8s-version <cluster_id>
+```
+
+#### cluster morpheus upgrade
+Upgrade the Kubernetes version on all nodes.
+
+```bash
+ankra cluster morpheus upgrade <cluster_id> <target_version>
+```
+
+---
+
+### Managed Kubernetes Clusters
+
+Provision and operate provider-managed Kubernetes — the provider runs the control plane, Ankra manages everything on top. Every subcommand takes `--provider` with one of `doks` (DigitalOcean), `uks` (UpCloud), `gke` (Google Cloud), `ovh-mks` (OVHcloud), `aks` (Azure), or `eks` (AWS). See [Managed Kubernetes](/essentials/managed-kubernetes).
+
+#### cluster managed options
+List the locations, Kubernetes versions (with support windows), node sizes with live pricing, cluster plans, and capabilities a provider offers for a credential.
+
+```bash
+ankra cluster managed options --provider gke --credential-id <credential_id>
+```
+
+#### cluster managed create
+Create a managed cluster. Provider preflight checks run first and abort on errors (`--skip-preflight` bypasses them).
+
+```bash
+ankra cluster managed create \
+  --provider aks \
+  --name my-cluster \
+  --credential-id <credential_id> \
+  --location westeurope \
+  --node-pool-name workers \
+  --node-pool-size Standard_D2s_v5 \
+  --node-pool-count 2
+```
+
+| Flag | Description |
+|------|-------------|
+| `--provider` | `doks`, `uks`, `gke`, `ovh-mks`, `aks`, or `eks` (required) |
+| `--name` | Cluster name (required) |
+| `--credential-id` | Provider credential UUID (required) |
+| `--location` | Provider region or zone (required; see `managed options`) |
+| `--node-pool-name` / `--node-pool-size` / `--node-pool-count` | Initial node pool (size required) |
+| `--node-pool-autoscaling-min` / `--node-pool-autoscaling-max` | Enable autoscaling on the initial pool |
+| `--kubernetes-version` | Kubernetes version (defaults to the provider default) |
+| `--ha` | Highly available control plane (DOKS) |
+| `--cluster-plan` | Control plane plan (UKS) |
+| `--description` | Cluster description |
+| `--gitops-credential-name` / `--gitops-repository` / `--gitops-branch` | Optional GitOps target |
+| `--skip-preflight` | Skip the provider preflight checks |
+
+#### cluster managed discover
+List the clusters that already exist at the provider for a credential, with already-imported markers.
+
+```bash
+ankra cluster managed discover --provider eks --credential-id <credential_id>
+```
+
+#### cluster managed import
+Adopt a discovered cluster into Ankra. Ankra fetches the kubeconfig, installs the agent, and enables day-2 operations without modifying the cluster.
+
+```bash
+ankra cluster managed import \
+  --provider eks \
+  --credential-id <credential_id> \
+  --cluster-id <provider_cluster_id> \
+  --name imported-prod
+```
+
+#### cluster managed node-pool
+Add, scale, update, and delete node pools.
+
+```bash
+ankra cluster managed node-pool add <cluster_id> --provider doks --name pool-b --size s-4vcpu-8gb --count 2
+ankra cluster managed node-pool scale <cluster_id> workers --provider doks --count 5
+ankra cluster managed node-pool update <cluster_id> workers --provider doks \
+  --autoscaling-enabled --autoscaling-min 2 --autoscaling-max 10
+ankra cluster managed node-pool delete <cluster_id> pool-b --provider doks
+```
+
+#### cluster managed upgrades
+List the Kubernetes versions the provider offers as upgrade targets for a cluster.
+
+```bash
+ankra cluster managed upgrades <cluster_id> --provider aks
+```
+
+#### cluster managed upgrade
+Upgrade the cluster's Kubernetes version. The provider upgrades the control plane first, then rolls node pools.
+
+```bash
+ankra cluster managed upgrade <cluster_id> --provider aks --version 1.33.0
+```
+
+#### cluster managed delete
+Delete a managed cluster at the provider. This destroys the control plane, node pools, and workloads.
+
+```bash
+ankra cluster managed delete <cluster_id> --provider aks
+```
+
+---
+
 ### OVH Credentials
 
 Manage OVH API credentials and SSH key credentials.
@@ -2400,6 +2695,117 @@ ankra credentials digitalocean ssh-key create --name my-key --public-key "ssh-ed
 <Warning>
 When using `--generate`, the private key is displayed only once. Save it immediately.
 </Warning>
+
+---
+
+### Proxmox VE Credentials
+
+Manage Proxmox VE API credentials and SSH key credentials.
+
+#### credentials proxmox list
+List all Proxmox VE API credentials.
+
+```bash
+ankra credentials proxmox list
+```
+
+#### credentials proxmox create
+Create a Proxmox VE API credential. You will be prompted for the API URL (e.g., `https://your-host:8006/api2/json`) and token ID (e.g., `ankra@pam!ankra`), then securely for the token secret.
+
+```bash
+ankra credentials proxmox create --name my-proxmox-cred
+# Proxmox API URL: https://pve.example.com:8006/api2/json
+# Proxmox Token ID: ankra@pam!ankra
+# Proxmox Token Secret: ****
+# Proxmox VE credential 'my-proxmox-cred' created successfully!
+```
+
+| Flag | Description |
+|------|-------------|
+| `--name` | Credential name (required) |
+
+<Note>
+The **TLS insecure** toggle (for self-signed certificates) and the optional **SSH jumphost** for hybrid connectivity are configured on the credential — see [Proxmox VE Credentials](/integrations/credentials#proxmox-ve-api-credentials).
+</Note>
+
+#### credentials proxmox ssh-key list
+List all SSH key credentials.
+
+```bash
+ankra credentials proxmox ssh-key list
+```
+
+#### credentials proxmox ssh-key create
+Create an SSH key credential for Proxmox VE clusters.
+
+```bash
+# Generate a new keypair
+ankra credentials proxmox ssh-key create --name my-key --generate
+
+# Provide your own public key
+ankra credentials proxmox ssh-key create --name my-key --public-key "ssh-ed25519 AAAA..."
+```
+
+| Flag | Description |
+|------|-------------|
+| `--name` | Credential name (required) |
+| `--public-key` | SSH public key string |
+| `--generate` | Generate a new keypair (private key returned once) |
+
+---
+
+### Morpheus Credentials
+
+Manage Morpheus API credentials and SSH key credentials.
+
+#### credentials morpheus list
+List all Morpheus API credentials.
+
+```bash
+ankra credentials morpheus list
+```
+
+#### credentials morpheus create
+Create a Morpheus API credential. You will be prompted for the appliance URL, then securely for the long-lived API access token.
+
+```bash
+ankra credentials morpheus create --name my-morpheus-cred
+# Morpheus Appliance URL: https://morpheus.example.com
+# Morpheus Access Token: ****
+# Morpheus credential 'my-morpheus-cred' created successfully!
+```
+
+| Flag | Description |
+|------|-------------|
+| `--name` | Credential name (required) |
+
+<Note>
+The **TLS insecure** toggle (for self-signed certificates) and the optional **SSH jumphost** for hybrid connectivity are configured on the credential — see [Morpheus Credentials](/integrations/credentials#morpheus-api-credentials).
+</Note>
+
+#### credentials morpheus ssh-key list
+List all SSH key credentials.
+
+```bash
+ankra credentials morpheus ssh-key list
+```
+
+#### credentials morpheus ssh-key create
+Create an SSH key credential for Morpheus clusters.
+
+```bash
+# Generate a new keypair
+ankra credentials morpheus ssh-key create --name my-key --generate
+
+# Provide your own public key
+ankra credentials morpheus ssh-key create --name my-key --public-key "ssh-ed25519 AAAA..."
+```
+
+| Flag | Description |
+|------|-------------|
+| `--name` | Credential name (required) |
+| `--public-key` | SSH public key string |
+| `--generate` | Generate a new keypair (private key returned once) |
 
 ---
 
