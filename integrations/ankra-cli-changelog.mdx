@@ -4,6 +4,90 @@ description: Release history for the Ankra CLI
 mode: wide
 rss: true
 ---
+<Update label="v0.6.0">
+# Cluster Groups, Scoped Roles, Deploy Waves, and Node-Group Autoscaling
+
+The stable v0.6.0 release adds the first slice of platform RBAC on top of the v0.6.0-rc0 agent-workflow work: cluster groups, scoped role assignments, stack deploy waves, and node-group autoscaling.
+
+## Organisation cluster groups and scoped roles
+
+`ankra org cluster-groups list | create | add-cluster | set-selector | preview` manages named sets of clusters - static (pinned members) or dynamic (a label selector evaluated against cluster labels) - for use as role-assignment scopes. `preview` shows the clusters a group currently resolves to.
+
+`ankra org assign <member-email>` grants a member a role at organisation, cluster, or cluster-group scope; `ankra org assignments <member-email>` lists what a member holds and `ankra org unassign <assignment-id>` revokes it. `ankra org roles create` defines custom roles that may bundle Kubernetes access levels provisioned across the assignment's scope.
+
+```bash
+ankra org cluster-groups create --name prod --selector env=production
+ankra org assign user@example.com --role operator --cluster-group prod
+ankra org assignments user@example.com
+```
+
+## Stack deploy waves
+
+Stacks in a cluster YAML accept an optional `deploy_wave` (integer ≥ 0): stacks in wave N deploy only after every stack in a lower wave finished, and teardown unwinds in reverse. Stacks without a wave keep the current unordered behaviour. The wave is validated by `ankra cluster apply`, preserved by partial patches, and shown as a new **Wave** column in `ankra cluster stacks list`.
+
+## Node-group autoscaling
+
+`ankra cluster node-group autoscaling get | set` reads and writes a node group's Cluster Autoscaler settings on Hetzner, OVH, and UpCloud clusters. `set --enabled --min <n> --max <n>` keeps the group's node count within `[min, max]` based on pod demand (the first enable installs the autoscaler); `--enabled=false` turns it off. Both honour `-o json|yaml`, and `set` supports the standard `--wait`/`--timeout` flags.
+
+## Wider roles, scoped tokens, and exit code 7
+
+`ankra org invite --role` now accepts `owner`, `admin`, `operator`, `member`, `viewer`, and `read-only`, and `ankra org roles` lists them. `ankra tokens create --scopes` can pin an API token to a permission allowlist (e.g. `--scopes clusters.read,stacks.deploy`). A new **exit code 7** is returned when the platform denies a request because the caller's role lacks a permission (403 `permission_denied`) - distinct from exit 6 (re-authenticate) - and the CLI names the missing permission.
+
+## Agent workflow (from v0.6.0-rc0)
+
+`ankra skills install` now also writes an always-applied rule making Ankra the agent's default for Kubernetes work (route changes through GitOps or `ankra cluster apply`, never mutate with raw kubectl/helm; skip with `--no-rules`). `ankra skills install --with-hooks` installs an agent hook that runs `ankra skills guard` on every shell command, pausing cluster-mutating kubectl/helm invocations for confirmation while letting read-only and `--dry-run` calls through. Embedded skill descriptions now trigger on plain Kubernetes intent, not just the word "Ankra".
+
+## Security
+
+Builds now use Go 1.26.5, picking up the fix for [GO-2026-5856](https://pkg.go.dev/vuln/GO-2026-5856) (`crypto/tls` Encrypted Client Hello privacy leak). `govulncheck ./...` is clean.
+
+</Update>
+<Update label="v0.5.1">
+# DigitalOcean and Managed Kubernetes (DOKS/UKS)
+
+`ankra cluster digitalocean` (alias `do`) brings full self-managed lifecycle to DigitalOcean - create, deprovision, stop/start, scale, upgrade, node groups, region/size discovery, and credential management (`ankra credentials digitalocean`). The provider-agnostic verbs (`scale`, `upgrade`, `node-group`, `ssh-keys`, `deprovision`) now auto-detect DigitalOcean clusters.
+
+`ankra cluster managed` adds create, deprovision, upgrade, and node-pool operations for **DigitalOcean Kubernetes** (`doks`) and **UpCloud Managed Kubernetes** (`uks`).
+
+## Fixed
+
+`ankra cluster addons upgrade`, `manifests upgrade`, `encrypt --cluster`, and `stacks variables set|delete` no longer time out on large clusters: these end in a partial-stack PATCH the backend serves synchronously (DB plus a full GitOps commit/push), so the command deadline is now 5 minutes.
+
+</Update>
+<Update label="v0.5.0">
+# kubeadm Upgrades and etcd Topology
+
+`ankra cluster upgrade` now covers **kubeadm** clusters alongside k3s. Nodes upgrade one at a time (control plane first): each is cordoned, drained respecting PodDisruptionBudgets, upgraded, and gated on being Ready at the target version, with an etcd snapshot taken before the control plane. A new `--force` proceeds when a drain is blocked by a PDB (the default aborts safely), and the upgrade prints the operation ID.
+
+`ankra cluster kubeadm-versions` lists the upstream Kubernetes versions available for kubeadm clusters, a sibling of `ankra cluster k3s-versions`.
+
+`ankra cluster hetzner|ovh|upcloud create` gain etcd topology flags for kubeadm: `--etcd-topology` (`stacked` or `external`), `--etcd-node-count` (3 or 5), and `--etcd-server-type`.
+
+## Also
+
+`ankra stack-profiles list --category` filters profiles server-side. A new generated CLI reference (`tools/gendocs`) renders the full command tree as Mintlify MDX and opens a sync PR against the public docs on each release tag, so the reference never drifts.
+
+## Fixed
+
+Kubeconfig exec entries written by `ankra cluster kubeconfig add` now pin the cluster's owning organisation (`--org`), so `kubectl` keeps working after you switch organisations - entries written before this release need a one-time re-add. `ankra stack-profiles export-iac` now exports the profile's current published version instead of a hard-coded `1`.
+
+</Update>
+<Update label="v0.4.2">
+# Differentiated Exit Codes
+
+The CLI now exits with a stable, documented code instead of always `1`: `0` success, `1` API/runtime error, `2` usage/flag error, `3` resource not found, `4` confirmation declined, `5` `--wait`/`--timeout` expiry, `6` authentication failure. Scripts can branch on the failure class (re-authenticate on 6, treat 3 as idempotent success) without parsing error text.
+
+Every command handler moved from cobra's `Run` to `RunE`, so errors always reach stderr and set a non-zero exit code - fixing a class of bugs where failures printed to stdout and exited `0` (invisible to CI). Declined confirmations exit `4` everywhere, including `helm registries delete` and `helm credentials delete`.
+
+`ankra login` now declares two-factor capability to the platform (`supports_mfa: true`), letting the platform tell modern CLIs apart from legacy releases that silently saved an empty token.
+
+</Update>
+<Update label="v0.4.1">
+# Safer Login
+
+`ankra login` no longer reports "Login successful!" while saving an empty token. When the platform withholds the API token - for example when the account requires a two-factor step-up the running CLI version does not understand - the login flow now refuses to persist credentials without a token and explains what happened: an incomplete step-up says to run `ankra login` again, and a token-less exchange points at `ankra upgrade`. Existing saved credentials are left untouched.
+
+</Update>
 <Update label="v0.4.0">
 # Cluster Access (RBAC) and Provider-Agnostic Cloud Verbs
 

@@ -47,8 +47,15 @@ Before creating a DigitalOcean cluster, you need two credentials:
 
     The wizard shows vCPUs, RAM, and monthly cost for each size to help you choose.
   </Step>
+  <Step title="Choose Distribution">
+    Pick the Kubernetes distribution:
+ **k3s** Lightweight Kubernetes with a user-selectable CNI (default).
+ **kubeadm** Vanilla upstream Kubernetes bootstrapped with `kubeadm` and containerd. kubeadm clusters always use Cilium CNI and optionally support an external etcd topology with dedicated etcd droplets.
+
+    See [Kubernetes Distribution](#kubernetes-distribution) for details.
+  </Step>
   <Step title="Create & Track Progress">
-    Click **Create** to start provisioning. A live progress view tracks credential setup, VPC creation, SSH key deployment, bastion provisioning, droplet creation, k3s installation, and Ankra Agent setup. The cluster appears with an **offline** state until provisioning completes, then transitions to **online**.
+    Click **Create** to start provisioning. A live progress view tracks credential setup, VPC creation, SSH key deployment, bastion provisioning, droplet creation, Kubernetes installation (k3s or kubeadm), and Ankra Agent setup. The cluster appears with an **offline** state until provisioning completes, then transitions to **online**.
   </Step>
 </Steps>
 
@@ -114,6 +121,11 @@ curl -X POST https://platform.ankra.app/api/v1/clusters/digitalocean \
 | `node_groups` | | Array of node group definitions (see [Node Groups](#node-groups)) |
 | `distribution` | `k3s` | Kubernetes distribution (`k3s` or `kubeadm`) |
 | `kubernetes_version` | *latest stable* | Kubernetes version (optional) |
+| `cni` | `flannel` (k3s) | CNI plugin. kubeadm clusters always use `cilium` |
+| `cni_features` | *all off* | Advanced CNI feature toggles, fixed at creation. Cilium: `kube_proxy_replacement`, `hubble`, `wireguard_encryption`. Calico: `ebpf_dataplane`. See [Advanced CNI features](#advanced-cni-features) |
+| `etcd_topology` | `stacked` | kubeadm only. `stacked` (etcd on control planes) or `external` (dedicated etcd droplets) |
+| `etcd_node_count` | `3` | kubeadm `external` topology only. Number of dedicated etcd droplets (3 or 5) |
+| `etcd_size` | `s-2vcpu-4gb` | kubeadm `external` topology only. Droplet size for dedicated etcd nodes |
 | `include_ingress` | `false` | Deploy Traefik + cert-manager for ingress |
 
 ### DigitalOcean Regions
@@ -139,6 +151,65 @@ Available regions and sizes depend on your account. Use `ankra cluster digitaloc
 | `s-1vcpu-2gb` | 1 | 2 GB | Small workers |
 | `s-2vcpu-4gb` | 2 | 4 GB | Control plane, general workers |
 | `s-4vcpu-8gb` | 4 | 8 GB | Larger workloads |
+
+---
+
+## Kubernetes Distribution
+
+DigitalOcean clusters can be provisioned with either **k3s** (default) or **kubeadm**.
+
+| | k3s | kubeadm |
+|---|-----|---------|
+| Kubernetes | Lightweight, single-binary distribution | Vanilla upstream Kubernetes |
+| CNI | User-selectable (Flannel default) | Cilium (fixed, cannot be changed after creation) |
+| etcd | Embedded | `stacked` (on control planes) or `external` (dedicated droplets) |
+| Version format | `v1.35.1+k3s1` | `v1.31.0` (plain upstream tag) |
+
+<Note>
+kubeadm clusters always use Cilium CNI (eBPF-based networking, L7 policies, Hubble observability). The CNI cannot be changed after creation.
+</Note>
+
+### Advanced CNI features
+
+k3s clusters can enable advanced CNI features at creation time via `cni_features` (also available as toggles in the create wizard). Features are fixed once the cluster is created.
+
+| Feature | CNI | What it does |
+|---|---|---|
+| `kube_proxy_replacement` | Cilium | Replaces kube-proxy with Cilium's eBPF dataplane |
+| `hubble` | Cilium | Deploys Hubble relay and UI for network flow observability |
+| `wireguard_encryption` | Cilium | Encrypts pod-to-pod traffic between nodes with WireGuard (UDP/51871 must be open node-to-node) |
+| `ebpf_dataplane` | Calico | Runs Calico in eBPF mode, bypassing kube-proxy |
+
+<Warning>
+`kube_proxy_replacement` and `ebpf_dataplane` pin the CNI's API-server endpoint to the first control plane, so on k3s they require a **single control plane**. Creation and control-plane scaling both enforce this. Flannel accepts no feature toggles.
+</Warning>
+
+### External etcd topology (kubeadm)
+
+By default kubeadm runs etcd **stacked** on the control plane nodes. For larger clusters you can run etcd on dedicated droplets by setting `etcd_topology` to `external`:
+
+```bash
+curl -X POST https://platform.ankra.app/api/v1/clusters/digitalocean \
+  -H "Authorization: Bearer $ANKRA_API_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "my-cluster",
+    "credential_id": "<digitalocean-credential-id>",
+    "ssh_key_credential_id": "<ssh-key-credential-id>",
+    "region": "nyc3",
+    "control_plane_count": 3,
+    "control_plane_size": "s-2vcpu-4gb",
+    "node_groups": [
+      {"name": "default", "instance_type": "s-2vcpu-4gb", "count": 2}
+    ],
+    "distribution": "kubeadm",
+    "etcd_topology": "external",
+    "etcd_node_count": 3,
+    "etcd_size": "s-2vcpu-4gb"
+  }'
+```
+
+The equivalent CLI flags are `--distribution kubeadm`, `--etcd-topology external`, `--etcd-node-count 3`, and `--etcd-size s-2vcpu-4gb`.
 
 ---
 
@@ -193,11 +264,12 @@ For new clusters, prefer using [Node Groups](#node-groups) for more granular con
 
 ## Upgrading Kubernetes Version
 
-You can upgrade the Kubernetes (k3s) version on all nodes in a DigitalOcean cluster. Upgrades are applied to control plane nodes first, then workers.
+You can upgrade the Kubernetes version on all nodes in a DigitalOcean cluster. Upgrades are applied to control plane nodes first, then workers. Both k3s and kubeadm clusters are supported.
 
 <Warning>
-- Only k3s clusters are supported for version upgrades.
-- Downgrades are not supported — k3s downgrades require an etcd snapshot restore.
+- Both k3s and kubeadm clusters are supported for version upgrades, including kubeadm clusters with an **external** etcd topology: the dedicated etcd members are upgraded first, one at a time, each saving a pre-upgrade snapshot before its static pod rolls to the etcd image matching the target Kubernetes version.
+- Use the matching version format for the target: `v1.35.1+k3s1` for k3s, or a plain `v1.31.0` upstream tag for kubeadm.
+- Downgrades are not supported — downgrades require an etcd snapshot restore.
 - You can only upgrade one minor version at a time (e.g., v1.33.x to v1.34.x, not v1.33.x to v1.35.x).
 - The cluster must be online with no active operations.
 </Warning>
@@ -233,6 +305,12 @@ curl -X POST https://platform.ankra.app/api/v1/clusters/digitalocean/<cluster_id
 ```
 
 </CodeGroup>
+
+For a kubeadm cluster, use a plain upstream tag instead:
+
+```bash
+ankra cluster digitalocean upgrade <cluster_id> v1.31.0
+```
 
 ---
 
@@ -273,6 +351,7 @@ A DigitalOcean cluster provisions the following infrastructure:
 | **Bastion Host** | Jump server for secure SSH access to cluster nodes |
 | **Control Plane(s)** | Kubernetes control plane droplets |
 | **Worker(s)** | Kubernetes worker droplets organized in [node groups](#node-groups) |
+| **etcd Node(s)** | Dedicated etcd droplets, only for kubeadm clusters with an `external` [etcd topology](#external-etcd-topology-kubeadm) |
 | **SSH Keys** | Deployed to all droplets for access |
 | **Cloud Provider Stack** | DigitalOcean CCM and CSI for LoadBalancers and block storage |
 
@@ -284,12 +363,14 @@ Ankra automatically deploys a **digitalocean-cloud-provider** stack after the An
 
 ## Provider-native Managed Kubernetes (DOKS & UKS)
 
-In addition to self-managed K3s on droplets, Ankra can connect provider-native managed Kubernetes services:
+In addition to self-managed k3s or kubeadm on droplets, Ankra can provision and import provider-native managed Kubernetes services:
 
 | Provider kind | Service | Credential |
 |---------------|---------|------------|
 | `doks` | [DigitalOcean Kubernetes (DOKS)](https://www.digitalocean.com/products/kubernetes) | DigitalOcean API token |
 | `uks` | [UpCloud Managed Kubernetes (UKS)](https://upcloud.com/products/managed-kubernetes) | UpCloud API token |
+
+See [Managed Kubernetes](/essentials/managed-kubernetes) for the full guide covering live options and pricing, preflight checks, discovery and import, node pool autoscaling, and upgrades — across DOKS, UKS, GKE, OVHcloud MKS, AKS, and EKS.
 
 Create a managed cluster from the platform UI or via the API:
 

@@ -1,0 +1,251 @@
+---
+title: MCP Server
+description: Connect any MCP-capable agent -- Cursor, Claude Code, Hermes, or your own -- to Ankra's hosted Model Context Protocol server. Agents get Ankra's full tool surface, from listing clusters and querying pods to applying manifests and scaling deployments, gated by token scopes you control.
+---
+
+## Overview
+
+Ankra hosts a **Model Context Protocol (MCP) server** so any MCP-capable agent
+can operate your Kubernetes infrastructure through the same tools Ankra AI
+uses internally -- listing clusters, inspecting pods and events, searching Helm
+charts, applying manifests, scaling deployments, and more.
+
+The server speaks **streamable HTTP** at a single endpoint:
+
+```
+https://platform.ankra.app/api/v1/mcp
+```
+
+Authentication is a standard `Authorization: Bearer` header carrying an Ankra
+API token. What an agent can do is decided by the **scopes** on that token,
+so you choose per token whether an agent can only observe or also make
+changes.
+
+<CardGroup cols={3}>
+  <Card title="Cursor" icon="code">
+    Add Ankra to `.cursor/mcp.json` and manage infrastructure from your
+    editor.
+  </Card>
+  <Card title="Claude Code" icon="terminal">
+    One `claude mcp add` command connects Claude Code to your clusters.
+  </Card>
+  <Card title="Hermes" icon="robot">
+    Point Hermes (or any OpenClaw agent) at the MCP endpoint alongside its
+    CLI skill.
+  </Card>
+</CardGroup>
+
+---
+
+## Token scopes
+
+MCP access is opt-in per token. A token with no MCP scope -- including every
+token created before scopes existed -- cannot reach the endpoint at all, so
+nothing changes for your existing REST and CLI tokens.
+
+| Scope | Grants |
+|-------|--------|
+| `mcp:read` | The read-only tool surface: list clusters, get pods, events, logs, addons, jobs, Helm releases, search charts and documentation. |
+| `mcp:write` | Everything in `mcp:read` plus the mutating tools: apply manifests, scale deployments, restart workloads, delete resources, manage stacks and registries, and saving Ankra AI memories. |
+
+<Warning>
+A token inherits your account's permissions inside your organisation. Grant
+`mcp:write` only to agents whose actions you are prepared to own -- every
+mutating call runs with your identity and is recorded in the audit log.
+</Warning>
+
+---
+
+## Step 1: Create a token with MCP scopes
+
+<Tabs>
+  <Tab title="Platform UI">
+    1. Go to **Profile** → **API** → **Create Token**.
+    2. Name the token after the agent that will hold it, for example
+       `cursor-mcp` or `hermes-agent`.
+    3. Under **MCP access**, tick `mcp:read` -- and `mcp:write` if the agent
+       should be able to make changes.
+    4. Click **Create** and copy the token. It is shown only once.
+  </Tab>
+  <Tab title="Ankra CLI">
+    ```bash
+    # Read-only agent
+    ankra tokens create cursor-mcp --scope mcp:read
+
+    # Agent that can also mutate infrastructure
+    ankra tokens create hermes-agent --scope mcp:read --scope mcp:write
+    ```
+
+    Save the token from the output -- it is shown only once.
+  </Tab>
+</Tabs>
+
+<Tip>
+Create one token per agent. Separate tokens keep rate limits, audit trails,
+and revocation independent -- if one agent misbehaves, revoke its token
+without touching the others.
+</Tip>
+
+---
+
+## Step 2: Connect your agent
+
+### Cursor
+
+Create (or extend) `.cursor/mcp.json` in your project, or `~/.cursor/mcp.json`
+for all projects:
+
+```json
+{
+  "mcpServers": {
+    "ankra": {
+      "url": "https://platform.ankra.app/api/v1/mcp",
+      "headers": {
+        "Authorization": "Bearer YOUR_ANKRA_TOKEN"
+      }
+    }
+  }
+}
+```
+
+Reload Cursor and the Ankra tools appear under **Settings** → **MCP**. Ask the
+agent something like *"list my Ankra clusters and check for failing pods"* to
+verify the connection.
+
+### Claude Code
+
+```bash
+claude mcp add --transport http ankra https://platform.ankra.app/api/v1/mcp \
+  --header "Authorization: Bearer YOUR_ANKRA_TOKEN"
+```
+
+Then verify inside a Claude Code session:
+
+```
+> /mcp
+  ankra  ✔ connected
+```
+
+### Hermes / OpenClaw
+
+Hermes usually drives Ankra through the [CLI skill](/integrations/hermes), but
+it can consume the MCP endpoint directly -- useful when you want the structured
+tool surface with scope gating instead of shell access. Add an `mcpServers`
+block to `~/.openclaw/openclaw.json`:
+
+```json
+{
+  "mcpServers": {
+    "ankra": {
+      "transport": "http",
+      "url": "https://platform.ankra.app/api/v1/mcp",
+      "headers": {
+        "Authorization": "Bearer YOUR_ANKRA_TOKEN"
+      }
+    }
+  }
+}
+```
+
+Both integration paths can coexist: keep the CLI skill for interactive
+workflows like `ankra cluster apply`, and let the MCP tools handle structured
+reads and scoped writes.
+
+### Claude Desktop and claude.ai web connectors
+
+These clients cannot send a static `Authorization` header. They use the
+OAuth 2.1 flow the MCP spec requires:
+
+1. The client probes `POST /api/v1/mcp` unauthenticated and reads the
+   `resource_metadata` URL from the `401` `WWW-Authenticate` header.
+2. It fetches protected-resource and authorization-server metadata, registers
+   itself (`POST /oauth/register`), and opens `/oauth/authorize` with PKCE.
+3. You sign in to Ankra (Auth0 session) and approve the consent page — it
+   shows the MCP scopes and, if you belong to several organisations, which
+   organisation the token is bound to.
+4. The client exchanges the authorization code at `POST /oauth/token` and
+   receives a scoped `ankra_*` PAT. Revoke it any time under **Profile →
+   API**.
+
+No manual token paste is required. Tokens issued this way behave like any
+other MCP-scoped PAT (rate limits, audit, portal revocation).
+
+### Any other MCP client
+
+Any client that supports **streamable HTTP** works:
+
+- **With a static header** (Cursor, Claude Code, Hermes): point it at
+  `https://platform.ankra.app/api/v1/mcp` and send
+  `Authorization: Bearer YOUR_ANKRA_TOKEN`.
+- **With OAuth** (spec-conformant discovery): point at the same URL and
+  follow the metadata → authorize → token flow above.
+
+No session state is required on the MCP endpoint itself — it is stateless.
+
+---
+
+## How agents work with clusters
+
+Most Ankra tools operate on a specific cluster and take a required
+`cluster_id` argument. The intended flow, which the server also advertises to
+agents in its instructions:
+
+1. Call `list_clusters` once to see the clusters in your organisation and
+   their IDs.
+2. Pass the chosen `cluster_id` to cluster-scoped tools like `get_pods`,
+   `get_events`, `scale_deployment`, or `apply_manifest`.
+
+```
+You: Why is the api namespace unhealthy on staging?
+Agent: Calling list_clusters... staging is 4f6a…9c2e.
+       Calling get_pods with cluster_id 4f6a…9c2e, namespace api...
+       Two pods are in CrashLoopBackOff; pulling their recent events now.
+```
+
+Agents can only reach clusters inside the organisation the token belongs to --
+IDs from other organisations (or deleted clusters) return `Cluster not found.`
+
+---
+
+## Limits and safety rails
+
+| Rail | Behaviour |
+|------|-----------|
+| Scope gating | Tools outside the token's scopes are invisible to the agent -- a read-only token never even sees `apply_manifest`. |
+| Rate limits | Per token, per minute: 120 read calls and 20 write calls by default. Exceeding them returns a retryable error to the agent. |
+| Secret guard | Mutating calls whose parameters contain literal secrets (API keys, private keys, passwords) are refused; bind secrets to secret slots instead of pasting them. |
+| Kubernetes write policies | The same write-policy checks Ankra AI applies (protected namespaces, resource kinds) apply to MCP calls. |
+| Audit log | Every call -- including refused ones -- is recorded in your organisation's audit log with the tool name, cluster, and outcome. |
+| Revocation | Revoking the token in **Profile** → **API** cuts the agent off within about a minute. |
+
+---
+
+## Troubleshooting
+
+| Symptom | Cause and fix |
+|---------|---------------|
+| `401 Unauthorized` | Missing, mistyped, expired, or revoked token. Create a new one and update the client config. |
+| `403` with a message about `mcp:read` | The token has no MCP scope. Create a token with the scopes you need -- scopes cannot be added to an existing token. |
+| A tool the agent needs is missing | The token lacks `mcp:write`. Mutating tools are hidden, not just blocked, from read-only tokens. |
+| `Cluster not found.` | The `cluster_id` belongs to another organisation, is deleted, or is mistyped. Have the agent call `list_clusters` again. |
+| `Rate limit exceeded` | The agent is looping or batching too aggressively. Wait for the minute window to pass; the limit is per token, so other agents are unaffected. |
+| Refusal mentioning literal secrets | A mutating call embedded a credential in its parameters. Reference a secret slot instead of the raw value. |
+
+---
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="API Tokens" icon="key" href="/essentials/tokens">
+    Manage, revoke, and rotate the tokens your agents authenticate with.
+  </Card>
+  <Card title="Hermes" icon="robot" href="/integrations/hermes">
+    Deploy Ankra's autonomous agent and give it the CLI skill alongside MCP.
+  </Card>
+  <Card title="Ankra CLI" icon="terminal" href="/integrations/ankra-cli">
+    The command-line companion for creating tokens and driving Ankra directly.
+  </Card>
+  <Card title="Ankra AI" icon="sparkles" href="/essentials/ai-assistant">
+    The same tools, used by Ankra's built-in assistant on the platform.
+  </Card>
+</CardGroup>

@@ -50,7 +50,7 @@ A guided wizard walks you through creating an UpCloud cluster select credentials
     The wizard shows vCPUs, RAM, and monthly cost for each plan to help you choose.
   </Step>
   <Step title="Create & Track Progress">
-    Click **Create** to start provisioning. A live progress view tracks every step credential setup, router creation, network creation, gateway setup, SSH key deployment, bastion provisioning, server creation, k3s installation, and Ankra Agent setup. The cluster appears with an **offline** state until provisioning completes, then transitions to **online**.
+    Click **Create** to start provisioning. A live progress view tracks every step credential setup, router creation, network creation, gateway setup, SSH key deployment, bastion provisioning, server creation, Kubernetes installation (k3s or kubeadm), and Ankra Agent setup. The cluster appears with an **offline** state until provisioning completes, then transitions to **online**.
   </Step>
 </Steps>
 
@@ -117,8 +117,13 @@ d '{
 | `worker_count` | `1` | Number of worker nodes (legacy, use `node_groups` instead) |
 | `worker_plan` | `2xCPU-4GB` | Server plan for workers (legacy, use `node_groups` instead) |
 | `node_groups` | | Array of node group definitions (see [Node Groups](#node-groups)) |
-| `distribution` | `k3s` | Kubernetes distribution |
+| `distribution` | `k3s` | Kubernetes distribution (`k3s` or `kubeadm`) |
 | `kubernetes_version` | *latest stable* | Kubernetes version (optional) |
+| `cni` | `flannel` (k3s) | CNI plugin. kubeadm clusters always use `cilium` |
+| `cni_features` | *all off* | Advanced CNI feature toggles, fixed at creation. Cilium: `kube_proxy_replacement`, `hubble`, `wireguard_encryption`. Calico: `ebpf_dataplane`. See [Advanced CNI features](#advanced-cni-features) |
+| `etcd_topology` | `stacked` | kubeadm only. `stacked` (etcd on control planes) or `external` (dedicated etcd servers) |
+| `etcd_node_count` | `3` | kubeadm `external` topology only. Number of dedicated etcd servers (3 or 5) |
+| `etcd_plan` | `2xCPU-4GB` | kubeadm `external` topology only. Server plan for dedicated etcd nodes |
 
 ### UpCloud Datacenter Zones
 
@@ -145,6 +150,65 @@ d '{
 <Note>
 Available plans may vary by zone. Check the [UpCloud pricing page](https://upcloud.com/pricing/) for the latest offerings.
 </Note>
+
+---
+
+## Kubernetes Distribution
+
+UpCloud clusters can be provisioned with either **k3s** (default) or **kubeadm**.
+
+| | k3s | kubeadm |
+|---|-----|---------|
+| Kubernetes | Lightweight, single-binary distribution | Vanilla upstream Kubernetes |
+| CNI | User-selectable (Flannel default) | Cilium (fixed, cannot be changed after creation) |
+| etcd | Embedded | `stacked` (on control planes) or `external` (dedicated servers) |
+| Version format | `v1.35.1+k3s1` | `v1.31.0` (plain upstream tag) |
+
+<Note>
+kubeadm clusters always use Cilium CNI (eBPF-based networking, L7 policies, Hubble observability). The CNI cannot be changed after creation.
+</Note>
+
+### Advanced CNI features
+
+k3s clusters can enable advanced CNI features at creation time via `cni_features` (also available as toggles in the create wizard). Features are fixed once the cluster is created.
+
+| Feature | CNI | What it does |
+|---|---|---|
+| `kube_proxy_replacement` | Cilium | Replaces kube-proxy with Cilium's eBPF dataplane |
+| `hubble` | Cilium | Deploys Hubble relay and UI for network flow observability |
+| `wireguard_encryption` | Cilium | Encrypts pod-to-pod traffic between nodes with WireGuard (UDP/51871 must be open node-to-node) |
+| `ebpf_dataplane` | Calico | Runs Calico in eBPF mode, bypassing kube-proxy |
+
+<Warning>
+`kube_proxy_replacement` and `ebpf_dataplane` pin the CNI's API-server endpoint to the first control plane, so on k3s they require a **single control plane**. Creation and control-plane scaling both enforce this. Flannel accepts no feature toggles.
+</Warning>
+
+### External etcd topology (kubeadm)
+
+By default kubeadm runs etcd **stacked** on the control plane nodes. For larger clusters you can run etcd on dedicated servers by setting `etcd_topology` to `external`:
+
+```bash
+curl -X POST https://platform.ankra.app/api/v1/clusters/upcloud \
+  -H "Authorization: Bearer $ANKRA_API_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "my-cluster",
+    "credential_id": "<upcloud-credential-id>",
+    "ssh_key_credential_id": "<ssh-key-credential-id>",
+    "zone": "fi-hel1",
+    "control_plane_count": 3,
+    "control_plane_plan": "2xCPU-4GB",
+    "node_groups": [
+      {"name": "default", "instance_type": "4xCPU-8GB", "count": 2}
+    ],
+    "distribution": "kubeadm",
+    "etcd_topology": "external",
+    "etcd_node_count": 3,
+    "etcd_plan": "2xCPU-4GB"
+  }'
+```
+
+The equivalent CLI flags are `--distribution kubeadm`, `--etcd-topology external`, `--etcd-node-count 3`, and `--etcd-plan 2xCPU-4GB`.
 
 ---
 
@@ -199,11 +263,12 @@ For new clusters, prefer using [Node Groups](#node-groups) for more granular con
 
 ## Upgrading Kubernetes Version
 
-You can upgrade the Kubernetes (k3s) version on all nodes in an UpCloud cluster. Upgrades are applied to control plane nodes first, then workers.
+You can upgrade the Kubernetes version on all nodes in an UpCloud cluster. Upgrades are applied to control plane nodes first, then workers. Both k3s and kubeadm clusters are supported.
 
 <Warning>
-- Only k3s clusters are supported for version upgrades.
-- Downgrades are not supported k3s downgrades require an etcd snapshot restore.
+- Both k3s and kubeadm clusters are supported for version upgrades, including kubeadm clusters with an **external** etcd topology: the dedicated etcd members are upgraded first, one at a time, each saving a pre-upgrade snapshot before its static pod rolls to the etcd image matching the target Kubernetes version.
+- Use the matching version format for the target: `v1.35.1+k3s1` for k3s, or a plain `v1.31.0` upstream tag for kubeadm.
+- Downgrades are not supported downgrades require an etcd snapshot restore.
 - You can only upgrade one minor version at a time (e.g., v1.33.x to v1.34.x, not v1.33.x to v1.35.x).
 - The cluster must be online with no active operations.
 </Warning>
@@ -251,6 +316,12 @@ d '{"target_version": "v1.35.1+k3s1"}'
 ```
 
 </CodeGroup>
+
+For a kubeadm cluster, use a plain upstream tag instead:
+
+```bash
+ankra cluster upcloud upgrade <cluster_id> v1.31.0
+```
 
 Response:
 ```json
@@ -304,6 +375,7 @@ An UpCloud cluster provisions the following infrastructure:
 | **Bastion Host** | Jump server for secure SSH access to cluster nodes |
 | **Control Plane(s)** | Kubernetes control plane servers |
 | **Worker(s)** | Kubernetes worker servers for running workloads |
+| **etcd Node(s)** | Dedicated etcd servers, only for kubeadm clusters with an `external` [etcd topology](#external-etcd-topology-kubeadm) |
 | **SSH Keys** | Deployed to all servers for access |
 
 All nodes are deployed within a private UpCloud SDN network. The bastion host provides the only external SSH access point, and a NAT gateway handles outbound traffic for nodes without public IPs.

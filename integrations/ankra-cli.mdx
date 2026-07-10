@@ -299,7 +299,42 @@ Invite a user to the current organisation.
 
 ```bash
 ankra org invite <email>
-ankra org invite <email> --role admin    # role: member, admin, read-only
+ankra org invite <email> --role operator
+```
+
+`--role` accepts `owner`, `admin`, `operator`, `member`, `viewer`, and `read-only`, validated client-side. Until the RBAC assignments API is fully live, `owner`/`operator` alias onto `admin`/`member` on the wire.
+
+#### org roles
+List the built-in roles with their descriptions, and define custom roles.
+
+```bash
+ankra org roles                                   # list roles
+ankra org roles create --name release-manager \
+  --permissions clusters.read,stacks.deploy \
+  --kube-access edit                              # optional bundled kube access
+```
+
+#### org cluster-groups
+Manage named sets of clusters used as role-assignment scopes. Groups are **static** (pinned members) or **dynamic** (a label selector evaluated against cluster labels).
+
+```bash
+ankra org cluster-groups list
+ankra org cluster-groups create --name prod --selector env=production   # dynamic
+ankra org cluster-groups create --name core                             # static
+ankra org cluster-groups add-cluster core <cluster_id>
+ankra org cluster-groups set-selector prod tier=production,region=eu
+ankra org cluster-groups preview prod                                   # clusters it resolves to
+```
+
+#### org assign / assignments / unassign
+Grant, list, and revoke scoped role assignments. A role can be assigned at organisation, single-cluster, or cluster-group scope; when the role bundles Kubernetes access, Ankra provisions it across every cluster in scope.
+
+```bash
+ankra org assign user@example.com --role operator --cluster-group prod
+ankra org assign user@example.com --role viewer --cluster <cluster_id>
+ankra org assign user@example.com --role admin                          # org-wide
+ankra org assignments user@example.com                                  # list what a member holds
+ankra org unassign <assignment_id>
 ```
 
 #### org remove
@@ -1572,13 +1607,22 @@ List the k3s (Kubernetes) versions the platform can upgrade to, with the stable 
 ankra cluster k3s-versions
 ```
 
+#### cluster kubeadm-versions
+List the upstream Kubernetes versions the platform can provision or upgrade **kubeadm** clusters to. The sibling of `k3s-versions` for kubeadm-distribution clusters.
+
+```bash
+ankra cluster kubeadm-versions
+```
+
 #### cluster upgrade
-Upgrade the Kubernetes (k3s) version on all nodes of a cloud cluster. Only Hetzner, OVH, UpCloud, DigitalOcean, Proxmox VE, and Morpheus clusters can be upgraded.
+Upgrade the Kubernetes version on all nodes of a cloud cluster, on both k3s and kubeadm distributions. Only Hetzner, OVH, UpCloud, DigitalOcean, Proxmox VE, and Morpheus clusters can be upgraded.
 
 ```bash
 ankra cluster upgrade <cluster_id> <target_version>
 ankra cluster upgrade 62f4559a-a44d-46d7-aab3-a57c9dd6b4c6 v1.36.1+k3s1
 ```
+
+On kubeadm clusters, nodes upgrade one at a time (control plane first): each is cordoned, drained respecting PodDisruptionBudgets, upgraded, and gated on being Ready at the target version, with an etcd snapshot taken before the control plane. Add `--force` to proceed when a drain is blocked by a PodDisruptionBudget (the default aborts safely). The command prints the operation ID - follow it with `ankra cluster operations list`.
 
 #### cluster scale
 Scale the default worker pool of a cloud cluster up or down. To scale a named pool instead, use `cluster node-group scale`.
@@ -1604,6 +1648,17 @@ The `add`, `scale`, `upgrade`, and `delete` mutations submit asynchronously by d
 <Note>
 OVH-specific node label and taint management (`node-group labels` / `node-group taints`) has no provider-agnostic equivalent yet — use `cluster ovh node-group labels|taints` for those.
 </Note>
+
+#### cluster node-group autoscaling
+Read and write a node group's Cluster Autoscaler settings on Hetzner, OVH, and UpCloud clusters. Enabling keeps the group's node count within `[min, max]` based on pod demand; the first enable on a cluster installs the autoscaler.
+
+```bash
+ankra cluster node-group autoscaling get <cluster_id> <group_name>
+ankra cluster node-group autoscaling set <cluster_id> <group_name> --enabled --min 2 --max 10
+ankra cluster node-group autoscaling set <cluster_id> <group_name> --enabled=false
+```
+
+Both honour `-o json|yaml`, and `set` supports the standard `--wait`/`--timeout` async-write flags.
 
 #### cluster ssh-keys
 View, replace, or re-sync the SSH key credentials attached to a Hetzner, OVH, UpCloud, DigitalOcean, Proxmox VE, or Morpheus cluster. The provider is detected from the cluster.
@@ -2896,7 +2951,10 @@ Create a new API token.
 ```bash
 ankra tokens create my-ci-token
 ankra tokens create my-temp-token --expires "2026-12-31T00:00:00Z"
+ankra tokens create my-ci-token --scopes clusters.read,stacks.deploy
 ```
+
+`--scopes` optionally pins the token to a permission allowlist. Omitting it keeps the default behaviour of the token carrying your full authority.
 
 #### tokens revoke
 Revoke an API token (must be revoked before deletion).
@@ -2995,6 +3053,17 @@ ankra skills uninstall ankra-cli             # remove a named skill
 
 `--source <dir>` is also accepted by `skills list` and `skills uninstall`, which is useful for testing a local copy of the curated skill set instead of the embedded copy. Use `--editor cursor` (default) or `--editor claude-code` to choose the target skills directory.
 
+#### Making Ankra the agent's default
+
+Skills alone only load when the conversation happens to match their description. By default, `ankra skills install` also writes an **always-applied rule** telling your agent that clusters here are Ankra-managed: route changes through the GitOps repo or `ankra cluster apply`, inspect freely, and never mutate with raw kubectl/helm. Cursor gets a local plugin rule (`~/.cursor/plugins/local/ankra`) or a project `.cursor/rules/ankra.mdc`; Claude Code gets a marker-managed block in `CLAUDE.md`. Pass `--no-rules` to skip it; a full `ankra skills uninstall` cleans everything up.
+
+```bash
+ankra skills install --with-hooks   # also install a workflow-enforcing agent hook
+ankra skills install --no-rules     # skills only, no always-applied rule
+```
+
+`--with-hooks` installs an agent hook (Cursor `beforeShellExecution`, Claude Code `PreToolUse`) that runs the `ankra skills guard` plumbing command on every shell command: cluster-mutating kubectl/helm invocations (`apply`, `delete`, `helm upgrade`, …) pause for confirmation with a redirect to the Ankra workflow, while read-only inspection, `--dry-run`, and everything else pass through untouched. The guard fails open and merges into existing `hooks.json`/`settings.json` without disturbing other entries.
+
 <Note>
 `ankra skills` installs the static, curated skill set. To generate a SKILL.md describing one
 of your own clusters, use `ankra openclaw skill` instead.
@@ -3081,6 +3150,21 @@ ankra chat --help
 - **"No active cluster selected"** Run `ankra cluster select` first
 - **"Resource not found"** Verify the resource name and selected cluster
 - **"Unauthorized"** Re-authenticate with `ankra login`
+
+### Exit codes
+
+The CLI returns a stable, documented exit code so scripts can branch on the failure class without parsing error text:
+
+| Code | Meaning |
+|------|---------|
+| `0` | Success |
+| `1` | API / runtime error |
+| `2` | Usage or flag error (unknown command/flag, bad arguments, missing required flags) |
+| `3` | Targeted resource not found |
+| `4` | Confirmation declined |
+| `5` | `--wait` / `--timeout` expiry on an asynchronous write |
+| `6` | Authentication failure (missing/expired/rejected credentials, 401/403) - re-authenticate |
+| `7` | RBAC permission denied (403 `permission_denied`) - your role lacks a permission; the CLI names it and points at an organisation admin |
 
 ## Support & Resources
 

@@ -50,6 +50,19 @@ Welcome to the Ankra Mintlify documentation starter! This project provides a rob
 - Connect your GitHub repository to Mintlify for automatic deployments.
 - Changes pushed to your default branch will be published to your live documentation site.
 
+## Keeping docs in sync with releases
+
+Documentation drifts when a feature ships without a matching docs change. Run this checklist as part of every user-visible release so the docs never lag behind the product:
+
+1. **Changelog.** Add a dated `<Update>` block to `changelog.mdx` describing the user-visible change, linking to the feature page. This file is the single source of truth for product changes.
+2. **Feature page.** Create or update the relevant page under `essentials/`, `integrations/`, or `guides/`, and wire any new page into `docs.json` navigation.
+3. **CLI changelog.** For a CLI release, mirror `ankra-cli/CHANGELOG.md` into `integrations/ankra-cli-changelog.mdx` (newest first, one `<Update>` per version).
+4. **CLI reference sync.** Extend `integrations/ankra-cli.mdx` for any new command, flag, or exit code. If the generated reference (`tools/gendocs`) is in use, confirm its sync PR landed.
+5. **Wire-format schemas.** If a wire-format Pydantic model changed, run `python scripts/dump_pydantic_schemas.py` in the platform repo and commit the diff.
+6. **Publish.** Merge `develop` → `master` (or your default branch) so Mintlify publishes the update. Do this as a deliberate release step, not per-commit.
+
+Before publishing, run `mintlify dev` (or `mintlify broken-links`) to catch broken internal links introduced by new or moved pages.
+
 ## Troubleshooting
 
 - **Mintlify CLI not running?**
