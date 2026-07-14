@@ -348,14 +348,41 @@ A DigitalOcean cluster provisions the following infrastructure:
 | Component | Description |
 |-----------|-------------|
 | **VPC** | Private network for inter-node communication |
-| **Bastion Host** | Jump server for secure SSH access to cluster nodes |
+| **Cloud Firewalls** | Two tag-scoped firewalls - the only ingress boundary, since every droplet has a public IP |
+| **Bastion Host** | Jump host Ankra uses to provision and manage nodes - the only droplet reachable on SSH from the internet |
 | **Control Plane(s)** | Kubernetes control plane droplets |
 | **Worker(s)** | Kubernetes worker droplets organized in [node groups](#node-groups) |
 | **etcd Node(s)** | Dedicated etcd droplets, only for kubeadm clusters with an `external` [etcd topology](#external-etcd-topology-kubeadm) |
 | **SSH Keys** | Deployed to all droplets for access |
 | **Cloud Provider Stack** | DigitalOcean CCM and CSI for LoadBalancers and block storage |
 
-All nodes are deployed within a private VPC. The bastion host provides the only external SSH access point.
+```mermaid
+flowchart TB
+    Internet((Internet))
+    Platform[Ankra Platform]
+
+    subgraph VPC [DigitalOcean VPC + tag-scoped cloud firewalls]
+        Bastion[Bastion droplet<br/>SSH open to the internet]
+        CP[Control plane droplets<br/>inbound closed by firewall]
+        Workers[Worker droplets<br/>inbound closed by firewall]
+        Agent[Ankra Agent<br/>runs in the cluster]
+    end
+
+    LB[DigitalOcean Load Balancers<br/>created by the DO CCM]
+
+    Platform -->|SSH port 22| Bastion
+    Bastion -->|SSH jump over VPC| CP
+    Bastion -->|SSH jump over VPC| Workers
+    Agent -->|outbound only - NATS| Platform
+    CP -->|egress via own public IP| Internet
+    Workers -->|egress via own public IP| Internet
+    Internet --> LB
+    LB --> Workers
+```
+
+DigitalOcean droplets always receive public IPs, so isolation works differently here than on providers with truly private nodes: two tag-scoped **cloud firewalls** are the ingress boundary. The node firewall only accepts traffic from other cluster droplets and the VPC range; the bastion firewall additionally opens SSH (port 22) to the internet. Outbound traffic leaves through each droplet's own public IP - there is no NAT hop.
+
+The bastion is the SSH jump host Ankra uses for provisioning and management; inter-node and jump traffic stay on the VPC.
 
 Ankra automatically deploys a **digitalocean-cloud-provider** stack after the Ankra Agent is installed, including the DigitalOcean Cloud Controller Manager and CSI driver backed by your API credential.
 
