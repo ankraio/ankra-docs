@@ -43,14 +43,14 @@ A guided wizard walks you through creating an OVH cluster - select credentials, 
   </Step>
   <Step title="Configure Nodes">
     Set your cluster topology:
-    - **Gateway** - instance flavor for the SSH gateway (e.g., `b2-7`)
+    - **Bastion** - instance flavor for the SSH bastion (e.g., `b2-7`)
     - **Control Plane** - count and flavor (e.g., 1x `b2-15`)
     - **Workers** - count and flavor (e.g., 2x `b2-15`)
 
     The wizard shows vCPUs, RAM, disk, and hourly cost for each flavor to help you choose.
   </Step>
   <Step title="Create & Track Progress">
-    Click **Create** to start provisioning. A live progress view tracks every step - network creation, gateway setup, control plane provisioning, worker provisioning, k3s installation, and Ankra Agent setup. The cluster appears with an **offline** state until provisioning completes, then transitions to **online**.
+    Click **Create** to start provisioning. A live progress view tracks every step - network creation, bastion setup, control plane provisioning, worker provisioning, k3s installation, and Ankra Agent setup. The cluster appears with an **offline** state until provisioning completes, then transitions to **online**.
   </Step>
 </Steps>
 
@@ -231,7 +231,7 @@ Response:
 
 ## Stopping and Starting a Cluster
 
-You can stop an OVH cluster to release its compute (instances, gateway, and managed gateway) while keeping its configuration, networking definition, and SSH keys. Starting the cluster re-provisions the compute and reconciles it back to a running state. This is useful for pausing non-production clusters to save cost.
+You can stop an OVH cluster to release its compute (node instances, the bastion, and the managed network gateway) while keeping its configuration, networking definition, and SSH keys. Starting the cluster re-provisions the compute and reconciles it back to a running state. This is useful for pausing non-production clusters to save cost.
 
 When starting, use `--scope control_plane` to bring up only the control plane first (for example to inspect or repair it), or `--scope all` (the default) to provision the whole cluster.
 
@@ -261,7 +261,7 @@ Stop and start are background operations. A start returns `409` if a stop or ter
 
 ## SSH Access and Keys
 
-`ankra cluster ovh access-info` prints the gateway (bastion) and control plane IPs along with ready-to-paste `ssh -J` jump and Kubernetes API port-forward commands, so you can reach nodes behind the gateway without looking up IPs by hand.
+`ankra cluster ovh access-info` prints the bastion and control plane IPs along with ready-to-paste `ssh -J` jump and Kubernetes API port-forward commands, so you can reach nodes behind the bastion without looking up IPs by hand.
 
 <CodeGroup>
 
@@ -392,13 +392,46 @@ An OVH cluster provisions the following infrastructure:
 
 | Component | Description |
 |-----------|-------------|
-| **Gateway** | Jump server for secure SSH access to cluster nodes |
-| **Private Network** | Isolated VLAN for inter-node communication |
-| **Control Plane(s)** | Kubernetes control plane instances |
-| **Worker(s)** | Kubernetes worker instances for running workloads |
+| **Private Network** | Isolated vRack VLAN with a DHCP subnet for inter-node communication |
+| **Managed Network Gateway** | OVH-managed gateway attached to the subnet - the default route and NAT for all node egress |
+| **Bastion** | Small instance holding the cluster's only public IP - the SSH jump host Ankra uses to provision and manage nodes |
+| **Control Plane(s)** | Kubernetes control plane instances (private IPs only) |
+| **Worker(s)** | Kubernetes worker instances for running workloads (private IPs only) |
 | **SSH Keys** | Deployed to all instances for access |
 
-All nodes are deployed within a private OVH network. The gateway provides the only external SSH access point.
+```mermaid
+flowchart TB
+    Internet((Internet))
+    Platform[Ankra Platform]
+
+    subgraph Network [OVH private network - vRack VLAN]
+        Bastion[Bastion<br/>public + private IP]
+        CP[Control plane nodes<br/>private IP only]
+        Workers[Worker nodes<br/>private IP only]
+        Agent[Ankra Agent<br/>runs in the cluster]
+    end
+
+    MGW[OVH managed network gateway<br/>default route + NAT]
+
+    Platform -->|SSH to public IP| Bastion
+    Bastion -->|SSH jump| CP
+    Bastion -->|SSH jump| Workers
+    Agent -->|outbound only - NATS| Platform
+    CP -->|egress| MGW
+    Workers -->|egress| MGW
+    MGW --> Internet
+```
+
+All nodes are deployed within a private OVH network and have no public IPs. Two different components share the word "gateway", so it helps to keep them apart:
+
+- The **managed network gateway** (created alongside the private network, named `<cluster>-network-gw`) is the actual router: every node's default route points at it, and all outbound traffic to the internet leaves through it.
+- The **bastion** (named `<cluster>-bastion`) is an SSH jump host, not a router. No workload or egress traffic flows through it. Ankra connects to its public IP to provision nodes, install Kubernetes, apply upgrades, and run reconciliation, and you can use it for `ssh -J` access to the nodes.
+
+<Note>
+Clusters created before the bastion rename carry the instance name `<cluster>-gateway` in OVH instead of `<cluster>-bastion`. It is the same component with the same role; existing clusters keep their original instance name.
+</Note>
+
+Because the data plane does not depend on the bastion, workloads keep running if it is briefly unavailable - but Ankra cannot provision, scale, upgrade, or reconcile the cluster until it is back, and the cluster can appear degraded in the dashboard while reads fail.
 
 ---
 

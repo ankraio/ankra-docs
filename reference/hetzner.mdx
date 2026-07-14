@@ -72,14 +72,48 @@ A Hetzner cluster provisions the following infrastructure:
 
 | Component | Description |
 |-----------|-------------|
-| **Bastion Host** | Jump server for secure SSH access to cluster nodes |
+| **Bastion Host** | The only server with a public IP - SSH jump host *and* NAT gateway for all node egress |
 | **Private Network** | Isolated network for inter-node communication |
-| **Control Plane(s)** | Kubernetes control plane nodes |
+| **Control Plane(s)** | Kubernetes control plane nodes (private IPs only) |
 | **Worker(s)** | Kubernetes worker nodes organized in [node groups](/guides/hetzner-clusters#node-groups), each with independent instance types, labels, and taints |
 | **SSH Keys** | Deployed to all servers for access (multiple keys supported) |
 | **External Cloud Provider** | k3s is configured with `cloud-provider=external` for Hetzner CCM compatibility |
 
-All nodes are deployed within a private Hetzner network. The bastion host provides the only external SSH access point.
+```mermaid
+flowchart TB
+    Internet((Internet))
+    Platform[Ankra Platform]
+
+    subgraph Network [Hetzner private network]
+        Bastion[Bastion<br/>public + private IP<br/>NAT masquerade]
+        CP[Control plane nodes<br/>private IP only]
+        Workers[Worker nodes<br/>private IP only]
+        Agent[Ankra Agent<br/>runs in the cluster]
+    end
+
+    LB[Hetzner Load Balancers<br/>created by the hcloud CCM]
+
+    Platform -->|SSH to public IP| Bastion
+    Bastion -->|SSH jump| CP
+    Bastion -->|SSH jump| Workers
+    Agent -->|outbound only - NATS| Platform
+    CP -->|default route| Bastion
+    Workers -->|default route| Bastion
+    Bastion -->|NAT| Internet
+    Internet --> LB
+    LB --> Workers
+```
+
+All nodes are deployed within a private Hetzner network and have no public IPs. The bastion host plays two roles:
+
+- **SSH jump host** - Ankra provisions and manages nodes through it, and it is the entry point for `ssh -J` access.
+- **NAT gateway** - a network route sends the nodes' default traffic (`0.0.0.0/0`) to the bastion, which masquerades it out through its public IP. All node egress - image pulls, package installs, and the Ankra Agent's outbound connection - flows through the bastion.
+
+<Warning>
+Because the bastion is the egress path on Hetzner, stopping or deleting it cuts off internet access for every node in the cluster. This differs from [OVH clusters](/guides/ovh-clusters#architecture), where egress uses a provider-managed gateway and the bastion is only a jump host.
+</Warning>
+
+Inbound traffic to workloads does not pass through the bastion: `LoadBalancer` services get Hetzner Load Balancers from the CCM, attached to nodes over the private network.
 
 ### Automatic Cloud Integration (hcloud Stack)
 
