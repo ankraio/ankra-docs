@@ -55,7 +55,7 @@ Before creating a DigitalOcean cluster, you need two credentials:
     See [Kubernetes Distribution](#kubernetes-distribution) for details.
   </Step>
   <Step title="Create & Track Progress">
-    Click **Create** to start provisioning. A live progress view tracks credential setup, VPC creation, SSH key deployment, bastion provisioning, droplet creation, Kubernetes installation (k3s or kubeadm), and Ankra Agent setup. The cluster appears with an **offline** state until provisioning completes, then transitions to **online**.
+    Click **Create** to start provisioning. A live progress view tracks credential setup, VPC creation, NAT gateway setup, SSH key deployment, bastion provisioning, droplet creation, Kubernetes installation (k3s or kubeadm), and Ankra Agent setup. The cluster appears with an **offline** state until provisioning completes, then transitions to **online**.
   </Step>
 </Steps>
 
@@ -361,7 +361,7 @@ ankra cluster digitalocean upgrade <cluster_id> v1.31.0
 
 ## Deprovisioning
 
-Deprovisioning deletes all DigitalOcean resources (droplets, VPC, SSH keys) and removes the cluster from Ankra.
+Deprovisioning deletes all DigitalOcean resources (droplets, NAT gateway, VPC, SSH keys) and removes the cluster from Ankra.
 
 <Warning>
 This action is irreversible. All data on the cluster will be permanently deleted.
@@ -393,7 +393,8 @@ A DigitalOcean cluster provisions the following infrastructure:
 | Component | Description |
 |-----------|-------------|
 | **VPC** | Private network for inter-node communication |
-| **Cloud Firewalls** | Two tag-scoped firewalls - the only ingress boundary, since every droplet has a public IP |
+| **NAT Gateway** | VPC NAT gateway providing outbound internet access for the private node droplets |
+| **Cloud Firewalls** | Two tag-scoped firewalls providing defense in depth; on clusters created before private-droplet support they are the only ingress boundary |
 | **Bastion Host** | Jump host Ankra uses to provision and manage nodes - the only droplet reachable on SSH from the internet |
 | **Control Plane(s)** | Kubernetes control plane droplets |
 | **Worker(s)** | Kubernetes worker droplets organized in [node groups](#node-groups) |
@@ -407,9 +408,10 @@ flowchart TB
     Platform[Ankra Platform]
 
     subgraph VPC [DigitalOcean VPC + tag-scoped cloud firewalls]
-        Bastion[Bastion droplet<br/>SSH open to the internet]
-        CP[Control plane droplets<br/>inbound closed by firewall]
-        Workers[Worker droplets<br/>inbound closed by firewall]
+        Bastion[Bastion droplet<br/>public + private IP]
+        CP[Control plane droplets<br/>private IP only]
+        Workers[Worker droplets<br/>private IP only]
+        NAT[VPC NAT gateway<br/>VPC default route]
         Agent[Ankra Agent<br/>runs in the cluster]
     end
 
@@ -419,15 +421,22 @@ flowchart TB
     Bastion -->|SSH jump over VPC| CP
     Bastion -->|SSH jump over VPC| Workers
     Agent -->|outbound only - NATS| Platform
-    CP -->|egress via own public IP| Internet
-    Workers -->|egress via own public IP| Internet
+    CP -->|egress| NAT
+    Workers -->|egress| NAT
+    NAT --> Internet
     Internet --> LB
     LB --> Workers
 ```
 
-DigitalOcean droplets always receive public IPs, so isolation works differently here than on providers with truly private nodes: two tag-scoped **cloud firewalls** are the ingress boundary. The node firewall only accepts traffic from other cluster droplets and the VPC range; the bastion firewall additionally opens SSH (port 22) to the internet. Outbound traffic leaves through each droplet's own public IP - there is no NAT hop.
+All nodes are deployed within a private VPC. Cluster nodes are created as **private droplets with no public IP** - the bastion host is the only droplet with a public address and provides the only external SSH access point. Outbound traffic from the nodes (image pulls, package downloads, the Ankra Agent connection) leaves through a managed **VPC NAT gateway** set as the VPC's default route. The tag-scoped cloud firewalls stay in place as defense in depth; inter-node and jump traffic stay on the VPC.
 
-The bastion is the SSH jump host Ankra uses for provisioning and management; inter-node and jump traffic stay on the VPC.
+<Note>
+DigitalOcean bills the VPC NAT gateway separately (from $40/month per gateway). See [DigitalOcean's VPC NAT gateway pricing](https://www.digitalocean.com/pricing/networking) for current rates.
+</Note>
+
+<Note>
+Clusters created before private-droplet support keep their original layout: all droplets carry public IPs and rely on tag-scoped cloud firewalls as the ingress boundary. Public networking is fixed at droplet creation, so existing clusters - including nodes added when scaling them - stay on that model. Only newly created clusters get private nodes and a NAT gateway.
+</Note>
 
 Ankra automatically deploys a **digitalocean-cloud-provider** stack after the Ankra Agent is installed, including the DigitalOcean Cloud Controller Manager and CSI driver backed by your API credential.
 
