@@ -4,7 +4,7 @@ description: Create, manage, and scale Kubernetes clusters on your own Proxmox V
 tag: "Closed Beta"
 ---
 
-Ankra supports provisioning fully managed Kubernetes clusters on [Proxmox VE](https://www.proxmox.com/en/proxmox-virtual-environment). You bring your own Proxmox nodes, storage, and network bridge - Ankra creates the VMs, installs Kubernetes, and manages the full cluster lifecycle: node groups, scaling, upgrades, and deprovisioning.
+Ankra supports provisioning fully managed Kubernetes clusters on [Proxmox VE](https://www.proxmox.com/en/proxmox-virtual-environment). You bring your own Proxmox nodes and can use existing storage and network bridges. Ankra fills in safe defaults when they are absent, creates the VMs, installs Kubernetes, and manages the full cluster lifecycle: node groups, scaling, upgrades, and deprovisioning.
 
 <Warning>
 **Closed beta.** Proxmox VE cluster provisioning is in closed beta. The workflow is stable but the surface may still change, and it is enabled per organisation on request. [Contact support](/platform/support) to have it turned on for your organisation.
@@ -18,7 +18,7 @@ Before creating a Proxmox VE cluster, you need two credentials:
 
 <CardGroup cols={2}>
   <Card title="Proxmox VE API Credential" icon="key">
-    The Proxmox API URL and an API token with VM management privileges. See [Proxmox VE Credentials](/platform/credentials/proxmox).
+    The Proxmox API URL and an API token with VM management privileges. If Ankra needs to initialize storage or networking, the token also needs `Datastore.Allocate`, `Sys.Modify`, and `SDN.Use`. See [Proxmox VE Credentials](/platform/credentials/proxmox).
   </Card>
   <Card title="SSH Key Credential" icon="lock">
     An SSH public key for VM access. You can provide your own or let Ankra generate one. See [SSH Key Credentials](/platform/credentials/ssh-key).
@@ -28,9 +28,9 @@ Before creating a Proxmox VE cluster, you need two credentials:
 Your Proxmox environment must also provide:
 
 - **A cloud-init VM template** (e.g., Ubuntu 24.04) with the QEMU guest agent installed, registered on the node you deploy to. Ankra clones this template for every cluster VM and reads each VM's IP address through the guest agent. You can pin a specific template with the `template` option; otherwise the first template on the node is used.
-- **An existing network bridge with DHCP.** Ankra does not create or modify bridges - you select one at creation, and all cluster VMs get their addresses from DHCP on that bridge.
-- **Storage with free space** on the Proxmox node you deploy to, for the VM disks.
-- **API reachability.** The Proxmox API must be reachable from Ankra either directly or through an [SSH jumphost](#hybrid-connectivity-ssh-jumphost).
+- **A network with DHCP.** You can provide an existing active Linux bridge. If none exists, the host must have exactly one active, statically addressed Ethernet or bond management interface that Ankra can safely convert to `vmbr0`.
+- **Local free disk space or existing VM storage.** If no active storage supports VM images, Ankra enables `images` and `rootdir` on the `local` directory storage, or creates it at `/var/lib/vz`.
+- **API reachability.** The Proxmox API must use HTTPS and be reachable from Ankra either directly or through an [SSH jumphost](#hybrid-connectivity-ssh-jumphost).
 
 ---
 
@@ -59,7 +59,7 @@ Both options are configured on the credential - see [Proxmox VE Credentials](/pl
     Pick your Proxmox VE API credential and SSH key credential from the dropdowns. You can also create new credentials directly from the wizard.
   </Step>
   <Step title="Choose Placement">
-    Select the **Proxmox node** to host the cluster VMs, the **storage** for VM disks, and the **network bridge** the VMs attach to. The bridge must provide DHCP.
+    Pick **Single host** or **Host spread** placement. With single host, select the **Proxmox node** that hosts all cluster VMs. With host spread, select two or more compatible hosts and Ankra distributes the Kubernetes VMs across them - see [Host-Spread Placement](#host-spread-placement). In both modes, select the **storage** for VM disks and the **network bridge** the VMs attach to. The bridge must provide DHCP.
   </Step>
   <Step title="Configure Nodes">
     Set your cluster topology:
@@ -116,9 +116,10 @@ curl -X POST https://platform.ankra.app/api/v1/clusters/proxmox \
 | `name` | *required* | Unique cluster name |
 | `credential_id` | *required* | Proxmox VE API credential ID |
 | `ssh_key_credential_id` | *required* | SSH key credential ID |
-| `node` | *required* | Proxmox node that hosts the cluster VMs |
-| `bridge` | *required* | Existing network bridge the VMs attach to (must provide DHCP) |
-| `storage` | `local-lvm` | Proxmox storage for VM disks |
+| `node` | *required* | Proxmox node that hosts the cluster VMs (and the bastion in host-spread mode) |
+| `placement_nodes` | | Two or more Proxmox nodes to spread the Kubernetes VMs across (see [Host-Spread Placement](#host-spread-placement)). Omit for single-host placement |
+| `bridge` | *required* | Network bridge the VMs attach to (must provide DHCP). `vmbr0` is created during credential setup when no bridge exists |
+| `storage` | *auto-picked* | Active Proxmox storage for VM disks. Prefers `local-lvm`, then `local` |
 | `template` | *auto-picked* | Cloud-init template to clone, by VMID or name. Defaults to the first template on the node |
 | `bastion_instance_type` | `px-small` | Instance size for the bastion VM |
 | `control_plane_count` | `1` | Number of control plane nodes (1, 3, or 5) |
@@ -150,7 +151,75 @@ Proxmox VE has no list pricing, so Ankra does not show cost estimates for Proxmo
 
 ### Networking
 
-Ankra does not create networks or bridges on Proxmox. You select an existing bridge at creation, and all cluster VMs receive their IP addresses via DHCP on that bridge. Make sure the bridge has a DHCP server available before creating the cluster.
+When you save a Proxmox VE credential, Ankra keeps any existing active Linux bridge unchanged. If no bridge exists, Ankra can convert a single active, statically addressed Ethernet or bond management interface to `vmbr0`: the host address and gateway move to the bridge, the physical interface becomes its uplink, and Proxmox applies the network configuration. Inactive bridges must be fixed or removed first.
+
+Ankra refuses the automatic conversion without changing the live network when the management interface is ambiguous, uses DHCP, has custom interface options, or another network change is pending. Do not edit Proxmox networking concurrently while saving the credential. Configure a bridge manually in those cases, then save the credential again.
+
+All cluster VMs receive their IP addresses via DHCP on the selected bridge. The upstream network must therefore provide DHCP whether you use an existing bridge or the automatically created `vmbr0`.
+
+---
+
+## Host-Spread Placement
+
+When your Proxmox VE cluster has multiple nodes, you can spread the Kubernetes VMs across them so a single host failure does not take down the whole Kubernetes cluster. Host spread is opt-in: pass `placement_nodes` with two or more nodes via the API, or pick **Host spread** in the creation wizard.
+
+```bash
+curl -X POST https://platform.ankra.app/api/v1/clusters/proxmox \
+  -H "Authorization: Bearer $ANKRA_API_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "my-cluster",
+    "credential_id": "<proxmox-credential-id>",
+    "ssh_key_credential_id": "<ssh-key-credential-id>",
+    "node": "pve01",
+    "placement_nodes": ["pve01", "pve02", "pve03"],
+    "storage": "local-lvm",
+    "bridge": "vmbr0",
+    "control_plane_count": 3,
+    "control_plane_instance_type": "px-medium",
+    "node_groups": [
+      {"name": "default", "instance_type": "px-medium", "count": 3}
+    ],
+    "distribution": "k3s"
+  }'
+```
+
+### Prerequisites
+
+Every selected host must be online and provide the **same-named resources**, because VMs are cloned locally on each host:
+
+- Active storage with the selected name that allows VM images (e.g., `local-lvm` on every host).
+- An active bridge with the selected name (e.g., `vmbr0` on every host), all attached to the same DHCP network.
+- A cloud-init template with the **same name** on every host. Ankra resolves each host's own template VMID and clones locally - shared-storage cross-node cloning is not used.
+
+Creation is rejected if any selected host is missing one of these. `node` stays required and must be one of the `placement_nodes`; the bastion always runs there.
+
+### How VMs are distributed
+
+Ankra assigns control planes, dedicated etcd members, and each worker group deterministically: the host with the fewest members of the same role or group wins, ties break by fewest total Kubernetes VMs, then by your selected-node order. Every Kubernetes node is labeled with `topology.kubernetes.io/zone=<proxmox-node>` so you can use standard [topology spread constraints](https://kubernetes.io/docs/concepts/scheduling-eviction/topology-spread-constraints/) and pod anti-affinity against the physical failure domain.
+
+Later scaling keeps the policy: adding node groups, scaling them up, and adding control planes all place new VMs on the least-represented eligible host. Restart, resize, upgrade, and delete operations stay pinned to each VM's recorded host.
+
+### Requirements and limitations
+
+- **At least 3 control planes.** Host-spread clusters must be created with 3 or 5 control plane nodes so the Kubernetes control plane keeps quorum when one host fails.
+- **Two hosts give reduced resilience.** With only two hosts, losing the host that carries the control-plane majority still takes the Kubernetes API down. Three or more hosts are recommended.
+- **The bastion is not spread.** It runs on the primary `node`; if that host fails, Ankra's SSH path to the cluster is unavailable until the host returns, while workloads keep running.
+- **No Proxmox HA-manager integration.** Ankra does not enroll VMs in Proxmox HA groups and never live-migrates or recreates VMs on another host after a failure. Resilience comes from Kubernetes replication across hosts, so run workloads with multiple replicas spread over zones.
+
+### Workload guidance
+
+For a workload to survive a host outage, run at least two replicas and spread them across zones:
+
+```yaml
+topologySpreadConstraints:
+  - maxSkew: 1
+    topologyKey: topology.kubernetes.io/zone
+    whenUnsatisfiable: ScheduleAnyway
+    labelSelector:
+      matchLabels:
+        app: my-app
+```
 
 ---
 
@@ -332,7 +401,7 @@ flowchart TB
     Router[Your network's router<br/>DHCP gateway]
     Internet((Internet))
 
-    subgraph Bridge [Existing Proxmox bridge - DHCP]
+    subgraph Bridge [Existing or Ankra-initialized Proxmox bridge - DHCP]
         Bastion[Bastion VM]
         CP[Control plane VMs]
         Workers[Worker VMs]
@@ -349,7 +418,7 @@ flowchart TB
     Router --> Internet
 ```
 
-All VMs are QEMU virtual machines on the Proxmox node you selected, attached to your existing bridge with DHCP addressing. Ankra creates no network infrastructure: routing and internet egress follow your network's own DHCP-provided gateway, and Ankra only pins the default route and DNS on each VM.
+All VMs are QEMU virtual machines on the Proxmox node you selected, attached to the selected bridge with DHCP addressing. Ankra can initialize `vmbr0` during credential setup when no bridge exists, but it does not manage DHCP, routing, or internet egress. Those continue to use your network's DHCP-provided gateway, while Ankra only pins the default route and DNS on each VM.
 
 The bastion VM provides the only SSH access point Ankra uses to reach the cluster nodes - it carries no workload or egress traffic. When an [SSH jumphost](#hybrid-connectivity-ssh-jumphost) is configured, Ankra reaches both the Proxmox API and the bastion through the jumphost (without one, Ankra connects to the bastion directly).
 
