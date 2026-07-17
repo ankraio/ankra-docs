@@ -27,9 +27,10 @@ Before creating a Proxmox VE cluster, you need two credentials:
 
 Your Proxmox environment must also provide:
 
-- **A cloud-init VM template** (e.g., Ubuntu 24.04) with the QEMU guest agent installed, registered on the node you deploy to. Ankra clones this template for every cluster VM and reads each VM's IP address through the guest agent. You can pin a specific template with the `template` option; otherwise the first template on the node is used. See [Creating a cloud-init template](#creating-a-cloud-init-template).
-- **A network bridge.** You can provide an existing active Linux bridge. If none exists, Ankra converts the single active management Ethernet or bond interface (static, DHCP, or `manual`-method) to `vmbr0` and also creates a private NAT bridge `vmbr1` (10.20.0.0/16) — see [Networking](#networking).
-- **Local free disk space or existing VM storage.** If no active storage supports VM images, Ankra enables `images` and `rootdir` on the `local` directory storage, or creates it at `/var/lib/vz`.
+- **A cloud-init VM template.** If no template exists on a node, Ankra creates one automatically during credential setup: it downloads the Ubuntu 24.04 cloud image and registers it as the `ankra-ubuntu-24-04` template. You can also bring your own template and pin it with the `template` option — see [Creating a cloud-init template](#creating-a-cloud-init-template).
+- **A network bridge.** You can provide an existing active Linux bridge. If none exists, Ankra converts the single active management Ethernet or bond interface (static or `manual`-method) to `vmbr0`. Ankra also creates a private NAT network `ankra` (10.20.0.0/16) through Proxmox SDN — see [Networking](#networking).
+- **The `dnsmasq` package** on each node for the private network's DHCP (`apt install dnsmasq && systemctl disable --now dnsmasq`), and `/etc/network/interfaces` must contain `source /etc/network/interfaces.d/*` (present by default on standard Proxmox installs).
+- **Local free disk space or existing VM storage.** If no active storage supports VM images, Ankra enables `images` and `rootdir` on the `local` directory storage, or creates it at `/var/lib/vz`. The `import` content type is enabled on `local` for cloud-image downloads.
 - **API reachability.** The Proxmox API must use HTTPS and be reachable from Ankra either directly or through an [SSH jumphost](#hybrid-connectivity-ssh-jumphost).
 
 ---
@@ -59,7 +60,7 @@ Both options are configured on the credential - see [Proxmox VE Credentials](/pl
     Pick your Proxmox VE API credential and SSH key credential from the dropdowns. You can also create new credentials directly from the wizard.
   </Step>
   <Step title="Choose Placement">
-    Pick **Single host** or **Host spread** placement. With single host, select the **Proxmox node** that hosts all cluster VMs. With host spread, select two or more compatible hosts and Ankra distributes the Kubernetes VMs across them - see [Host-Spread Placement](#host-spread-placement). In both modes, select the **storage** for VM disks and the **network bridge** the VMs attach to. The bridge must provide DHCP.
+    Pick **Single host** or **Host spread** placement. With single host, select the **Proxmox node** that hosts all cluster VMs. With host spread, select two or more compatible hosts and Ankra distributes the Kubernetes VMs across them - see [Host-Spread Placement](#host-spread-placement). In both modes, select the **storage** for VM disks and the **network** the VMs attach to. Pick the `ankra` private network (created during credential setup) unless you operate your own DHCP-served bridge.
   </Step>
   <Step title="Configure Nodes">
     Set your cluster topology:
@@ -97,7 +98,7 @@ curl -X POST https://platform.ankra.app/api/v1/clusters/proxmox \
     "ssh_key_credential_id": "<ssh-key-credential-id>",
     "node": "pve01",
     "storage": "local-lvm",
-    "bridge": "vmbr0",
+    "bridge": "ankra",
     "control_plane_count": 1,
     "control_plane_instance_type": "px-medium",
     "node_groups": [
@@ -118,7 +119,7 @@ curl -X POST https://platform.ankra.app/api/v1/clusters/proxmox \
 | `ssh_key_credential_id` | *required* | SSH key credential ID |
 | `node` | *required* | Proxmox node that hosts the cluster VMs (and the bastion in host-spread mode) |
 | `placement_nodes` | | Two or more Proxmox nodes to spread the Kubernetes VMs across (see [Host-Spread Placement](#host-spread-placement)). Omit for single-host placement |
-| `bridge` | *required* | Network bridge the VMs attach to (must provide DHCP). `vmbr0` is created during credential setup when no bridge exists |
+| `bridge` | *required* | Network the VMs attach to: the `ankra` private SDN network (created during credential setup) or a DHCP-served Linux bridge |
 | `storage` | *auto-picked* | Active Proxmox storage for VM disks. Prefers `local-lvm`, then `local` |
 | `template` | *auto-picked* | Cloud-init template to clone, by VMID or name. Defaults to the first template on the node |
 | `bastion_instance_type` | `px-small` | Instance size for the bastion VM |
@@ -151,26 +152,26 @@ Proxmox VE has no list pricing, so Ankra does not show cost estimates for Proxmo
 
 ### Networking
 
-When you save a Proxmox VE credential, Ankra initializes two bridges when they do not already exist:
+When you save a Proxmox VE credential, Ankra initializes two networks when they do not already exist:
 
-| Bridge | Purpose | Address |
-|--------|---------|---------|
-| `vmbr0` | Management — carries the host's public or provider-assigned IP | Inherited from the physical interface |
-| `vmbr1` | Private compute — isolated from the management interface | 10.20.0.1/16 (NAT to `vmbr0`) |
+| Network | Purpose | Address |
+|---------|---------|---------|
+| `vmbr0` (Linux bridge) | Management — carries the host's public or provider-assigned IP | Inherited from the physical interface |
+| `ankra` (SDN vnet) | Private compute — isolated from the management interface | 10.20.0.1/16 (SNAT to the public interface) |
 
-**`vmbr0` (management bridge).** If no active bridge exists, Ankra converts the single active Ethernet or bond management interface to `vmbr0`. The interface's address, gateway, and addressing method (static, DHCP, or `manual`) move to the bridge; the physical interface becomes its uplink. Inactive bridges must be fixed or removed before connecting. Ankra refuses the conversion when the management interface is ambiguous, has custom options, or another network change is pending.
+**`vmbr0` (management bridge).** If no active bridge exists, Ankra converts the single active Ethernet or bond management interface to `vmbr0`. A statically addressed interface's address and gateway move to the bridge; a `manual`-method interface (common on dedicated-server providers such as Scaleway) converts to an address-less bridge. The physical interface becomes the bridge's uplink. DHCP-managed management interfaces cannot be converted through the Proxmox API — create the bridge manually in that case. Ankra refuses the conversion when the management interface is ambiguous, has custom options, or another network change is pending.
 
-**`vmbr1` (private bridge).** Ankra also creates `vmbr1` as an internal bridge with no physical uplink. It has a fixed RFC-1918 address (10.20.0.1/16) and two `post-up` rules: one that enables IPv4 forwarding on the host, and one that masquerades outbound traffic from the 10.20.0.0/16 subnet through `vmbr0` so VMs can reach the internet. A dnsmasq DHCP server runs on `vmbr1` (range 10.20.1.0–10.20.254.254) so VMs get addresses automatically.
+**`ankra` (private SDN network).** Ankra creates a Proxmox SDN *simple zone* named `ankra` with a vnet of the same name and the subnet 10.20.0.0/16 (gateway 10.20.0.1). The subnet has **SNAT** enabled, so Proxmox masquerades outbound VM traffic through the host's public interface, and **DHCP** served by dnsmasq (range 10.20.1.1–10.20.254.254) backed by the built-in PVE IPAM. Because addresses are registered in the IPAM the moment a VM's NIC attaches, Ankra reads VM addresses without requiring the QEMU guest agent in the image.
 
-**Recommended setup.** Place cluster VMs on `vmbr1`. This keeps Kubernetes traffic off the management bridge and provides internet access through NAT without exposing VM addresses on the public network. Select `vmbr1` as the bridge in the cluster creation wizard.
+**Recommended setup.** Place cluster VMs on the `ankra` network — it appears alongside Linux bridges in the cluster creation wizard. This keeps Kubernetes traffic off the management bridge and gives VMs internet access through NAT without exposing them publicly. Because the VMs are private, attach the Proxmox host itself (or another host with a route into 10.20.0.0/16) as the [SSH jumphost](#hybrid-connectivity-ssh-jumphost) on the credential so Ankra can reach the bastion.
 
 ---
 
 ## Creating a cloud-init template
 
-Ankra clones a cloud-init VM template for every cluster VM. You must create this template on each Proxmox node before provisioning a cluster.
+Ankra clones a cloud-init VM template for every cluster VM. **Nodes without any template get one automatically**: during credential setup Ankra downloads the Ubuntu 24.04 cloud image and registers it as the `ankra-ubuntu-24-04` template. Nodes that already carry a template are left untouched, so a custom template always wins.
 
-The steps below use Ubuntu 24.04. Adjust the image URL and VM ID for your environment.
+Create your own template when you need a different distribution, a hardened image, or pre-installed packages. The steps below use Ubuntu 24.04. Adjust the image URL and VM ID for your environment.
 
 ```bash
 # On the Proxmox node (as root)
@@ -183,7 +184,7 @@ wget https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.i
 qm create 9000 \
   --name ubuntu-2404-cloudinit \
   --memory 2048 --cores 2 \
-  --net0 virtio,bridge=vmbr1 \
+  --net0 virtio,bridge=ankra \
   --ostype l26
 
 # 3. Import the cloud image as the primary disk
@@ -199,7 +200,8 @@ qm set 9000 \
 qm set 9000 --ide2 local-lvm:cloudinit
 qm set 9000 --serial0 socket --vga serial0
 
-# 6. Enable the QEMU guest agent (required for Ankra to read VM IPs)
+# 6. Enable the QEMU guest agent (required for Ankra to read VM IPs on
+#    networks other than the Ankra-managed SDN network)
 qm set 9000 --agent enabled=1
 
 # 7. Convert the VM to a template
@@ -229,7 +231,7 @@ curl -X POST https://platform.ankra.app/api/v1/clusters/proxmox \
     "node": "pve01",
     "placement_nodes": ["pve01", "pve02", "pve03"],
     "storage": "local-lvm",
-    "bridge": "vmbr0",
+    "bridge": "ankra",
     "control_plane_count": 3,
     "control_plane_instance_type": "px-medium",
     "node_groups": [
@@ -307,7 +309,7 @@ curl -X POST https://platform.ankra.app/api/v1/clusters/proxmox \
     "ssh_key_credential_id": "<ssh-key-credential-id>",
     "node": "pve01",
     "storage": "local-lvm",
-    "bridge": "vmbr0",
+    "bridge": "ankra",
     "control_plane_count": 3,
     "control_plane_instance_type": "px-medium",
     "node_groups": [
@@ -457,8 +459,8 @@ flowchart TB
 
     subgraph Host [Proxmox host]
         vmbr0[vmbr0 — management bridge<br/>public / provider IP]
-        vmbr1[vmbr1 — private bridge<br/>10.20.0.0/16 · NAT → vmbr0]
-        subgraph Private [Cluster VMs on vmbr1]
+        ankra[ankra — private SDN network<br/>10.20.0.0/16 · SNAT + DHCP]
+        subgraph Private [Cluster VMs on ankra]
             Bastion[Bastion VM]
             CP[Control plane VMs]
             Workers[Worker VMs]
@@ -471,11 +473,11 @@ flowchart TB
     Bastion -->|SSH jump| CP
     Bastion -->|SSH jump| Workers
     Agent -->|outbound only - NATS| Platform
-    vmbr1 -->|NAT masquerade| vmbr0
+    ankra -->|SNAT| vmbr0
     vmbr0 --> Internet
 ```
 
-All VMs are QEMU virtual machines on the Proxmox node you selected, attached to the selected bridge. Ankra initializes `vmbr0` (management) and `vmbr1` (private, 10.20.0.0/16 with NAT) during credential setup when they do not already exist. Place cluster VMs on `vmbr1` — they receive DHCP addresses from a dnsmasq server on the host and reach the internet via NAT through `vmbr0`.
+All VMs are QEMU virtual machines on the Proxmox node you selected, attached to the selected network. Ankra initializes `vmbr0` (management) and the `ankra` private SDN network (10.20.0.0/16 with SNAT and DHCP) during credential setup when they do not already exist. Place cluster VMs on `ankra` — they receive DHCP addresses from the zone's dnsmasq instance and reach the internet through the host's public interface via SNAT.
 
 The bastion VM provides the only SSH access point Ankra uses to reach the cluster nodes - it carries no workload or egress traffic. When an [SSH jumphost](#hybrid-connectivity-ssh-jumphost) is configured, Ankra reaches both the Proxmox API and the bastion through the jumphost (without one, Ankra connects to the bastion directly).
 
@@ -493,9 +495,9 @@ Proxmox VE clusters do not include a cloud controller manager or load balancer i
 |-------|----------|
 | Proxmox API unreachable from Ankra | Attach an [SSH jumphost](#hybrid-connectivity-ssh-jumphost) to the credential - Ankra tunnels API calls and node SSH through it |
 | TLS certificate errors (self-signed) | Enable the **TLS insecure** toggle (`tls_insecure`) on the Proxmox VE credential |
-| Nodes never get an IP address | The selected bridge must provide DHCP - Ankra does not manage IP allocation. Verify a DHCP server answers on that bridge |
-| Provisioning fails waiting for a VM's IP address | The cloned template must have the **QEMU guest agent** installed and enabled - Ankra reads VM addresses through the agent. Rebuild the template with `qemu-guest-agent` and retry |
-| No VM templates found on the node | Create a cloud-init template on the selected Proxmox node first — see [Creating a cloud-init template](#creating-a-cloud-init-template) |
+| Nodes never get an IP address | On the `ankra` SDN network, verify the zone is healthy (`dnsmasq` installed, zone status *available* under **Datacenter → SDN**). On your own bridge, verify a DHCP server answers there |
+| Provisioning fails waiting for a VM's IP address | On the `ankra` SDN network, addresses come from the PVE IPAM automatically. On other bridges the cloned template must ship the **QEMU guest agent** - rebuild the template with `qemu-guest-agent` and retry |
+| No VM templates found on the node | Re-save the Proxmox credential to run the automatic setup (it creates the `ankra-ubuntu-24-04` template), or create one yourself — see [Creating a cloud-init template](#creating-a-cloud-init-template) |
 | Cluster stuck in provisioning | Check the API token privileges (see [Proxmox VE Credentials](/platform/credentials/proxmox)) and free capacity on the selected node and storage |
 | VM creation fails with a permission error | The API token is missing privileges (e.g., `VM.Allocate`, `Datastore.AllocateSpace`) on the selected node, storage, or bridge |
 | LoadBalancer service stuck in `Pending` | Proxmox clusters have no cloud controller manager - use `NodePort`, ingress, or your own load balancer |
