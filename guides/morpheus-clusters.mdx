@@ -172,7 +172,112 @@ By default kubeadm runs etcd **stacked** on the control plane nodes. For larger 
 
 ## Node Groups
 
-Node groups let you organize worker nodes into logical groups with independent service plans, counts, labels, and taints. Manage node groups from **Settings** > **Nodes** in the dashboard, or via the API.
+Node groups let you organize worker nodes into logical groups with independent service plans, counts, labels, and taints. Each group can be scaled, re-planned, and configured independently. During the closed beta, node groups are managed from the portal or the API - the `ankra` CLI does not yet include Morpheus commands.
+
+### Via the Platform UI
+
+Navigate to cluster **Settings** > **Nodes** to manage node groups. From this tab you can:
+
+- View all node groups with their service plan, count, labels, and taints
+- Add new node groups with a name, service plan, count, and optional labels/taints
+- Scale individual groups up or down (0–100 nodes)
+- Upgrade the service plan (upgrade only - see [Service Plan Changes](#service-plan-changes))
+- Edit labels and taints per group
+- Delete a node group and all its instances
+
+### List Node Groups
+
+```bash
+curl https://platform.ankra.app/api/v1/clusters/morpheus/<cluster_id>/node-groups \
+  -H "Authorization: Bearer $ANKRA_API_TOKEN"
+```
+
+Response:
+```json
+{
+  "node_groups": [
+    {
+      "name": "default",
+      "instance_type": "<service-plan-name>",
+      "count": 2,
+      "min": 0,
+      "max": 100,
+      "labels": {},
+      "taints": []
+    }
+  ]
+}
+```
+
+### Add a Node Group
+
+New groups are sized by the numeric service plan ID from your appliance, the same as `node_groups` at creation time:
+
+```bash
+curl -X POST https://platform.ankra.app/api/v1/clusters/morpheus/<cluster_id>/node-groups \
+  -H "Authorization: Bearer $ANKRA_API_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "workers-large",
+    "plan_id": 103,
+    "count": 2,
+    "labels": {"tier": "backend"},
+    "taints": [{"key": "dedicated", "value": "backend", "effect": "NoSchedule"}]
+  }'
+```
+
+### Scale a Node Group
+
+```bash
+curl -X PUT https://platform.ankra.app/api/v1/clusters/morpheus/<cluster_id>/node-groups/default/scale \
+  -H "Authorization: Bearer $ANKRA_API_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"count": 4}'
+```
+
+Node groups can be scaled to 0 nodes. This keeps the group definition but removes all instances.
+
+### Service Plan Changes
+
+<Warning>
+Service plan upgrades are one-way - you cannot downgrade a node group to a smaller plan. To use a smaller plan, create a new node group with the desired plan and delete the old one.
+</Warning>
+
+```bash
+curl -X PUT https://platform.ankra.app/api/v1/clusters/morpheus/<cluster_id>/node-groups/default/instance-type \
+  -H "Authorization: Bearer $ANKRA_API_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"instance_type": "<service-plan-name>"}'
+```
+
+Each node is powered off, resized, and powered back on. This causes brief downtime for workloads on those nodes.
+
+### Update Labels and Taints
+
+```bash
+# Update labels
+curl -X PUT https://platform.ankra.app/api/v1/clusters/morpheus/<cluster_id>/node-groups/default/labels \
+  -H "Authorization: Bearer $ANKRA_API_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"labels": {"env": "production", "tier": "backend"}}'
+
+# Update taints
+curl -X PUT https://platform.ankra.app/api/v1/clusters/morpheus/<cluster_id>/node-groups/default/taints \
+  -H "Authorization: Bearer $ANKRA_API_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"taints": [{"key": "dedicated", "value": "ml", "effect": "NoSchedule"}]}'
+```
+
+### Delete a Node Group
+
+```bash
+curl -X DELETE https://platform.ankra.app/api/v1/clusters/morpheus/<cluster_id>/node-groups/workers-large \
+  -H "Authorization: Bearer $ANKRA_API_TOKEN"
+```
+
+<Warning>
+Deleting a node group removes all its instances. Workloads running on those nodes will be evicted.
+</Warning>
 
 ### Node Group API Reference
 
@@ -185,8 +290,6 @@ Node groups let you organize worker nodes into logical groups with independent s
 | `/api/v1/clusters/morpheus/{id}/node-groups/{name}/labels` | PUT | Update labels |
 | `/api/v1/clusters/morpheus/{id}/node-groups/{name}/taints` | PUT | Update taints |
 | `/api/v1/clusters/morpheus/{id}/node-groups/{name}` | DELETE | Delete a node group |
-
-For detailed usage examples, see [Hetzner Node Groups](/guides/hetzner-clusters#node-groups) - the API is identical across all providers.
 
 ---
 
@@ -258,6 +361,26 @@ curl -X POST https://platform.ankra.app/api/v1/clusters/morpheus/<cluster_id>/up
 ```
 
 For a kubeadm cluster, use a plain upstream tag instead (for example `"target_version": "v1.31.0"`).
+
+---
+
+## Stopping and Starting a Cluster
+
+You can stop a Morpheus cluster to release its compute (the cluster instances provisioned through your appliance) while keeping its configuration, stacks, and credentials in Ankra. Starting the cluster re-provisions the instances and reconciles the cluster back to a running state. This is useful for freeing capacity when a cluster is not needed.
+
+When starting, use `scope=control_plane` to bring up only the control plane first (for example to inspect or repair it), or `scope=all` (the default) to provision the whole cluster.
+
+```bash
+curl -X POST https://platform.ankra.app/api/v1/clusters/morpheus/<cluster_id>/stop \
+  -H "Authorization: Bearer $ANKRA_API_TOKEN"
+
+curl -X POST "https://platform.ankra.app/api/v1/clusters/morpheus/<cluster_id>/start?scope=all" \
+  -H "Authorization: Bearer $ANKRA_API_TOKEN"
+```
+
+<Note>
+Stop and start are background operations. A start returns `409` if a stop or terminate operation is still running. The cluster's saved topology is preserved while stopped and re-provisioned on the next start. `ankra` CLI support for Morpheus stop/start is rolling out - use the portal or API during the closed beta.
+</Note>
 
 ---
 

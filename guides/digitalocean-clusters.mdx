@@ -215,7 +215,153 @@ The equivalent CLI flags are `--distribution kubeadm`, `--etcd-topology external
 
 ## Node Groups
 
-Node groups let you organize worker nodes into logical groups with independent droplet sizes, counts, labels, and taints. Manage node groups from **Settings** > **Nodes** in the dashboard, or via the API.
+Node groups let you organize worker nodes into logical groups with independent droplet sizes, counts, labels, and taints. Each group can be scaled, resized, and configured independently.
+
+### Via the Platform UI
+
+Navigate to cluster **Settings** > **Nodes** to manage node groups. From this tab you can:
+
+- View all node groups with their droplet size, count, labels, and taints
+- Add new node groups with a name, droplet size, count, and optional labels/taints
+- Scale individual groups up or down (0–100 nodes)
+- Upgrade the droplet size (upgrade only - see [Droplet Size Changes](#droplet-size-changes))
+- Edit labels and taints per group
+- Delete a node group and all its nodes
+
+### List Node Groups
+
+<CodeGroup>
+
+```bash CLI
+ankra cluster digitalocean node-group list <cluster_id>
+```
+
+```bash cURL
+curl https://platform.ankra.app/api/v1/clusters/digitalocean/<cluster_id>/node-groups \
+  -H "Authorization: Bearer $ANKRA_API_TOKEN"
+```
+
+</CodeGroup>
+
+Response:
+```json
+{
+  "node_groups": [
+    {
+      "name": "default",
+      "instance_type": "s-2vcpu-4gb",
+      "count": 2,
+      "min": 0,
+      "max": 100,
+      "labels": {},
+      "taints": []
+    }
+  ]
+}
+```
+
+### Add a Node Group
+
+<CodeGroup>
+
+```bash CLI
+ankra cluster digitalocean node-group add <cluster_id> \
+  --name workers-large \
+  --instance-type s-4vcpu-8gb \
+  --count 2
+```
+
+```bash cURL
+curl -X POST https://platform.ankra.app/api/v1/clusters/digitalocean/<cluster_id>/node-groups \
+  -H "Authorization: Bearer $ANKRA_API_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "workers-large",
+    "instance_type": "s-4vcpu-8gb",
+    "count": 2,
+    "labels": {"tier": "backend"},
+    "taints": [{"key": "dedicated", "value": "backend", "effect": "NoSchedule"}]
+  }'
+```
+
+</CodeGroup>
+
+### Scale a Node Group
+
+<CodeGroup>
+
+```bash CLI
+ankra cluster digitalocean node-group scale <cluster_id> default 4
+```
+
+```bash cURL
+curl -X PUT https://platform.ankra.app/api/v1/clusters/digitalocean/<cluster_id>/node-groups/default/scale \
+  -H "Authorization: Bearer $ANKRA_API_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"count": 4}'
+```
+
+</CodeGroup>
+
+Node groups can be scaled to 0 nodes. This keeps the group definition but removes all droplets.
+
+### Droplet Size Changes
+
+<Warning>
+Droplet size upgrades are one-way - you cannot downgrade a node group to a smaller size. To use a smaller size, create a new node group with the desired size and delete the old one.
+</Warning>
+
+<CodeGroup>
+
+```bash CLI
+ankra cluster digitalocean node-group upgrade <cluster_id> default s-4vcpu-8gb
+```
+
+```bash cURL
+curl -X PUT https://platform.ankra.app/api/v1/clusters/digitalocean/<cluster_id>/node-groups/default/instance-type \
+  -H "Authorization: Bearer $ANKRA_API_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"instance_type": "s-4vcpu-8gb"}'
+```
+
+</CodeGroup>
+
+Each node is powered off, resized, and powered back on. This causes brief downtime for workloads on those nodes.
+
+### Update Labels and Taints
+
+```bash
+# Update labels
+curl -X PUT https://platform.ankra.app/api/v1/clusters/digitalocean/<cluster_id>/node-groups/default/labels \
+  -H "Authorization: Bearer $ANKRA_API_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"labels": {"env": "production", "tier": "backend"}}'
+
+# Update taints
+curl -X PUT https://platform.ankra.app/api/v1/clusters/digitalocean/<cluster_id>/node-groups/default/taints \
+  -H "Authorization: Bearer $ANKRA_API_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"taints": [{"key": "dedicated", "value": "ml", "effect": "NoSchedule"}]}'
+```
+
+### Delete a Node Group
+
+<CodeGroup>
+
+```bash CLI
+ankra cluster digitalocean node-group delete <cluster_id> workers-large
+```
+
+```bash cURL
+curl -X DELETE https://platform.ankra.app/api/v1/clusters/digitalocean/<cluster_id>/node-groups/workers-large \
+  -H "Authorization: Bearer $ANKRA_API_TOKEN"
+```
+
+</CodeGroup>
+
+<Warning>
+Deleting a node group removes all its droplets. Workloads running on those nodes will be evicted.
+</Warning>
 
 ### Node Group API Reference
 
@@ -228,8 +374,6 @@ Node groups let you organize worker nodes into logical groups with independent d
 | `/api/v1/clusters/digitalocean/{id}/node-groups/{name}/labels` | PUT | Update labels |
 | `/api/v1/clusters/digitalocean/{id}/node-groups/{name}/taints` | PUT | Update taints |
 | `/api/v1/clusters/digitalocean/{id}/node-groups/{name}` | DELETE | Delete a node group |
-
-For detailed usage examples, see [Hetzner Node Groups](/guides/hetzner-clusters#node-groups) - the API is identical across all providers.
 
 ---
 
@@ -356,6 +500,36 @@ For a kubeadm cluster, use a plain upstream tag instead:
 ```bash
 ankra cluster digitalocean upgrade <cluster_id> v1.31.0
 ```
+
+---
+
+## Stopping and Starting a Cluster
+
+You can stop a DigitalOcean cluster to release its compute (node droplets, the bastion, and the VPC NAT gateway) while keeping its configuration, networking definition, and SSH keys. Starting the cluster re-provisions the compute and reconciles it back to a running state. This is useful for pausing non-production clusters to save cost.
+
+When starting, use `--scope control_plane` to bring up only the control plane first (for example to inspect or repair it), or `--scope all` (the default) to provision the whole cluster.
+
+<CodeGroup>
+
+```bash CLI
+ankra cluster digitalocean stop <cluster_id>
+ankra cluster digitalocean start <cluster_id>                       # scope defaults to "all"
+ankra cluster digitalocean start <cluster_id> --scope control_plane # control plane only
+```
+
+```bash cURL
+curl -X POST https://platform.ankra.app/api/v1/clusters/digitalocean/<cluster_id>/stop \
+  -H "Authorization: Bearer $ANKRA_API_TOKEN"
+
+curl -X POST "https://platform.ankra.app/api/v1/clusters/digitalocean/<cluster_id>/start?scope=all" \
+  -H "Authorization: Bearer $ANKRA_API_TOKEN"
+```
+
+</CodeGroup>
+
+<Note>
+Stop and start are background operations. A start returns `409` if a stop or terminate operation is still running. The cluster's saved topology is preserved while stopped - `ankra cluster digitalocean nodes list` includes the soft-deleted entries that are re-provisioned on the next start.
+</Note>
 
 ---
 

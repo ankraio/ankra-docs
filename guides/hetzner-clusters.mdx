@@ -404,26 +404,39 @@ Like node-group writes, this endpoint answers `202 Accepted` and applies the res
 
 ---
 
-## Scaling Up After Termination
+## Stopping and Starting a Cluster
 
-When a cluster's Kubernetes has been [deleted](#delete-kubernetes), all infrastructure is destroyed but the cluster record remains in Ankra. You can bring the cluster back online by adding a new node group.
+You can stop a Hetzner cluster to release its compute (servers, networks, and SSH keys in Hetzner Cloud) while keeping its configuration, stacks, and credentials in Ankra. Starting the cluster re-provisions the compute and reconciles it back to a running state. This is useful for pausing non-production clusters to save cost.
 
-### How It Works
+In the dashboard, stopping is the **Delete Kubernetes** action in **Settings** → **General** → **Danger Zone** - the cluster moves to a **stopped** state (see [Delete Kubernetes](#delete-kubernetes)).
+
+When starting, use `scope=control_plane` to bring up only the control plane first (for example to inspect or repair it), or `scope=all` (the default) to provision the whole cluster.
+
+```bash
+curl -X POST https://platform.ankra.app/api/v1/clusters/hetzner/<cluster_id>/stop \
+  -H "Authorization: Bearer $ANKRA_API_TOKEN"
+
+curl -X POST "https://platform.ankra.app/api/v1/clusters/hetzner/<cluster_id>/start?scope=all" \
+  -H "Authorization: Bearer $ANKRA_API_TOKEN"
+```
+
+<Note>
+Stop and start are background operations. A start returns `409` if a stop or terminate operation is still running. The cluster's saved topology is preserved while stopped - `ankra cluster hetzner nodes list` includes the soft-deleted entries that are re-provisioned on the next start. `ankra` CLI support for Hetzner stop/start is rolling out - use the API until the commands appear in the [CLI reference](/reference/cli/cluster).
+</Note>
+
+### What Happens on Start
 
 <Steps>
-  <Step title="Add a Node Group">
-    Use the UI, CLI, or API to add a node group to the terminated cluster (same as adding to a running cluster).
-  </Step>
   <Step title="Ankra Restores Infrastructure">
-    Ankra detects the cluster is stopped and automatically restores the full control plane:
+    Ankra provisions fresh infrastructure for the stopped cluster:
     - Private network and subnet
     - SSH keys
     - Bastion host
-    - Control plane servers (same count and type as before termination)
+    - Control plane servers (same count and type as before the stop)
     - Kubernetes (k3s) installation on all control plane nodes
   </Step>
   <Step title="Workers Join the Cluster">
-    The new node group workers are created and join the restored Kubernetes cluster. The worker k8s jobs wait for the first control plane to be ready before attempting to join.
+    Worker servers are created and join the restored Kubernetes cluster. The worker k8s jobs wait for the first control plane to be ready before attempting to join.
   </Step>
   <Step title="Stacks Reconcile">
     Once the Ankra Agent is deployed and connected, stacks and addons configured in Ankra begin reconciling automatically.
@@ -431,11 +444,11 @@ When a cluster's Kubernetes has been [deleted](#delete-kubernetes), all infrastr
 </Steps>
 
 <Note>
-The restored cluster gets entirely fresh infrastructure - new Hetzner servers, new IP addresses, new k3s installation. Data from before the termination is not preserved on the servers. Persistent data stored in Hetzner Volumes (via the CSI driver) is preserved if the volumes were not deleted.
+The started cluster gets entirely fresh infrastructure - new Hetzner servers, new IP addresses, new k3s installation. Data from before the stop is not preserved on the servers. Persistent data stored in Hetzner Volumes (via the CSI driver) is preserved if the volumes were not deleted.
 </Note>
 
 <Note>
-Only the control plane configuration from before termination is restored. Previously existing worker node groups are **not** restored - the node group you add is the only worker pool. Add additional node groups as needed.
+Adding a node group to a stopped cluster also brings it back online: Ankra restores the control plane (same count and type as before the stop) and joins the new group's workers. On that path, previously existing worker node groups are **not** restored - the node group you add is the only worker pool. Use **start** to re-provision the full saved topology instead.
 </Note>
 
 ---
@@ -535,7 +548,7 @@ Response:
 
 ### Delete Kubernetes
 
-Deleting the Kubernetes layer destroys all Hetzner infrastructure (servers, networks, SSH keys) but keeps the cluster registered in Ankra. The cluster moves to a **stopped** state and can be brought back online by adding a node group.
+Deleting the Kubernetes layer destroys all Hetzner infrastructure (servers, networks, SSH keys) but keeps the cluster registered in Ankra. The cluster moves to a **stopped** state and can be brought back online by [starting it](#stopping-and-starting-a-cluster) or adding a node group.
 
 This is useful for cost savings when a cluster is not needed temporarily - you stop paying for Hetzner servers while preserving the cluster configuration, credentials, and history in Ankra.
 

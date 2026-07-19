@@ -1,14 +1,9 @@
 ---
 title: Proxmox VE Clusters
 description: Create, manage, and scale Kubernetes clusters on your own Proxmox VE infrastructure with Ankra.
-tag: "Closed Beta"
 ---
 
 Ankra supports provisioning fully managed Kubernetes clusters on [Proxmox VE](https://www.proxmox.com/en/proxmox-virtual-environment). You bring your own Proxmox nodes and can use existing storage and network bridges. Ankra fills in safe defaults when they are absent, creates the VMs, installs Kubernetes, and manages the full cluster lifecycle: node groups, scaling, upgrades, and deprovisioning.
-
-<Warning>
-**Closed beta.** Proxmox VE cluster provisioning is in closed beta. The workflow is stable but the surface may still change, and it is enabled per organisation on request. [Contact support](/platform/support) to have it turned on for your organisation.
-</Warning>
 
 ---
 
@@ -85,7 +80,7 @@ Both options are configured on the credential - see [Proxmox VE Credentials](/pl
 ### Via the API
 
 <Note>
-Proxmox VE clusters are managed from the **portal or API** during the closed beta - the `ankra` CLI does not yet include Proxmox commands. Create the [Proxmox VE credential](/platform/credentials/proxmox) and [SSH key credential](/platform/credentials/ssh-key) from the portal first.
+Create the [Proxmox VE credential](/platform/credentials/proxmox) and [SSH key credential](/platform/credentials/ssh-key) from the portal first. Prefer the terminal? The `ankra` CLI covers the same lifecycle - see [`ankra cluster proxmox`](/reference/cli/cluster#ankra-cluster-proxmox) for create, stop, start, nodes, hosts, storages, and templates.
 </Note>
 
 ```bash
@@ -326,7 +321,112 @@ curl -X POST https://platform.ankra.app/api/v1/clusters/proxmox \
 
 ## Node Groups
 
-Node groups let you organize worker nodes into logical groups with independent instance sizes, counts, labels, and taints. Manage node groups from **Settings** > **Nodes** in the dashboard, or via the API.
+Node groups let you organize worker nodes into logical groups with independent instance sizes, counts, labels, and taints. Each group can be scaled, resized, and configured independently. Node groups are managed from the portal or the API.
+
+### Via the Platform UI
+
+Navigate to cluster **Settings** > **Nodes** to manage node groups. From this tab you can:
+
+- View all node groups with their instance size, count, labels, and taints
+- Add new node groups with a name, instance size, count, and optional labels/taints
+- Scale individual groups up or down (0–100 nodes)
+- Upgrade the instance size (upgrade only - see [Instance Size Changes](#instance-size-changes))
+- Edit labels and taints per group
+- Delete a node group and all its VMs
+
+### List Node Groups
+
+```bash
+curl https://platform.ankra.app/api/v1/clusters/proxmox/<cluster_id>/node-groups \
+  -H "Authorization: Bearer $ANKRA_API_TOKEN"
+```
+
+Response:
+```json
+{
+  "node_groups": [
+    {
+      "name": "default",
+      "instance_type": "px-medium",
+      "count": 2,
+      "min": 0,
+      "max": 100,
+      "labels": {},
+      "taints": []
+    }
+  ]
+}
+```
+
+### Add a Node Group
+
+```bash
+curl -X POST https://platform.ankra.app/api/v1/clusters/proxmox/<cluster_id>/node-groups \
+  -H "Authorization: Bearer $ANKRA_API_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "workers-large",
+    "instance_type": "px-large",
+    "count": 2,
+    "labels": {"tier": "backend"},
+    "taints": [{"key": "dedicated", "value": "backend", "effect": "NoSchedule"}]
+  }'
+```
+
+On [host-spread](#host-spread-placement) clusters, new VMs are placed on the least-represented eligible host automatically.
+
+### Scale a Node Group
+
+```bash
+curl -X PUT https://platform.ankra.app/api/v1/clusters/proxmox/<cluster_id>/node-groups/default/scale \
+  -H "Authorization: Bearer $ANKRA_API_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"count": 4}'
+```
+
+Node groups can be scaled to 0 nodes. This keeps the group definition but removes all VMs.
+
+### Instance Size Changes
+
+<Warning>
+Instance size upgrades are one-way - you cannot downgrade a node group to a smaller size. To use a smaller size, create a new node group with the desired size and delete the old one.
+</Warning>
+
+```bash
+curl -X PUT https://platform.ankra.app/api/v1/clusters/proxmox/<cluster_id>/node-groups/default/instance-type \
+  -H "Authorization: Bearer $ANKRA_API_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"instance_type": "px-large"}'
+```
+
+Each node is powered off, resized, and powered back on. This causes brief downtime for workloads on those nodes.
+
+### Update Labels and Taints
+
+```bash
+# Update labels
+curl -X PUT https://platform.ankra.app/api/v1/clusters/proxmox/<cluster_id>/node-groups/default/labels \
+  -H "Authorization: Bearer $ANKRA_API_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"labels": {"env": "production", "tier": "backend"}}'
+
+# Update taints
+curl -X PUT https://platform.ankra.app/api/v1/clusters/proxmox/<cluster_id>/node-groups/default/taints \
+  -H "Authorization: Bearer $ANKRA_API_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"taints": [{"key": "dedicated", "value": "ml", "effect": "NoSchedule"}]}'
+```
+
+### Delete a Node Group
+
+```bash
+curl -X DELETE https://platform.ankra.app/api/v1/clusters/proxmox/<cluster_id>/node-groups/workers-large \
+  -H "Authorization: Bearer $ANKRA_API_TOKEN"
+```
+
+<Warning>
+Deleting a node group removes all its VMs. Workloads running on those nodes will be evicted.
+</Warning>
 
 ### Node Group API Reference
 
@@ -339,8 +439,6 @@ Node groups let you organize worker nodes into logical groups with independent i
 | `/api/v1/clusters/proxmox/{id}/node-groups/{name}/labels` | PUT | Update labels |
 | `/api/v1/clusters/proxmox/{id}/node-groups/{name}/taints` | PUT | Update taints |
 | `/api/v1/clusters/proxmox/{id}/node-groups/{name}` | DELETE | Delete a node group |
-
-For detailed usage examples, see [Hetzner Node Groups](/guides/hetzner-clusters#node-groups) - the API is identical across all providers.
 
 ---
 
@@ -421,6 +519,26 @@ curl -X POST https://platform.ankra.app/api/v1/clusters/proxmox/<cluster_id>/upg
 ```
 
 For a kubeadm cluster, use a plain upstream tag instead (for example `"target_version": "v1.31.0"`).
+
+---
+
+## Stopping and Starting a Cluster
+
+You can stop a Proxmox VE cluster to release its compute (the cluster VMs on your Proxmox nodes) while keeping its configuration, stacks, and credentials in Ankra. Starting the cluster re-provisions the VMs and reconciles the cluster back to a running state. This is useful for freeing host capacity when a cluster is not needed.
+
+When starting, use `scope=control_plane` to bring up only the control plane first (for example to inspect or repair it), or `scope=all` (the default) to provision the whole cluster.
+
+```bash
+curl -X POST https://platform.ankra.app/api/v1/clusters/proxmox/<cluster_id>/stop \
+  -H "Authorization: Bearer $ANKRA_API_TOKEN"
+
+curl -X POST "https://platform.ankra.app/api/v1/clusters/proxmox/<cluster_id>/start?scope=all" \
+  -H "Authorization: Bearer $ANKRA_API_TOKEN"
+```
+
+<Note>
+Stop and start are background operations. A start returns `409` if a stop or terminate operation is still running. The cluster's saved topology is preserved while stopped and re-provisioned on the next start. From the terminal, use `ankra cluster proxmox stop` and `ankra cluster proxmox start`.
+</Note>
 
 ---
 
