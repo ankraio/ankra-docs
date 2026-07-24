@@ -1,736 +1,109 @@
 ---
-title: GitHub Actions CI/CD Pipeline
-description: Automate deployments by connecting your GitHub repositories to Ankra GitOps
+title: Application CI/CD with GitHub Actions
+description: Build application images and publish them to your private Ankra registry
 ---
+
+Ankra Applications generates a GitHub Actions pipeline that builds your source repository, scans the image, and publishes it to your organisation's private registry. The generated Kubernetes manifests already reference that image and the matching pull secret.
 
 <Note>
-This guide shows you how to build a CI/CD pipeline with GitHub Actions that automatically deploys your applications to Kubernetes when you push code. Your workflow builds container images and updates the GitOps repository. Ankra handles the rest.
+The Ankra registry is private. Ankra provisions its project, GitHub Actions credentials, and Kubernetes pull credentials automatically.
 </Note>
 
----
-
-## Architecture Overview
+## How it works
 
 ```mermaid
-flowchart TB
-    subgraph AppRepos [Application Repositories]
-        ServiceA[Service A]
-        ServiceB[Service B]
-        ServiceC[Service C]
-    end
-
-    subgraph CI [GitHub Actions Workflow]
-        Build[Build and Push Image]
-        Update[Update GitOps Repo]
-    end
-
-    GitOps[(GitOps Repo)]
-
-    subgraph Ankra [Ankra Platform]
-        StackBuilder[Stack Builder]
-        Engine[GitOps Engine]
-    end
-
-    Agent[Ankra Agent]
-    Cluster[Your Cluster]
-
-    ServiceA --> Build
-    ServiceB --> Build
-    ServiceC --> Build
-    Build --> Update
-    Update -->|commit image tag| GitOps
-    StackBuilder --> Engine
-    Engine -->|sync| GitOps
-    Engine --> Agent
-    Agent --> Cluster
+flowchart LR
+    Repo[Application repository] -->|connect| Ankra
+    Ankra -->|open setup PR| PR[Setup pull request]
+    PR -->|merge| Actions[GitHub Actions]
+    Actions -->|build and scan| Image[Container image]
+    Image -->|push| Registry[Private Ankra registry]
+    Registry -->|pull| Cluster[Kubernetes cluster]
 ```
 
-The flow works like this:
-
-1. **You push code** to your GitHub application repository
-2. **GitHub Actions builds and pushes** a container image to your registry
-3. **GitHub Actions updates the GitOps repo** with the new image tag
-4. **Ankra detects the change** and triggers a deployment
-5. **Ankra Agent deploys** the updated manifest to your cluster
-
----
-
-## What You'll Build
-
-A complete CI/CD pipeline with:
-
-| Component | Purpose |
-|-----------|---------|
-| **Application Repo** | Your app code with Dockerfile and `.github/workflows/deploy.yml` |
-| **GitOps Repo** | Kubernetes manifests managed by Ankra |
-| **Container Registry** | Stores your built images (GHCR, GCR, ECR, Docker Hub, etc.) |
-| **GitHub Actions** | Builds images and updates the GitOps repo |
-
----
-
-## Prerequisites
-
-- A cluster imported into Ankra with the agent connected
-- A container registry (GitHub Container Registry, Google Artifact Registry, AWS ECR, Docker Hub, etc.)
-- An application repository on GitHub with a Dockerfile
-
----
-
-## Step 1: Connect a GitHub Repository
-
-First, connect a GitHub repository to your cluster. This enables GitOps and installs the necessary components on your cluster.
-
 <Steps>
-  <Step title="Navigate to Integration Settings">
-    Go to your cluster → **Settings** → **Integration** tab.
+  <Step title="Connect the repository">
+    Create an Application from a GitHub repository. Ankra analyses the source and prepares the missing Dockerfile, Kubernetes manifests, and workflow.
   </Step>
-  <Step title="Add a GitHub Credential">
-    If you haven't connected GitHub yet, you'll see a prompt to connect a repository.
-
-    Select an existing GitHub credential from the dropdown, or click to add a new one. This authorizes Ankra to access your repositories.
+  <Step title="Review the setup pull request">
+    The pull request adds `.github/workflows/build-and-publish.yml` and manifests under `.ankra/manifests/`. Monorepos get one scoped workflow per application.
   </Step>
-  <Step title="Select a Repository">
-    Choose the repository that will store your GitOps configuration. This can be an existing repo or a new one.
-
-    <Tip>
-    We recommend creating a dedicated repository (e.g., `infrastructure-gitops`) to keep your cluster configurations separate from application code.
-    </Tip>
+  <Step title="Merge and build">
+    Merging the pull request runs the workflow. It tests the source, builds the image, pushes it to your organisation's project on `registry.ankra.cloud`, and scans it with Trivy.
   </Step>
-  <Step title="Confirm Installation">
-    When you connect for the first time, Ankra will install:
-    - **ArgoCD** - GitOps continuous delivery
-    - **Ankra Stack Builder** - Declarative infrastructure management
-    - **Ankra Resource Engine** - Intelligent resource orchestration
-    - **GitOps Monitoring** - Continuous deployment from your repository
-
-    Click **Install ArgoCD & Connect** to proceed.
+  <Step title="Deploy">
+    Deploy the Application to a cluster. Ankra checks that an image was published before starting the deployment.
   </Step>
 </Steps>
 
-Once connected, Ankra will create the repository structure and begin syncing your cluster configuration.
+## Registry authentication
 
----
+Ankra installs these encrypted GitHub Actions secrets on the application repository:
 
-## Step 2: Create a Stack for Your Application
+| Secret | Purpose |
+|--------|---------|
+| `ANKRA_REGISTRY_USERNAME` | Push robot username for the organisation registry project |
+| `ANKRA_REGISTRY_PASSWORD` | Push robot password |
 
-In Ankra, manifests are organized into **Stacks**. A Stack is a collection of related Kubernetes resources that are deployed together.
+The generated workflow uses the secrets with `docker/login-action`. It does not use `GITHUB_TOKEN` package permissions and does not publish a public package.
 
-<Steps>
-  <Step title="Open the Stacks Page">
-    Navigate to your cluster → **Stacks**.
-  </Step>
-  <Step title="Create a New Stack">
-    Click **Create** to open the Stack Builder.
-  </Step>
-  <Step title="Name Your Stack">
-    Give your stack a descriptive name, like `backend-services` or `production-apps`.
-  </Step>
-  <Step title="Add a Manifest Using AI">
-    Press `⌘+J` (or `Ctrl+J`) to open the AI Assistant and describe your deployment:
-
-    ```
-    Create a deployment manifest for my backend service:
-    - Image: ghcr.io/my-org/backend:latest
-    - Namespace: production
-    - 2 replicas
-    - Port 8080
-    - Health check on /health
-    - 256Mi memory, 100m CPU requests
-    ```
-
-    The AI will provide a manifest you can add to your stack.
-  </Step>
-  <Step title="Create the Stack">
-    Review your configuration in the Builder tab, then click **Create Stack**.
-
-    Ankra will commit the manifests to your GitOps repository and deploy them to your cluster.
-  </Step>
-</Steps>
-
-<Tip>
-You can view your stack's manifests in the GitOps repository under `clusters/{cluster-name}/manifests/`.
-</Tip>
-
----
-
-## Step 3: Set Up CI Deploy Key
-
-Your GitHub Actions workflow needs write access to the GitOps repository to update image tags when new builds complete.
-
-<Steps>
-  <Step title="Generate an SSH Key">
-    On your local machine, generate a deploy key:
-
-    ```bash
-    ssh-keygen -t ed25519 -C "ci-deploy-key" -f deploy_key -N ""
-    ```
-
-    This creates `deploy_key` (private) and `deploy_key.pub` (public).
-  </Step>
-  <Step title="Add Public Key to GitOps Repo">
-    Go to your GitOps repository on GitHub → **Settings** → **Deploy keys** → **Add deploy key**.
-
-    Paste the contents of `deploy_key.pub` and check **Allow write access**.
-  </Step>
-  <Step title="Add Private Key to App Repo">
-    Go to your application repository → **Settings** → **Secrets and variables** → **Actions**.
-
-    Create a new repository secret called `GITOPS_DEPLOY_KEY` with the contents of `deploy_key`.
-  </Step>
-</Steps>
-
----
-
-## Step 4: Create the GitHub Actions Workflow
-
-Add a GitHub Actions workflow to your application repository that builds your container and updates the GitOps repo.
-
-<Steps>
-  <Step title="Create the Workflow File">
-    In your application repository, create `.github/workflows/deploy.yml`.
-  </Step>
-  <Step title="Use the AI to Generate the Workflow">
-    Open the AI Assistant (`⌘+J`) and describe your pipeline:
-
-    ```
-    Generate a GitHub Actions workflow that:
-    - Triggers on push to main branch
-    - Builds a Docker image from my Dockerfile
-    - Pushes to GitHub Container Registry
-    - Tags with the git SHA
-    - Updates my GitOps repo at github.com/my-org/infrastructure-gitops
-    - Updates the image tag in clusters/my-cluster/manifests/backend-deployment.yaml
-    ```
-
-    The AI will generate a complete workflow tailored to your setup.
-  </Step>
-  <Step title="Add Registry Secrets">
-    Add these secrets to your application repository under **Settings** → **Secrets and variables** → **Actions**:
-
-    | Secret | Description |
-    |--------|-------------|
-    | `GITOPS_DEPLOY_KEY` | The SSH private key from Step 3 |
-
-    <Tip>
-    GitHub Container Registry (GHCR) is available by default in GitHub Actions via the `GITHUB_TOKEN` - no extra registry secrets needed. For external registries (GCR, ECR, Docker Hub), add the appropriate credentials as secrets.
-    </Tip>
-  </Step>
-</Steps>
-
-<Accordion title="Example Workflow: GitHub Container Registry">
-Here's a workflow using GitHub's built-in container registry. Use the AI to customize it for your setup:
+For Kubernetes pulls, Ankra creates an `ankra-registry-pull` Docker registry secret in each managed namespace. Generated Deployments include:
 
 ```yaml
-name: Build and Deploy
-
-on:
-  push:
-    branches: [main]
-    paths:
-      - 'src/**'
-      - 'Dockerfile'
-  workflow_dispatch:
-
-env:
-  IMAGE_NAME: ghcr.io/${{ github.repository }}/backend
-  GITOPS_REPO: git@github.com:my-org/infrastructure-gitops.git
-  MANIFEST_PATH: clusters/my-cluster/manifests/backend-deployment.yaml
-
-jobs:
-  build:
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: write
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: docker/setup-buildx-action@v3
-
-      - uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - uses: docker/build-push-action@v5
-        with:
-          context: .
-          push: true
-          tags: |
-            ${{ env.IMAGE_NAME }}:${{ github.sha }}
-            ${{ env.IMAGE_NAME }}:latest
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-
-  update-gitops:
-    needs: build
-    runs-on: ubuntu-latest
-    steps:
-      - uses: webfactory/ssh-agent@v0.9.0
-        with:
-          ssh-private-key: ${{ secrets.GITOPS_DEPLOY_KEY }}
-
-      - name: Update GitOps repo
-        run: |
-          git clone ${{ env.GITOPS_REPO }}
-          cd infrastructure-gitops
-
-          git config user.name "GitHub Actions"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-
-          sed -i "s|image: .*backend:.*|image: ${{ env.IMAGE_NAME }}:${{ github.sha }}|" "${{ env.MANIFEST_PATH }}"
-
-          git add "${{ env.MANIFEST_PATH }}"
-          git commit -m "Deploy backend: ${{ github.sha }}"
-          git push origin main
+spec:
+  template:
+    spec:
+      imagePullSecrets:
+        - name: ankra-registry-pull
 ```
-</Accordion>
 
-<Accordion title="Example Workflow: Google Artifact Registry">
-Here's a workflow pushing to Google Artifact Registry:
+The same pull credential is injected into short-lived Application preview environments.
 
-```yaml
-name: Build and Deploy
+## Existing applications
 
-on:
-  push:
-    branches: [main]
-    paths:
-      - 'src/**'
-      - 'Dockerfile'
-  workflow_dispatch:
+Reconcile an Application after the registry cutover. Ankra updates its image URL, replaces a legacy build workflow or manifest with the private registry version, and restores missing repository secrets.
 
-env:
-  IMAGE_NAME: europe-west1-docker.pkg.dev/my-project/docker-images/backend
-  GITOPS_REPO: git@github.com:my-org/infrastructure-gitops.git
-  MANIFEST_PATH: clusters/my-cluster/manifests/backend-deployment.yaml
+You can inspect readiness in the Application's **CI/CD** tab or from the CLI:
 
-jobs:
-  build:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: docker/setup-buildx-action@v3
-
-      - uses: docker/login-action@v3
-        with:
-          registry: europe-west1-docker.pkg.dev
-          username: _json_key
-          password: ${{ secrets.GCP_SERVICE_ACCOUNT_KEY }}
-
-      - uses: docker/build-push-action@v5
-        with:
-          context: .
-          push: true
-          tags: ${{ env.IMAGE_NAME }}:${{ github.sha }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-
-  update-gitops:
-    needs: build
-    runs-on: ubuntu-latest
-    steps:
-      - uses: webfactory/ssh-agent@v0.9.0
-        with:
-          ssh-private-key: ${{ secrets.GITOPS_DEPLOY_KEY }}
-
-      - name: Update GitOps repo
-        run: |
-          git clone ${{ env.GITOPS_REPO }}
-          cd infrastructure-gitops
-
-          git config user.name "GitHub Actions"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-
-          sed -i "s|image: .*backend:.*|image: ${{ env.IMAGE_NAME }}:${{ github.sha }}|" "${{ env.MANIFEST_PATH }}"
-
-          git add "${{ env.MANIFEST_PATH }}"
-          git commit -m "Deploy backend: ${{ github.sha }}"
-          git push origin main
+```bash
+ankra application publish-readiness <application-id>
 ```
-</Accordion>
 
-<Accordion title="Example Workflow: AWS ECR">
-Here's a workflow pushing to Amazon Elastic Container Registry:
-
-```yaml
-name: Build and Deploy
-
-on:
-  push:
-    branches: [main]
-    paths:
-      - 'src/**'
-      - 'Dockerfile'
-  workflow_dispatch:
-
-env:
-  IMAGE_NAME: 123456789012.dkr.ecr.us-east-1.amazonaws.com/backend
-  GITOPS_REPO: git@github.com:my-org/infrastructure-gitops.git
-  MANIFEST_PATH: clusters/my-cluster/manifests/backend-deployment.yaml
-
-jobs:
-  build:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: aws-actions/configure-aws-credentials@v4
-        with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: us-east-1
-
-      - uses: aws-actions/amazon-ecr-login@v2
-
-      - uses: docker/setup-buildx-action@v3
-
-      - uses: docker/build-push-action@v5
-        with:
-          context: .
-          push: true
-          tags: ${{ env.IMAGE_NAME }}:${{ github.sha }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-
-  update-gitops:
-    needs: build
-    runs-on: ubuntu-latest
-    steps:
-      - uses: webfactory/ssh-agent@v0.9.0
-        with:
-          ssh-private-key: ${{ secrets.GITOPS_DEPLOY_KEY }}
-
-      - name: Update GitOps repo
-        run: |
-          git clone ${{ env.GITOPS_REPO }}
-          cd infrastructure-gitops
-
-          git config user.name "GitHub Actions"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-
-          sed -i "s|image: .*backend:.*|image: ${{ env.IMAGE_NAME }}:${{ github.sha }}|" "${{ env.MANIFEST_PATH }}"
-
-          git add "${{ env.MANIFEST_PATH }}"
-          git commit -m "Deploy backend: ${{ github.sha }}"
-          git push origin main
-```
-</Accordion>
-
----
-
-## Step 5: Configure Registry Access in Your Cluster
-
-If your container registry is private, your cluster needs credentials to pull images.
-
-<Steps>
-  <Step title="Open the AI Assistant">
-    Press `⌘+J` to open the AI Assistant.
-  </Step>
-  <Step title="Ask for an Image Pull Secret">
-    ```
-    Create an image pull secret for my private registry:
-    - Registry: ghcr.io
-    - Namespace: production
-    - Name: ghcr-pull-secret
-    ```
-  </Step>
-  <Step title="Add the Secret Value">
-    The AI will provide a Secret manifest template. You'll need to provide your registry credentials:
-    - For GHCR: Use a [Personal Access Token](https://docs.github.com/en/packages/working-with-a-github-packages-registry/working-with-the-container-registry#authenticating-with-a-personal-access-token-classic) with `read:packages` scope
-    - For GCP: Use a service account JSON key with `Artifact Registry Reader` role
-    - For AWS ECR: Use an IAM access key
-    - For Docker Hub: Use your username and access token
-  </Step>
-  <Step title="Link to Your Deployment">
-    Ask the AI to update your deployment to use the pull secret:
-
-    ```
-    Update my backend deployment to use the ghcr-pull-secret for pulling images
-    ```
-  </Step>
-</Steps>
-
-<Tip>
-Use [SOPS encryption](/guides/sops) to safely store registry credentials in your GitOps repository.
-</Tip>
-
----
-
-## Step 6: Test the Pipeline
-
-<Steps>
-  <Step title="Push a Code Change">
-    Make a change to your application code and push to main:
-
-    ```bash
-    git add .
-    git commit -m "Add new feature"
-    git push origin main
-    ```
-  </Step>
-  <Step title="Monitor CI Progress">
-    Go to the **Actions** tab in your application repository to watch the workflow run.
-  </Step>
-  <Step title="Verify GitOps Update">
-    After the workflow completes, check your GitOps repository. You should see a new commit updating the image tag.
-  </Step>
-  <Step title="Watch the Deployment">
-    In Ankra, go to your cluster → **Operations** to see the deployment in progress. The new image will roll out automatically.
-  </Step>
-</Steps>
-
----
-
-## Step 7: Monitor GitOps Sync Status
-
-Ankra provides visibility into your GitOps sync status.
-
-<Steps>
-  <Step title="View GitOps Status">
-    Navigate to your cluster → **GitOps** to see:
-    - Current sync status
-    - Recent sync history
-    - Any sync errors
-  </Step>
-  <Step title="Trigger Manual Sync">
-    If needed, click **Sync** to manually trigger a sync from your repository.
-  </Step>
-  <Step title="View in Operations">
-    Check the **Operations** page for detailed deployment history and job status.
-  </Step>
-</Steps>
-
----
-
-## Adding More Services
-
-To add CI/CD for additional services, use the AI Assistant to scaffold everything:
-
-<Steps>
-  <Step title="Add to Existing Stack or Create New">
-    Either edit your existing stack or create a new one for the service.
-  </Step>
-  <Step title="Generate the Deployment Manifest">
-    Open the AI Assistant (`⌘+J`) and describe your service:
-
-    ```
-    Add a deployment for my frontend service:
-    - Image: ghcr.io/my-org/frontend
-    - Namespace: production
-    - 3 replicas
-    - Port 3000
-    - Expose via a Service on port 80
-    ```
-  </Step>
-  <Step title="Generate the CI Workflow">
-    In your frontend app repo, create `.github/workflows/deploy.yml` or ask the AI:
-
-    ```
-    Generate a GitHub Actions workflow to build and deploy my frontend:
-    - Build from ./frontend/Dockerfile
-    - Push to GitHub Container Registry
-    - Update clusters/my-cluster/manifests/frontend-deployment.yaml in my GitOps repo
-    ```
-  </Step>
-  <Step title="Add the Secrets">
-    Copy the same secrets (`GITOPS_DEPLOY_KEY`, registry credentials) to the new repository.
-  </Step>
-</Steps>
-
----
-
-## Common AI Prompts
-
-Use these prompts with the AI Assistant (`⌘+J`) to set up your CI/CD:
-
-<AccordionGroup>
-  <Accordion title="Create a Deployment">
-    ```
-    Create a deployment manifest for my backend service:
-    - Image: ghcr.io/my-org/backend:latest
-    - Namespace: production
-    - 2 replicas with rolling update strategy
-    - Port 8080
-    - Health checks on /health and /ready
-    - Resource requests: 256Mi memory, 100m CPU
-    - Resource limits: 512Mi memory, 500m CPU
-    - Environment variables from a ConfigMap called backend-config
-    ```
-  </Accordion>
-  <Accordion title="Create a Complete Service Stack">
-    ```
-    Set up a complete service stack for my API:
-    - Deployment with 3 replicas
-    - Service exposing port 80
-    - Ingress with TLS using cert-manager
-    - HorizontalPodAutoscaler scaling 2-10 replicas at 70% CPU
-    - PodDisruptionBudget allowing 1 unavailable
-    ```
-  </Accordion>
-  <Accordion title="Add Image Pull Secret">
-    ```
-    Create a docker registry secret for pulling images from:
-    - Registry: ghcr.io
-    - Namespace: production
-
-    Then update my backend deployment to use this secret.
-    ```
-  </Accordion>
-  <Accordion title="Generate GitHub Actions Workflow">
-    ```
-    Generate a GitHub Actions workflow that:
-    - Builds my Docker image on push to main
-    - Pushes to GitHub Container Registry
-    - Updates clusters/prod/manifests/app-deployment.yaml in my GitOps repo
-    - Only builds when files in src/ or Dockerfile change
-    ```
-  </Accordion>
-  <Accordion title="Add Canary Deployment">
-    ```
-    Modify my deployment to support canary releases:
-    - Create a canary deployment with 1 replica
-    - Use labels to route 10% of traffic to canary
-    - Add a Service that selects both stable and canary pods
-    ```
-  </Accordion>
-  <Accordion title="Troubleshoot Deployment">
-    ```
-    My backend deployment isn't updating after CI pushed a new image.
-    Help me troubleshoot why the pods aren't rolling out.
-    ```
-  </Accordion>
-</AccordionGroup>
-
-<Tip>
-The AI Assistant has full context of your cluster. It can see your existing resources, logs, and events. Describe what you want to achieve and it will generate the right configuration.
-</Tip>
-
----
-
-## Best Practices
-
-<AccordionGroup>
-  <Accordion title="Use Immutable Image Tags">
-    Always use unique, immutable tags like `${{ github.sha }}` or `${{ github.run_number }}`. Avoid relying solely on `latest`.
-
-    Ask the AI: *"Ensure my deployment uses immutable image tags and imagePullPolicy IfNotPresent"*
-  </Accordion>
-  <Accordion title="Use GITHUB_TOKEN for GHCR">
-    GitHub Actions provides `GITHUB_TOKEN` automatically - no need to create a Personal Access Token for pushing to GHCR. Just add `packages: write` to your job permissions.
-  </Accordion>
-  <Accordion title="Leverage GitHub Actions Cache">
-    Use `cache-from: type=gha` and `cache-to: type=gha,mode=max` with `docker/build-push-action` to speed up builds using GitHub's built-in Actions cache.
-  </Accordion>
-  <Accordion title="Add Health Checks">
-    Let the AI configure proper health checks for your deployments.
-
-    Ask the AI: *"Add appropriate liveness and readiness probes to my backend deployment for a Node.js app"*
-  </Accordion>
-  <Accordion title="Set Resource Limits">
-    Prevent runaway resource usage with proper limits.
-
-    Ask the AI: *"Review my deployment and suggest appropriate resource requests and limits based on a typical web API"*
-  </Accordion>
-  <Accordion title="Use SOPS for Secrets">
-    Encrypt sensitive values in your GitOps repository.
-
-    Ask the AI: *"Help me encrypt my database password using SOPS"*
-  </Accordion>
-  <Accordion title="Use Environment Protection Rules">
-    For production deployments, set up [GitHub Environments](https://docs.github.com/en/actions/deployment/targeting-different-environments/using-environments-for-deployment) with required reviewers and branch restrictions to gate deployments.
-  </Accordion>
-</AccordionGroup>
-
----
+Readiness checks the organisation registry project, both repository secrets, the workflow login target, and whether an image has been published.
 
 ## Troubleshooting
 
-Having issues? Open the AI Assistant (`⌘+J`) and describe your problem:
-
 <AccordionGroup>
-  <Accordion title="Workflow Can't Push to GitOps Repo">
-    Ask the AI:
-    ```
-    My GitHub Actions workflow is failing to push to the GitOps repo with a permission denied error.
-    Help me troubleshoot the deploy key setup.
-    ```
-
-    Common causes:
-    - Deploy key doesn't have write access on the GitOps repo
-    - `GITOPS_DEPLOY_KEY` secret is not set or has extra whitespace
-    - The `webfactory/ssh-agent` action is missing from the workflow
+  <Accordion title="The workflow cannot log in">
+    Open the Application's **CI/CD** tab. If Ankra cannot restore the repository secrets, approve the updated Ankra GitHub App **Secrets** permission and retry the fix.
   </Accordion>
-  <Accordion title="Image Not Updating">
-    Ask the AI:
-    ```
-    I pushed a new image tag to my GitOps repo but the pods aren't updating.
-    What could be wrong?
-    ```
+  <Accordion title="The registry project is not ready">
+    Registry projects are provisioned automatically. The background reconciler retries missed provisioning. If readiness remains blocked after a few minutes, contact support.
   </Accordion>
-  <Accordion title="Pods Can't Pull Image">
-    Ask the AI:
-    ```
-    My pods are stuck in ImagePullBackOff. Help me fix the registry authentication.
-    ```
-
-    For GHCR, ensure your image pull secret uses a PAT with `read:packages` scope, or make the package public in your repository's package settings.
+  <Accordion title="The image push is denied">
+    Confirm that the workflow logs in to the host shown in the Application image URL and uses `ANKRA_REGISTRY_USERNAME` and `ANKRA_REGISTRY_PASSWORD`. Reconcile the Application to replace a legacy workflow.
   </Accordion>
-  <Accordion title="Workflow Permission Errors">
-    If you see `permission denied` errors when pushing to GHCR, ensure your workflow has the correct permissions:
-    ```yaml
-    permissions:
-      contents: read
-      packages: write
-    ```
-    Also check that **Settings** → **Actions** → **General** → **Workflow permissions** is set to **Read and write permissions**.
+  <Accordion title="Pods report ImagePullBackOff">
+    Reconcile the Application and check the target namespace for `ankra-registry-pull`. Ankra rotates and reapplies pull credentials automatically.
   </Accordion>
-  <Accordion title="`denied: permission_denied: write_package` on the first build">
-    This happens at **runtime**, inside GitHub Actions, using GitHub's own `GITHUB_TOKEN` - it is **not** an Ankra GitHub App permission. The build succeeds but the image push to `ghcr.io/<owner>/<repo>` is rejected.
-
-    The most common fixes, in order:
-
-    1. **Grant the repository write on the package.** If a package with that name already exists (created manually or by another repo), open its settings and add this repository with the **Write** role under **Manage Actions access**.
-    2. **Set the workflow token to read/write.** Change **Settings → Actions → General → Workflow permissions** to **Read and write permissions**.
-    3. **Check the organisation Actions policy.** Some organisations cap the `GITHUB_TOKEN` or restrict Actions from creating packages.
-
-    If the repository is connected as an [Application (closed beta)](/concepts/applications), Ankra surfaces this for you: the application's **CI/CD** tab runs a **GHCR publishing readiness** check during onboarding and after each run, turns a failed push into a fix card with the exact remediation, and can set the workflow token permission in one click when its GitHub App has the optional **Administration** permission.
-  </Accordion>
-  <Accordion title="Deployment Rollout Stuck">
-    Ask the AI:
-    ```
-    My deployment rollout is stuck. Show me what's blocking it and how to fix it.
-    ```
-  </Accordion>
-  <Accordion title="GitOps Sync Not Triggering">
-    Check the **GitOps** page in your cluster to see sync status. If sync isn't triggering:
-    - Verify the GitHub repository is still connected in **Settings** → **Integration**
-    - Check that your commit was pushed to the correct branch
-    - Look for webhook configuration issues in the GitOps status
+  <Accordion title="Deploy is blocked">
+    Ankra blocks deployment until it can verify a published image in the organisation registry. Check the latest GitHub Actions run, then retry after the image push succeeds.
   </Accordion>
 </AccordionGroup>
 
-<Note>
-The AI has access to your pod logs, events, and deployment status. It can pinpoint exactly what's going wrong and suggest fixes.
-</Note>
-
----
-
-## Next Steps
+## Next steps
 
 <CardGroup cols={2}>
-  <Card title="GitLab CI/CD Pipeline" icon="gitlab" href="/guides/gitlab-cicd-pipeline">
-    See the equivalent guide for GitLab CI.
+  <Card title="Applications" icon="box" href="/concepts/applications">
+    Connect a repository and follow the Application lifecycle.
   </Card>
-  <Card title="GitOps Reference" icon="git-alt" href="/concepts/gitops">
-    Learn more about GitOps file formats and include paths.
+  <Card title="GitHub integration" icon="github" href="/integrations/github">
+    Review the GitHub App permissions used by Ankra.
+  </Card>
+  <Card title="Pipeline Agents" icon="robot" href="/guides/pipeline-agents">
+    Add read-only deployment and health reporting to your CI workflows.
   </Card>
   <Card title="SOPS Encryption" icon="lock" href="/guides/sops">
-    Encrypt secrets in your GitOps repository.
-  </Card>
-  <Card title="Operations" icon="list-check" href="/platform/operations">
-    Monitor deployment progress and history.
+    Encrypt other secrets stored in GitOps.
   </Card>
 </CardGroup>
