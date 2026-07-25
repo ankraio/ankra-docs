@@ -1,6 +1,6 @@
 ---
 title: Cluster Security
-description: Fleet-wide Trivy vulnerability and compliance posture, actionable cluster checks, organisation policies, and per-add-on security views.
+description: Fleet-wide Trivy vulnerability and compliance posture, actionable cluster checks, organisation policies, NetworkPolicy exposure scoring, and per-add-on security views.
 ---
 
 Ankra turns [Trivy Operator](https://aquasecurity.github.io/trivy-operator/latest/) vulnerability and compliance reports into a prioritised security workflow across your organisation. The platform reads the operator's Kubernetes reports through the agent. No scanner runs on Ankra's side and no image data leaves your cluster.
@@ -84,7 +84,34 @@ Per-cluster actionable posture, observed/accepted context, scanner freshness, an
 
 ### Policies
 
-Organisation-wide disposition rules: active, expiring, fix-available, mitigated, unmatched, expired, and revoked. Edit, renew, or soft-revoke with a fresh server-side match preview.
+Organisation-wide vulnerability disposition rules: active, expiring, fix-available, mitigated, unmatched, expired, and revoked. Edit, renew, or soft-revoke with a fresh server-side match preview.
+
+These are Ankra's own dispositions for CVE findings. They are unrelated to Kubernetes `NetworkPolicy` objects, which are covered under [Network Exposure](#network-exposure).
+
+### Network Exposure
+
+How tightly a cluster's NetworkPolicies are scoped, in and out. Identity - not port or CIDR - is what excludes an attacker, so a workload with no policy, or an allow-rule broader than a named workload identity, counts as over-privileged.
+
+Ingress and egress are scored separately, each from 0 to 100, and each blends two halves:
+
+| Half | Question |
+|------|----------|
+| Coverage | How many workloads are selected by any policy in that direction? |
+| Tightness | Of the rules that admit traffic, how many are scoped to a named workload identity? |
+
+A rule counts as broad unless every peer is identity-scoped. An `ipBlock` on ingress, a `namespaceSelector`, an empty selector, or a missing `from` / `to` all make a rule broad.
+
+Findings list every unprotected workload and every broad rule, ranked by severity with ingress before egress. Filter by flow, namespace, or severity. An unprotected workload is high severity on ingress and medium on egress, because egress default-deny is uncommon enough that its absence is exposure to review rather than an active misconfiguration.
+
+<Warning>
+This score reads your policy objects, never your traffic. It cannot tell you whether a policy is safe to apply, and three limits follow from that:
+
+- **Enforcement is not verified.** The score reflects how the policies are written, not whether your CNI enforces `NetworkPolicy` at all.
+- **A fully locked-down cluster and a broken one score identically.** A default-deny in every namespace with no allow-rules scores 100 out of 100 while blocking every flow in the cluster. Treat a high score as "policy is written tightly", not "the cluster is healthy".
+- **Coverage is partial.** Only Deployments, StatefulSets, and DaemonSets are inventoried, and ports are not scored.
+
+Use it to find workloads nobody has scoped yet. Do not use it to decide a policy change is safe - that needs observed traffic, which this metric does not have.
+</Warning>
 
 ### Compliance
 
@@ -100,6 +127,7 @@ Each cluster Security page shares the same domain model, scoped to that cluster:
 - **Overview** — actionable summary, ranked remediation list, trend, and collapsed breakdowns.
 - **Findings** — server-side list and detail sheet with acknowledge / accept-risk flows.
 - **Workloads** — risk explorer with namespace and add-on filters.
+- **Network Exposure** — the same NetworkPolicy scoping scores and findings described above, for this cluster alone.
 - **Compliance**: failed and passed benchmark checks, configuration-audit hotspots, scanner remediation, and **Fix with AI** actions.
 
 Use the Compliance filters to focus by result, severity, framework, check ID, or remediation text. Failed checks show affected results and scanner guidance. Passed checks stay collapsed by benchmark until you need evidence for an audit.
