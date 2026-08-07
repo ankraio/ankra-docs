@@ -4,6 +4,199 @@ description: Release history for the Ankra CLI
 mode: wide
 rss: true
 ---
+<Update label="v0.9.0">
+# Proxmox and Morpheus, AI Agent Runs, and Writes That Ask First
+
+Two new self-managed cluster families, terminal control over what your AI agents are doing, confirmation prompts for the writes agent-mode chat proposes, and a long list of commands that finally show the data the API was sending all along.
+
+## Proxmox VE and HPE Morpheus clusters
+
+`ankra cluster proxmox` and `ankra cluster morpheus` bring both platforms to the terminal: create and deprovision, stop and start, worker and node-group scaling, labels and taints, autoscaling, control-plane changes, node inspection, SSH keys, and Kubernetes upgrades. Each family also discovers what the platform offers - Proxmox nodes, storages, bridges, and templates; Morpheus groups, clouds, plans, layouts, and networks - and manages its own credentials.
+
+```bash
+ankra credentials proxmox create --help
+ankra cluster proxmox nodes list <cluster_id>
+ankra cluster morpheus node-group list <cluster_id>
+```
+
+Proxmox nodes restart with `ankra cluster proxmox nodes restart`. Morpheus has no restart lane on the platform, so the CLI does not pretend to offer one.
+
+[Proxmox clusters →](/guides/proxmox-clusters) | [Morpheus clusters →](/guides/morpheus-clusters)
+
+## Managed Kubernetes reaches parity
+
+`ankra cluster managed stop | start` drives provider-native stop and start where the provider supports it (AKS today). The new `ankra cluster managed node-pool update` changes node counts and autoscaling settings in place, node pools accept autoscaling bounds at create and add time (`--autoscaling`, `--autoscaling-min`, `--autoscaling-max`), and Scaleway Kapsule joins the provider list as `--provider kapsule`.
+
+[Managed Kubernetes →](/guides/managed-kubernetes)
+
+## See and stop what your AI agents are doing
+
+The new `ankra agents` family lists the organisation's dispatched agent runs, shows one run in full, reads the session transcript of what the agent actually said and did, and cancels a live run - the platform interrupts the in-flight turn within seconds without pausing the agent itself. Cancelling requires organisation admin rights, and all four commands support `-o json|yaml`.
+
+```bash
+ankra agents runs --status running
+ankra agents transcript <run_id>
+ankra agents cancel <run_id>
+```
+
+[agents reference →](/reference/cli/agents)
+
+## Agent-mode chat asks before it writes
+
+In agent mode every mutating tool halts the turn and proposes the write, and the write only runs once the proposal is confirmed. The CLI used to drop that proposal silently, so `ankra chat --mode agent "restart node worker-1"` appeared to do nothing. The stream now renders each proposal - tool, description, risk, whether it is reversible, parameters, expiry, and the action id - an interactive session prompts to run or discard it, and `ankra chat actions confirm | reject | list` drives the same decision from a script.
+
+If the cluster drifted since the proposal, confirming reports the drift instead of applying it, and prints the ready-to-run `--force` invocation. A superseded action is not offered a force, because forcing it cannot work.
+
+[chat actions reference →](/reference/cli/chat)
+
+## Scaleway lifecycle and node commands
+
+`ankra cluster scaleway stop | start` releases and re-provisions compute while preserving the cluster definition, and `ankra cluster scaleway nodes list | get | restart` closes the last gap in provider node coverage - a Scaleway node could already be restarted from the portal and from AI chat, but not from the terminal.
+
+## Node restarts and bastion resize across the provisioned providers
+
+For Hetzner, OVH, UpCloud, and DigitalOcean, `ankra cluster <provider> nodes restart` reboots any provisioned node - a control plane node, a worker, or the bastion/gateway - as a tracked operation, and the new `bastion resize` command changes the bastion instance type with the same submit-or-`--wait` contract as node-group upgrades. `nodes list` gained a `PROVIDER_STATUS` column carrying the cloud provider's live power state, so an externally-stopped VM is visible before you act on it.
+
+## Applications from the terminal
+
+`ankra application add .` detects a local GitHub checkout and starts application setup, and the subcommands cover lifecycle, deployment, workflow, repository, security, publishing, and demo operations.
+
+[application reference →](/reference/cli/application)
+
+## Set a secret and encrypt it in one commit
+
+`ankra cluster encrypt manifest` accepts repeatable `--set` edits that are applied in memory before encryption, so the new value and its SOPS encryption land in a single commit - the plaintext never reaches git history. The previously documented flow of `manifests upgrade --set` followed by `encrypt manifest` committed the plaintext first, leaving it recoverable from the repository history.
+
+```bash
+ankra cluster encrypt manifest db-secret --key password \
+  --set 'data.password=bmV3LXNlY3JldA==' --cluster prod
+```
+
+`ankra cluster manifests upgrade --from-file` also accepts SOPS-encrypted files now, detecting `ENC[...]` keys and recording them as `encrypted_paths` automatically, with `--encrypted-path` to declare keys explicitly.
+
+## Commands that were quietly returning nothing
+
+A batch of listings and readers were decoding JSON keys the API never sends, and showed empty results rather than an error. `cluster manifests list` always printed "No manifests found", `org members` always printed "No members found", `chat health` printed an empty status scored 0, and `cluster stacks history` rendered blank rows. All of them now decode the response the API actually returns.
+
+Alongside that: `ankra cluster addons uninstall` resolves the addon's resource id through the stack history instead of sending an empty id and failing with a 404; `cluster stacks` and `cluster addons list` walk every page instead of stopping at the first 25; every `ankra cluster managed` subcommand now calls a path the backend serves, instead of failing with "not found"; `ankra cluster kubeconfig add my-cluster` accepts the cluster as a positional argument; and `ankra helm registries create` explains the expected file shape up front rather than letting the API answer with an unexplained error.
+
+## Your cluster YAML keeps its fields and comments
+
+`ankra cluster encrypt -f` and `ankra cluster clone` used to rewrite the file by re-serialising an internal struct, silently dropping anything the struct did not model - `deploy_wave` on stacks and `spec.prometheus_metrics` were lost outright, and comments, anchors, and key ordering were destroyed. Both now edit the parsed YAML document in place, touching only the nodes they change.
+
+## Deprecated
+
+`ankra cluster deprovision --auto-delete` is deprecated: the backend parses and discards it, so it never deleted anything. The flag is hidden, prints a warning pointing at `ankra delete cluster`, and is scheduled for removal in v0.10.0. `--force` is only honoured by the Hetzner deprovision endpoint, and now says so on stderr for every other cluster type instead of implying a forced teardown.
+
+</Update>
+
+<Update label="v0.8.0">
+# Real Agent Tokens and Drift Field Paths
+
+A small release fixing two agent commands that reported the wrong thing, plus drift detail in operations.
+
+## `agent token` prints the real token
+
+`ankra cluster agent token` rendered an empty string: it decoded a `token`/`expires_at` shape the platform no longer returns. It now decodes every returned field, extracts the `ank_cai_…` token from the install command when that is all the platform sends, and prints the token together with the full install/update command. Structured output carries `token`, `cluster_id`, and `command`; the never-populated `expires_at` is gone.
+
+## `agent status` no longer calls a stale agent connected
+
+Status was derived from `checked_in_at` merely being present, so an agent offline for days still displayed `Status: connected`. The CLI now uses the platform's `is_online` verdict when present - the same 30-second threshold that flips clusters offline - and otherwise falls back to a two-minute recency test, rendering a stale check-in as `not connected (stale check-in)`.
+
+## Operations show which fields drifted
+
+`ankra cluster operations list <id>` and `operations steps <id>` now render each drifting resource with its drift type and the exact field paths the agent compared, for example `/spec/template/spec/hostNetwork`, instead of only step metadata and timings. Enrichment is best-effort: on platforms without the execution result endpoint the commands work as before.
+
+</Update>
+
+<Update label="v0.7.0">
+# Browser Login Without a Local Port, Managed Kubernetes, and Homebrew
+
+**This release is required to log in.** The platform has dropped support for the old localhost-callback login flow and answers pre-v0.7.0 CLIs with `426 Upgrade Required`.
+
+## Login no longer opens a local network port
+
+`ankra login` used to start a localhost callback server and have the browser redirect the OAuth code to it. The CLI now starts a platform login ticket, drives the whole flow in the browser including sign-in approval and any MFA challenge, and polls for the parked token with a PKCE code verifier that never leaves your machine.
+
+## Install with Homebrew
+
+```bash
+brew install ankraio/tap/ankra
+```
+
+The formula lives in the [ankraio/homebrew-tap](https://github.com/ankraio/homebrew-tap) vendor tap and is bumped automatically on every stable release. A Homebrew-managed binary refuses `ankra upgrade` and defers to `brew upgrade ankra`, so brew stays the single owner of the file.
+
+## Managed Kubernetes for all six providers
+
+`ankra cluster managed` previously accepted only `doks` and `uks` even though the platform already managed the rest. `create`, `delete`, `node-pool add | scale | delete`, and `upgrade` now accept `doks`, `uks`, `gke`, `ovh_mks`, `aks`, and `eks`.
+
+</Update>
+
+<Update label="v0.6.0">
+# Cluster Groups, Scoped Roles, Deploy Waves, and Agent Guardrails
+
+Organisation-level RBAC building blocks, ordered stack deployment, node-group autoscaling, and the agent rules that make Ankra the default Kubernetes workflow in your editor.
+
+## Cluster groups and scoped role assignments
+
+`ankra org cluster-groups list | create | add-cluster | set-selector | preview` manages named sets of clusters, either static or resolved from a label selector, for use as role-assignment scopes. `ankra org assign <member-email>` then grants a role at organisation, cluster, or cluster-group scope, with `ankra org assignments` and `ankra org unassign` to inspect and revoke. `ankra org roles create` defines custom roles that can bundle Kubernetes access levels provisioned across the assignment's scope.
+
+## Ankra becomes your agent's default Kubernetes workflow
+
+`ankra skills install` now also writes an always-applied rule telling Cursor or Claude Code that clusters here are Ankra-managed: route changes through the GitOps repo or `ankra cluster apply`, inspect freely, never mutate with raw kubectl or helm. Add `--with-hooks` and cluster-mutating kubectl/helm commands pause for confirmation with a redirect to the Ankra workflow, while read-only inspection and `--dry-run` pass through untouched. The guard fails open and merges into existing hook configuration without disturbing other entries; `--no-rules` skips it and `ankra skills uninstall` cleans everything up.
+
+## Stack deploy waves
+
+Stacks in a cluster YAML accept an optional `deploy_wave` (an integer of 0 or more): stacks in wave N deploy only after every stack in a lower wave finished, and teardown unwinds in reverse. Stacks without a wave keep the existing unordered behaviour. The wave is validated by `ankra cluster apply`, preserved by partial patches, and shown as a Wave column in `ankra cluster stacks list`.
+
+## Node-group autoscaling
+
+`ankra cluster node-group autoscaling get | set` reads and writes a node group's Cluster Autoscaler settings on Hetzner, OVH, and UpCloud. `set --enabled --min <n> --max <n>` keeps the group within those bounds based on pod demand, installing the autoscaler on first enable.
+
+## Scoped tokens and a distinct RBAC exit code
+
+`ankra tokens create --scopes` pins an API token to a permission allowlist. When the platform denies a request because your role lacks a permission, the CLI now names the missing permission, points at an organisation admin, and exits **7** - distinct from exit 6, which means re-authenticate.
+
+</Update>
+
+<Update label="v0.5.1">
+# DigitalOcean and Managed Kubernetes
+
+## DigitalOcean clusters
+
+`ankra cluster digitalocean` (alias `ankra cluster do`) covers create, deprovision, stop and start, scale, upgrade, node groups, regions and sizes discovery, with credentials in `ankra credentials digitalocean`. The provider-agnostic commands - `scale`, `upgrade`, `node-group`, `ssh-keys`, `deprovision` - detect DigitalOcean clusters automatically.
+
+## Managed Kubernetes
+
+`ankra cluster managed` arrives with create, deprovision, upgrade, and node-pool operations for DigitalOcean Kubernetes (`doks`) and UpCloud Managed Kubernetes (`uks`).
+
+## Long stack writes no longer time out
+
+`addons upgrade`, `manifests upgrade`, `encrypt … --cluster`, and `stacks variables set | delete` end in a partial-stack PATCH the backend serves synchronously, including a full GitOps commit and push when the cluster has a linked repository. On large clusters that legitimately exceeded the old 60-second command context; the deadline is now five minutes.
+
+</Update>
+
+<Update label="v0.5.0">
+# kubeadm Upgrades, etcd Topology, and the Generated Reference
+
+## kubeadm cluster upgrades
+
+The provider-agnostic `ankra cluster upgrade` now covers kubeadm clusters alongside k3s. Nodes upgrade one at a time, control plane first: each is cordoned, drained respecting PodDisruptionBudgets, upgraded, and gated on being Ready at the target version, with an etcd snapshot taken before the control plane. `--force` proceeds when a drain is blocked by a PodDisruptionBudget, where the default aborts safely. `ankra cluster kubeadm-versions` lists the versions available, as a sibling of `ankra cluster k3s-versions`.
+
+## etcd topology at create time
+
+`ankra cluster hetzner | ovh | upcloud create` gained `--etcd-topology` (`stacked` on the control planes, or `external` on dedicated VMs), `--etcd-node-count` (3 or 5), and `--etcd-server-type` for sizing dedicated etcd nodes.
+
+## The generated CLI reference
+
+The full command tree is now rendered as documentation pages straight from the CLI source, and a release-tag workflow opens a sync pull request against these docs - so [the reference](/reference/cli/index) can never drift from the shipped binary.
+
+## Kubeconfig entries pin the owning organisation
+
+Entries written by `ankra cluster kubeconfig add` embed `--org <organisation-id>` in the `kube-token` exec arguments, so `kubectl` keeps working after you switch your selected organisation. Previously the token mint failed with "Cluster not found" whenever the selection differed from the cluster's owner.
+
+</Update>
+
 <Update label="v0.4.0">
 # Cluster Access (RBAC) and Provider-Agnostic Cloud Verbs
 
