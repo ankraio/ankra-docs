@@ -1,0 +1,130 @@
+---
+title: Power Schedules
+description: Stop and start clusters automatically on one-off or repeated cron schedules to park idle environments and save cost.
+---
+
+Power schedules stop and start a cluster for you on a timetable. Instead of remembering to press **Stop cluster** every evening, you attach schedules to the cluster - a one-off action at a chosen time, or a repeated cron schedule - and Ankra runs the same operations the manual buttons do: a scheduled stop snapshots the cluster's resource state and shuts the provider infrastructure down, and a scheduled start restores it.
+
+The classic use is parking development clusters outside working hours. A stop at 19:00 on weekdays paired with a start at 07:00 the next morning means the cluster only runs while someone is using it. While stopped, the cluster stops accruing compute cost at the provider; retained resources such as storage may still be billed, depending on the provider.
+
+<Note>
+Power schedules are available for self-managed Hetzner, OVHcloud, UpCloud, DigitalOcean, Scaleway, Proxmox VE, and HPE Morpheus clusters - the same clusters that support manual [Stop and Start](/platform/cluster-settings#stop-cluster). Managed Kubernetes clusters (EKS, AKS, GKE, and similar) and plain imported clusters do not support power schedules.
+</Note>
+
+---
+
+## Creating a schedule
+
+<Steps>
+  <Step title="Open Power schedules">
+    Go to cluster **Settings** → **General** and find the **Power schedules** card in the right column.
+  </Step>
+  <Step title="Add a schedule">
+    Click **Add schedule**.
+  </Step>
+  <Step title="Choose the action">
+    Pick **Stop cluster** or **Start cluster**. Each schedule performs exactly one action - create a pair of schedules if you want the cluster stopped and started.
+  </Step>
+  <Step title="Choose the cadence">
+    - **One-off**: pick the date and time it should fire.
+    - **Repeated**: enter a standard 5-field cron expression and the timezone it should be evaluated in. The dialog defaults to your browser's timezone.
+  </Step>
+  <Step title="Save">
+    The schedule appears in the card with its next run time.
+  </Step>
+</Steps>
+
+A cluster can hold up to 20 schedules, so you can combine patterns - for example a weekday stop/start pair plus a one-off start before a weekend load test.
+
+### One-off schedules
+
+A one-off schedule fires once at the chosen date and time. After firing it disables itself, but stays in the list as a record of what ran and how it went.
+
+### Repeated schedules
+
+A repeated schedule takes a standard 5-field cron expression (minute, hour, day of month, month, day of week) evaluated in the IANA timezone you choose, so `0 19 * * 1-5` in `Europe/Stockholm` fires at 19:00 Stockholm time regardless of where your team members are. After each fire, the schedule re-arms to its next occurrence.
+
+| Expression | Fires |
+|------------|-------|
+| `0 19 * * 1-5` | 19:00, Monday to Friday |
+| `0 7 * * 1-5` | 07:00, Monday to Friday |
+| `0 20 * * 5` | 20:00 on Fridays |
+| `30 8 * * 1` | 08:30 on Mondays |
+
+<Tip>
+To park a development cluster overnight, create two repeated schedules: a **Stop cluster** at `0 19 * * 1-5` and a **Start cluster** at `0 7 * * 1-5`. The cluster shuts down every weekday evening and is back before the team starts in the morning.
+</Tip>
+
+---
+
+## Reading the schedule list
+
+Each schedule's row shows an enabled toggle, its next run time, and the outcome of its last run:
+
+| Outcome | Meaning |
+|---------|---------|
+| `completed` | The action ran successfully |
+| `skipped` | The action was not needed - the reason is shown, for example the cluster was already stopped |
+| `deferred` | The cluster was busy with a conflicting operation; the schedule is retrying |
+| `failed` | The action did not succeed within the retry window |
+
+---
+
+## How schedules run
+
+Schedules fire within about a minute of their due time, and are safe against surprises:
+
+- A scheduled stop is **skipped** if the cluster is already stopped or is deprovisioning. A scheduled start only fires when the cluster is stopped.
+- If the cluster is busy with a conflicting operation, or the action fails transiently, the schedule retries every 5 minutes for up to 24 hours, then records a failure and gives up. A repeated schedule still fires at its next regular occurrence either way.
+- Disabling or editing a schedule always wins over an in-flight retry.
+
+<Warning>
+A scheduled stop behaves exactly like pressing **Stop cluster** yourself: the virtual machines are terminated at the provider, and data stored only on them is not preserved. See [Stop cluster](/platform/cluster-settings#stop-cluster) for what is kept and what a start restores.
+</Warning>
+
+---
+
+## Pausing and deleting a schedule
+
+Use the toggle on a schedule's row to disable it without losing its configuration - a disabled schedule never fires, and re-enabling a repeated schedule arms it for its next occurrence. Deleting a schedule removes it from the cluster entirely.
+
+---
+
+## API
+
+Power schedules are managed per cluster:
+
+```bash
+GET    /org/clusters/imported/{cluster_id}/power-schedules
+POST   /org/clusters/imported/{cluster_id}/power-schedules
+PUT    /org/clusters/imported/{cluster_id}/power-schedules/{schedule_id}
+DELETE /org/clusters/imported/{cluster_id}/power-schedules/{schedule_id}
+```
+
+The create body takes:
+
+| Field | Description |
+|-------|-------------|
+| `action` | `stop` or `start` |
+| `schedule_kind` | `once` or `cron` |
+| `run_at` | RFC 3339 timestamp, for `once` schedules |
+| `cron_expression` | 5-field cron expression, for `cron` schedules |
+| `timezone` | IANA timezone the cron expression is evaluated in |
+| `enabled` | Whether the schedule is armed |
+
+<Note>
+Updates are full replaces: a `PUT` must restate `enabled` (and `timezone` for repeated schedules), not just the field you are changing.
+</Note>
+
+---
+
+## Related
+
+<CardGroup cols={2}>
+  <Card title="Cluster Settings" icon="gear" href="/platform/cluster-settings">
+    Manual Stop and Start, and the rest of the cluster lifecycle.
+  </Card>
+  <Card title="Cloud Cost" icon="coins" href="/platform/cloud-cost">
+    See what your clusters cost and what parking them saves.
+  </Card>
+</CardGroup>
