@@ -428,8 +428,7 @@ ankra cluster deprovision [cluster_name] [flags]
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--auto-delete` | `false` | Automatically delete the cluster after deprovisioning |
-| `--force` | `false` | Force deprovision even if cluster is in an unexpected state |
+| `--force` | `false` | Force deprovision even if cluster is in an unexpected state (only honored for Hetzner clusters) |
 | `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
 | `--yes` | `false` | Skip the confirmation prompt |
 
@@ -768,12 +767,27 @@ Two modes:
     from_file in place, adding the key to encrypted_paths in the file. Used by
     GitOps workflows where the source of truth is on disk.
 
+In cluster mode, --set applies value edits in-memory BEFORE encrypting, so the
+new secret value and its encryption land in a single commit - the plaintext
+value never reaches git history. This is the recommended way to set a new
+secret value:
+
+  ankra cluster encrypt manifest db-secret --key password \
+    --set 'data.password=aHVudGVyMg==' --cluster prod
+
+(compared to "manifests upgrade --set" followed by "encrypt manifest", which
+commits the plaintext value first).
+
 Examples:
   # Cluster mode against the selected cluster
   ankra cluster encrypt manifest db-secret --key password
 
   # Cluster mode against a specific cluster
   ankra cluster encrypt manifest db-secret --key password --cluster prod
+
+  # Set a new value and encrypt it atomically (single commit, no plaintext)
+  ankra cluster encrypt manifest db-secret --key password \
+    --set 'data.password=bmV3LXNlY3JldA==' --cluster prod
 
   # File mode
   ankra cluster encrypt manifest db-secret --key password -f cluster.yaml
@@ -789,6 +803,7 @@ ankra cluster encrypt manifest <manifest_name> [flags]
 | `--cluster` |   | Target cluster (name or ID); defaults to the active selection (cluster mode) |
 | `-f`, `--file` |   | Path to a local cluster YAML (enables file mode) |
 | `--key` |   | YAML key name to encrypt (required); dotted paths are normalised to the last segment, a leading-dot key like .dockerconfigjson is kept literally |
+| `--set` | `[]` | Apply value edits in-memory before encrypting (same syntax as manifests upgrade --set, e.g. --set 'data.password=bmV3'); the plaintext value never reaches git (cluster mode only; repeatable) |
 
 ## ankra cluster get
 
@@ -1420,11 +1435,11 @@ These commands read and write a single file: --kubeconfig if given, otherwise
 the first entry of $KUBECONFIG, otherwise ~/.kube/config.
 
 Examples:
-  ankra cluster kubeconfig add --cluster my-cluster --use
+  ankra cluster kubeconfig add my-cluster --use
   ankra cluster kubeconfig add --all
-  ankra cluster kubeconfig add --cluster my-cluster --print &gt; my-cluster.yaml
+  ankra cluster kubeconfig add my-cluster --print &gt; my-cluster.yaml
   ankra cluster kubeconfig list
-  ankra cluster kubeconfig remove --cluster my-cluster
+  ankra cluster kubeconfig remove my-cluster
   ankra cluster kubeconfig remove --all
 
 ## ankra cluster kubeconfig add
@@ -1432,7 +1447,7 @@ Examples:
 Add or update an Ankra context in your kubeconfig
 
 ```bash
-ankra cluster kubeconfig add [flags]
+ankra cluster kubeconfig add [cluster] [flags]
 ```
 
 **Flags**
@@ -1440,7 +1455,7 @@ ankra cluster kubeconfig add [flags]
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--all` | `false` | Add every cluster you can access |
-| `--cluster` |   | Cluster name or ID (defaults to the selected cluster) |
+| `--cluster` |   | Cluster name or ID (same as the positional argument; defaults to the selected cluster) |
 | `--embed-token` | `false` | Embed a short-lived token instead of the exec credential plugin |
 | `--exec-command` | `ankra` | Executable kubectl invokes for credentials in exec mode (use an absolute path if 'ankra' is not on PATH) |
 | `--insecure-skip-tls-verify` | `false` | Skip TLS verification for the cluster server (dev only) |
@@ -1468,7 +1483,7 @@ ankra cluster kubeconfig list [flags]
 Remove Ankra contexts from your kubeconfig
 
 ```bash
-ankra cluster kubeconfig remove [flags]
+ankra cluster kubeconfig remove [cluster] [flags]
 ```
 
 **Flags**
@@ -1476,7 +1491,7 @@ ankra cluster kubeconfig remove [flags]
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--all` | `false` | Remove all Ankra-managed contexts |
-| `--cluster` |   | Cluster name or ID |
+| `--cluster` |   | Cluster name or ID (same as the positional argument) |
 | `--kubeconfig` |   | Path to the kubeconfig file (default: $KUBECONFIG or ~/.kube/config) |
 
 ## ankra cluster list
@@ -1779,6 +1794,12 @@ list items by a stable field (e.g. containers[name=app]) as well as by numeric
 index (containers[0]). --from-file / --manifest - REPLACE the whole manifest
 and are mutually exclusive with --set*.
 
+--from-file / --manifest - accept SOPS-encrypted content: when the file
+carries a top-level sops: metadata mapping, the keys holding ENC[...]
+ciphertext are detected and recorded as encrypted_paths automatically (merged
+with the manifest's existing encrypted_paths). Use --encrypted-path to declare
+keys explicitly when auto-detection cannot see them.
+
 When no content or --set flag is supplied, the existing content is re-sent
 unchanged (only namespace is updated). This is required because the backend's
 manifest validation rejects empty manifest_base64.
@@ -1794,6 +1815,7 @@ ankra cluster manifests upgrade <manifest_name> [flags]
 | `--add-parent` | `[]` | Add a dependency parent, e.g. --add-parent name=infisical-ns,kind=manifest (kind defaults to manifest; repeatable) |
 | `--cluster` |   | Target cluster (name or ID); defaults to the active selection |
 | `--dry-run` | `false` | Print the proposed before/after spec without applying changes |
+| `--encrypted-path` | `[]` | With --from-file / --manifest -: declare a YAML key name that is (or must stay) SOPS-encrypted; merged with auto-detected ENC[...] keys and the manifest's existing encrypted_paths (repeatable) |
 | `--from-file` |   | Path to manifest YAML file (REPLACES the entire manifest) |
 | `--manifest` |   | Use `-` to read manifest YAML from stdin (REPLACES the entire manifest) |
 | `--namespace` |   | Change the manifest's namespace |
@@ -2948,6 +2970,58 @@ ankra cluster scale <cluster_id> <worker_count> [flags]
 ## ankra cluster scaleway
 
 Manage the lifecycle of Scaleway clusters.
+
+## ankra cluster scaleway nodes
+
+Inspect every server Ankra manages for the cluster (control plane, workers,
+and bastion or gateway). Soft-deleted entries from a stopped cluster are
+included so the saved topology is visible before re-provisioning.
+
+## ankra cluster scaleway nodes get
+
+Show full spec and metadata for a single node
+
+```bash
+ankra cluster scaleway nodes get <cluster_id> <node_id> [flags]
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+
+## ankra cluster scaleway nodes list
+
+List all nodes for the cluster
+
+```bash
+ankra cluster scaleway nodes list <cluster_id> [flags]
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+
+## ankra cluster scaleway nodes restart
+
+Schedule a native reboot (falling back to a power cycle) of the node as a
+tracked operation. The node must be in the 'up' state and have no restart
+already in flight. Workloads on the node are briefly unavailable while it
+reboots. Works for any node returned by 'nodes list', including the
+bastion/gateway.
+
+```bash
+ankra cluster scaleway nodes restart <cluster_id> <node_id> [flags]
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
 
 ## ankra cluster scaleway start
 
