@@ -5,7 +5,7 @@ mode: wide
 rss: true
 ---
 <Update label="August 2026">
-# See Who Did What to a Cluster, Park Clusters on a Schedule, Credentials That Show Their Capacity, Two More Cluster Platforms in Your Terminal, AI Writes That Ask First, and Demos That Fix Their Own Configuration
+# See Who Did What to a Cluster, Park Clusters on a Schedule, Credentials That Show Their Capacity, Two More Cluster Platforms in Your Terminal, AI Writes That Ask First, Demos That Fix Their Own Configuration and Bring Their Whole Stack, a Bastion That Heals Itself, and an Assistant That Deploys and Reports Back
 
 ## Every manual cluster action, on the record
 
@@ -61,6 +61,63 @@ An application image that validates its environment on boot used to make a hopel
 The agent's run is visible on the AI agents page like any other mission, it never weakens the application's own validation, and it runs at most once per demo per day. You can also trigger the same fix on demand, or ask the AI assistant to repair a failed demo in chat - the same diagnostics, configuration, and redeploy tools back both. Two supporting fixes ship alongside: demo redeploys switch to a Recreate rollout, so a configuration change can never wedge against the namespace resource quota, and the throwaway demo database now runs a pgvector-capable Postgres, so migrations using `CREATE EXTENSION vector` work.
 
 [Preview demos →](/concepts/applications#automatic-pre-setup-when-a-demo-crashes)
+
+## Demos that bring their whole stack
+
+An application rarely runs alone, and a demo of the application by itself is not a demo of the thing you are trying to show. Point an application's demo settings at a **stack profile** and every demo launch - manual, CLI, AI, and the automatic pull-request previews - instantiates that profile as a real, demo-scoped Ankra Stack that lives and dies with the demo.
+
+Configure it under *Full-stack demo* in **Demo settings**: enable it, pick the profile, pin a version or track the current one, and bind its parameters (secrets become Ankra secret slots exactly like demo environment secrets). The Stack is instantiated into the demo's own namespace, so the resource quota bounds it and the TTL reaper removes it; full-stack demos get a larger quota (20 pods, 8 CPU, 16 Gi) and a longer provisioning window to let the Stack converge. Teardown removes the Stack before the namespace, and proceeds anyway after a grace period if an uninstall wedges, so a stuck Stack can never strand a demo namespace.
+
+The Demos tab badges full-stack demos with the profile name, and the details view shows the Stack's status and a "Stack instantiated" step. Demos of applications with no profile designated are completely unchanged.
+
+[Full-stack demos →](/concepts/applications#full-stack-demos)
+
+## A dead bastion is now something Ankra notices, and can fix
+
+Every node in a cloud-provisioned cluster is reached through its bastion, so when the bastion dies every node goes quiet at once - previously indistinguishable from the nodes themselves failing, and it raised no notification at all.
+
+Ankra now probes each cluster's bastion every minute and records the verdict with the cluster's other integration health. It separates the two hops that can fail, because they need different answers: the bastion is Ankra's host and is recoverable, while the SSH jumphost some credentials declare is yours and sits in front of everything, including the provider API. For Proxmox the split is confirmed against the provider API over the same tunnel, so "the bastion is down" is only ever claimed when the tunnel is provably intact. Notifications are raised after three consecutive failures and clear themselves when it recovers.
+
+Automatic restart is available behind a flag and off by default. It reuses the provider restart that does not need the bastion to be reachable, and is bounded by four guards: it acts only on the confirmed verdict you were notified about, at most three attempts spaced immediately, +10 and +30 minutes, never twice concurrently, and a bastion that dies three times in a day is treated as flapping and left alone. Jumphost outages are never auto-recovered.
+
+A separate read-only diagnosis collects sshd configuration, failed-login volume and sources, disk, failed units, journal errors, listening ports, and pending security updates in one SSH round trip, with the findings derived deterministically rather than eyeballed. Optionally, a settled incident opens one AI session to explain why it went down and what the host's security posture needs - because a restart answers "is it up again" and nothing else.
+
+[Bastion health and recovery →](/platform/cluster-settings#bastion-health-and-recovery)
+
+## Ask the assistant to deploy something, and it tells you when it is live
+
+"Deploy application X and tell me when it is live" now works end to end, and so does "link this repository and make it live". Previously it could not: convergence takes minutes, a chat turn is capped at ten, and no tool is allowed to sleep. The lane that could wait between turns was not the lane that could act.
+
+Both halves are now in one place. The durable chat lane can start work - creating an application, deploying one, deleting one - and every such write still stops the turn and asks you to confirm it first, exactly as before. Once you confirm, Ankra registers a **watch** on the work rather than leaving the assistant to guess, and wakes the conversation when the deploy converges or the setup finishes. The waiting happens between sessions, so nothing is lost if you close the tab.
+
+What comes back is a sentence you can act on, not a status code. A failed deploy is diagnosed before it is reported. A timeout says where it got to ("still at `ai_generate_files`") instead of only that it ran out of time. Setup that completes but still carries a publishing blocker is reported as success **with the blocker named**, because the scaffolding did land and saying only "setup finished" would be a half-truth about an application that cannot yet publish an image.
+
+It also closes a trap that used to waste twenty minutes: deploying to a cluster whose agent has stopped checking in is accepted by the API and then never runs. The assistant can now see that before it starts (`get_ai_environment` reports the organisation's staging cluster and whether its agent is online, and `list_application_installations` flags an installation that is not progressing), and a watch on a deploy whose agent has gone away closes immediately with the reason rather than burning its timeout.
+
+[AI Assistant →](/platform/ai-assistant)
+
+## Stack tools that teach deployment order
+
+Stacks composed through the MCP surface or the AI arrived with no dependency edges, so every member deployed in parallel and charts raced the namespaces, Secrets, CRDs and databases they needed. The `parents` field was accepted all along - it just was not visible in anything a client reads: the Stack parameter was an opaque object, and the tool description mentioned parents once in passing with no shape and no warning about what happens without them.
+
+`create_stack`, `update_stack`, and `validate_stack` now carry the real member schema, with `parents` as a first-class array of `{name, kind}` and `kind` an enum of the engine's lowercase constants. That enum also closes a silent failure: parent kinds are matched case-sensitively, so a capitalised `"Addon"` used to be skipped without complaint and the edge simply never existed. `validate_stack` reports which members were left with no dependency edges, and `update_stack` is the way to add missing edges to a Stack created without them.
+
+[MCP stack tools →](/platform/mcp-tools#declaring-deployment-order)
+
+## Two-factor and RBAC commands that never worked are gone from the CLI
+
+Every API-backed `ankra profile auth` command and the whole `ankra org cluster-groups` / `assign` / `assignments` / `unassign` / `roles create` family called routes the backend only ever served to browser sessions, so every invocation since v0.6.0 failed with an API error. They are removed rather than grown bearer-token twins: two-factor enrollment is a step-up browser flow by design, passkey enrollment needs a WebAuthn ceremony a terminal cannot run, and an API token should not be able to weaken your 2FA. The CLI now ships `ankra profile auth open`, which lands you on Profile Authentication. `ankra profile auth passkeys open` still works as a deprecated alias until v0.10.0, and `ankra org roles`, `members`, `invite` and every other `org` command are unaffected.
+
+[CLI Changelog →](/integrations/ankra-cli-changelog)
+
+## Smaller fixes
+
+- Unknown `/organisation/*` routes rendered a blank dark page with no 404, no sidebar and no way back except the browser button. A non-UUID organisation segment now serves the real 404 page.
+- Two settings pages (DNS, Variables) showed the raw organisation UUID in the breadcrumb where every sibling showed the organisation's name.
+- Breadcrumbs mis-cased brands and acronyms ("Create Digitalocean", "Create Upcloud", "Dns"), and Kubernetes kinds disagreed across breadcrumb, heading and search on the same page - the autoscalers page managed three spellings of one resource at once. Breadcrumbs now use the API spelling the nav and heading already use.
+- The members page search box said "Search organisations...".
+- The UpCloud and OVH cluster wizards rendered their heading twice.
+- `/troubleshooting` set no document title, so the browser tab showed the raw URL.
 
 </Update>
 

@@ -188,6 +188,25 @@ The bastion/gateway's row menu has a **Resize** action that changes its instance
 
 Bastion/gateway resize is available for Hetzner, OVH, UpCloud, DigitalOcean, Proxmox, and HPE Morpheus clusters. See [Resizing the Bastion or Gateway](/guides/hetzner-clusters#resizing-the-bastion-or-gateway) for the full CLI/API walkthrough, which is identical across providers.
 
+### Bastion health and recovery
+
+Every node in a cloud-provisioned cluster is reached through the bastion, so when the bastion dies every node goes quiet at once. That used to be indistinguishable from the nodes themselves failing, and it produced no notification: node reads reported success with an `ssh_unreachable` reason and nothing acted on it.
+
+Ankra now probes each cluster's bastion once a minute and records the verdict alongside the cluster's other integration health. The probe stops at the SSH handshake, so it reports liveness even for relay bastions that offer no shell.
+
+It reports the two hops separately, because they need different answers:
+
+- **The bastion** is the host Ankra provisioned and can recover.
+- **The SSH jumphost** some credentials declare is yours, and it sits in front of everything including the provider API.
+
+For Proxmox the split is confirmed against the provider API over the same tunnel: an API that answers proves the tunnel is intact and the bastion alone is down (and reports whether the VM is stopped), while an API that stays dark means Ankra is blind and reports the jumphost rather than asserting anything about the bastion. A verdict that cannot be resolved is recorded as unknown, never as offline.
+
+Notifications (`bastion_offline`, `jumphost_unreachable`) are raised after three consecutive failures and clear automatically when the bastion comes back.
+
+**Automatic restart** is available behind `BASTION_AUTO_RESTART_ENABLED` and is off by default. It uses the same provider restart that the Nodes tab exposes - which goes through the provider API and therefore does not need the bastion to be reachable. It is deliberately not routed through the AI: the action is mechanical and has one right answer. Four guards bound it: it acts only on the confirmed verdict you were notified about, it makes at most three attempts (immediately, +10 minutes, +30 minutes), an in-flight restart blocks a duplicate, and a bastion that recovers and dies three times in a day is treated as flapping and left alone. Jumphost outages are never auto-recovered - that host is yours, and the provider API sits behind it.
+
+**Diagnosis** collects sshd configuration, failed-login volume and sources, disk, failed units, journal errors, listening ports, and pending security updates in one read-only SSH round trip. Findings are derived deterministically rather than left to a model to eyeball. With `BASTION_AI_ANALYSIS_ENABLED`, a settled incident (recovered or exhausted) opens one AI session to explain why it went down and what about the host's security posture needs attention - a restart answers "is it up again" and nothing else.
+
 ---
 
 ## GitOps Settings
