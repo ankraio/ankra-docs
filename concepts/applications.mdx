@@ -126,8 +126,21 @@ A demo runs one component. A single-app application has exactly one, so there is
     # List active demos, then stop one
     ankra application demo list <application-id>
     ankra application demo stop <application-id> <workspace-id>
+
+    # Inspect a demo: record + provisioning steps, and a bounded log tail
+    ankra application demo detail <application-id> <workspace-id>
+    ankra application demo logs <application-id> <workspace-id> --tail 200
+
+    # Read or edit the saved demo defaults
+    ankra application demo config get <application-id>
+    ankra application demo config set <application-id> \
+      --database=true --env 'DATABASE_URL=${{ ankra.demo_database.url }}' \
+      --migrate-command 'pnpm run db:migrate' --database-extension vector
+
+    # Dispatch the AI pre-setup mission for a failed demo
+    ankra application demo fix <application-id> <workspace-id>
     ```
-    The deploy response includes `preview_url` when a public host was resolved.
+    The deploy response includes `preview_url` when a public host was resolved. `config set` fetches the saved configuration first and applies only the flags you pass, so it never drops entries or dependency designations you did not name.
   </Tab>
   <Tab title="AI / MCP">
     Ask the AI assistant to demo a pull request, or call the `deploy_pr_demo` tool directly (it is allowed in **Ask** mode - the demo is isolated and self-expiring). The result carries the same `preview_url`. Tear down early with `demo_stop`.
@@ -157,18 +170,30 @@ Values marked **secret** are stored as Ankra secret slots (Vault-backed) — the
 | `${{ ankra.demo_database.password }}` | The per-demo random password |
 
 <Note>
-The throwaway database is ephemeral by design: it starts empty on every deploy and is wiped with the namespace. Run your app's migrations on boot, or treat the demo as stateless. The database runs a pgvector-capable Postgres, so migrations using `CREATE EXTENSION vector` work. `.url` and `.password` references are always delivered through a Kubernetes Secret, never as plain env text.
+The throwaway database is ephemeral by design: it starts empty on every deploy and is wiped with the namespace. The database runs a pgvector-capable Postgres, so migrations using `CREATE EXTENSION vector` work. `.url` and `.password` references are always delivered through a Kubernetes Secret, never as plain env text.
 </Note>
+
+**Migrations.** If your image does not run its own migrations on boot, set a **migration command** in the demo configuration (`migrate_command`) — for example `pnpm run db:migrate` or `alembic upgrade head`. It runs inside your application image (`sh -c`) as an init container, after the database accepts connections and with the same environment the app sees, so a fresh demo database provisions its schema before the first request. Because every deploy starts the database empty, the command re-runs on every deploy — write migrations to be idempotent (every standard migration tool is).
+
+**Extensions.** If your schema needs Postgres extensions beyond what migrations create themselves, list them in `database_extensions` (for example `["vector"]`) and the demo database creates them at initdb, before your migrations run.
+
+Ankra detects both automatically when it analyses a repository: a Postgres client dependency, an ORM configuration, or a composed database marks the application as database-needing, its referenced connection variables are wired to the `${{ ankra.demo_database.* }}` placeholders, and a recognised migration script becomes the migration command — so the first demo of a database-backed application works without any manual configuration. Detection only ever seeds an application that has no demo configuration yet; it never overwrites what you or the pre-setup agent saved.
+
+### The demo container port
+
+The demo's readiness probe, Service, and preview route all target one container port, resolved in this order: the component's recorded port, the generated runtime Dockerfile's `EXPOSE`, the generated Deployment manifest's `containerPort`, the analysed `target_port` parameter, and only then the platform default. The launch dialog shows the resolved port and where it came from; a port you did not edit is left to the platform to resolve.
+
+When the resolved port is still wrong — stale analysis, a hand-edited Dockerfile — the platform corrects itself at runtime: a demo whose container runs cleanly but never accepts connections has its logs read for the port the server actually announces (`Accepting connections at…`, `Listening on…`, and the other common startup banners). If the evidence is unambiguous, the demo is repointed at the announced port on the fly, the correction is recorded on the application so the next launch resolves it statically, and the demo detail page shows the correction. Ambiguous evidence never auto-corrects; it flows into the failure message ("Nothing accepted connections on port 3000. The container's logs say it listens on port 8001.") and dispatches the pre-setup agent instead.
 
 ### Automatic pre-setup when a demo crashes
 
 An image that validates its environment on boot — refusing to start without a database URL, an auth secret, an API key — crash-loops when demoed with no configuration. Ankra now detects this and fixes it with an agent:
 
-1. When a demo fails with a **startup crash** (CrashLoopBackOff or a container configuration error), Ankra dispatches a one-shot **pre-setup agent** for it automatically. The run appears on the **AI agents** page like any other mission.
+1. When a demo fails with a **startup crash** (CrashLoopBackOff or a container configuration error), a **failed migration command**, or a port-evidence timeout (the container announced a different port than the demo probed), Ankra dispatches a one-shot **pre-setup agent** for it automatically. The run appears on the **AI agents** page like any other mission.
 2. The agent reads the crashed container's logs, works out which environment variables the application demands, and generates a **pre-setup**: missing database URLs become `${{ ankra.demo_database.* }}` references with the throwaway Postgres enabled, secrets get fresh random values, and mode flags get the value that avoids external side effects.
 3. It saves the pre-setup as the application's demo defaults — so **every future demo inherits it** — and redeploys the failed demo to prove it boots.
 
-The agent never weakens the application's own validation, never reuses values found in logs, and merges with existing demo settings rather than replacing what you configured. Dispatch is bounded to one run per demo per day; image-pull failures and provisioning timeouts never dispatch (no environment can fix those). You can also trigger it on demand with `POST /org/applications/{application_id}/demos/{workspace_id}/fix`, or just ask the AI assistant to fix the failed demo — the chat has the same `get_demo_diagnostics`, `update_application_demo_config`, and `redeploy_demo` tools the mission uses.
+The agent can also set the migration command and database extensions when the logs show schema or `CREATE EXTENSION` failures. It never weakens the application's own validation, never reuses values found in logs, and merges with existing demo settings rather than replacing what you configured. Dispatch is bounded to one run per demo per day; image-pull failures and provisioning timeouts never dispatch (no environment can fix those). You can also trigger it on demand with `POST /org/applications/{application_id}/demos/{workspace_id}/fix`, or just ask the AI assistant to fix the failed demo — the chat has the same `get_demo_diagnostics`, `update_application_demo_config`, and `redeploy_demo` tools the mission uses.
 
 ---
 
