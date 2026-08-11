@@ -1,0 +1,182 @@
+---
+title: Branch Demos
+description: Launch a throwaway demo of any branch build on your staging cluster - with environment variables, an optional Postgres, and an automatic teardown timer
+---
+
+<Note>
+A branch demo runs a branch's already-built container images in their own isolated namespace on your organisation's staging cluster, and stops itself when the timer runs out. Use it to show work in progress, reproduce a bug against a specific build, or hand a reviewer a live URL instead of a screenshot.
+</Note>
+
+Pull requests get [previews automatically](/guides/pr-preview-environments). This guide covers the manual path: the **Launch a branch demo** dialog on an application's **Demos** tab, and its CLI and MCP equivalents.
+
+---
+
+## Prerequisites
+
+<Steps>
+  <Step title="Connect the repository as an application">
+    The branch must belong to a [connected application](/concepts/applications). Application setup adds the canonical build-and-publish workflow, which is what pushes the image a demo deploys.
+  </Step>
+  <Step title="Set the organisation's staging cluster">
+    An admin sets it under **AI** → **Settings** → **Workspaces**. Every demo lands there. Without it, there is nowhere to launch.
+  </Step>
+  <Step title="Build the branch at least once">
+    A demo deploys an image, it does not build one. Push the branch so the workflow publishes a tag for it. If nothing was ever published, the dialog offers [Fix the build](#no-built-image-for-this-branch).
+  </Step>
+  <Step title="Optional: a demo base domain for HTTPS">
+    Without one, demos are served over the staging cluster's `*.ankra.cc` zone on plain HTTP, or stay in-cluster-only. See [the preview URL](/concepts/applications#the-preview-url).
+  </Step>
+</Steps>
+
+---
+
+## Launch a demo
+
+Open the application, go to the **Demos** tab, and choose **Launch demo**.
+
+### Staging cluster capacity
+
+The panel at the top of the dialog reports the staging cluster's live headroom - nodes ready, CPU and memory in use, pod count, and how many demos are already running - and highlights a figure in amber once it passes 90% of capacity. It is informational: a busy cluster does not block the launch, but it tells you whether your pods will actually get scheduled.
+
+Each demo namespace carries its own hard `ResourceQuota`, so one demo can never exhaust the cluster:
+
+| Demo type | Pods | CPU limit | Memory limit |
+|---|---|---|---|
+| Single service | 5 | 2 | 2 Gi |
+| Full stack (stack profile attached) | 20 | 8 | 16 Gi |
+
+### Branch
+
+Pick the branch to demo. The list marks the application's configured **build branch** and the repository **default** branch. As soon as you pick one, Ankra checks the registry for a matching image and reports the verdict inline:
+
+| Verdict | Meaning |
+|---|---|
+| ✅ **Build found** | The resolved image tag is shown and will be deployed. |
+| ⚠️ **No built image was found** | Nothing was published for this branch yet. See [below](#no-built-image-for-this-branch). |
+| ❌ An error message | The registry or the repository could not be read - the message names the cause. |
+
+### Components (monorepos only)
+
+A single-app repository has nothing to choose. A monorepo shows every deployable component with its own build status and tag, and **all of them deploy by default** - each as its own pod in the one namespace, so a frontend and its API come up wired together instead of half an application answering where the other half belonged.
+
+- **Untick a component** to leave it out of this launch. At least one must stay ticked.
+- **The web entry** owns the demo's URL root. Ankra marks the component its heuristic picked; **set as entry** moves the badge to another one.
+- **Path badges** on the remaining components show where they are published under the same host, so in-cluster callers and the browser reach the same demo.
+
+The container port prefill follows the web entry, and the launch is blocked until every ticked component has an image (or you supply an [image tag override](#advanced-options), which applies to all of them).
+
+### Stop automatically after (hours)
+
+The teardown timer. It is pre-filled with the organisation's default demo TTL and capped by your role's limit, which admins set per role (admin, operator, member) under **AI** → **Settings** → **Workspaces**. The field states your own ceiling. When the timer expires the namespace is deleted; nothing survives it.
+
+### Environment and database
+
+Expand **Environment & database** to set variables for this launch only. **Add variable** adds a row - a name, a value, and a **Secret** checkbox. Values marked secret are stored as Vault-backed Ankra secret slots and mounted as a Kubernetes Secret at deploy time; the plaintext never persists in the application's configuration.
+
+Toggle **Attach a throwaway Postgres** and an ephemeral pgvector-capable Postgres is provisioned inside the demo namespace with a per-demo random password, then destroyed with it. Nothing is injected automatically, because every codebase names its configuration differently - reference the placeholders in your own variable *values* instead:
+
+| Placeholder | Resolves to |
+|---|---|
+| `${{ ankra.demo_database.url }}` | Full `postgres://` connection string |
+| `${{ ankra.demo_database.host }}` | In-namespace service host |
+| `${{ ankra.demo_database.port }}` | `5432` |
+| `${{ ankra.demo_database.name }}` | Database name |
+| `${{ ankra.demo_database.user }}` | Database user |
+| `${{ ankra.demo_database.password }}` | The per-demo random password |
+
+With the toggle on, the editor offers quick-add buttons for the common names (`DATABASE_URL` and friends) already wired to the right placeholder.
+
+<Note>
+Everything in this section applies to **this launch only**. To give every demo of the application the same configuration - manual launches, CLI and MCP deploys, and the automatic PR previews - set it once as the application's demo defaults behind the gear button on the **Demos** tab. Per-launch values win by name. Full reference: [environment variables and a throwaway database](/concepts/applications#environment-variables-and-a-throwaway-database).
+</Note>
+
+### Advanced options
+
+| Field | Use it when |
+|---|---|
+| **Image tag override** | You want a specific tag rather than the one resolved from the branch build - an older build, or a tag pushed outside the standard workflow. It applies to every included component, so it also rescues a partially built branch. Leave empty to use the resolved tag. |
+| **Container port** | Your application listens on something other than the detected port. It is pre-filled from the web entry's build metadata and stops following it once you edit the field. |
+
+### Full-stack demos
+
+When the application designates a **stack profile** for demos, the dialog says so before you launch. That launch also instantiates the profile as a demo-scoped Stack in the same namespace - dependencies, add-ons, and manifests included - and tears the whole thing down with the demo. The per-demo quota rises to the full-stack row in the table above. Configure the designation in the **Demos** tab settings.
+
+---
+
+## Reach the running demo
+
+Launching drops you back on the **Demos** tab, which lists every active demo with its status, preview URL, and remaining TTL. Each demo has a detail page carrying live provisioning progress read from the staging cluster, the namespace's bill of materials, Kubernetes events, and pod logs.
+
+How you reach it depends on DNS:
+
+1. **An organisation demo base domain**, if configured, wins outright: `<namespace>.<demo-base-domain>`, with your ingress class and TLS secret.
+2. **Otherwise the staging cluster's delegated Ankra DNS zone**, when active: `<namespace>.<cluster-id>.<org-id>.ankra.cc` over HTTP.
+3. **Otherwise in-cluster only** - the demo still runs, and the detail page gives you the service DNS name and a ready-made `kubectl port-forward` command.
+
+The full resolution order is documented under [the preview URL](/concepts/applications#the-preview-url).
+
+---
+
+## From the CLI and the AI Assistant
+
+<Tabs>
+  <Tab title="CLI">
+    ```bash
+    # Deploy a branch demo
+    ankra application demo deploy <application-id> --branch feature/login
+
+    # Override the teardown timer
+    ankra application demo deploy <application-id> --branch feature/login --ttl-hours 8
+
+    # List active demos, then stop one early
+    ankra application demo list <application-id>
+    ankra application demo stop <application-id> <workspace-id>
+    ```
+    The deploy response includes `preview_url` when a public host was resolved.
+  </Tab>
+  <Tab title="AI / MCP">
+    Ask the AI Assistant to demo a branch, or call the `deploy_pr_demo` tool directly - it is allowed in **Ask** mode, because a demo is isolated and self-expiring. Pass `env` to set per-launch variables. Tear down early with `demo_stop`, and inspect a failed one with `get_demo_diagnostics`.
+  </Tab>
+</Tabs>
+
+---
+
+## No built image for this branch
+
+When the registry holds nothing for the branch, the dialog does not dead-end. It offers, in order of effort:
+
+- **Recent image tags** from the same repository as one-click chips - handy for demoing the last good build while a new one is still running.
+- **Fix the build**, which diagnoses why no image exists and applies the safe fixes it can: restarting a failed application setup, repairing publish readiness, or re-running the latest workflow so it can push to the registry. When the deterministic fixes cannot unblock it, Ankra dispatches an agent mission and links you to its run so you can watch the work.
+- **Open CI/CD**, which jumps straight to the application's pipeline runs.
+
+---
+
+## Stopping a demo
+
+A demo stops itself when its TTL expires - namespace deleted, quota released, database gone. Stop one early from the **Demos** tab, with `ankra application demo stop`, or with the `demo_stop` tool. There is nothing to clean up afterwards.
+
+<Warning>
+Demo namespaces are ephemeral by design. The throwaway database starts empty on every deploy and is wiped with the namespace - run your migrations on boot and never point a demo at data you care about.
+</Warning>
+
+---
+
+## Troubleshooting
+
+| Symptom | What to check |
+|---|---|
+| **Launch demo** is disabled | The dialog names the reason on hover: no branch picked, an unresolved image tag, a TTL beyond your role's cap, an invalid container port, or an incomplete environment variable. |
+| No branches are listed | The application's Git credential can no longer read the repository. Re-check it on the application's settings, then reopen the dialog. |
+| Deployed, but the pod crash-loops | The demo runs *your* image, so a boot crash is application-side. Read the pod logs on the demo's detail page. If the container refuses to start without configuration, Ankra dispatches a [pre-setup agent](/concepts/applications#automatic-pre-setup-when-a-demo-crashes) that works out the missing variables, saves them as the application's demo defaults, and redeploys. |
+| Pods stay `Pending` | The namespace quota or the cluster is full. Check the capacity panel and the demo's Kubernetes events, and stop demos you no longer need. |
+| The preview URL does not resolve | The staging cluster needs an active Ankra DNS zone, or the organisation needs a demo base domain. Without either, use the port-forward command on the detail page. |
+| An environment variable did not reach the container | Per-launch values win by name over the application defaults, and an empty value is still a value. Confirm the final set on the demo's detail page bill of materials. |
+
+---
+
+## Related
+
+- [Preview demos](/concepts/applications#preview-demos) - the concept, the namespace model, and the isolation guarantees
+- [PR preview environments](/guides/pr-preview-environments) - the automatic per-pull-request flow and its status comment
+- [Environment variables and a throwaway database](/concepts/applications#environment-variables-and-a-throwaway-database) - the defaults layer shared by every demo surface
+- [GitHub Actions CI/CD pipeline](/guides/cicd-pipeline) - the build that publishes the image a demo deploys
