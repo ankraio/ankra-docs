@@ -11,7 +11,7 @@ Applications take you from source code to a deployable workload. Connect an appl
 </Warning>
 
 <Note>
-Applications connect to **GitHub** repositories and use a [GitHub credential](/integrations/github). The generated CI/CD pipeline pushes the container image to your organisation's private Ankra registry.
+Applications connect to **GitHub** repositories and use a [GitHub credential](/integrations/github). By default the generated CI/CD pipeline pushes the container image to your organisation's private Ankra registry; if you already run your own registry, [declare it](#using-your-own-registry) and Ankra publishes to and reads from it instead.
 </Note>
 
 ---
@@ -72,6 +72,45 @@ A repository that builds more than one deployable app is onboarded as a **monore
 Ankra decides the components from, in order: the per-component workflows the repository already carries (so re-running analysis never renames a component and orphans the images it has published), the apps the analysis proposed, then the repository's structure - two or more Dockerfiles in subdirectories and no Dockerfile at the root, or a workspace marker (`nx.json`, `turbo.json`, `lerna.json`, `pnpm-workspace.yaml`, `go.work`) plus two or more subdirectories with their own dependency manifest. **A Dockerfile at the repository root always means a single app**, whatever else the repository contains.
 
 Build state, published images, deploys, demos, and container scanning are all reported per component, so an application whose API component built and whose frontend did not says exactly that.
+
+### Using your own registry
+
+An application publishes to your organisation's private Ankra registry unless you say otherwise. If you already operate a registry - the same Harbor whose OCI charts Ankra indexes, for instance - declare it on the application and Ankra publishes there, reads the published tags back from there, and pulls from there.
+
+Declare it with `image_registry` when you create the application:
+
+```json
+{
+  "name": "commerce",
+  "app_repo_credential_name": "github",
+  "app_repo_owner": "smartoptics-dwdm",
+  "app_repo_name": "commerce",
+  "image_registry": {
+    "url": "oci://artifact.example.com/commerce-images",
+    "credential_name": "example-harbor-pull",
+    "pull_secret_name": "harbor-registry",
+    "username_secret_name": "HARBOR_USERNAME",
+    "password_secret_name": "HARBOR_PASSWORD"
+  }
+}
+```
+
+| Field | Meaning |
+| --- | --- |
+| `url` | The registry project images publish to, as `oci://<host>/<project>`. A deeper path becomes a prefix every component's repository nests under. |
+| `credential_name` | An existing [registry credential](/integrations/helm-registries) of the organisation - the same credential resource your chart registries authenticate with. Ankra reads published tags and builds the cluster pull secret from it. |
+| `api_url` | Optional. The registry's management API base; defaults to `https://<host>`, which is where a Harbor serves its own API. |
+| `pull_secret_name` | Optional. The `kubernetes.io/dockerconfigjson` Secret the generated manifests reference through `imagePullSecrets`. Defaults to `ankra-registry-pull`. |
+| `username_secret_name` / `password_secret_name` | Optional. The repository Actions secrets the build workflow logs in with. Default to `ANKRA_REGISTRY_USERNAME` / `ANKRA_REGISTRY_PASSWORD`. |
+| `manage_actions_secrets` | Optional, default `false`. See below. |
+
+**Ankra does not mint robots for a registry you operate.** With a declared registry, setup names the two Actions secrets the workflow reads and leaves them to you, rather than writing a credential Ankra happens to hold over a push robot you administer. Publish readiness reports whether those secrets exist and names them. Set `manage_actions_secrets: true` to have Ankra write the declared credential into them instead.
+
+<Note>
+On a monorepo, a component may declare its own `image_registry` to publish into a different project of the same registry - useful when each app has its own robot accounts and retention rules. A component's declaration wins over the application's; the application's applies to every component that declares none.
+</Note>
+
+Publish readiness, the deploy gate, image tag listings, container scanning, and preview demos all resolve the declared registry, so an application whose images live outside Ankra reports what is actually published rather than staying blocked on an artifact that was never going to appear in Ankra's own project.
 
 ### Security scanning
 
@@ -233,7 +272,7 @@ The agent can also set the migration command and database extensions when the lo
 
 <Steps>
   <Step title="Connect GitHub">
-    Add a [GitHub credential](/integrations/github) with access to the application's repository. The Ankra GitHub App needs permission to open pull requests, commit workflow files, and manage Actions secrets. Ankra installs private registry credentials on the repository automatically.
+    Add a [GitHub credential](/integrations/github) with access to the application's repository. The Ankra GitHub App needs permission to open pull requests, commit workflow files, and manage Actions secrets. Ankra installs the Ankra registry credentials on the repository automatically; for [your own registry](#using-your-own-registry) you set the login secrets yourself.
   </Step>
   <Step title="Have a target cluster">
     Make sure you have a [cluster](/guides/import-cluster) with the [agent](/concepts/cluster-agent) connected to deploy onto.
