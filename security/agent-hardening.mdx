@@ -1,0 +1,264 @@
+---
+title: Hardening the Agent
+description: Restrict the agent's network egress, scope its service account, ship its metrics and logs to your own stack, and turn off optional behaviours.
+---
+
+The [Ankra Agent](/concepts/cluster-agent) ships hardened by default - non-root, read-only root filesystem, all Linux capabilities dropped. This page covers what you can tighten beyond the defaults, and how to prove the resulting posture to an assessor.
+
+For the scope determination behind these controls, see [Agent Compliance Posture](/security/agent-compliance).
+
+---
+
+## Keep the token out of Helm values
+
+Passing `config.token` on the command line puts the credential in your shell history and in the Helm release Secret. Create the Secret yourself and reference it instead.
+
+```bash
+kubectl create secret generic ankra-agent-secret \
+  --namespace ankra \
+  --from-literal=token=<your-token>
+
+helm upgrade --install ankra-agent oci://ghcr.io/ankraio/ankra-agent/ankra-agent \
+  --namespace ankra \
+  --set config.existing_secret_name=ankra-agent-secret \
+  --set config.secret_key=token
+```
+
+Rotating that Secret and restarting the agent is also the fastest in-cluster way to cut the agent off during an incident.
+
+---
+
+## Restrict network egress
+
+The agent needs two external destinations plus in-cluster access to the Kubernetes API. Everything else can be denied.
+
+```yaml
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: ankra-agent-egress
+  namespace: ankra
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: ankra-agent
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - namespaceSelector: { }
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    - to:
+        - namespaceSelector: { }
+      ports:
+        - protocol: TCP
+          port: 443
+        - protocol: TCP
+          port: 6443
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.0.0.0/8
+              - 172.16.0.0/12
+              - 192.168.0.0/16
+      ports:
+        - protocol: TCP
+          port: 443
+        - protocol: TCP
+          port: 4222
+```
+
+<Warning>
+Standard `NetworkPolicy` matches on CIDRs, not hostnames, so the external rule above cannot name `platform.ankra.app` directly. If your CNI supports FQDN-based egress policy - Cilium's `toFQDNs` for example - use it to pin the two hostnames exactly. Otherwise the rule limits the agent to two ports on external addresses, which is still a meaningful reduction.
+</Warning>
+
+Before you apply a restrictive policy, account for the in-cluster endpoints the agent reaches on your behalf. If you have connected a [Prometheus](/integrations/prometheus) or [log source](/integrations/log-sources) endpoint, or you run the [ArgoCD engine](/concepts/deployment-engines), the agent needs to reach those services too. The in-cluster rule above allows 443 and 6443 across namespaces; widen it to the specific ports and namespace selectors your integrations use, and verify the cluster still reports healthy afterwards.
+
+---
+
+## Turn off optional egress
+
+The public IP lookup is the only outbound call the agent makes that is not required, and it is disabled by default. Confirm it stays that way in restricted-egress environments:
+
+```yaml
+public_ip:
+  reporting_enabled: false
+```
+
+You can also narrow what the agent watches. Dynamic API discovery extends the watch set to CRDs and operator resources beyond the curated built-in list. Pinning it off limits both the metadata that egresses and the agent's read footprint:
+
+```yaml
+k8s_watch:
+  dynamic_discovery: false
+```
+
+Secret redaction is on by default and should stay on. It replaces every Secret `data` and `stringData` value with a SHA-256 digest before it enters the sync pipeline:
+
+```yaml
+k8s_watch:
+  redact_secrets: true
+```
+
+<Note>
+Turning the watch pipeline off entirely (`k8s_watch.enabled: false`) stops resource browsing and live views in the platform. Prefer narrowing discovery over disabling the pipeline.
+</Note>
+
+---
+
+## Mirror the image
+
+Pull the agent image and chart from a registry you control rather than reaching a vendor registry from every cluster. Mirror them into your own registry, then point the chart at it:
+
+```yaml
+image:
+  repository: <your-registry>/ankra/agent
+  pull_secrets:
+    - name: <your-pull-secret>
+```
+
+<Warning>
+Pinning `image.tag` breaks the platform's fleet auto-upgrade, which relies on the image following the chart version. If you mirror, mirror new chart versions on a schedule so the agent does not fall behind on security fixes.
+</Warning>
+
+---
+
+## The service account
+
+The agent's ClusterRole grants all verbs on all resources in all API groups. It **cannot be narrowed through chart values today** - the rules are fixed in the chart, not templated from values. Anyone telling you to set an `rbac.rules` override is describing a knob that does not exist.
+
+What you can do instead:
+
+- **Constrain the agent by namespace policy rather than RBAC.** Admission policy engines such as Kyverno or Gatekeeper still apply to everything the agent creates. Its Kubernetes privilege does not exempt it from your admission controls, so policy is the effective place to draw the line.
+- **Tier your clusters.** Run Ankra-managed clusters as a separate tier from your highest-sensitivity workloads, so the privilege boundary matches your data boundary. This is also the practical answer for PCI scope.
+- **Alert on changes to the binding.** Watch the ClusterRole and ClusterRoleBinding for modification, so an unexpected change is a detection rather than a discovery.
+- **Review it on your normal cadence.** Record the binding as a justified exception in your privileged-access register and review it alongside your other cluster-admin grants.
+- **Move the control plane inside your boundary.** The self-hosted deployment keeps the privileged component on infrastructure you operate.
+
+Inspect exactly what is granted at any time:
+
+```bash
+kubectl get clusterrole ankra-agent-ankra -o yaml
+kubectl get clusterrolebinding -l app.kubernetes.io/name=ankra-agent
+```
+
+---
+
+## Ship the agent's metrics
+
+The agent exposes Prometheus metrics on port 8080 at `/metrics`. If you run the Prometheus Operator, enable the bundled ServiceMonitor:
+
+```yaml
+metrics:
+  serviceMonitor:
+    enabled: true
+    interval: 30s
+    scrapeTimeout: 10s
+    labels:
+      release: kube-prometheus-stack
+```
+
+The `labels` block must match your Prometheus instance's `serviceMonitorSelector`, otherwise the ServiceMonitor is created but never scraped.
+
+Without the Prometheus Operator, scrape the Service directly at `ankra-agent.ankra.svc:8080/metrics`.
+
+Metrics worth alerting on:
+
+| Metric | Type | Tells you |
+|--------|------|-----------|
+| `ankra_agent_watch_events_total` | Counter | Resource events observed - a flatline means the watch pipeline stalled |
+| `ankra_agent_watch_publish_failures_total` | Counter | Batches that failed to reach the platform |
+| `ankra_agent_watch_events_rate_limited_total` | Counter | Events dropped by the rate limiter, so the platform view may lag |
+| `ankra_agent_in_flight_publish_duration_seconds` | Histogram | Publish latency to the control plane |
+| `ankra_native_release_apply_duration_seconds` | Histogram | How long releases take to apply |
+| `ankra_native_release_drift_detected_total` | Counter | Drift found between Git and the cluster |
+| `ankra_native_release_selfheal_total` | Counter | Releases the agent repaired automatically |
+| `ankra_native_release_prune_total` | Counter | Resources pruned during reconciliation |
+
+Health endpoints for liveness and readiness probes are on the same port at `/livez` and `/readyz`.
+
+---
+
+## Ship the agent's logs
+
+The agent writes structured JSON to stdout, so any Kubernetes log collector picks it up without extra configuration. Set the verbosity through chart values:
+
+```yaml
+log_level: "INFO"
+```
+
+Accepted values are `DEBUG`, `INFO`, `WARNING`, `ERROR` and `CRITICAL`. Keep production at `INFO` - `DEBUG` is verbose enough to matter on a busy cluster.
+
+Secret-bearing strings pass through a redaction handler before a line is emitted, covering authorization headers, credentials embedded in URLs, provider tokens, password assignments and docker config JSON. Do not bypass it by writing agent output through a different path.
+
+To collect the logs with Promtail or Grafana Alloy, select the namespace:
+
+```yaml
+scrape_configs:
+  - job_name: ankra-agent
+    kubernetes_sd_configs:
+      - role: pod
+    relabel_configs:
+      - source_labels:
+          - __meta_kubernetes_namespace
+        regex: ankra
+        action: keep
+      - source_labels:
+          - __meta_kubernetes_pod_label_app_kubernetes_io_name
+        regex: ankra-agent
+        action: keep
+```
+
+If you also want Ankra to search those logs back, connect the store as a [log source](/integrations/log-sources).
+
+---
+
+## Verify the posture
+
+Prove the settings rather than asserting them. These commands produce output you can attach to an audit response.
+
+```bash
+# Security context actually in effect
+kubectl get deployment ankra-agent -n ankra \
+  -o jsonpath='{.spec.template.spec.containers[0].securityContext}'
+
+# Confirm no host namespaces are used
+kubectl get deployment ankra-agent -n ankra \
+  -o jsonpath='{.spec.template.spec.hostNetwork}{" "}{.spec.template.spec.hostPID}{" "}{.spec.template.spec.hostIPC}'
+
+# Confirm only emptyDir volumes are mounted
+kubectl get deployment ankra-agent -n ankra \
+  -o jsonpath='{.spec.template.spec.volumes}'
+
+# Image and version in use
+kubectl get deployment ankra-agent -n ankra \
+  -o jsonpath='{.spec.template.spec.containers[0].image}'
+
+# Effective egress policy
+kubectl get networkpolicy -n ankra
+```
+
+An empty result from the host-namespace query means none are set, which is the expected and correct output.
+
+---
+
+## Related
+
+<CardGroup cols={2}>
+  <Card title="Agent Compliance Posture" icon="clipboard-check" href="/security/agent-compliance">
+    The scope determination these controls support.
+  </Card>
+  <Card title="Agent Helm Values" icon="sliders" href="/reference/agent-helm-values">
+    The complete value reference.
+  </Card>
+  <Card title="Monitoring Stack" icon="chart-line" href="/guides/monitoring-stack">
+    Deploy Prometheus and Loki to receive these signals.
+  </Card>
+  <Card title="Compliance Evidence" icon="file-shield" href="/security/compliance-evidence">
+    Turn cluster state into audit evidence.
+  </Card>
+</CardGroup>
