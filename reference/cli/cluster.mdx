@@ -300,11 +300,13 @@ ankra cluster apply [flags]
 
 | Flag | Default | Description |
 |------|---------|-------------|
+| `--allow-repoint` | `false` | Allow this apply to change the cluster's GitOps repository or branch. Resources the new source does not define are pruned |
+| `--allow-repoint-destroying-data` | `false` | Additionally allow a repoint on a cluster holding PersistentVolumeClaims, whose data the prune destroys. Requires --allow-repoint |
 | `--dry-run` | `false` | Validate the ImportCluster YAML locally without calling the API |
 | `-f`, `--file` |   | Path to the ImportCluster YAML file to apply |
 | `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
 | `--timeout` | `10m0s` | Maximum time to wait when --wait is set |
-| `--wait` | `false` | Wait for the operation to finish and report success or failure (default: submit and return immediately) |
+| `--wait` | `false` | Wait for the configuration write to be applied and report its result. Add-on deploys are dispatched afterwards and are NOT covered by this flag - watch them with 'ankra cluster operations list' |
 
 ## ankra cluster clear
 
@@ -707,13 +709,15 @@ Encrypt sensitive values in manifest or addon configuration files using SOPS.
 
 ## ankra cluster encrypt addon
 
-Encrypt a specific key in an addon's Helm values using SOPS.
+Encrypt one or more keys in an addon's Helm values using SOPS.
 
---key takes the YAML key name whose values should be encrypted. SOPS matches
-key names anywhere in the document, not dotted paths; a dotted --key is
-normalised to its last segment. A key whose own name starts with a dot (such
-as ".dockerconfigjson") is kept literally. After encrypting, the CLI verifies
-the value is actually ENC[...] ciphertext and fails if it is not.
+--key takes the YAML key name whose values should be encrypted. Repeat --key to
+encrypt several keys in a single run; all keys are encrypted in one SOPS pass
+and one write. SOPS matches key names anywhere in the document, not dotted
+paths; a dotted --key is normalised to its last segment. A key whose own name
+starts with a dot (such as ".dockerconfigjson") is kept literally. After
+encrypting, the CLI verifies every value is actually ENC[...] ciphertext and
+fails if any is not.
 
 Two modes:
   Cluster mode (default): fetch the addon's values from a live cluster,
@@ -730,6 +734,9 @@ Examples:
   # Cluster mode against a specific cluster, disambiguating stack
   ankra cluster encrypt addon --name grafana --key adminPassword --cluster prod --stack monitoring
 
+  # Encrypt several keys in one run
+  ankra cluster encrypt addon --name grafana --key adminPassword --key smtpPassword
+
   # File mode
   ankra cluster encrypt addon --name grafana --key adminPassword -f cluster.yaml
 
@@ -743,20 +750,27 @@ ankra cluster encrypt addon [flags]
 |------|---------|-------------|
 | `--cluster` |   | Target cluster (name or ID); defaults to the active selection (cluster mode) |
 | `-f`, `--file` |   | Path to a local cluster YAML (enables file mode) |
-| `--key` |   | YAML key name to encrypt (required); dotted paths are normalised to the last segment, a leading-dot key like .dockerconfigjson is kept literally |
+| `--key` | `[]` | YAML key name to encrypt (required; repeatable); dotted paths are normalised to the last segment, a leading-dot key like .dockerconfigjson is kept literally |
 | `--name` |   | Name of the addon (required) |
 | `--stack` |   | Stack name (cluster mode; required when the addon exists in multiple stacks) |
 
 ## ankra cluster encrypt manifest
 
-Encrypt a specific key in a manifest using SOPS.
+Encrypt one or more keys in a manifest using SOPS.
 
 --key takes the YAML key name whose values should be encrypted (for a Secret's
-data.password, that is "password"). SOPS matches key names anywhere in the
-document, not dotted paths; a dotted --key is normalised to its last segment.
-A key whose own name starts with a dot (such as ".dockerconfigjson" in a
-kubernetes.io/dockerconfigjson Secret) is kept literally. After encrypting, the
-CLI verifies the value is actually ENC[...] ciphertext and fails if it is not.
+data.password, that is "password"). Repeat --key to encrypt several keys in a
+single run; all keys are encrypted in one SOPS pass and one write. SOPS matches
+key names anywhere in the document, not dotted paths; a dotted --key is
+normalised to its last segment. A key whose own name starts with a dot (such as
+".dockerconfigjson" in a kubernetes.io/dockerconfigjson Secret) is kept
+literally. After encrypting, the CLI verifies every value is actually ENC[...]
+ciphertext and fails if any is not.
+
+--all-data selects every key under data and stringData of a Kubernetes Secret
+manifest instead of naming keys individually; keys whose values are already
+encrypted are skipped. The manifest must be a Secret. --all-data and --key are
+mutually exclusive.
 
 Two modes:
   Cluster mode (default): fetch the manifest from a live cluster, encrypt the
@@ -789,6 +803,12 @@ Examples:
   ankra cluster encrypt manifest db-secret --key password \
     --set 'data.password=bmV3LXNlY3JldA==' --cluster prod
 
+  # Encrypt several keys in one run
+  ankra cluster encrypt manifest db-secret --key password --key api-token
+
+  # Encrypt every data/stringData key of a Secret manifest
+  ankra cluster encrypt manifest db-secret --all-data --cluster prod
+
   # File mode
   ankra cluster encrypt manifest db-secret --key password -f cluster.yaml
 
@@ -800,9 +820,10 @@ ankra cluster encrypt manifest <manifest_name> [flags]
 
 | Flag | Default | Description |
 |------|---------|-------------|
+| `--all-data` | `false` | Encrypt every key under data and stringData of a Secret manifest, skipping values that are already encrypted |
 | `--cluster` |   | Target cluster (name or ID); defaults to the active selection (cluster mode) |
 | `-f`, `--file` |   | Path to a local cluster YAML (enables file mode) |
-| `--key` |   | YAML key name to encrypt (required); dotted paths are normalised to the last segment, a leading-dot key like .dockerconfigjson is kept literally |
+| `--key` | `[]` | YAML key name to encrypt (repeatable); dotted paths are normalised to the last segment, a leading-dot key like .dockerconfigjson is kept literally |
 | `--set` | `[]` | Apply value edits in-memory before encrypting (same syntax as manifests upgrade --set, e.g. --set 'data.password=bmV3'); the plaintext value never reaches git (cluster mode only; repeatable) |
 
 ## ankra cluster get
@@ -995,9 +1016,12 @@ ankra cluster get pods [name] [flags]
 
 Fetch any Kubernetes resource type. Use for kinds not covered by dedicated commands.
 
+Kinds outside the core API group need --group (and sometimes --api-version).
+
 Example:
   ankra cluster resources PersistentVolumeClaim -n default
-  ankra cluster resources NetworkPolicy --all-namespaces
+  ankra cluster resources NetworkPolicy --group networking.k8s.io --all-namespaces
+  ankra cluster resources StorageClass --group storage.k8s.io
 
 ```bash
 ankra cluster get resources <kind> [flags]
@@ -1068,6 +1092,44 @@ ankra cluster get statefulsets [name] [flags]
 | `-n`, `--namespace` |   | Kubernetes namespace |
 | `-o`, `--output` | `table` | Output format: table, json, yaml |
 | `-l`, `--selector` |   | Label selector |
+
+## ankra cluster get storageclasses
+
+List storage classes in the cluster
+
+```bash
+ankra cluster get storageclasses [name] [flags]
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--name` |   | Filter by resource name |
+| `-o`, `--output` | `table` | Output format: table, json, yaml |
+| `-l`, `--selector` |   | Label selector |
+
+## ankra cluster gitops
+
+Commands for inspecting which GitOps repository a cluster syncs from.
+
+## ankra cluster gitops status
+
+Show the GitOps sync status of a cluster: the repository, branch, and
+credential it syncs from, the last synced commit, and any pending commit or
+sync error.
+
+If no cluster name is provided, uses the currently selected cluster.
+
+```bash
+ankra cluster gitops status [cluster_name] [flags]
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
 
 ## ankra cluster helm
 
@@ -2149,6 +2211,7 @@ ankra cluster node-group add <cluster_id> [flags]
 
 | Flag | Default | Description |
 |------|---------|-------------|
+| `--availability-zone` |   | Pin every node of the group to one availability zone, on OVH 3-AZ regions (e.g. eu-west-par-b). See 'ankra cluster ovh regions --with-zones'. Pin the group when it runs zonal storage: an OVH volume cannot attach from another zone |
 | `--count` | `1` | Number of nodes |
 | `--instance-type` |   | Server type / flavor / plan for nodes (required) |
 | `--name` |   | Node group name (required) |
@@ -2479,6 +2542,7 @@ ankra cluster ovh create [flags]
 
 | Flag | Default | Description |
 |------|---------|-------------|
+| `--availability-zones` | `[]` | Availability zones to spread the cluster across, in a 3-AZ region (e.g. eu-west-par-a,eu-west-par-b,eu-west-par-c). See 'ankra cluster ovh regions --with-zones'. Omitted leaves placement to OVH, which puts every node in one zone. More than one zone needs --control-plane-count=3 for etcd quorum |
 | `--control-plane-count` | `1` | Number of control plane nodes |
 | `--control-plane-flavor-id` | `b2-15` | Control plane instance flavor |
 | `--credential-id` |   | OVH API credential ID (required) |
@@ -2588,6 +2652,7 @@ ankra cluster ovh regions [flags]
 |------|---------|-------------|
 | `--credential-id` |   | OVH API credential ID (required) |
 | `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+| `--with-zones` | `false` | Also show each region's type and availability zones. Only region-3-az regions can place instances by zone; the zone names listed here are what --availability-zones and --availability-zone accept |
 
 ## ankra cluster ovh ssh-keys
 
@@ -2635,6 +2700,123 @@ ankra cluster ovh workers <cluster_id> [flags]
 | Flag | Default | Description |
 |------|---------|-------------|
 | `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+
+## ankra cluster playground
+
+The playground is a real, writable Kubernetes environment Ankra provisions for you - a virtual cluster on Ankra's own infrastructure, with the agent already installed. Every organisation may hold one; it expires after a period of inactivity.
+
+## ankra cluster playground create
+
+Create the organisation's playground. Provisioning runs in the background: poll `ankra cluster playground status <cluster_id>` until the phase reaches ready.
+
+```bash
+ankra cluster playground create
+```
+
+## ankra cluster playground status
+
+Show the provisioning phase of a playground
+
+```bash
+ankra cluster playground status <cluster_id>
+```
+
+## ankra cluster power-schedules
+
+Manage the cluster's power schedules: scheduled stop or start actions that
+fire once at a chosen time or repeatedly on a cron expression, so a
+development cluster can park itself outside working hours.
+
+Power schedules are available for self-managed Hetzner, OVHcloud, UpCloud,
+DigitalOcean, Scaleway, Proxmox VE, and HPE Morpheus clusters - the same
+clusters that support manual stop and start. A scheduled stop behaves
+exactly like stopping the cluster yourself: the provider VMs are
+terminated and only the cluster's configuration is preserved for the next
+start.
+
+Examples:
+  # Park a development cluster on weekday evenings, back before morning
+  ankra cluster power-schedules create --action stop --cron '0 19 * * 1-5' --timezone Europe/Stockholm
+  ankra cluster power-schedules create --action start --cron '0 7 * * 1-5' --timezone Europe/Stockholm
+
+  # One-off stop before the weekend
+  ankra cluster power-schedules create --action stop --at 2026-01-02T19:00:00Z
+
+## ankra cluster power-schedules create
+
+Create a scheduled stop or start on the active cluster. The schedule fires
+once at --at, or repeatedly per --cron evaluated in --timezone (UTC when
+omitted). A cluster can hold up to 20 schedules.
+
+```bash
+ankra cluster power-schedules create [flags]
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--action` |   | What the schedule does when it fires: stop or start (required) |
+| `--at` |   | Fire once at this RFC 3339 time, e.g. 2026-01-02T19:00:00Z (mutually exclusive with --cron) |
+| `--cron` |   | Fire repeatedly per this 5-field cron expression, e.g. '0 19 * * 1-5' (mutually exclusive with --at) |
+| `--enabled` | `true` | Whether the schedule is armed; --enabled=false creates or leaves it paused |
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+| `--timezone` |   | IANA timezone the cron expression is evaluated in, e.g. Europe/Stockholm (default UTC) |
+
+## ankra cluster power-schedules delete
+
+Delete a power schedule: it stops firing immediately and disappears from
+the cluster's schedule list. The cluster itself is not touched. To pause a
+schedule while keeping its configuration, use
+'ankra cluster power-schedules update &lt;schedule_id&gt; ... --enabled=false'.
+
+```bash
+ankra cluster power-schedules delete <schedule_id> [flags]
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+| `-y`, `--yes` | `false` | Skip the confirmation prompt |
+
+## ankra cluster power-schedules list
+
+List the active cluster's power schedules
+
+```bash
+ankra cluster power-schedules list [flags]
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+
+## ankra cluster power-schedules update
+
+Replace a power schedule. This is a full replace, not a patch: pass the
+complete schedule as it should be afterwards - --action plus one of --at or
+--cron (with --timezone for cron schedules), and --enabled=false to leave it
+paused. Use 'ankra cluster power-schedules list' for the schedule ID and the
+current values.
+
+```bash
+ankra cluster power-schedules update <schedule_id> [flags]
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--action` |   | What the schedule does when it fires: stop or start (required) |
+| `--at` |   | Fire once at this RFC 3339 time, e.g. 2026-01-02T19:00:00Z (mutually exclusive with --cron) |
+| `--cron` |   | Fire repeatedly per this 5-field cron expression, e.g. '0 19 * * 1-5' (mutually exclusive with --at) |
+| `--enabled` | `true` | Whether the schedule is armed; --enabled=false creates or leaves it paused |
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+| `--timezone` |   | IANA timezone the cron expression is evaluated in, e.g. Europe/Stockholm (default UTC) |
 
 ## ankra cluster provision
 
