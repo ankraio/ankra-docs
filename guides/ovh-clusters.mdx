@@ -106,6 +106,130 @@ Every configuration parameter, the region list, and instance flavors are in the 
 
 ---
 
+## Availability Zones
+
+Some OVH regions are *3-AZ*: one region spanning three availability zones with independent power, cooling, and networking. `EU-WEST-PAR` is the first, holding `eu-west-par-a`, `eu-west-par-b`, and `eu-west-par-c`.
+
+Two rules come from OVH and shape everything below. An instance's zone is chosen at creation, and a request that names no zone gets whichever zone OVH picks - in practice the same one for every node of a cluster. And an instance's zone is fixed for its lifetime, so re-placing a node means replacing it.
+
+### Find the zones a region has
+
+Zone names are region-scoped, so check the spelling before you use one. Only a region whose type is `region-3-az` accepts zone placement.
+
+```bash
+ankra cluster ovh regions --credential-id <ovh-credential-id> --with-zones
+```
+
+```
+Regions available to credential <ovh-credential-id>:
+  EU-WEST-PAR      region-3-az    zones: eu-west-par-a, eu-west-par-b, eu-west-par-c
+  GRA              region
+```
+
+### Spread a new cluster across zones
+
+Pass the zone pool at create. Ankra distributes instances across it deterministically: control planes and etcd spread per role, workers spread per node group, so a three-node database group gets one node in each zone rather than being balanced against unrelated workers.
+
+<CodeGroup>
+
+```bash CLI
+ankra cluster ovh create \
+  --name my-cluster \
+  --credential-id <ovh-credential-id> \
+  --ssh-key-credential-id <ssh-key-credential-id> \
+  --region EU-WEST-PAR \
+  --availability-zones eu-west-par-a,eu-west-par-b,eu-west-par-c \
+  --control-plane-count 3 \
+  --control-plane-flavor-id b2-15 \
+  --worker-count 3 \
+  --worker-flavor-id b2-15
+```
+
+```bash cURL
+curl -X POST https://platform.ankra.app/api/v1/clusters/ovh \
+  -H "Authorization: Bearer $ANKRA_API_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "my-cluster",
+    "credential_id": "<ovh-credential-id>",
+    "ssh_key_credential_id": "<ssh-key-credential-id>",
+    "region": "EU-WEST-PAR",
+    "availability_zones": ["eu-west-par-a", "eu-west-par-b", "eu-west-par-c"],
+    "control_plane_count": 3,
+    "control_plane_flavor_id": "b2-15",
+    "worker_count": 3,
+    "worker_flavor_id": "b2-15",
+    "distribution": "k3s"
+  }'
+```
+
+</CodeGroup>
+
+<Warning>
+Spreading across more than one zone requires **at least 3 control planes**. Fewer cannot keep etcd quorum through the loss of a zone, which is the only reason to spread a control plane, so the create is refused rather than quietly producing a cluster that fails on the first zone outage.
+</Warning>
+
+Omitting the zones leaves placement to OVH and changes nothing about how clusters behaved before. Clusters in single-zone regions are unaffected by everything on this page.
+
+### Pin a node group to one zone
+
+A node group can be pinned to a single zone instead of spreading. Pin the group that runs zonal storage, because an OVH volume cannot attach from another zone.
+
+```bash
+ankra cluster ovh node-group add <cluster-id> \
+  --name database-par-a \
+  --instance-type r3-128 \
+  --count 1 \
+  --availability-zone eu-west-par-a
+```
+
+Day-2 growth follows the cluster's stored zone pool: node group add, node group scale, worker scale, and control plane growth all balance new instances around where the existing ones already are. A group whose nodes all share one zone is treated as pinned and grows in that zone; a group that is already spread keeps spreading.
+
+### Node topology labels
+
+Every OVH node carries the standard Kubernetes topology pair, so zone-aware scheduling works without extra configuration:
+
+| Label | Value |
+|-------|-------|
+| `topology.kubernetes.io/zone` | the zone OVH reports for the instance |
+| `topology.kubernetes.io/region` | the cluster's region |
+
+The zone comes from what OVH reports for the live instance rather than what was requested, so it is correct even on clusters created before zone placement existed.
+
+On those older clusters Ankra records the zone automatically the next time it reads the instance, but the labels are written by a server sync. Trigger one rather than waiting for it:
+
+```bash
+ankra cluster reconcile <cluster-id>
+kubectl get nodes -L topology.kubernetes.io/zone
+```
+
+### Fixing a cluster that is already in one zone
+
+- **Workers - in place.** Add a node group pinned to the target zone, drain the old group, then delete it. No cluster rebuild.
+- **Control planes - not in place.** The zone is immutable, Ankra never re-places an existing control plane, and a control plane count change is stopped-cluster-only. A zone-spread control plane on an existing cluster means recreating the cluster.
+
+A cluster created before zone placement existed has no stored zone pool, so a node group added to it without a zone still lands wherever OVH picks. Pin each group explicitly: three zones means three pinned node groups.
+
+### Zone tolerance needs more than node spread
+
+**OVH High Speed block storage is zonal.** It is triple-replicated *within* a single zone and cannot attach from another. A single database pod with a single PersistentVolume is therefore **not** zone-fault-tolerant however the nodes are spread: the volume is the single-zone dependency, and if its zone goes down the pod cannot start anywhere else.
+
+A zone-fault-tolerant stateful workload needs all of:
+
+- **Replication at the application layer** - CloudNativePG or Patroni with one replica per zone, each with its own volume. Node spread gives the replicas somewhere to live; it does not create them.
+- **A `WaitForFirstConsumer` StorageClass** so the volume is provisioned in the zone the pod was actually scheduled to, rather than binding first and stranding the pod. Ankra ships `csi-cinder-sc-topology` for exactly this reason, and marks it the default on new OVH clusters. On a cluster created earlier, k3s's `local-path` class is still present and also marked default, so name the class explicitly on anything that matters rather than relying on which default wins:
+
+  ```yaml
+  spec:
+    storageClassName: csi-cinder-sc-topology
+  ```
+- **`allowedTopologies`** on the StorageClass, or a zone-pinned node group per replica, so a rescheduled pod cannot land where its volume is not.
+- **`topologySpreadConstraints`** keyed on `topology.kubernetes.io/zone` for the stateless tiers.
+
+Node spread is necessary but never sufficient.
+
+---
+
 ## Node Groups
 
 Node groups let you organize worker nodes into logical groups with independent instance flavors, counts, labels, and taints. Each group can be scaled, re-flavored, and configured independently.
