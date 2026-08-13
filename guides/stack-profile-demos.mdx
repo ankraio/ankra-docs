@@ -1,0 +1,99 @@
+---
+title: Stack Profile Demos
+description: Run a stack profile on your staging cluster as a throwaway, time-limited deployment - no cluster of your own required, and it tears itself down
+---
+
+<Note>
+A stack profile demo installs a profile's add-ons and manifests into their own isolated namespace on your organisation's staging cluster, and stops itself when the timer runs out. Use it to see what a profile actually deploys before you instantiate it onto a real cluster, to check a new version against the old one, or to hand a colleague something running instead of a YAML file.
+</Note>
+
+This is the profile-side twin of [branch demos](/guides/branch-demos). A branch demo runs an application's build; a profile demo runs the stack itself, with no application in front of it.
+
+---
+
+## Prerequisites
+
+<Steps>
+  <Step title="Set the organisation's staging cluster">
+    An admin sets it under **AI** → **Settings** → **Workspaces**. Every demo lands there. Without it, the Demos tab explains that and offers nothing to launch.
+  </Step>
+  <Step title="Have a stack profile you can read">
+    Your own profiles, profiles shared with your organisation, and public profiles can all be demoed. The demo runs on your staging cluster, so demoing someone else's public profile costs them nothing.
+  </Step>
+  <Step title="Hold the stacks deploy permission">
+    A demo is a real deployment through the resource engine. Without the permission the Demos tab is read-only and says so.
+  </Step>
+</Steps>
+
+---
+
+## Launch a demo
+
+Open the profile and go to the **Demos** tab, then choose **Launch demo**.
+
+The dialog asks for two things:
+
+- **Parameters** - whatever the profile's current version declares. Required inputs are marked; secret parameters bind to an organisation secret slot rather than a typed value, so the plaintext never travels through the browser and is resolved from Vault only at deploy time.
+- **Lifetime** - how long the demo lives, defaulted to your organisation's demo TTL and capped by your role.
+
+Ankra then creates the namespace, applies its quota, and instantiates the profile into it with every member forced into that one namespace.
+
+### One demo per profile
+
+A profile has at most one live demo per organisation. Its namespace is derived from the organisation and profile ids - `ankra-demo-sp-<org>-<profile>` - so launching again **replaces** the running demo rather than adding a second copy. That is also why renaming a profile never strands a demo.
+
+Relaunch to pick up a new profile version or changed parameter values.
+
+### Capacity
+
+The demo namespace carries a hard `ResourceQuota` at the full-stack tier, because a profile installs a whole stack rather than one workload:
+
+| | Pods | CPU limit | Memory limit |
+|---|---|---|---|
+| Stack profile demo | 20 | 8 | 16 Gi |
+
+---
+
+## Watch it come up
+
+The demo list shows the status and what the stack is doing - *waiting to instantiate*, *installing add-ons*, *stack deployed*. Open **Details** for the live picture, read from the staging cluster on every poll:
+
+- **Progress** - namespace created, guardrails applied, stack instantiated. A profile demo deploys no workload of its own, so there is no image or routing step to wait on: the stack operation completing *is* readiness.
+- **What the profile installed** - every Deployment, Service, Ingress, ReplicaSet and Pod in the namespace, with the live manifest behind each one.
+- **Events** - the Kubernetes events for the namespace, newest first.
+- **Logs** - a bounded tail from any pod in the namespace, fetched on demand.
+
+If a chart fails to install, the failure text is the stack's own - "no matching PVC storage class" rather than "the demo failed".
+
+---
+
+## Stopping
+
+**Stop** uninstalls the stack and deletes the namespace. Because Helm uninstall jobs have to drain before the namespace can go, a stop is asynchronous: the demo is marked *stopping* and the reaper finishes the teardown. Every demo also stops on its own at the end of its lifetime, whether or not anyone remembers it.
+
+---
+
+## Application demos and profile demos
+
+An application's demo settings can designate a stack profile, in which case every demo of that application deploys **its own replica** of the profile alongside the app (see [Branch Demos](/guides/branch-demos#full-stack-demos)). That replica and a profile demo are the same stack seen from two sides, so each list links to the other:
+
+- The application's **Demos** tab names the profile its demos replicate and lists that profile's own live demos, each linking straight to its details.
+- The profile's **Demos** tab lists the applications designating it.
+
+When you only want to look at the stack, launching the profile demo is cheaper than launching a whole application demo for it.
+
+---
+
+## API
+
+All endpoints sit under the profile and require authentication; the mutations require a CSRF header for browser-originated requests. Bearer-PAT twins live under `/api/v1/org/stack-profiles/...` for the CLI.
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| `GET` | `/org/stack-profiles/{profile_id}/demos` | The profile's live demos, your TTL policy, the staging cluster, the current version's parameters, and the applications designating this profile |
+| `POST` | `/org/stack-profiles/{profile_id}/demos` | Launch a demo (`version`, `parameters`, `ttl_hours`) |
+| `GET` | `/org/stack-profiles/{profile_id}/demos/{workspace_id}/detail` | The demo plus the live inspection of its namespace |
+| `GET` | `/org/stack-profiles/{profile_id}/demos/{workspace_id}/logs` | A bounded log tail (`pod`, `container`, `tail_lines`) |
+| `DELETE` | `/org/stack-profiles/{profile_id}/demos/{workspace_id}` | Stop the demo |
+
+See [Stack Profiles](/concepts/stack-profiles) for authoring and versioning, and [Branch Demos](/guides/branch-demos) for the application lane.
