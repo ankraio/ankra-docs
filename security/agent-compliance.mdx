@@ -1,0 +1,137 @@
+---
+title: Agent Compliance Posture
+description: What installing the cluster agent adds to your compliance scope, control by control - including a direct answer on its cluster-admin permissions.
+---
+
+Installing the [Ankra Agent](/concepts/cluster-agent) does not create a new compliance boundary. It creates one new privileged identity inside a boundary you already govern.
+
+That distinction carries the whole page. A new boundary means new controls, new evidence and a new perimeter to defend - the agent introduces none of those. A new privileged identity means an entry in an inventory you already maintain, assessed by a process you already run. The agent is the second thing.
+
+Most controls a reviewer reaches for come back out of scope or already satisfied. One comes back in scope and stays there: the agent holds a cluster-admin ServiceAccount. That is answered directly below rather than left to be discovered.
+
+---
+
+## Scope determination
+
+"Out of scope" means the agent adds nothing the control governs. "Satisfied" means it is in scope and passes as evidence rather than as a gap.
+
+| Control area | What the agent introduces | Determination |
+|--------------|---------------------------|---------------|
+| Network perimeter and ingress | No listener reachable from outside the cluster, no inbound firewall rule, no tunnel terminating inward. The agent dials out; nothing on Ankra's side dials in. | **Out of scope** - no new perimeter control to evidence |
+| Host and OS hardening | An unprivileged container. No host namespaces, no hostPath mounts, no node agent, no kernel module, no DaemonSet on your nodes. | **Out of scope** - your host baseline is unchanged |
+| Regulated data processing | Not in the data path. Does not mount application volumes, connect to your databases, or read application payloads. | **Conditional** - out of scope by design, but log streaming and `exec` can surface regulated data if your workloads emit it |
+| Data residency and transfer | Kubernetes object metadata and cluster telemetry egress to the control plane. Secret values are digested before they leave. | **Conditional** - a processor transfer on SaaS, nil when self-hosted |
+| Container runtime hardening | Non-root, read-only root filesystem, all capabilities dropped, no privilege escalation, `RuntimeDefault` seccomp. | **In scope, satisfied** - use it as evidence |
+| Privileged access and RBAC | A ClusterRole granting all verbs on all resources in all API groups, bound cluster-wide. | **In scope** - cannot be descoped, see below |
+| Change and release management | Desired state in your Git repository, applied as attributed commits. AI-proposed writes require human approval. | **In scope, satisfied** |
+| Logging and audit trail | Append-only record of every administrative change, with actor, action, timestamp and source IP. | **In scope, satisfied** |
+| Cryptography in transit | TLS to the platform API. NATS authenticated with per-agent credentials on an organisation-isolated account. | **In scope, satisfied** |
+| Third-party risk | Ankra becomes a processor for the cluster metadata it holds. | **In scope** - a vendor assessment, not an agent property |
+| Reversibility and exit | `helm uninstall` plus deleting the namespace removes the workload, ServiceAccount and ClusterRoleBinding. | **Out of scope** - no lock-in control to evidence |
+
+---
+
+## What crosses the boundary
+
+Every connection is opened by the agent, from inside your cluster, outbound. There is no inbound row in this table because there is no inbound path.
+
+| Destination | Port | Carries | Default |
+|-------------|------|---------|---------|
+| `platform.ankra.app` | 443/tcp | Registration and check-in, job pull, job results, cluster telemetry | Required |
+| `connect.ngs.global` | 4222/tcp | Command channel, resource watch batches, log and `exec` streams, metrics | Required |
+| Your container registry | 443/tcp | Agent image and chart pulls - can be mirrored to a registry you control | Required |
+| `api.ipify.org` | 443/tcp | Public egress IP, so the cluster can appear on the fleet map | **Off** |
+
+The egress-IP lookup is the only optional outbound call and it stays off unless you enable it. Both required destinations are stable hostnames, so confining the agent's namespace to them with a `NetworkPolicy` is straightforward - see [Hardening the Agent](/security/agent-hardening).
+
+---
+
+## What never leaves the cluster
+
+- **Secret values** - before a Secret enters the sync pipeline, every `data` and `stringData` value is replaced with a short SHA-256 digest. Key names survive so the console can show key counts, and a rotated value still changes the digest so change detection works, but the plaintext never reaches the control plane and never reaches the agent's own on-disk buffer.
+- **Container images and their contents** - vulnerability scanning runs in-cluster and only findings metadata leaves. No image layers or filesystem contents.
+- **SOPS plaintext** - values encrypted with [SOPS](/guides/sops) are decrypted inside your cluster at deploy time. Git and the control plane hold ciphertext only.
+- **Application traffic and volume data** - the agent never sees request bodies, database contents, or persistent volume data.
+- **Credentials in logs** - agent logs pass through a redaction handler that strips authorization headers, embedded URL credentials, provider tokens, password assignments and docker config JSON before a line is emitted.
+
+<Note>
+One deliberate exception: the console's **view secret** action returns live secret values to an operator who holds the permission for it. That is an authorised, audited, on-demand read rather than a background flow. If your policy forbids it, withhold the permission through [Roles & Access](/guides/roles-and-access).
+</Note>
+
+---
+
+## Runtime posture as benchmark evidence
+
+The pod ships hardened rather than leaving hardening to you, and every setting below is visible in the chart before you install.
+
+| Control | As shipped | Bears on |
+|---------|-----------|----------|
+| Runs as non-root | `runAsNonRoot: true`, UID/GID 1000 | CIS Kubernetes 5.2.6 |
+| No privilege escalation | `allowPrivilegeEscalation: false` | CIS Kubernetes 5.2.5 |
+| Capabilities dropped | `capabilities.drop: [ALL]` | CIS Kubernetes 5.2.9 |
+| Immutable filesystem | `readOnlyRootFilesystem: true` | NIST SP 800-190 |
+| Syscall confinement | `seccompProfile: RuntimeDefault` | NIST SP 800-190 |
+| No host namespaces | `hostNetwork`, `hostPID`, `hostIPC` unset | CIS Kubernetes 5.2.2 - 5.2.4 |
+| No host filesystem access | Size-limited `emptyDir` volumes only | CIS Kubernetes 5.2 |
+| Credential handling | Token read from a Secret reference | ISO/IEC 27001:2022 A.5.17 |
+
+Verify any of these against a running agent with the commands in [Hardening the Agent](/security/agent-hardening#verify-the-posture).
+
+---
+
+## The cluster-admin question
+
+The agent's ClusterRole grants every verb on every resource in every API group, plus all non-resource URLs, bound cluster-wide. There is no way to present that as least privilege.
+
+**Why it is that way.** The agent installs arbitrary Helm charts and raw manifests that you choose, reconciles them, and proxies authenticated `kubectl` - including `watch`, `logs -f` and `exec` - for the whole cluster. A tool that deploys arbitrary workloads needs reach equivalent to the workloads it deploys.
+
+**What it means for your review.** The agent belongs in your privileged-access inventory, recorded as a justified exception and reviewed on the same cadence as your other cluster-admin bindings. It will appear in a CIS 5.1.1 review. That is the correct outcome, not a finding to argue away.
+
+### Compensating controls
+
+- **The identity is revocable from outside the cluster.** Each cluster has its own registration token. Revoking it at the platform, or rotating the Kubernetes Secret holding it, cuts the agent off without needing cluster access. After repeated identity rejection the agent stops and the cluster is marked disconnected.
+- **Per-agent, per-organisation transport credentials.** NATS credentials are issued to that agent at registration, scoped to its own command subject, on an account isolated per organisation. Session tokens rotate. There is no shared or long-lived transport secret.
+- **Human approval gates automated writes.** AI-proposed changes become drafts that a person approves, applied as attributed Git commits. The AI never mutates a cluster directly and is never shown secret values.
+- **Reconciliation is bounded.** Release operations serialise on a Kubernetes Lease, and pruning runs behind anti-mass-deletion guards and sync windows, so drift correction converges toward Git rather than issuing surprise deletions.
+- **Git holds desired state.** Every change is diffable, attributable and revertable by you, independently of the platform.
+- **Administrative actions are append-only audited**, and exportable - see [Audit Export](/security/audit-export).
+
+<Warning>
+The ClusterRole cannot currently be narrowed through chart values. If your policy requires a smaller grant, the workable routes are network and admission constraints, cluster tiering, or the self-hosted deployment - all covered in [Hardening the Agent](/security/agent-hardening).
+</Warning>
+
+---
+
+## Framework mapping
+
+| Framework | Clauses engaged | How the agent bears on them |
+|-----------|-----------------|------------------------------|
+| SOC 2 | CC6.1, CC6.6, CC6.7, CC7.2, CC8.1 | Logical access (the cluster-admin binding and its review), boundary protection (outbound only), transmission, monitoring, and change management |
+| ISO/IEC 27001:2022 | A.5.15, A.5.17, A.8.2, A.8.9, A.8.15, A.8.16, A.8.24 | Privileged access rights are the live clause. Configuration management, logging, monitoring and cryptography are served by existing behaviour |
+| GDPR | Art. 28, Art. 32 | On SaaS, Ankra is a processor for cluster metadata. Art. 32 measures are met by secret digesting, encryption in transit and audit logging |
+| NIS2 | Art. 21 supply chain and access control | Assessed as a supplier relationship plus a privileged-access control |
+| DORA | ICT risk and change management | An ICT third-party dependency, with Git-backed change management and an audit trail |
+| PCI DSS v4.0 | Requirements 1, 6, 7, 8, 10 | If the cluster is in your CDE, the agent is in scope with it. Descope through segmentation, not through the agent's design |
+
+<Warning>
+A cluster-admin component inside a cardholder data environment cannot be descoped by asserting it does not touch cardholder data. Either keep Ankra-managed clusters outside the CDE, or assess the agent as an in-scope system component.
+</Warning>
+
+---
+
+## Related
+
+<CardGroup cols={2}>
+  <Card title="Hardening the Agent" icon="lock" href="/security/agent-hardening">
+    Restrict egress, ship metrics and logs, and pin optional behaviours.
+  </Card>
+  <Card title="Shared Responsibility" icon="scale-balanced" href="/security/shared-responsibility">
+    Why Ankra's footprint in your certification is narrow.
+  </Card>
+  <Card title="Ankra Agent" icon="satellite-dish" href="/concepts/cluster-agent">
+    How the agent works and what it does.
+  </Card>
+  <Card title="Data Handling" icon="database" href="/security/data-handling">
+    What the control plane stores.
+  </Card>
+</CardGroup>

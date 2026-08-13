@@ -1,0 +1,191 @@
+---
+title: Compliance Management
+description: Ankra's built-in compliance layer - continuous control monitoring, governed exceptions, and the evidence export that backs them in an audit.
+---
+
+Ankra has a compliance management layer built into the platform. It continuously measures your clusters against recognised benchmarks, governs the exceptions you grant against them, and exports the result as evidence.
+
+That combination is what an information security management system needs from a technical control: not a one-off scan, but a control that is monitored on a cadence, exceptions that carry an owner and an expiry, and a record that survives the audit.
+
+This page covers the compliance layer as a management system. The interface mechanics live in [Cluster Security](/guides/cluster-security).
+
+---
+
+## Continuous control monitoring
+
+The **Compliance** view scores every managed cluster against four benchmark specifications and lays them out as a matrix, so you can read one cluster down or one framework across.
+
+| Framework | What it checks |
+|-----------|----------------|
+| CIS Kubernetes Benchmark | Control plane, kubelet, etcd and workload configuration against the CIS baseline |
+| NSA/CISA Kubernetes Hardening Guidance | The NSA and CISA hardening recommendations |
+| Pod Security Standards - Baseline | Pod-level posture against the PSS baseline profile |
+| Pod Security Standards - Restricted | Pod-level posture against the stricter PSS restricted profile |
+
+Each cell carries pass and fail counts and a pass rate, graded into three tiers:
+
+| Tier | Meaning |
+|------|---------|
+| **Compliant** | No failed checks |
+| **Attention** | Failures present, but the pass rate is 85% or above |
+| **Poor** | Pass rate below 85% |
+
+Configuration-audit findings are rolled up alongside the benchmarks, and a fleet scorecard summarises coverage and the failing-check count across the estate.
+
+<Note>
+A cluster without the scanner installed is reported explicitly as **not reporting**, with the reason, rather than being counted as passing. That distinction is deliberate: to an assessor an unscanned cluster is a coverage gap, and a system that quietly scored it as clean would be worse than useless.
+</Note>
+
+Scanning runs inside your cluster through [Trivy Operator](/guides/cluster-security) and only findings metadata reaches the platform. Ankra is the aggregation, grading and retention layer, not the scanner.
+
+---
+
+## Governed exceptions
+
+Every real control set has exceptions. What separates a managed exception from an unmanaged one is that somebody owns it, justified it, and agreed to look at it again. Ankra enforces that shape rather than leaving it to convention.
+
+Findings carry two distinct dispositions:
+
+| Disposition | Effect |
+|-------------|--------|
+| **Acknowledged** | Reviewed, but still actionable and still alerts |
+| **Accepted risk** | Excluded from actionable totals and alerts, still visible in observed totals |
+
+Accepting risk requires a reason, an actor recorded in the audit trail, and a **review deadline of at most one year**. You can also have the acceptance expire automatically the moment a fix becomes available, so an exception granted because nothing could be done ends as soon as something can.
+
+This is the behaviour a risk register is supposed to have. The register cannot silently accumulate permanent exceptions, because the platform will not accept one without an expiry.
+
+---
+
+## Policy lifecycle
+
+Accepted risks become organisation-wide policies with a lifecycle you can review, rather than one-off suppressions that are impossible to audit later.
+
+Policies are tracked as **active**, **expiring**, **fix-available**, **mitigated**, **unmatched**, **expired** or **revoked**, and the Security overview surfaces those nearing review so the next review is prompted rather than remembered. Matching is deterministic - organisation, add-on, CVE, package type and package name - and creating a policy always shows a server-side preview of exactly which findings it will affect before you commit.
+
+Policies are never hard-deleted. They are revoked, they expire, they mitigate when no matches remain, or they reopen if the findings return. That means the history of what was excluded, and when, stays intact.
+
+<Warning>
+Expiry or a newly available fix can make findings actionable again and may fire threshold alerts. This is the control working as intended, but plan for it: a batch of acceptances expiring in the same week produces a spike in actionable findings.
+</Warning>
+
+---
+
+## Segregation of duties
+
+Three permissions separate looking from triaging from accepting risk, so the person who grants an exception need not be the person who investigates one.
+
+| Permission | Grants |
+|------------|--------|
+| `security.read` | View compliance, findings and posture |
+| `security.triage` | Acknowledge findings |
+| `security.manage` | Accept risk, and create, edit or revoke policies |
+
+All three can be attached to [custom roles](/guides/roles-and-access). Enforcement is server-side, and every disposition change is written to the append-only audit trail in the same transaction as the change itself, so the record cannot drift from the action.
+
+---
+
+## The compliance report
+
+The report is the export that carries the state above out of the platform in one document. Generate it from **Organisation** &rarr; **Security**, or pull it on a schedule:
+
+```bash
+curl -sS \
+  -H "Authorization: Bearer <your-token>" \
+  "https://platform.ankra.app/org/security/compliance-report?format=json&start_date=2026-07-01&end_date=2026-07-31" \
+  -o compliance-report-july.json
+```
+
+Both `json` (default) and `csv` are supported, and the date range bounds the audit-activity section.
+
+| Section | What it proves |
+|---------|----------------|
+| **Posture** | Each cluster's latest daily snapshot, so you can evidence a specific date rather than only today |
+| **Findings** | Open findings by severity, with a count of severe findings that have a fix available |
+| **Dispositions** | The exceptions in effect - what was accepted, by whom, and until when |
+| **Audit summary** | Administrative actions over the requested window |
+| **Attestation** | Whether MFA is required, SOPS is initialised, the security baseline is enabled, and which clusters have the scanner |
+| **Compliance** | The live benchmark rollup per cluster |
+
+<Note>
+The report requires **both** the security read and audit read permissions, and names the missing one in the `403` if you hold only one. That is deliberate: it combines posture with audit activity, so it should not be obtainable with half the access.
+</Note>
+
+---
+
+## How this maps to an ISMS
+
+If you run a management system to ISO/IEC 27001 or an equivalent framework, the compliance layer supplies specific inputs to it. It does not replace the system.
+
+| Your ISMS needs | What Ankra supplies |
+|-----------------|---------------------|
+| Technical controls that are monitored, not assumed | Continuous benchmark scoring per cluster, with tiers and coverage |
+| A risk register with owners and review dates | Accepted-risk dispositions with actor, reason and mandatory expiry |
+| Evidence that controls operated over a period | Daily posture snapshots plus the audit trail for the same window |
+| Governed exceptions rather than silent suppression | Policy lifecycle states, review prompts, and no hard deletion |
+| Segregation of duties | Read, triage and manage permissions on custom roles |
+| Records that cannot be altered after the fact | Append-only audit written in the same transaction as the change |
+| Management review inputs | Scheduled [security reports](/guides/security-reports) and the compliance report |
+
+What remains yours: the scope statement, the risk assessment methodology, the Statement of Applicability, policy documents, internal audit, and management review. Ankra evidences a set of technical controls well; it is not the management system itself.
+
+---
+
+## Building an audit response
+
+<Steps>
+  <Step title="Establish coverage">
+    Show which clusters are managed and which are reporting. Non-reporting clusters are visible in the compliance view and the attestation section. Coverage gaps are the first thing an assessor tests.
+  </Step>
+  <Step title="Show the controls are configured">
+    Point at the attestation flags and the benchmark matrix. This demonstrates control design.
+  </Step>
+  <Step title="Show they operated across the period">
+    Attach posture snapshots over the audit window and the [audit export](/security/audit-export) for the same window. Configuration proves design; the trail proves operation.
+  </Step>
+  <Step title="Show exceptions were governed">
+    The dispositions section records what was accepted, by whom, and when it expires. A managed exception has an owner and a review date. An unexplained open finding does not.
+  </Step>
+</Steps>
+
+---
+
+## Limits worth stating up front
+
+- **Ankra evidences the clusters it manages.** Clusters outside Ankra are outside this evidence, and an assessor will ask about them.
+- **Benchmark results come from the scanner.** Ankra ingests, grades and retains Trivy Operator's output. The authority for a check is the benchmark specification, and a cluster without the scanner produces no result.
+- **Benchmarks are not your whole control set.** CIS, NSA/CISA and PSS cover Kubernetes configuration. They say nothing about your application controls, your suppliers, or your people.
+- **Nothing here certifies your environment.** The platform produces evidence; your assessor draws the conclusion.
+
+---
+
+## Ankra's own compliance posture
+
+Everything above concerns **your** environment. A separate question comes up in procurement: what is Ankra's own certification status?
+
+Ankra runs an internal information security management system covering the platform. The current, honest state of that work is published at [ankra.ai/trust](https://ankra.ai/trust), alongside the sub-processor and hosting list.
+
+<Warning>
+Take Ankra's certification status from [ankra.ai/trust](https://ankra.ai/trust) or from us directly, never from this documentation. That page is the single source of truth and it changes as the programme progresses.
+</Warning>
+
+For how Ankra's posture does and does not affect the scope of your own certification, see [Shared Responsibility](/security/shared-responsibility).
+
+---
+
+## Related
+
+<CardGroup cols={2}>
+  <Card title="Cluster Security" icon="bug" href="/guides/cluster-security">
+    The Security Center interface, findings and dispositions.
+  </Card>
+  <Card title="Security Reports" icon="envelope" href="/guides/security-reports">
+    Scheduled posture reports as review evidence.
+  </Card>
+  <Card title="Audit Export" icon="file-export" href="/security/audit-export">
+    The administrative trail for the same period.
+  </Card>
+  <Card title="Shared Responsibility" icon="scale-balanced" href="/security/shared-responsibility">
+    What Ankra is and is not accountable for.
+  </Card>
+</CardGroup>
