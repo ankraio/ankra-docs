@@ -77,7 +77,22 @@ Build state, published images, deploys, demos, and container scanning are all re
 
 An application publishes to your organisation's private Ankra registry unless you say otherwise. If you already operate a registry - the same Harbor whose OCI charts Ankra indexes, for instance - declare it on the application and Ankra publishes there, reads the published tags back from there, and pulls from there.
 
-Declare it with `image_registry` when you create the application:
+Declare it on an existing application from **Settings** → **Image registry**, from the CLI, or with `image_registry` when you create the application. The settings panel also reports the host and project the declaration resolved to and the image repository each component is expected to publish to, so you can compare them against where your builds actually push.
+
+```bash
+# Show the effective registry and the expected repositories
+ankra application registry get <application-id>
+
+# Declare a registry you operate
+ankra application registry set <application-id> \
+  --url oci://artifact.example.com/commerce-images \
+  --credential example-harbor-pull
+
+# Go back to your organisation's own Ankra registry
+ankra application registry clear <application-id>
+```
+
+The same declaration at create time:
 
 ```json
 {
@@ -105,6 +120,10 @@ Declare it with `image_registry` when you create the application:
 | `manage_actions_secrets` | Optional, default `false`. See below. |
 
 **Ankra does not mint robots for a registry you operate.** With a declared registry, setup names the two Actions secrets the workflow reads and leaves them to you, rather than writing a credential Ankra happens to hold over a push robot you administer. Publish readiness reports whether those secrets exist and names them. Set `manage_actions_secrets: true` to have Ankra write the declared credential into them instead.
+
+<Warning>
+`credential_name` is what makes a declaration usable rather than merely descriptive. Without one Ankra records where the images live but cannot read their tags or pull them, so publish readiness, the demo build check and the deploy gate all keep reporting the application as never built - while it publishes healthily to a registry Ankra simply cannot see.
+</Warning>
 
 <Note>
 On a monorepo, a component may declare its own `image_registry` to publish into a different project of the same registry - useful when each app has its own robot accounts and retention rules. A component's declaration wins over the application's; the application's applies to every component that declares none.
@@ -184,7 +203,7 @@ A demo deploys **every component** of the application by default. A single-app a
     The deploy response includes `preview_url` when a public host was resolved. `config set` fetches the saved configuration first and applies only the flags you pass, so it never drops entries or dependency designations you did not name.
   </Tab>
   <Tab title="AI / MCP">
-    Ask the AI assistant to demo a pull request, or call the `deploy_pr_demo` tool directly (it is allowed in **Ask** mode - the demo is isolated and self-expiring). The result carries the same `preview_url`. Tear down early with `demo_stop`.
+    Ask the AI assistant to demo a pull request, or call the `deploy_pr_demo` tool directly (it is allowed in **Ask** mode - the demo is isolated and self-expiring). The result carries the same `preview_url`, names the `entry_component`, and lists every deployed workload under `components[]` with its image, container port and ingress path - so a multi-component launch reports what it actually provisioned rather than only the component that owns the URL. Pass `entry_component` to choose which component serves `/`. Tear down early with `demo_stop`.
   </Tab>
 </Tabs>
 
@@ -196,6 +215,18 @@ A monorepo demo deploys each component as its own Deployment and Service inside 
 
 - **The web entry owns the demo URL.** Ankra picks the frontend-shaped component (a name or directory like `frontend`, `web`, `ui`, `portal`) as the entry serving `/` on the demo host; you can move the entry in the launch dialog or with `entry_component` on the API.
 - **API components share the host under a path.** The single API-shaped component (`api`, `backend`, `server`) is published under `/api` on the same demo host, routed straight to its Service — so a browser calling `/api/...` reaches the API even when the frontend's own proxy target was baked for another environment. Override per component with `ingress_path`.
+- **Save the routing when the guess is wrong.** The entry and the `/api` path above are heuristics, and the lanes with no human in the loop — the automatic PR previews and the MCP demo tools — have no launch dialog to correct them in. Declare the routing once in the demo configuration and every lane follows it:
+
+  ```json
+  {
+    "routing": {
+      "entry_component": "commerce-frontend",
+      "components": [{ "name": "commerce-backend", "ingress_path": "/api/v1" }]
+    }
+  }
+  ```
+
+  A declaration is authoritative: the `/api` guess stops running, so a component you leave out of `components` stays reachable in-cluster only rather than picking up a path it never asked for. Per-launch `ingress_path` overrides still win over the declaration. Clear it with `"routing": null` to return every lane to the heuristics.
 - **Components reach each other by name.** Every component's Service is named after it, so in-namespace URLs like `http://crm-api:8090` resolve. Env values can also use placeholders that resolve at deploy time:
 
 | Placeholder | Resolves to |
@@ -235,6 +266,10 @@ The throwaway database is ephemeral by design: it starts empty on every deploy a
 </Note>
 
 **Migrations.** If your image does not run its own migrations on boot, set a **migration command** in the demo configuration (`migrate_command`) — for example `pnpm run db:migrate` or `alembic upgrade head`. It runs inside your application image (`sh -c`) as an init container, after the database accepts connections and with the same environment the app sees, so a fresh demo database provisions its schema before the first request. Because every deploy starts the database empty, the command re-runs on every deploy — write migrations to be idempotent (every standard migration tool is).
+
+<Note>
+The command runs with your image's `WORKDIR` as the working directory **and** on `PYTHONPATH`. Python puts the *script's* directory on `sys.path`, not the working directory, so a migration entrypoint that is a script rather than a console script — `python scripts/bootstrap_database.py` — could not import the application package sitting beside it and died at import with `ModuleNotFoundError`. Setting `PYTHONPATH` yourself in the command still wins.
+</Note>
 
 **Extensions.** If your schema needs Postgres extensions beyond what migrations create themselves, list them in `database_extensions` (for example `["vector"]`) and the demo database creates them at initdb, before your migrations run.
 
