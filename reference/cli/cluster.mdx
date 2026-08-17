@@ -430,7 +430,7 @@ ankra cluster deprovision [cluster_name] [flags]
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--force` | `false` | Force deprovision even if cluster is in an unexpected state (only honored for Hetzner clusters) |
+| `--force` | `false` | Force deprovision even if cluster is in an unexpected state; on UpCloud, Hetzner, OVH and DigitalOcean also deletes leftover CSI storage volumes and load balancers |
 | `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
 | `--yes` | `false` | Skip the confirmation prompt |
 
@@ -662,8 +662,14 @@ ankra cluster digitalocean start <cluster_id> [flags]
 Stop an DigitalOcean cluster's compute while keeping its configuration so it can be started again later.
 
 ```bash
-ankra cluster digitalocean stop <cluster_id>
+ankra cluster digitalocean stop <cluster_id> [flags]
 ```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--force` | `false` | Also delete the cluster's block storage volumes and load balancers (destroys persisted data; they otherwise keep billing while stopped) |
 
 ## ankra cluster digitalocean workers
 
@@ -678,6 +684,36 @@ ankra cluster digitalocean workers <cluster_id> [flags]
 | Flag | Default | Description |
 |------|---------|-------------|
 | `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+
+## ankra cluster domain
+
+Show the cluster's generated public domain, queueing the zone if the
+cluster does not have one yet. The domain nests under the organisation's
+Ankra-managed root (ankra.cc by default; organisations may select another
+offered root, such as smartoptics.dev, in the organisation's AI environment
+settings).
+
+The call is idempotent: a cluster that already has a zone reports its
+existing domain unchanged, so this doubles as a lookup. A fresh zone reads
+"pending" until it is published to the authoritative nameservers and then
+turns "active"; external-dns is wired to it on the next cloud-provider pass,
+after which any ingress hostname under the domain resolves with TLS.
+
+--remove hands the zone back for teardown instead: the removal step before
+an organisation switches its Ankra root domain (the switch is refused while
+cluster zones still live under the old root). A later call without --remove
+re-enables it under the organisation's current root.
+
+```bash
+ankra cluster domain <cluster> [flags]
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+| `--remove` | `false` | Remove the cluster's generated public domain (tear the zone down) instead of enabling it |
 
 ## ankra cluster draft
 
@@ -1404,6 +1440,7 @@ ankra cluster hetzner stop <cluster_id> [flags]
 
 | Flag | Default | Description |
 |------|---------|-------------|
+| `--force` | `false` | Also delete the cluster's CSI volumes and load balancers (destroys persisted data; they otherwise keep billing while stopped) |
 | `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
 
 ## ankra cluster hetzner workers
@@ -1574,8 +1611,13 @@ ankra cluster list [flags]
 
 Stream log output from a pod in the active cluster.
 
+By default the stream stays open and prints new lines as they arrive, like
+kubectl logs -f. Pass --follow=false to print the current backlog and exit,
+which is what a pipeline into grep or a script wants.
+
 Example:
   ankra cluster logs my-pod -n default -c my-container --tail 100
+  ankra cluster logs my-pod -n default --since 600 --follow=false | grep ERROR
 
 ```bash
 ankra cluster logs <pod_name> [flags]
@@ -1586,6 +1628,7 @@ ankra cluster logs <pod_name> [flags]
 | Flag | Default | Description |
 |------|---------|-------------|
 | `-c`, `--container` |   | Container name (defaults to pod name) |
+| `-f`, `--follow` | `true` | Keep the stream open for new lines; --follow=false prints the current backlog and exits |
 | `-n`, `--namespace` |   | Kubernetes namespace (required) |
 | `--since` | `0` | Seconds of logs to retrieve |
 | `--tail` | `0` | Number of lines from the end of the logs |
@@ -1639,6 +1682,41 @@ ankra cluster managed delete <cluster_id> [flags]
 | `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
 | `--provider` |   | Managed Kubernetes provider (doks, uks, gke, ovh_mks, aks, eks, kapsule) |
 | `-y`, `--yes` | `false` | Skip confirmation prompt |
+
+## ankra cluster managed discover
+
+List the managed Kubernetes clusters that already run in the provider account behind a credential, marking the ones already imported into Ankra.
+
+```bash
+ankra cluster managed discover [flags]
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--credential-id` |   | Cloud credential ID |
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+| `--provider` |   | Managed Kubernetes provider (doks, uks, gke, ovh_mks, aks, eks, kapsule) |
+
+## ankra cluster managed import
+
+Adopt a managed Kubernetes cluster that already runs at the provider: Ankra fetches the kubeconfig through the provider API and installs the agent automatically, so there is nothing to run against the cluster.
+
+```bash
+ankra cluster managed import [flags]
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--credential-id` |   | Cloud credential ID |
+| `--description` |   | Description for the cluster in Ankra (optional) |
+| `--name` |   | Name for the cluster in Ankra (defaults to the provider-side name) |
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+| `--provider` |   | Managed Kubernetes provider (doks, uks, gke, ovh_mks, aks, eks, kapsule) |
+| `--provider-cluster-id` |   | Provider-side cluster ID (from discover) |
 
 ## ankra cluster managed node-pool
 
@@ -2429,7 +2507,12 @@ ankra cluster operations retry <execution_id> [flags]
 
 ## ankra cluster operations steps
 
-List steps for a specific execution
+List the steps of an execution with their status and error excerpt.
+
+--results additionally fetches each step's job result - the structured
+payload the scheduler recorded when the step finished (for example the
+resources a teardown deleted, skipped, or failed to reclaim). Results are
+printed under each step, and merged into the steps in -o json|yaml output.
 
 ```bash
 ankra cluster operations steps <execution_id> [flags]
@@ -2440,6 +2523,7 @@ ankra cluster operations steps <execution_id> [flags]
 | Flag | Default | Description |
 |------|---------|-------------|
 | `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+| `--results` | `false` | Also fetch and show each step's recorded job result (what the step created, deleted, skipped, or failed to reclaim) |
 
 ## ankra cluster ovh
 
@@ -2685,6 +2769,7 @@ ankra cluster ovh stop <cluster_id> [flags]
 
 | Flag | Default | Description |
 |------|---------|-------------|
+| `--force` | `false` | Also delete the cluster's Cinder volumes and load balancers (destroys persisted data; they otherwise keep billing while stopped) |
 | `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
 
 ## ankra cluster ovh workers
@@ -3224,8 +3309,14 @@ ankra cluster scaleway start <cluster_id> [flags]
 Stop a Scaleway cluster by terminating its compute while preserving its configuration so it can be re-provisioned later.
 
 ```bash
-ankra cluster scaleway stop <cluster_id>
+ankra cluster scaleway stop <cluster_id> [flags]
 ```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--force` | `false` | Also delete the cluster's tagged volumes and load balancers even when retention_policy is retain (destroys persisted data) |
 
 ## ankra cluster select
 
@@ -3655,9 +3746,17 @@ ankra cluster upcloud start <cluster_id> [flags]
 
 Stop an UpCloud cluster's compute while keeping its configuration so it can be started again later.
 
+--force also deletes the cluster's CSI storage volumes and load balancers, which otherwise keep billing while the cluster is stopped - the persisted data is lost.
+
 ```bash
-ankra cluster upcloud stop <cluster_id>
+ankra cluster upcloud stop <cluster_id> [flags]
 ```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--force` | `false` | Also delete the cluster's CSI storage volumes and load balancers (destroys persisted data; they otherwise keep billing while stopped) |
 
 ## ankra cluster upcloud workers
 
