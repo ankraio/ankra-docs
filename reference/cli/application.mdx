@@ -18,6 +18,12 @@ remote's default branch when available, and falls back to the current branch.
 It selects an available GitHub credential automatically when the choice is
 unambiguous.
 
+Pass --registry-url to have the application publish to a container image
+registry you already operate instead of the organisation's own Ankra registry
+project. Declare it here rather than afterwards: the setup job generates the
+build workflow from the declaration the application is created with, so a
+registry added later leaves a workflow that logs in with the wrong one.
+
 ```bash
 ankra application add <path> [flags]
 ```
@@ -28,6 +34,8 @@ ankra application add <path> [flags]
 ankra application add .
   ankra application add ./services/payments --name payments
   ankra application add . --credential github-acme --branch main
+  ankra application add . --registry-url oci://artifact.example.com/commerce \
+    --registry-credential example-harbor
 ```
 
 **Flags**
@@ -38,6 +46,13 @@ ankra application add .
 | `--credential` |   | GitHub credential name or ID (auto-detected when omitted) |
 | `--name` |   | Application name (defaults to the repository name) |
 | `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+| `--registry-api-url` |   | Registry management API base (defaults to https://&lt;host&gt;) |
+| `--registry-credential` |   | Registry credential of this organisation that authenticates to it |
+| `--registry-manage-actions-secrets` | `false` | Let Ankra write the named credential into the repository's Actions secrets |
+| `--registry-password-secret` |   | Repository Actions secret holding the registry password |
+| `--registry-pull-secret` |   | Name of the dockerconfigjson Secret generated manifests reference |
+| `--registry-url` |   | Registry project the application publishes to, as oci://&lt;host&gt;/&lt;project&gt; |
+| `--registry-username-secret` |   | Repository Actions secret the build workflow logs in with |
 | `--remote` | `origin` | Git remote used to identify the GitHub repository |
 
 ## ankra application branch-files
@@ -197,6 +212,13 @@ Deploy a short-lived demo workspace for a branch or pull request.
 All flags are optional; only the flags you set are sent, so the backend
 applies its own defaults for the rest.
 
+A monorepo demo runs every recorded component as its own pod by default.
+--component narrows that to the components you name, and the per-component
+override flags (--component-tag, --component-port, --component-path) tune
+one component each. Because selection and overrides ride the same request
+field, an override may only name a component that --component selects: to
+tune one component of a full launch, list them all.
+
 ```bash
 ankra application demo deploy <application-id> [flags]
 ```
@@ -206,6 +228,10 @@ ankra application demo deploy <application-id> [flags]
 ```bash
 ankra application demo deploy <app-id> --branch feature/login
   ankra application demo deploy <app-id> --pr-number 42 --ttl-hours 8
+  ankra application demo deploy <app-id> --branch main \
+    --component crm-frontend --component crm-api \
+    --component-port crm-api=8090 --component-path crm-api=/api \
+    --entry-component crm-frontend
 ```
 
 **Flags**
@@ -213,7 +239,12 @@ ankra application demo deploy <app-id> --branch feature/login
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--branch` |   | Repository branch to deploy |
+| `--component` | `[]` | Component of a monorepo to deploy (repeatable; omitted deploys every component) |
+| `--component-path` | `[]` | Ingress path prefix for one selected component as NAME=/prefix (repeatable; empty keeps it in-cluster only) |
+| `--component-port` | `[]` | Container port for one selected component as NAME=PORT (repeatable) |
+| `--component-tag` | `[]` | Image tag for one selected component as NAME=TAG (repeatable) |
 | `--container-port` | `0` | Container port to expose |
+| `--entry-component` |   | Component that owns the demo host's root path (default: the backend's entry heuristic) |
 | `--image-tag` |   | Explicit container image tag to deploy |
 | `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
 | `--pr-number` | `0` | Pull request number to deploy |
@@ -221,7 +252,10 @@ ankra application demo deploy <app-id> --branch feature/login
 
 ## ankra application demo detail
 
-Show a demo workspace's record, provisioning steps, and failure detail
+Show a demo workspace's record, its components, provisioning steps, and
+failure detail. The default rendering summarises the demo; -o json or
+-o yaml emit the full payload, including the resource inventory and the
+Kubernetes events behind a stalled step.
 
 ```bash
 ankra application demo detail <application-id> <workspace-id> [flags]
@@ -249,7 +283,9 @@ ankra application demo fix <application-id> <workspace-id> [flags]
 
 ## ankra application demo list
 
-List the application's active demo workspaces
+List the application's active demo workspaces, one row each, with the
+components every demo runs. -o json or -o yaml emit the full payload,
+including the TTL policy and the staging cluster's status.
 
 ```bash
 ankra application demo list <application-id> [flags]
@@ -263,17 +299,32 @@ ankra application demo list <application-id> [flags]
 
 ## ankra application demo logs
 
-Fetch a bounded tail of the demo container's logs. One-shot: the command returns after the fetch instead of following the stream.
+Fetch a bounded tail of the demo container's logs. One-shot: the command
+returns after the fetch instead of following the stream.
+
+A multi-component demo runs one pod per component, and without a selector
+the backend reads whichever pod it finds first. --component picks the pod
+belonging to that component; --pod addresses one by name (from
+`ankra application demo detail`) when a component has more than one.
 
 ```bash
 ankra application demo logs <application-id> <workspace-id> [flags]
+```
+
+**Examples**
+
+```bash
+ankra application demo logs <app-id> <workspace-id> --tail 500
+  ankra application demo logs <app-id> <workspace-id> --component crm-api
 ```
 
 **Flags**
 
 | Flag | Default | Description |
 |------|---------|-------------|
+| `--component` |   | Read the pod belonging to this component of a multi-component demo |
 | `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+| `--pod` |   | Read this pod by name (default: the demo's own pod) |
 | `--tail` | `200` | Number of log lines from the end |
 
 ## ankra application demo stop
