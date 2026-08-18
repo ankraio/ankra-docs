@@ -1,0 +1,173 @@
+---
+title: Node Group Cloud-init User Data
+description: Attach a cloud-init document to an OVH node group so every node it creates, including replacements, is provisioned the same way.
+---
+
+A node group can carry a cloud-init user-data document. Ankra applies it verbatim at first boot on every instance the group ever creates - the nodes you add today and every replacement the group makes later.
+
+That last part is the reason the field exists. Anything you configure by hand after a node boots is lost the first time that node is replaced, so a layout that must survive replacement has to come from the provisioning template rather than from a one-off SSH session. Disk partitioning is the common case: you cannot repartition a running root disk, so the work has to happen before the root filesystem is grown.
+
+<Note>
+User data is currently supported on **OVH** clusters only. Other providers refuse the field with `User data is not supported for <provider> clusters`.
+</Note>
+
+## Prerequisites
+
+- An OVH cluster in your organisation.
+- Permission to operate the cluster (`clusters.operate`).
+- Ankra CLI **v0.12.0 or later** for `--user-data-file`. Earlier versions have no user-data flag; the API accepts the field regardless of CLI version.
+
+<Warning>
+User data is set when a node group is **created**, and cannot be edited afterwards. To change the document, create a new node group with the new user data and move the workload over. Existing nodes are never re-provisioned by a user-data change.
+</Warning>
+
+## Attach a document
+
+Write the cloud-init document to a file and pass it with `--user-data-file`. It is a file flag rather than a string flag because the document is normally multi-KB YAML, which does not survive shell quoting well.
+
+<CodeGroup>
+
+```bash CLI
+ankra cluster ovh node-group add <cluster-id> \
+  --name db-par-a \
+  --instance-type b2-30 \
+  --count 2 \
+  --user-data-file ./carve-disk.yaml
+```
+
+```bash cURL
+curl -X POST https://platform.ankra.app/api/v1/clusters/ovh/<cluster-id>/node-groups \
+  -H "Authorization: Bearer $ANKRA_API_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d @- <<'JSON'
+{
+  "name": "db-par-a",
+  "instance_type": "b2-30",
+  "count": 2,
+  "user_data": "#cloud-config\nbootcmd:\n  - echo hello\n"
+}
+JSON
+```
+
+</CodeGroup>
+
+The document is capped at 65535 bytes. The CLI refuses anything larger before sending the request.
+
+Ankra sends no cloud-init of its own to these instances, so your document is not merged with a platform-provided one. What you write is what runs.
+
+## Read the first-boot output
+
+A provisioning script that fails leaves a node that looks healthy to the cloud provider and wrong to you. Read the node's own cloud-init output rather than inferring the failure from symptoms:
+
+<CodeGroup>
+
+```bash CLI
+ankra cluster ovh nodes cloud-init-log <cluster-id> <node-id>
+```
+
+```bash cURL
+curl -X POST https://platform.ankra.app/api/v1/clusters/ovh/<cluster-id>/nodes/<node-id>/cloud-init-log \
+  -H "Authorization: Bearer $ANKRA_API_TOKEN"
+```
+
+</CodeGroup>
+
+This returns `cloud-init status --long` plus the tail of `/var/log/cloud-init-output.log`, fetched over the platform's own bastion lane - you do not need the cluster's SSH key. It runs as a tracked read-only operation; if the fetch outruns the platform's wait it hands back an operation id to poll with `ankra cluster operations list`. Calling it again while a fetch is in flight attaches to that fetch instead of starting a second one.
+
+The same command is available for Hetzner, UpCloud, DigitalOcean and Scaleway clusters.
+
+## Carving a partition at provision time
+
+The motivating case is encryption at rest. LUKS needs a real block device, but on single-disk flavors the only NVMe device is also the boot disk, and the image grows the root filesystem across the whole device - leaving no free partition to encrypt. Falling back to LUKS on a loopback file works but costs materially more overhead than LUKS on a real partition.
+
+The fix is to carve the disk in `bootcmd`, before the root filesystem is grown.
+
+### Leave growpart enabled
+
+<Warning>
+Do not set `growpart: mode: off`. Leave growpart enabled and do the carving in `bootcmd`.
+</Warning>
+
+This ordering is a safety property, not a style preference. `bootcmd` runs before the `growpart` module, so:
+
+- **When your carve succeeds**, it has already consumed the tail of the disk. growpart finds no free space to expand into and does nothing. Your layout stands.
+- **When your carve fails**, growpart still runs and restores an ordinary full-disk root. You get a normal, usable node and a failed script to read in the log.
+
+Disabling growpart removes the second case. A bug in your script then leaves root at the image's own size - a few GiB - and the node is effectively unusable rather than merely unmodified.
+
+### Grow root to its cap before appending
+
+Append the new partitions **after** resizing root to the size you want it capped at, not before.
+
+If you append partitions directly after a small image root, they start immediately behind it, growpart has nowhere to expand into, and root stays at the image size. That failure looks exactly like the bricked node above, except it happens on the path where every command succeeded.
+
+### Tooling present in the image
+
+- `sfdisk` is available. `sgdisk` and `parted` are **not** - do not assume them.
+- `sfdisk --append` refuses to run without `--force`.
+- Address the resulting partitions by GPT partlabel (`/dev/disk/by-partlabel/<name>`), never by device path. Nodes are replaced, and a partlabel is the part of the layout that reliably comes back with them.
+
+### Example
+
+<Warning>
+Sizes, the device name and the filesystem layout below are illustrative. Validate any partitioning document on a scratch node group before pointing it at a group you care about, and read the cloud-init log of the first node it creates.
+</Warning>
+
+```yaml
+#cloud-config
+bootcmd:
+  - |
+    set -eux
+    disk=/dev/nvme0n1
+    # Idempotent: bootcmd runs on every boot, not only the first.
+    if [ ! -e /dev/disk/by-partlabel/pgdata ]; then
+      # 1. Cap root at 64 GiB so growpart has a boundary to stop at.
+      echo ', 64GiB' | sfdisk --no-reread -N 1 "$disk"
+      # 2. Append the data partitions into the tail growpart would have taken.
+      printf 'size=200GiB, name=pgdata\nsize=80GiB, name=pgwal\n' \
+        | sfdisk --append --force "$disk"
+      partx -u "$disk"
+    fi
+```
+
+With that in place, `/dev/disk/by-partlabel/pgdata` and `/dev/disk/by-partlabel/pgwal` are real partitions that LUKS can take directly, and root settles at its 64 GiB cap.
+
+## Verify
+
+<Steps>
+
+<Step title="Check cloud-init finished">
+Run `ankra cluster ovh nodes cloud-init-log <cluster-id> <node-id>` against the first node the group creates. `cloud-init status --long` should report `status: done`. Anything else, read the output tail below it.
+</Step>
+
+<Step title="Confirm the layout">
+The partitions you carved should be addressable by partlabel, and root should be at the size you capped it to and not the image default.
+</Step>
+
+<Step title="Replace one node">
+Delete a node and let the group recreate it, then repeat the two checks. This is the property the field exists for, so it is worth confirming once per document rather than assuming it.
+</Step>
+
+</Steps>
+
+## Troubleshooting
+
+<AccordionGroup>
+
+<Accordion title="The node joined but the partitions are missing">
+Read the cloud-init log. A failed `bootcmd` does not stop the node from joining the cluster: growpart restores a normal root and the node comes up looking healthy. That is the designed fallback, and the log is where the failure is recorded.
+</Accordion>
+
+<Accordion title="Root is only a few GiB">
+Either growpart was disabled, or partitions were appended before root was resized so growpart had no free space to expand into. Both are covered above; fix the document and create a new node group, since user data cannot be edited on an existing one.
+</Accordion>
+
+<Accordion title="sfdisk did nothing and reported no error">
+`sfdisk --append` needs `--force`. Without it the command declines to modify the table.
+</Accordion>
+
+<Accordion title="The request was refused">
+`User data is not supported for <provider> clusters` means the cluster is not OVH. A size complaint means the document is over the 65535-byte cap.
+</Accordion>
+
+</AccordionGroup>
