@@ -86,6 +86,63 @@ git diff old-remote/main new-remote/develop -- clusters/<cluster-name>/
 ```
 </Warning>
 
+## Observability sources in Git
+
+`spec.prometheus_metrics` and `spec.log_source` connect the cluster's metrics and log data sources. Both are read back from the cluster document on every sync, so authoring or editing either block in Git connects the source and updates it - the same result as filling in the platform's [metrics](/integrations/prometheus) or [log source](/integrations/log-sources) settings.
+
+Three rules apply to both members:
+
+- **Credentials are never in Git.** `username`, `password`, `token` and `auth_scheme` inside a source block are refused by name, because ignoring them would leave a live secret sitting in your repository while you believe it is in effect. Create the credential in the platform and reference it by `credential_name`.
+- **Unknown top-level fields are refused**, not ignored, and the error names the offending key and the accepted set. A mistyped field fails the sync rather than silently doing nothing.
+- **Removing the block does not disconnect the source.** Git can create and update a source; only the platform can disconnect one.
+
+<Warning>
+Deleting `prometheus_metrics` or `log_source` from the file is not a disconnect. The source survives the sync, and the next time Ankra regenerates the cluster document the block comes back. To disconnect, remove the source in the cluster's **Settings** → **Data Sources**; the platform then drops the block from Git on its own.
+
+This asymmetry is deliberate: reading "disconnect" out of an absent key is what deleted hand-written blocks before these members round-tripped, so a destructive change stays a platform action.
+</Warning>
+
+## `spec.prometheus_metrics`
+
+The cluster's metrics data source. See [Prometheus](/integrations/prometheus) for endpoint examples per product.
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `endpoint` | yes | Query endpoint the Ankra agent reaches from inside the cluster. `http://` or `https://`, or a scheme-less `host:port`. Any other scheme is refused, as is an endpoint containing whitespace or control characters |
+| `credential_name` | no | Name of a metrics credential already registered in Ankra. Omit for an unauthenticated endpoint - ordinary for in-cluster Prometheus. A name that resolves to no credential on the cluster fails the sync |
+| `flavor` | no | Which Prometheus-compatible product is behind the endpoint: `self_hosted`, `grafana_cloud`, or `victoria_metrics`. Affects the labels and placeholders the portal shows, not how the endpoint is queried |
+| `verify_ssl` | no | Verify the endpoint's TLS certificate. Omitted means not verified, which is the historical behaviour for clusters that never set it |
+
+```yaml
+spec:
+  prometheus_metrics:
+    endpoint: http://prometheus-operated.monitoring.svc.cluster.local:9090
+    flavor: self_hosted
+```
+
+## `spec.log_source`
+
+The cluster's log data source. See [Log Sources](/integrations/log-sources) for provider endpoints and field-mapping defaults.
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `provider` | yes | `loki`, `elasticsearch`, or `opensearch`. Any other value is refused - the provider decides how the agent queries the store |
+| `endpoint` | yes | Query endpoint the Ankra agent reaches from inside the cluster. Same rules as `prometheus_metrics.endpoint` |
+| `credential_name` | no | Name of a log credential already registered in Ankra. Omit for an unauthenticated endpoint. A name that resolves to no credential on the cluster fails the sync |
+| `tenant_id` | no | Loki tenant sent as `X-Scope-OrgID`, for multi-tenant Loki and Grafana Cloud |
+| `index_pattern` | no | Elasticsearch/OpenSearch index pattern to search (default `*`) |
+| `field_mappings` | no | Map of `timestamp`, `message`, `namespace`, `pod`, `container` to the paths your index actually uses. Keys outside that set are ignored rather than refused, so a mapping the platform wrote stays valid |
+| `verify_ssl` | no | Verify the endpoint's TLS certificate. Omitted means not verified |
+
+```yaml
+spec:
+  log_source:
+    provider: loki
+    endpoint: http://loki-gateway.monitoring.svc:80
+    credential_name: loki-read
+    tenant_id: my-tenant
+```
+
 ## `spec.helm_registries[]`
 
 Declare the Helm registries the file's add-ons depend on, so the repository is self-contained: applying the file connects any registry that is not already present before add-ons deploy. A declaration matching an existing registry (same name, same URL - org-scoped or global) is an idempotent no-op; a declaration whose name is taken by a registry with a different URL fails the apply before anything is written. Credentials are referenced by name and must already exist, so secrets stay out of Git.
