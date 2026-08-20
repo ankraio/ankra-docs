@@ -74,10 +74,9 @@ infrastructure.
 
 - A cluster imported into Ankra with the agent connected
 - An API key from [Anthropic](https://console.anthropic.com/) or [OpenAI](https://platform.openai.com/)
-- A Helm registry added for the OpenClaw chart repository (`https://charts.openclaw.ai`)
 
 <Tip>
-If you haven't added the OpenClaw Helm registry yet, go to **Settings** → **Registries** → **Add Registry** and enter `https://charts.openclaw.ai`.
+You do not need to add a Helm registry. **OpenClaw** ships as a global registry in every Ankra organisation, pointing at `oci://registry.gitlab.com/xrow-public/helm-openclaw/charts/openclaw`. Search for `openclaw` in the chart picker and it is there.
 </Tip>
 
 ### Step 1: Create the Stack
@@ -98,53 +97,55 @@ If you haven't added the OpenClaw Helm registry yet, go to **Settings** → **Re
     Click **+ Add** → search for `openclaw` from the OpenClaw registry (this is the runtime Hermes is built on).
   </Step>
   <Step title="Configure Core Settings">
-    Click the component and set these values:
+    Click the component and set these values. Every value the chart reads lives
+    under the top-level `openclaw` key:
 
     ```yaml
-    replicaCount: 1
-
-    image:
-      repository: ghcr.io/openclaw/openclaw
-      tag: "latest"
-
-    config:
-      model: "claude-sonnet-4-20250514"
-      port: 8789
-      logLevel: "info"
+    openclaw:
+      image:
+        tag: "1.84.0"
+      timezone: Europe/Berlin
     ```
 
     <Warning>
-    Hermes runs as a single instance -- it does not support horizontal scaling. Keep `replicaCount: 1`.
+    Hermes runs as a single instance -- it does not support horizontal scaling, and the chart does not expose a replica count.
     </Warning>
   </Step>
   <Step title="Configure API Key">
-    For quick setup, set the key directly:
+    The chart renders `openclaw.secrets` into a Kubernetes Secret and injects
+    each entry as an environment variable:
 
     ```yaml
-    config:
-      anthropicApiKey: "sk-ant-..."
+    openclaw:
+      secrets:
+        - name: ANTHROPIC_API_KEY
+          value: "sk-ant-..."
     ```
 
-    For production, use a Kubernetes Secret instead (see [Production Setup](#production-api-key-management) below).
+    Encrypt the value with SOPS before it reaches Git, or point the entry at an
+    existing Secret (see [Production Setup](#production-api-key-management) below).
   </Step>
   <Step title="Configure Resources">
     ```yaml
-    resources:
-      requests:
-        memory: 512Mi
-        cpu: 250m
-      limits:
-        memory: 1Gi
-        cpu: 1000m
+    openclaw:
+      resources:
+        requests:
+          memory: 512Mi
+          cpu: 250m
+        limits:
+          memory: 1Gi
+          cpu: 1000m
     ```
   </Step>
   <Step title="Enable Persistent Storage">
-    Hermes stores workspace data and conversation memory. Enable persistence so this survives pod restarts:
+    Hermes stores workspace data and conversation memory. Persistence is on by
+    default at 20Gi; shrink it if your cluster is small:
 
     ```yaml
-    persistence:
-      enabled: true
-      size: 5Gi
+    openclaw:
+      persistence:
+        enabled: true
+        size: 5Gi
     ```
   </Step>
 </Steps>
@@ -155,29 +156,38 @@ If you haven't added the OpenClaw Helm registry yet, go to **Settings** → **Re
 
 ### Step 3: Expose the Gateway (Optional)
 
-If you want to access Hermes from outside the cluster, configure an ingress:
+The gateway ingress publishes the webhook endpoints Hermes listens on,
+`/api/hooks` and `/api/messages`, so a chat platform can reach it. The chart
+renders those paths for you; you only supply the host, class and TLS.
 
 ```yaml
-ingress:
-  enabled: true
-  className: "nginx"
-  annotations:
-    cert-manager.io/cluster-issuer: "letsencrypt-prod"
-  hosts:
-    - host: hermes.your-domain.com
-      paths:
-        - path: /
-          pathType: Prefix
-  tls:
-    - secretName: hermes-tls
-      hosts:
-        - hermes.your-domain.com
+openclaw:
+  ingress:
+    enabled: true
+    className: "traefik"
+    annotations:
+      cert-manager.io/cluster-issuer: "letsencrypt-prod"
+      kubernetes.io/tls-acme: "true"
+    hosts:
+      - host: hermes.your-cluster.ankra.cc
+    tls:
+      - secretName: hermes-tls
+        hosts:
+          - hermes.your-cluster.ankra.cc
 ```
+
+<Note>
+On an Ankra-provisioned cluster the networking stack installs Traefik as the
+default ingress class, the `letsencrypt-prod` ClusterIssuer, and external-dns
+bound to the cluster's delegated `ankra.cc` subdomain. Use a host under that
+subdomain and the DNS record and certificate are created for you. See
+[UpCloud Clusters](/guides/upcloud-clusters) for where the subdomain comes from.
+</Note>
 
 Alternatively, use port-forwarding for local access:
 
 ```bash
-kubectl port-forward svc/hermes 8789:8789 -n hermes
+kubectl port-forward svc/hermes-openclaw 8080:80 -n hermes
 ```
 
 ### Step 4: Deploy
@@ -215,15 +225,19 @@ For production deployments, store your API key in a Kubernetes Secret rather tha
       -n hermes
     ```
   </Step>
-  <Step title="Reference in Values">
-    ```yaml
-    config:
-      anthropicApiKey: ""
+  <Step title="Keep the value out of Git">
+    The chart takes the key as a literal in `openclaw.secrets`, so encrypt that
+    value with [SOPS](/guides/sops) and let Ankra decrypt it at deploy time:
 
-    existingSecret:
-      name: hermes-api-key
-      anthropicApiKeyKey: anthropic-api-key
+    ```yaml
+    openclaw:
+      secrets:
+        - name: ANTHROPIC_API_KEY
+          value: ENC[AES256_GCM,data:...]
     ```
+
+    Add the path to the stack's `encrypted_paths` so the plaintext never reaches
+    the repository.
   </Step>
 </Steps>
 
@@ -660,7 +674,7 @@ RUN bash <(curl -sL https://github.com/ankraio/ankra-cli/releases/latest/downloa
 | `CrashLoopBackOff` | Check logs with `kubectl logs -n hermes -l app.kubernetes.io/name=openclaw`. Usually a missing or invalid API key. |
 | Ingress not working | Verify your ingress controller is installed and the `className` matches. Check cert-manager logs for TLS issues. |
 | PVC not binding | Ensure a StorageClass exists. Run `kubectl get storageclass` to verify. |
-| Helm chart not found | Confirm the OpenClaw registry (`https://charts.openclaw.ai`) is added under **Settings** → **Registries**. |
+| Helm chart not found | Search for `openclaw` in the chart picker. The **OpenClaw** registry (`oci://registry.gitlab.com/xrow-public/helm-openclaw/charts/openclaw`) is global, so it needs no setup. |
 
 ### Skill Integration Issues
 
