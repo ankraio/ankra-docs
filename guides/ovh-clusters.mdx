@@ -217,16 +217,22 @@ A cluster created before zone placement existed has no stored zone pool, so a no
 A zone-fault-tolerant stateful workload needs all of:
 
 - **Replication at the application layer** - CloudNativePG or Patroni with one replica per zone, each with its own volume. Node spread gives the replicas somewhere to live; it does not create them.
-- **A `WaitForFirstConsumer` StorageClass** so the volume is provisioned in the zone the pod was actually scheduled to, rather than binding first and stranding the pod. Ankra ships `csi-cinder-sc-topology` for exactly this reason, and marks it the default on new OVH clusters. On a cluster created earlier, k3s's `local-path` class is still present and also marked default, so name the class explicitly on anything that matters rather than relying on which default wins:
+- **A `WaitForFirstConsumer` StorageClass** so the volume is not bound before its pod is scheduled. Ankra ships `csi-cinder-sc-topology` for exactly this reason, and marks it the default on new OVH clusters. On a cluster created earlier, k3s's `local-path` class is still present and also marked default, so name the class explicitly on anything that matters rather than relying on which default wins:
 
   ```yaml
   spec:
     storageClassName: csi-cinder-sc-topology
   ```
-- **`allowedTopologies`** on the StorageClass, or a zone-pinned node group per replica, so a rescheduled pod cannot land where its volume is not.
+- **A node group pinned to one zone per replica**, so a rescheduled pod cannot land where its volume is not. `allowedTopologies` on the StorageClass does not do this on its own - it narrows which zones the provisioner may choose from, it does not tie a volume to one of them.
 - **`topologySpreadConstraints`** keyed on `topology.kubernetes.io/zone` for the stateless tiers.
 
 Node spread is necessary but never sufficient.
+
+<Warning>
+**Zone placement is pending on OVH.** The Cinder CSI provisioner runs with its Topology feature gate off on every Ankra OVH cluster, because OVH Block Storage rejects the compute zone names the gate forwards - with the gate on, every volume creation in a 3-AZ region fails with `Availability zone 'eu-west-par-a' is invalid`. While it is off the provisioner sends no zone at all: Cinder creates the volume in its own default zone, and the PersistentVolume carries no zone affinity. That applies to every class, `csi-cinder-sc-topology` included, so delayed binding still holds the volume back until a pod is scheduled, but the volume is not placed in that pod's zone.
+
+Until the gate can be re-enabled per region, pin each stateful replica to a node group in one zone, so its pod can only ever be scheduled where its volume already is.
+</Warning>
 
 ---
 
