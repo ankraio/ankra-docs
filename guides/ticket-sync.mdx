@@ -1,0 +1,343 @@
+---
+title: Sync Board Tickets to Jira, Linear, or a Webhook
+description: Add a sync connection so AI board tickets are mirrored into your own tracker - where every provider value comes from, what gets synced, and how to verify deliveries.
+---
+
+A **sync connection** mirrors [AI board](/platform/ai-board) tickets outbound. Each ticket that matches the connection's filters gets an issue created once in your tracker, and its timeline events follow as comments on that issue. Three providers are available: **Jira**, **Linear**, and a generic **webhook**.
+
+This is a different system from [webhook destinations](/guides/webhooks), which deliver alert firings and platform events. Sync connections carry board tickets only.
+
+## Prerequisites
+
+- You are an organisation **admin**. Members can see the connection list, but only admins can add, edit, enable, or delete one.
+- The AI board is available in your organisation (**AI** → **Board** in the sidebar).
+- The destination is reachable from the public internet.
+
+<Warning>
+Ankra dials sync destinations from its own infrastructure and refuses any address that is not publicly routable - loopback, private ranges, link-local (including the `169.254.169.254` cloud metadata endpoint), and IPv6 unique-local. A self-hosted Jira or a webhook receiver that only exists inside your VPN or cluster network cannot be reached. Literal private IPs are rejected when you save; a hostname that resolves to one is refused at delivery time and shows up as a failed delivery.
+</Warning>
+
+## What gets synced
+
+A new connection picks up your organisation's **live** tickets plus anything that changes afterwards. The closed backlog stays out, so enabling Jira sync does not file a thousand finished tickets into a fresh project. Closed tickets only sync if they change again after the connection was created.
+
+Three filters narrow it further, all set in the same dialog:
+
+| Filter | Options | Default |
+|--------|---------|---------|
+| **Kinds** | Incident, Insight, Gap, Automation, Request, Chore | none checked, which means every kind |
+| **Minimum priority** | Low and above (every ticket), Medium and above, High and above, Urgent only | Low and above |
+| **Timeline events** | Relay timeline events as comments, or create the external issue only | Relay timeline events as comments |
+
+<Warning>
+**Create the external issue only** (`anchor_only`) is not a pause. The timeline cursor moves to the tail as tickets change, so events skipped while the connection is in this mode are skipped permanently. Switching back to relaying comments later resumes from that point and never backfills what was missed.
+</Warning>
+
+## Step 1: Collect your provider's details
+
+Gather these before you open the dialog. It has no draft state, so a value you have to go and look up means starting the form again.
+
+<Tabs>
+  <Tab title="Jira">
+    You need four values, plus one optional one.
+
+    <Steps>
+      <Step title="Jira base URL">
+        Your Jira site root, with no path after it - for example `https://my-team.atlassian.net`. Copy it from the address bar while you are in Jira, and drop everything from `/jira` onwards.
+      </Step>
+      <Step title="Project key">
+        The short uppercase code for the project issues should land in. In Jira, open **Projects** and read the **Key** column, or take the prefix from any issue key in that project: `OPS-123` means the key is `OPS`.
+      </Step>
+      <Step title="Issue type (optional)">
+        The name of the issue type to create, exactly as it appears in Jira - `Task`, `Bug`, `Story`. It has to exist in that project's issue type scheme. Leave the field blank to use `Task`.
+      </Step>
+      <Step title="Account email">
+        The email address of the Atlassian account the API token belongs to. Issues and comments in Jira are attributed to this account, so a dedicated service account keeps your board traffic out of a person's name.
+      </Step>
+      <Step title="API token">
+        Sign in as that account, go to [id.atlassian.com/manage-profile/security/api-tokens](https://id.atlassian.com/manage-profile/security/api-tokens), and choose **Create API token**. Label it something you will recognise later, such as `ankra-ticket-sync`, then copy the token.
+
+        <Warning>
+        Atlassian shows the token once. Copy it before closing the dialog.
+        </Warning>
+      </Step>
+    </Steps>
+
+    That account needs these permissions **in the target project**, or deliveries fail with a Jira `403`:
+
+    - **Browse Projects** - to address the project at all
+    - **Create Issues** - the issue Ankra opens per ticket
+    - **Add Comments** - the timeline relay
+    - **Edit Issues** - Ankra pushes the ticket title onto the issue when it changes
+
+    <Note>
+    Ankra talks to Jira over the REST v2 API using HTTP basic authentication, which is the Jira Cloud email plus API token shape. Jira Data Center serves the same API, so a Data Center username and password go in those same two fields - as long as the instance is reachable on the public internet.
+    </Note>
+  </Tab>
+
+  <Tab title="Linear">
+    You need two values: an API key and the team's UUID.
+
+    <Steps>
+      <Step title="Personal API key">
+        In Linear, open **Settings** → **Security & access** → **Personal API keys** and choose **New API key**. Give it a label such as `Ankra ticket sync`, and grant it write access to the team you are syncing into. Copy the key - it starts with `lin_api_` and Linear shows it once.
+
+        <Tip>
+        The key acts as the Linear user who created it, so issues and comments appear under that person's name. Create it from a dedicated service user if you would rather board traffic did not look like one teammate's work.
+        </Tip>
+      </Step>
+      <Step title="Team ID">
+        This is the team's **UUID**, not the short team key you see in the interface (`ENG`, `OPS`). Linear does not show the UUID in its settings screens, so query the API for it with the key you just created:
+
+        ```bash
+        curl -s https://api.linear.app/graphql \
+          -H "Authorization: <your-linear-api-key>" \
+          -H "Content-Type: application/json" \
+          -d '{"query":"{ teams { nodes { id key name } } }"}'
+        ```
+
+        The response lists every team the key can see:
+
+        ```json
+        {
+          "data": {
+            "teams": {
+              "nodes": [
+                { "id": "8f1a2b3c-4d5e-4f60-9a71-2b3c4d5e6f70", "key": "OPS", "name": "Operations" }
+              ]
+            }
+          }
+        }
+        ```
+
+        Take the `id` of the team whose `key` or `name` you want. That is the value for the **Team ID** field.
+
+        <Tip>
+        Linear personal API keys go in the `Authorization` header **without** a `Bearer` prefix. If the command above returns an authentication error, check you have not added one.
+        </Tip>
+      </Step>
+    </Steps>
+  </Tab>
+
+  <Tab title="Webhook">
+    You need an endpoint URL, and optionally a signing secret.
+
+    <Steps>
+      <Step title="Endpoint URL">
+        An `http` or `https` URL Ankra can POST to from the public internet, for example `https://example.com/ankra-tickets`. It should answer within 30 seconds and return any 2xx status. Anything from 300 upwards counts as a failed delivery, and the response body is ignored. Redirects are followed up to five hops and must stay on `http` or `https`.
+      </Step>
+      <Step title="Signing secret (optional but recommended)">
+        Any high-entropy string. Generate one locally:
+
+        ```bash
+        openssl rand -hex 32
+        ```
+
+        Keep a copy for your receiver - Ankra never shows it again after you save. When it is set, every delivery carries an HMAC signature your endpoint can verify, as described in [Webhook payloads](#webhook-payloads) below. With no secret, deliveries are unsigned and your endpoint cannot tell they came from Ankra.
+      </Step>
+    </Steps>
+  </Tab>
+</Tabs>
+
+## Step 2: Add the connection
+
+<Steps>
+  <Step title="Open the ticket sync settings">
+    Go to **AI** → **Settings** → **Connections** and find the **Ticket sync** card.
+  </Step>
+  <Step title="Choose Add connection">
+    The **Add sync connection** dialog opens on a provider picker with the three options. Pick one and the form for that provider appears.
+
+    You can change your mind with **Back**, which returns to the picker. Re-picking keeps the name and filters you have typed, and clears the destination and credential fields, because those belong to the provider you just left.
+  </Step>
+  <Step title="Name the connection">
+    A label for your own use, up to 200 characters, unique within the organisation. Saving a name that is already taken returns `A sync connection with this name already exists.`
+  </Step>
+  <Step title="Fill in the destination and credential">
+    These are the values from step 1.
+
+    | Provider | Destination fields | Credential fields |
+    |----------|--------------------|-------------------|
+    | **Jira** | Jira base URL, Project key, Issue type (optional) | Account email, API token |
+    | **Linear** | Team ID | API key |
+    | **Webhook** | Endpoint URL | Signing secret (optional) |
+  </Step>
+  <Step title="Set the sync filters">
+    Tick the ticket **kinds** to sync, or leave them all unticked to sync every kind. Then set the **Minimum priority** and whether **Timeline events** are relayed as comments.
+  </Step>
+  <Step title="Decide whether it starts enabled">
+    **Start enabled** is on by default, so live tickets begin syncing as soon as the connection is created. Turn it off if you want to review the settings, or brief the team, before anything lands in the tracker.
+  </Step>
+  <Step title="Create connection">
+    Ankra validates the fields, stores the credential in Vault, and adds the connection to the list. The credential is never written to the database and is never returned by the API afterwards.
+  </Step>
+</Steps>
+
+## Verify it works
+
+The connection row carries a status dot with four states, and it deliberately does not go green until something has actually been delivered:
+
+| Dot | Meaning |
+|-----|---------|
+| Grey, "Sync disabled" | The connection is switched off |
+| Pale, "No deliveries yet" | Enabled, but nothing has been delivered yet. A wrong credential looks exactly like this until the first ticket fires |
+| Green, "Deliveries healthy" | The last delivery succeeded, and the row shows when |
+| Red, "Deliveries are failing" | The last delivery failed. The error text from the provider is printed under the row |
+
+To confirm the wiring end to end, change something on a live board ticket that matches the filters - move its status, or leave a comment. The sync loop runs roughly every 30 seconds, so within about a minute the row should show a **Synced** timestamp and the issue should exist in your tracker.
+
+<Note>
+A large first batch drains over several passes rather than all at once: deliveries are throttled to stay under tracker rate limits, and each ticket relays up to 20 timeline events per pass. A busy board that has just been connected takes a few minutes to catch up.
+</Note>
+
+## What lands in Jira and Linear
+
+The issue title is `[T-<number>] <ticket title>`, matching the board's per-organisation ticket number.
+
+The description opens with the classification, the cluster when the ticket names one, and a link back to the board, then the ticket body:
+
+```
+Ankra ticket T-412
+Kind: incident
+Priority: high
+Status: triage
+Cluster: my-cluster
+
+[Open T-412 on the Ankra board](https://platform.ankra.app/organisation/ai/board/<ticket-id>)
+
+The payments-api deployment has been restarting since 09:14 ...
+```
+
+Timeline events then arrive as comments: status changes as `Status: triage → **investigating**`, peer reviews as `Peer review: **approve**`, resolutions as `Resolved (**fixed**)`, comments prefixed with who wrote them. Chat thread messages are not relayed to Jira or Linear, to keep conversation noise out of the tracker. When a ticket's title or priority changes without producing a timeline event, Ankra pushes the updated title onto the external issue.
+
+## Webhook payloads
+
+Webhook connections receive JSON `POST` requests instead of rendered prose. Three event shapes exist, and each one carries the full ticket snapshot, so your consumer never needs a read-back call:
+
+| `X-Ankra-Event` | When |
+|-----------------|------|
+| `ticket.created` | First delivery for a ticket on this connection |
+| `ticket.event` | One timeline event |
+| `ticket.updated` | A metadata-only change, such as a title or priority edit that appended no timeline event |
+
+Every request carries these headers:
+
+- `X-Ankra-Event` - the event name above
+- `X-Ankra-Delivery` - a unique id for this delivery attempt
+- `X-Ankra-Signature` - `sha256=<hex>`, present only when the connection stores a signing secret
+
+A `ticket.created` body:
+
+```json
+{
+  "event": "ticket.created",
+  "ticket": {
+    "id": "3f6c2b1e-0a94-4a3d-9f0b-2c7d5e8a1b44",
+    "ticket_number": 412,
+    "title": "CrashLoopBackOff in payments-api",
+    "body": "The payments-api deployment has been restarting since 09:14 ...",
+    "kind": "incident",
+    "status": "triage",
+    "priority": "high",
+    "cluster_name": "my-cluster",
+    "board_url": "https://platform.ankra.app/organisation/ai/board/3f6c2b1e-0a94-4a3d-9f0b-2c7d5e8a1b44",
+    "organisation_id": "8c1d0f2a-55b7-4e19-9c3a-6d2f8b7e4a10"
+  }
+}
+```
+
+A `ticket.event` body adds the event alongside the same snapshot:
+
+```json
+{
+  "event": "ticket.event",
+  "ticket": { "id": "3f6c2b1e-0a94-4a3d-9f0b-2c7d5e8a1b44", "ticket_number": 412, "...": "..." },
+  "ticket_event": {
+    "sequence": 7,
+    "event_type": "status_change",
+    "author_kind": "agent",
+    "author_name": "Investigator",
+    "body": "",
+    "payload": { "from_status": "triage", "to_status": "investigating" }
+  }
+}
+```
+
+`ticket.updated` has the same shape as `ticket.created` with a different `event` value.
+
+Field vocabularies:
+
+- `kind` - `incident`, `insight`, `gap`, `automation`, `request`, `chore`
+- `priority` - `urgent`, `high`, `medium`, `low`
+- `status` - `triage`, `investigating`, `planning`, `awaiting_review`, `awaiting_approval`, `executing`, `verifying`, `done`, `blocked`, `cancelled`
+- `event_type` - `comment`, `status_change`, `assignment`, `plan_draft`, `review`, `session_linked`, `workspace_linked`, `link_added`, `thread_message`, `resolution`, `run_outcome`
+- `author_kind` - `agent`, `user`, or the board itself
+- `payload` - the raw members of that event type, such as `from_status` and `to_status` on a status change, `verdict` on a review, `resolution` on a resolution
+
+<Note>
+Webhook consumers receive **every** timeline event, including the `thread_message` chat echoes that the Jira and Linear connectors skip. `sequence` is monotonic per ticket, so use it to order and de-duplicate.
+</Note>
+
+### Verifying the signature
+
+The signature is the hex HMAC-SHA256 of the **raw request body** using your signing secret, prefixed with `sha256=`. Compute it over the bytes as received, before any JSON parsing or re-serialisation.
+
+<CodeGroup>
+```javascript Node.js
+import crypto from 'node:crypto'
+
+function isFromAnkra(rawBody, signatureHeader, secret) {
+  const expected = 'sha256=' + crypto.createHmac('sha256', secret).update(rawBody).digest('hex')
+  const received = Buffer.from(signatureHeader ?? '')
+  const computed = Buffer.from(expected)
+  return received.length === computed.length && crypto.timingSafeEqual(received, computed)
+}
+```
+
+```python Python
+import hashlib
+import hmac
+
+def is_from_ankra(raw_body: bytes, signature_header: str, secret: str) -> bool:
+    expected = "sha256=" + hmac.new(secret.encode(), raw_body, hashlib.sha256).hexdigest()
+    return hmac.compare_digest(expected, signature_header or "")
+```
+</CodeGroup>
+
+## Manage a connection
+
+- **Disable** - the switch on the row stops deliveries without losing the configuration or the cursor. Re-enabling resumes from where it stopped, and anything that changed in the meantime is delivered then.
+- **Edit** - the pencil opens the same dialog with the provider locked, since a connection cannot change provider. Create a second connection instead.
+- **Rotate a credential** - open **Edit**, fill in the credential fields, and save. Leaving every credential field blank keeps the stored one; filling them in replaces it wholesale. A partly filled credential is refused, because the replacement is all or nothing.
+- **Retry a failing connection** - saving a failing connection again clears its failure state and retries immediately, rather than waiting out the normal cadence.
+- **Delete** - the bin removes the connection and its stored credential.
+
+<Warning>
+Deleting a connection stops the sync and cannot be undone. External issues that were already created are left exactly as they are in Jira or Linear - Ankra does not close or delete them. Adding the connection back later starts a fresh cursor and files new issues for the tickets that are live at that moment.
+</Warning>
+
+## Troubleshooting
+
+| What you see | What it means |
+|--------------|---------------|
+| `Only organisation admins can manage ticket sync connections.` | Your role can read the list but not change it. Ask an organisation admin. |
+| `A sync connection with this name already exists.` | Names are unique per organisation. Pick a different one. |
+| **No credential** badge on the row | The connection has no stored credential and its provider needs one, so it cannot deliver. Open **Edit** and add it. |
+| Row stays on "No deliveries yet" | Nothing has matched the filters yet, or nothing has changed. Check the kinds and the minimum priority, then touch a live ticket that qualifies. |
+| `Jira API error 401` | The account email and API token do not match, or the token was revoked. Regenerate the token and rotate it. |
+| `Jira API error 403` | The account authenticates but lacks a project permission. Check Browse Projects, Create Issues, Add Comments, and Edit Issues on that project. |
+| `Jira API error 400` with an `issuetype` message | The issue type name does not exist in that project's scheme. Use the exact name Jira shows, or clear the field to fall back to `Task`. |
+| `Linear API GraphQL errors` mentioning the team | The **Team ID** is not a UUID this key can see. Re-run the `teams` query with the same key and copy the `id` exactly. |
+| `Linear API error 400` or `401` | The API key is wrong or was revoked. Note that Linear personal keys carry no `Bearer` prefix. |
+| `webhook delivery returned status <code>` | Your endpoint answered with a status of 300 or above, which Ankra treats as a failed delivery. It is retried on the next pass. |
+| `ticket sync destination <address> is not publicly routable` | The destination resolves to a private, loopback, or link-local address. Expose it on the public internet, or use a provider that is. |
+| `webhook delivery failed: ... timeout` | Your endpoint did not answer within the 30 second budget. Acknowledge fast and process asynchronously. |
+
+Failures are retried automatically on the next pass. A failing connection does not block the others, and one failing ticket does not starve the queue behind it.
+
+## Related pages
+
+- [AI Board](/platform/ai-board) - ticket kinds, statuses, priorities, and the plan approval flow
+- [AI Connections](/platform/ai-connections) - the rest of the Connections settings page
+- [Webhooks](/guides/webhooks) - alert and platform event destinations, a separate system from ticket sync
+- [Roles and Access](/guides/roles-and-access) - who counts as an organisation admin
