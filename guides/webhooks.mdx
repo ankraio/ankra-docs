@@ -88,37 +88,93 @@ Only **critical** and **warning** events reach the home channel; informational e
 
 ## Template Variables
 
-Use these variables in your custom templates. They are replaced with actual values when alerts trigger:
+Use these variables in your custom templates. They are replaced with actual values when the notification is delivered.
 
-### Alert Information
+One destination stores one template, and that template renders **every** notification it receives - alert firings, alert resolutions, and the operational notifications a routing rule sends it. The tables below mark which of those a variable carries a value for.
+
+### Notification
 
 | Variable | Description | Example |
 |----------|-------------|---------|
-| `{{alert_name}}` | Name of the alert | "Production Down Alert" |
+| `{{kind}}` | Notification kind identifier | "execution_failed" |
+| `{{kind_label}}` | Human label for the kind | "Operation failed" |
+| `{{title}}` | Notification headline | "Deployment failed for registry_pull_secret 'harbor-pull'" |
+| `{{body}}` | Notification detail text | "Error: chart not found" |
+| `{{message}}` | One-line summary - the title, or the alert name for alert firings | "Production Down Alert" |
+| `{{name}}` | Destination name | "infra-channel" |
+| `{{webhook_name}}` | Destination name, same value as `{{name}}` | "infra-channel" |
+| `{{notification_type}}` | "triggered" or "resolved" | "triggered" |
+| `{{notification_id}}` | Identifier of the notification | "abc123-def456" |
+| `{{recurrence_count}}` | How many times this notification has recurred | "4" |
+| `{{source}}` | Delivery pipeline | "alert_trigger", "cluster_notification" |
+| `{{data}}` | Producer detail object for the kind, spliced in as JSON | `{"execution_id": "..."}` |
+| `{{route_hint}}` | In-app deep link descriptor, spliced in as JSON | `{"name": "ORG_OPERATIONS_DETAIL"}` |
+
+### Alert Information
+
+Alert firings and resolutions carry all of these. Operational notifications carry `{{severity}}` and its two presentation values; the rest are empty for them, except a firing routed by a routing rule, which also carries `{{condition_type}}` and `{{trigger_value}}`.
+
+| Variable | Description | Example |
+|----------|-------------|---------|
+| `{{alert_name}}` | Name of the alert, falling back to the rule name and then the notification title | "Production Down Alert" |
 | `{{alert_id}}` | Unique alert identifier | "abc123-def456" |
+| `{{rule_id}}` | Alert rule identifier | "def456-abc123" |
+| `{{rule_name}}` | Alert rule name, or the kind label for operational notifications | "Cluster state check" |
+| `{{trigger_id}}` | Identifier of this firing | "789abc-123def" |
 | `{{severity}}` | Alert severity level | "critical", "warning", "info" |
 | `{{severity_color}}` | Hex colour for severity | "#d9534f" |
 | `{{severity_style}}` | Adaptive Card container style for severity | "attention", "warning", "accent" |
-| `{{condition_type}}` | Type of condition that triggered | "resource_state" |
-| `{{triggered_at}}` | Human-readable trigger time | "Dec 15, 2024, 3:45 PM" |
-| `{{triggered_at_iso}}` | ISO 8601 timestamp | "2024-12-15T15:45:00Z" |
+| `{{condition_type}}` | Condition types that fired, comma-separated | "cluster_state" |
+| `{{trigger_value}}` | Observed value that met the condition | "cluster_state=online" |
+| `{{trigger_details}}` | Full evaluation detail object, spliced in as JSON | `{"actual": 91, "threshold": 80}` |
+| `{{resource_snapshot}}` | Resource state captured when the alert fired, spliced in as JSON | `{"state": "degraded"}` |
+| `{{triggered_at}}` | Human-readable trigger time | "2026-08-22 09:15:04 UTC" |
+| `{{triggered_at_iso}}` | ISO 8601 timestamp | "2026-08-22T09:15:04Z" |
+| `{{resolved_at}}` | When the alert resolved | "2026-08-22T10:02:11Z" |
+| `{{resolved_by}}` | Who resolved the alert | "sara@example.com" |
+| `{{previous_status}}` | Status the alert held before this notification | "triggered" |
 
 ### Resource Information
+
+Every notification kind fills what it has. Where a producer records no finer resource kind, `{{resource_type}}` reads as the thing that went wrong - "operation", "resource", "agent", "insight", "gitops repository", "security report". Agent notifications are about the agent on a cluster, so their `{{resource_name}}` is that cluster's name.
 
 | Variable | Description | Example |
 |----------|-------------|---------|
 | `{{resource_name}}` | Name of the affected resource | "nginx-deployment" |
-| `{{resource_type}}` | Type of resource | "addon", "manifest", "stack" |
-| `{{job_name}}` | Related job name | "deploy-nginx" |
-| `{{cluster_name}}` | Cluster where alert triggered | "production-us-east" |
+| `{{resource_type}}` | Kind of the affected resource | "addon", "manifest", "deployment" |
+| `{{namespace}}` | Kubernetes namespace of the affected resource | "production" |
+| `{{job_name}}` | Job or operation the notification is about | "deploy-nginx" |
+| `{{cluster_id}}` | Cluster identifier | "abc123-def456" |
+| `{{cluster_name}}` | Cluster the notification came from | "production-us-east" |
 
 ### Action URLs
 
 | Variable | Description |
 |----------|-------------|
-| `{{alert_url}}` | Direct link to the alert in Ankra |
+| `{{alert_url}}` | Direct link to the firing in Ankra, or to the alerts dashboard when the notification has no firing page |
 | `{{acknowledge_url}}` | Signed one-click acknowledge link (safe to put behind a button) |
 | `{{dashboard_url}}` | Link to the Ankra dashboard |
+| `{{snooze_url}}` | Link to the page the alert can be snoozed from |
+
+### Empty values and fallbacks
+
+No notification kind carries a value for every variable - a cluster-level alert has no job, an agent update has no condition. Two things stop that showing up as a column of blank rows in your card:
+
+- **Empty rows are dropped for you.** After substitution Ankra removes the rows whose whole purpose was to show one value: Adaptive Card `FactSet` facts whose value came out empty (and a `FactSet` left with no facts), empty `TextBlock` entries, Slack `section` fields whose `*Label*` has no value under it, and the `{"name", "value"}` rows a Discord embed or a legacy Teams MessageCard carries. All four built-in presets therefore render correctly for every kind with no editing. Containers, columns and action sets are never removed, and a card is never pruned down to nothing.
+- **You can supply your own fallback** with `{{variable|text}}`, for example `{{resource_name|not applicable}}`. The fallback is used both when the variable is unknown and when it resolves empty, so it wins over the row being dropped.
+
+A variable name Ankra does not recognise renders as an empty string rather than as literal `{{...}}` text.
+
+The JSON-valued variables (`{{data}}`, `{{route_hint}}`, `{{trigger_details}}`, `{{resource_snapshot}}`) follow where you put them: written unquoted they splice in as a nested object, and written inside a quoted string they are escaped for you so the payload stays valid JSON.
+
+```json
+{
+  "details": {{trigger_details}},
+  "text": "Details: {{trigger_details}}"
+}
+```
+
+Every other value is escaped for the string it sits in, so a resource name containing a quote or a newline cannot break your template.
 
 ---
 
@@ -343,7 +399,9 @@ After creating a webhook, use the **Test** button to:
 2. Verify the message appears correctly in your target service
 3. Confirm the JSON structure is valid for your integration
 
-Test payloads use placeholder values so you can see how real alerts will appear.
+Test payloads populate **every** template variable, so a template that renders correctly under Test renders correctly on delivery - the Test button and the delivery pipeline run the same renderer. A real notification only fills the variables its kind has a value for, and the rows for the rest are dropped as described in [Empty values and fallbacks](#empty-values-and-fallbacks).
+
+Testing a **routing rule** (Alerting → Routing rules → Test) sends the same sample through the rule's own kind, so you can check a rule and its destination's template together.
 
 ---
 
@@ -387,6 +445,8 @@ ankra alerts routes delete <route-id>
 ```
 
 Updates send only the flags you pass, so the rest of a destination or route stays untouched. The same endpoints are available directly for other tooling under `/api/v1/org/alerts/integrations` and `/api/v1/org/notifications/routes` with a bearer token.
+
+Before you rely on a set of rules, run `ankra alerts routes preview` to see which destinations a notification would actually reach. [Notification routing](/guides/notification-routing) covers the full matching, ordering, and de-duplication behaviour.
 
 ---
 

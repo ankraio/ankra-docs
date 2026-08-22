@@ -26,6 +26,7 @@ A profile is a **template**, not a running deployment. Instantiating a profile p
 |---------|-------------|
 | **Version** | An immutable snapshot of the stack spec. Versions increment as you publish updates and carry a `channel` (e.g. `stable`) and an optional changelog. |
 | **Parameters** | Typed inputs callers fill in at instantiation. Each parameter has a `type` (`string`, `number`, `boolean`, `enum`, or `secret`), and may be `required`, have a `default`, an `enum` list, or a validation `pattern`. |
+| **Choices** | A parameter can offer `options`, and each option can `set` other parameters. One **Model size** choice of `8b` or `32b` then moves the model id, the context length and the volume size together, so the operator picks one thing instead of keeping four consistent. See [Choices that set other inputs](#choices-that-set-other-inputs). |
 | **Visibility** | `organisation` (default) keeps the profile private to your org; `public` shares it more widely. Independently of visibility, a profile can be [shared with specific organisations](#share-with-specific-organisations). |
 | **Category & tags** | Metadata for organising and searching profiles. |
 | **Publisher** | The organisation that owns the profile. Publisher names, logos, and verified badges help you identify trusted profiles. Verified Ankra profiles appear first in profile results. |
@@ -126,6 +127,68 @@ Instantiating turns a profile into a stack on a target cluster:
     Commit the draft to deploy, exactly like any other [stack](/concepts/stacks) change.
   </Step>
 </Steps>
+
+### Choices that set other inputs
+
+Some inputs only make sense together. A chat profile that can run a small model on
+one GPU or a large one on a bigger card has four inputs that must agree - the model
+id, the context length, the GPU memory ceiling and the size of the model store - and
+an operator asked for each one separately has to know all four answers.
+
+A profile author can instead give one input **options**, and have each option **set**
+the others:
+
+```yaml
+- name: model_size
+  title: Model size
+  type: enum
+  default: 8b
+  options:
+    - value: 8b
+      title: Qwen3 8B on one L4 (24 GB)
+      sets:
+        model_id: Qwen/Qwen3-8B
+        max_model_len: "16384"
+        gpu_memory_utilization: "0.90"
+        model_store_size: 60Gi
+    - value: 32b
+      title: Qwen3 32B on one L40S (48 GB)
+      sets:
+        model_id: Qwen/Qwen3-32B
+        max_model_len: "28672"
+        gpu_memory_utilization: "0.95"
+        model_store_size: 120Gi
+```
+
+When the profile is used, the values resolve in one fixed order, on every surface:
+
+```
+a value you set  >  what the selected option sets  >  the parameter's own default
+```
+
+- **In the portal**, the choice renders as a card of options above the rest of the
+  form, each naming how many inputs it answers. The inputs an option answers show
+  the value it assigned, labelled with the choice that made it; type over one and
+  it is marked *customised*, and **Reset** hands it back to the option. A required
+  input an option answers counts as answered.
+- **From the CLI**, `ankra stack-profiles get` prints a `Choices for model_size`
+  block listing what every option sets, and
+  `ankra stack-profiles apply <profile> --cluster <name> --set model_size=32b`
+  deploys the whole set with no other bindings. A `--set` of your own on one of
+  those inputs still wins over the option.
+- **The platform resolves the choice server-side**, so the AI assistant, the MCP
+  tools and Terraform get the same stack from the same selection, and the
+  deployment's recorded parameters are the values that actually deployed.
+
+A profile may declare any number of such inputs, each driving a different slice of
+the form (model size, storage tier, ingress mode); when two set the same input, the
+one declared later wins. An option can never set a **secret** input - a profile
+never stores secret values - and cannot set another input that itself offers
+options, so every resolution is a single readable pass. Options are authored on the
+builder's **Inputs** tab; a choice-only input that no manifest references can be
+added there directly, and mistakes that would be refused at publish (a value the
+target input would reject, a default that names no option, an unknown target) are
+shown inline while you edit.
 
 ### From the CLI
 
