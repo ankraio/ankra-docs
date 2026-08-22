@@ -175,23 +175,40 @@ Zones already provisioned keep the domain they were minted under, so the switch 
   <Step title="Inventory what is under the current root">
     `ankra org dns zones` lists every cluster domain in the organisation with its state; `ankra org dns list` lists the DNS records. Both are reads. In the portal the same two lists live under **Organisation** → **Settings** → **DNS records**.
   </Step>
+  <Step title="Destroy any playground environment">
+    A playground publishes a wildcard DNS record in the organisation's zone, and that record is **reconciled** - the platform writes it again on its next pass over a ready environment, so deleting it in the next step will not clear it. Destroy the environment instead: `ankra cluster playground destroy <cluster_id>`. The refusal names any playground that is still holding a record.
+  </Step>
   <Step title="Remove each cluster domain">
     `ankra cluster domain <cluster> --remove` (or `DELETE /api/v1/clusters/{cluster_id}/dns-zone`, or **Remove** on the cluster domain row in the portal) hands the zone to Ankra for teardown.
+
+    The removal is **held**: nothing re-creates the zone until you ask for it back in the last step - not the `external-dns` Ankra runs on that cluster, and not the discovery that mints zones for clusters that have none. `ankra cluster domain <cluster>` reports `Opted out: yes` for as long as the hold stands, so a domain that is gone is distinguishable from one that is between reconciler passes.
   </Step>
   <Step title="Delete the DNS records">
-    `ankra org dns delete <record>`, or delete them from the DNS records table.
+    `ankra org dns delete <record>`, or delete them from the DNS records table. These are the records you created; anything the platform publishes is listed separately in the refusal, with what to remove instead.
   </Step>
   <Step title="Register the new domain">
     `ankra org domain set example.com`, or save the **Custom Ankra domain** field. Ankra tears the organisation zone down and re-creates it under the new domain automatically.
   </Step>
   <Step title="Re-enable the cluster domains">
-    `ankra cluster domain <cluster> --enable` re-creates each cluster's zone under the new root - the staging cluster's zone comes back on its own - and the cluster's external-dns picks up the new zone on its next cloud-provider stack pass.
+    `ankra cluster domain <cluster> --enable` withdraws the hold and re-creates each cluster's zone under the new root, and the cluster's external-dns picks up the new zone on its next cloud-provider stack pass. Every cluster you removed in step 3 needs this, the staging cluster included.
   </Step>
 </Steps>
 
 <Note>
 `ankra cluster domain <cluster>` on its own is a **read**: it reports the cluster's domain, or state `none` when it has none, and never creates a zone. Creating one is the explicit `--enable`. (Before CLI v0.13.0 the bare command created a zone, which meant checking a cluster's domain could add a blocker to this very migration.)
 </Note>
+
+### What a root-domain switch does and does not touch
+
+Two questions decide whether the switch is safe to attempt on a domain that is already in use. Both have short answers.
+
+**Ankra confines itself to one subzone of the domain you register.** Registering `example.com` creates `<org_short_id>.example.com` and nothing else. Records you already publish at the apex or under any other name in `example.com` are never read, written or deleted - not by the switch, and not by anything Ankra runs afterwards. The delegation is strict below that too: each cluster gets its own subzone under the organisation zone, and the `external-dns` Ankra installs on a cluster holds a token pinned to that cluster's subzone alone, so it cannot reach a name outside it.
+
+**A switch never re-labels a zone.** Zone labels are derived from the organisation and cluster ids, so they are the same under any root: a cluster that was `axmndle4sl.<org>.ankra.cc` becomes `axmndle4sl.<org>.example.com`. The label is also what Ankra passes as `external-dns`'s `--txt-owner-id`, and what any GitOps path built from a cluster domain embeds - so the TXT ownership registry stays matched to its records across the switch, and the paths do not move. `--enable` re-creating a zone preserves the label for the same reason.
+
+<Warning>
+`external-dns` on each cluster runs with `--policy=sync` against its own subzone. That is safe here precisely because the label and the owner id survive the switch together: an owner id that changed under a `--policy=sync` controller would be the configuration that deletes records the controller no longer recognises as its own. Ankra does not change it, and nothing in the switch asks you to.
+</Warning>
 
 ### Deploying a demo
 
