@@ -204,13 +204,35 @@ Zones already provisioned keep the domain they were minted under, so the switch 
 
 Two questions decide whether the switch is safe to attempt on a domain that is already in use. Both have short answers.
 
-**Ankra confines itself to one subzone of the domain you register.** Registering `example.com` creates `<org_short_id>.example.com` and nothing else. Records you already publish at the apex or under any other name in `example.com` are never read, written or deleted - not by the switch, and not by anything Ankra runs afterwards. The delegation is strict below that too: each cluster gets its own subzone under the organisation zone, and the `external-dns` Ankra installs on a cluster holds a token pinned to that cluster's subzone alone, so it cannot reach a name outside it.
+**Ankra touches only the records it creates in the domain you register.** Registering `example.com` adopts it as the organisation's zone apex, with each cluster's own `<cluster-id>.example.com` subzone under it, and the `external-dns` Ankra installs on every cluster is scoped to the whole domain so it can publish top-level names like `app.example.com`. Each controller runs with its own record ownership (`--txt-owner-id`), so it creates, updates and deletes only the records that exist because of an Ingress on its cluster: records you already publish at the apex or under any other name in `example.com` are never read, written or deleted - not by the switch, and not by anything Ankra runs afterwards.
 
 **A switch never re-labels a zone.** Zone labels are derived from the organisation and cluster ids, so they are the same under any root: a cluster that was `axmndle4sl.<org>.ankra.cc` becomes `axmndle4sl.<org>.example.com`. The label is also what Ankra passes as `external-dns`'s `--txt-owner-id`, and what any GitOps path built from a cluster domain embeds - so the TXT ownership registry stays matched to its records across the switch, and the paths do not move. `--enable` re-creating a zone preserves the label for the same reason.
 
 <Warning>
 `external-dns` on each cluster runs with `--policy=sync` against its own subzone. That is safe here precisely because the label and the owner id survive the switch together: an owner id that changed under a `--policy=sync` controller would be the configuration that deletes records the controller no longer recognises as its own. Ankra does not change it, and nothing in the switch asks you to.
 </Warning>
+
+### Serving a zone in your own DNS account from every cluster
+
+A custom Ankra domain has to be hosted in Ankra's own DNS account, because Ankra mints the per-cluster credentials for it. A zone you keep in **your own** DNS provider account is different: Ankra cannot mint anything there, so the `external-dns` it installs drops Ingress hostnames on that zone silently (the sync logs `All records are already up to date`, because from its point of view there is nothing in scope), and cert-manager's HTTP-01 challenge for such a hostname waits forever for a name that never resolves.
+
+Declare the zone with a credential of your own instead, once, for the whole organisation:
+
+```bash
+ankra org dns credentials create --name my-dns \
+  --webhook-provider-url https://dns.example/api/external-dns/<token>   # stored in the platform's secret store; never echoed back
+ankra org custom-dns-zones add --zone example.dev --credential my-dns
+ankra org custom-dns-zones list
+```
+
+Every cluster in the organisation - the ones running now and every one created afterwards - then gets its own `external-dns` for `example.dev`, rendered and reconciled by Ankra in a dedicated `custom-dns` stack, within about two minutes of the declaration or of the cluster coming up. An Ingress on `chat.example.dev` publishes from whichever cluster serves it, and the certificate follows once the name resolves. Each cluster's controller is pinned to exactly that zone (`--domain-filter`) with its own record ownership, so it can never fight the controller Ankra runs for the cluster's Ankra domain, another cluster's controller, or records you publish in the zone yourself.
+
+- The credential is the external-dns **webhook provider URL** including its token, for any provider that speaks the external-dns webhook protocol. It is written to the platform's secret store on create and no read surface returns it; re-creating it under the same name re-points every cluster at once, which is how a rotated token rolls out. Its name is what `list` shows.
+- `ankra cluster custom-dns-zones add <cluster> --zone <zone> --credential <name>` declares the same thing for **one** cluster. A cluster's own declaration of a zone takes precedence over the organisation's on that cluster - the way to serve a zone with a different credential on one cluster - and `ankra cluster custom-dns-zones list <cluster>` shows where each zone a cluster serves was declared (`SOURCE` = `cluster` or `organisation`).
+- A zone that overlaps the domain Ankra already serves for the organisation (its `<org-id>.<ankra-domain>` zone, or the whole custom Ankra domain when one is registered) is refused: Ankra's own controllers publish there already and cannot be told to stay off those names. A zone **above** the Ankra domain is accepted, and each cluster's controller is told to leave the Ankra-served part alone.
+- `ankra org custom-dns-zones remove --zone example.dev` withdraws the declaration. Ankra tears down the controllers it rendered on every cluster that inherited the zone; clusters that declared it themselves keep theirs, and the zone's records are yours and are left untouched.
+
+The same declarations are available on the API: `GET`/`POST` `/api/v1/org/custom-dns-zones`, `DELETE /api/v1/org/custom-dns-zones/{zone}`, and the per-cluster `/api/v1/clusters/{cluster_id}/custom-dns-zones` twins.
 
 ### Deploying a demo
 
