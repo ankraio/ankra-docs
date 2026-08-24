@@ -117,9 +117,10 @@ The same declaration at create time:
 | `api_url` | Optional. The registry's management API base; defaults to `https://<host>`, which is where a Harbor serves its own API. |
 | `pull_secret_name` | Optional. The `kubernetes.io/dockerconfigjson` Secret the generated manifests reference through `imagePullSecrets`. Defaults to `ankra-registry-pull`. |
 | `username_secret_name` / `password_secret_name` | Optional. The repository Actions secrets the build workflow logs in with. Default to `ANKRA_REGISTRY_USERNAME` / `ANKRA_REGISTRY_PASSWORD`. |
+| `admin_credential_name` | Optional. A registry credential with project administrator rights on the project (or a robot granted the robot-account permissions). Setting it hands robot management on your registry to Ankra: it mints, rotates and revokes a push robot for the application with it. See [Robot accounts](#robot-accounts). |
 | `manage_actions_secrets` | Optional, default `false`. See below. |
 
-**Ankra does not mint robots for a registry you operate.** With a declared registry, setup names the two Actions secrets the workflow reads and leaves them to you, rather than writing a credential Ankra happens to hold over a push robot you administer. Publish readiness reports whether those secrets exist and names them. Set `manage_actions_secrets: true` to have Ankra write the declared credential into them instead.
+**Ankra does not mint robots for a registry you operate unless you hand it the keys.** With a declared registry and no `admin_credential_name`, setup names the two Actions secrets the workflow reads and leaves them to you, rather than writing a credential Ankra happens to hold over a push robot you administer. Publish readiness reports whether those secrets exist and names them. Name an `admin_credential_name` to have Ankra mint a push robot for the application there ([Robot accounts](#robot-accounts)), or set `manage_actions_secrets: true` to have it write the declared credential into them instead.
 
 <Warning>
 `credential_name` is what makes a declaration usable rather than merely descriptive. Without one Ankra records where the images live but cannot read their tags or pull them, so publish readiness, the demo build check and the deploy gate all keep reporting the application as never built - while it publishes healthily to a registry Ankra simply cannot see.
@@ -130,6 +131,37 @@ On a monorepo, a component may declare its own `image_registry` to publish into 
 </Note>
 
 Publish readiness, the deploy gate, image tag listings, container scanning, and preview demos all resolve the declared registry, so an application whose images live outside Ankra reports what is actually published rather than staying blocked on an artifact that was never going to appear in Ankra's own project.
+
+### Robot accounts
+
+Every application gets a registry robot account of its own: a push+pull robot named `robot$<project>+app-<application-id>` on the project it publishes to, stored as the platform-managed registry credential `ankra-harbor-app-<application-id>` and written into the repository's Actions secrets as the login the build workflow uses. Nothing else shares that login, so a leaked repository secret is rotated or revoked for that one application, and a deleted application takes its robot with it.
+
+- **On your organisation's Ankra registry** the robot is minted automatically when the application is set up, and again whenever the application is reconciled. Applications onboarded before robots existed get one the first time **Fix automatically** runs on the CI/CD tab, or when you create it from **Settings** → **Image registry**.
+- **On a registry you operate**, Ankra mints one only with a credential that may: set `admin_credential_name` to a registry credential with project administrator rights on the declared project (in Harbor, a project admin user, or a robot granted the robot-account permissions). Without it Ankra never touches your robots; publish readiness names the field.
+
+The robot is shown - name, registry, when it was created and last rotated - under **Settings** → **Image registry**, where you can create, rotate or revoke it. Rotating refreshes the secret and rewrites the repository's Actions secrets; the previous secret stops working the moment the registry answers. Revoking deletes the robot from the registry and drops its credential, leaving the repository's secrets holding a login that no longer works.
+
+```bash
+# Show the application's robot
+ankra application registry robot get <application-id>
+
+# Mint one (or confirm the existing one) and write its login into the repository
+ankra application registry robot ensure <application-id>
+
+# Rotate its secret after a leak
+ankra application registry robot rotate <application-id>
+
+# Revoke it
+ankra application registry robot revoke <application-id> --yes
+
+# Let Ankra manage robots on a registry you operate
+ankra application registry set <application-id> \
+  --url oci://artifact.example.com/commerce-images \
+  --credential example-harbor-pull \
+  --admin-credential example-harbor-admin
+```
+
+The same is available on the API at `/api/v1/org/applications/{application_id}/registry-robot` (`GET`, `POST` with `{"rotate": true|false}`, `DELETE`). The robot's credential appears in your organisation's registry credentials as managed by Ankra; it cannot be edited or deleted there, only through the application.
 
 ### Security scanning
 
