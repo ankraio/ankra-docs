@@ -1,0 +1,191 @@
+---
+title: Harbor as your application registry
+description: Publish application images to a Harbor you operate, with Ankra minting, rotating and revoking a push robot per application and wiring the pull secret into every cluster.
+---
+
+An application publishes to your organisation's private Ankra registry unless you say otherwise. If you already run Harbor, declare it on the application and Ankra publishes there, reads the published tags back from there, and pulls from there - including minting the robot account the build logs in with, if you let it.
+
+This guide is the operator's side of [Using your own registry](/concepts/applications#using-your-own-registry): what Harbor needs to look like before you point an application at it, what Ankra creates once you do, and how to check it from the Harbor end.
+
+---
+
+## The two credentials
+
+Ankra talks to your Harbor with [registry credentials](/platform/credentials/registry) of your organisation. A declaration names up to two of them, and they do different jobs.
+
+| Credential | Declared as | What Ankra does with it | Rights it needs |
+| --- | --- | --- | --- |
+| **Read / pull** | `credential_name` (`--credential`) | Reads published tags for publish readiness, the deploy gate, image listings and demos, and builds the `dockerconfigjson` pull secret every cluster uses | Pull and read on the project: `repository` pull/list/read, `artifact` list/read, `tag` list, `project` read |
+| **Project administrator** | `admin_credential_name` (`--admin-credential`) | Mints, rotates and revokes the application's own push robot | Project administrator on the project |
+
+<Warning>
+The read credential is what makes a declaration usable rather than merely descriptive. Without one, Ankra records where the images live but cannot read their tags or pull them - so publish readiness, the demo build check and the deploy gate all keep reporting the application as never built, while it publishes healthily to a registry Ankra simply cannot see. It is also what the cluster pull secret is built from: declare a registry with no read credential and no pull secret is created at all.
+</Warning>
+
+**Ankra does not mint robots for a registry you operate unless you hand it the keys.** With no `admin_credential_name`, setup names the two Actions secrets the workflow reads and leaves them to you; your robots stay yours and untouched.
+
+---
+
+## What Harbor needs first
+
+<Steps>
+<Step title="Create the project">
+Ankra publishes into a project you already have; it never creates one. Create the project that the declaration's `oci://<host>/<project>` names, and decide whether it is public or private - Ankra works with either, and a private project is why the pull secret exists.
+</Step>
+
+<Step title="Give the project-administrator credential a Harbor user">
+Make the account behind `admin_credential_name` a **Harbor user** with the **Project Admin** role on the project, and store it as a registry credential in Ankra.
+
+<Warning>
+A project-scoped **robot** cannot administer robots. Harbor's project-level robot permission set has no `robot` create/update/delete, so a declaration whose `admin_credential_name` points at an ordinary project robot fails to mint the application's robot - with a permission error from Harbor, not from Ankra. Use a Harbor user with Project Admin, or a **system**-level robot granted the robot-account permissions.
+</Warning>
+</Step>
+
+<Step title="Store a read credential">
+Create the pull account - a system robot with pull/list/read across the projects Ankra reads is the tidiest - and store it as a second registry credential. This is the one that ends up inside every cluster's pull secret, so scope it to pull, not push.
+</Step>
+</Steps>
+
+---
+
+## Declaring it on an application
+
+Declare the registry when you create the application where you can: the setup job generates the build workflow from the declaration the application is created with, so a registry added afterwards leaves a workflow that logs in to the wrong one until the application is reconciled and its setup pull request merged.
+
+```bash
+# At creation
+ankra application add . \
+  --registry-url oci://artifact.example.com/commerce-images \
+  --registry-credential example-harbor-pull \
+  --registry-admin-credential example-harbor-admin
+
+# On an existing application
+ankra application registry set <application-id> \
+  --url oci://artifact.example.com/commerce-images \
+  --credential example-harbor-pull \
+  --admin-credential example-harbor-admin \
+  --pull-secret harbor-registry
+
+# What the declaration resolved to, and where each component is expected to publish
+ankra application registry get <application-id>
+```
+
+Where your Harbor's repository layout is not Ankra's `<project>/<app>/<component>` nesting, say so rather than reorganising Harbor: `--flat-repositories` addresses components as `<project>/<component>`, and `--component-repository backend=commerce-backend` names one outright. Both are used by publish readiness, the deploy gate and the generated workflow, so they describe what your pipeline already pushes.
+
+---
+
+## The robot Ankra mints
+
+With a project-administrator credential in the declaration, every application gets a push robot of its own.
+
+| | |
+| --- | --- |
+| **Name** | `robot$<project>+app-<application-id>` |
+| **Rights** | `push` and `pull` on that one project - nothing else |
+| **Expiry** | Non-expiring, so a build never fails at 2am because a token aged out |
+| **Stored as** | The platform-managed registry credential `ankra-harbor-app-<application-id>` |
+| **Delivered to** | The repository's Actions secrets, `ANKRA_REGISTRY_USERNAME` / `ANKRA_REGISTRY_PASSWORD` by default |
+
+Nothing else shares that login, so a leaked repository secret is rotated or revoked for that one application, and a deleted application takes its robot with it.
+
+```bash
+# Mint it (or confirm the existing one) and write its login into the repository
+ankra application registry robot ensure <application-id>
+
+# Show it: name, registry, created and last-rotated timestamps
+ankra application registry robot get <application-id>
+
+# Rotate after a leak - the old secret stops working the moment Harbor answers
+ankra application registry robot rotate <application-id>
+
+# Revoke: deletes the robot from Harbor and drops its credential
+ankra application registry robot revoke <application-id> --yes
+```
+
+The same lives under **Settings** → **Image registry** in the portal, and on the API at `/api/v1/org/applications/{application_id}/registry-robot` (`GET`, `POST` with `{"rotate": true|false}`, `DELETE`).
+
+### Checking it from the Harbor end
+
+Project robots are not returned by Harbor's system robot listing; query them with the project id.
+
+```bash
+# Find the project id
+curl -u '<admin>' 'https://artifact.example.com/api/v2.0/projects/commerce-images' \
+  -H 'X-Is-Resource-Name: true'
+
+# List the project's robots (id from the previous call)
+curl -u '<admin>' 'https://artifact.example.com/api/v2.0/robots?q=Level%3Dproject%2CProjectID%3D<id>'
+```
+
+A healthy application robot comes back enabled, with `expires_at: -1` and exactly `push repository` plus `pull repository` on its own project.
+
+---
+
+## Pull secrets in your clusters
+
+The generated manifests reference the pull secret through `imagePullSecrets`, and Ankra keeps that Secret in place for you - **per cluster and per namespace**, without you registering anything.
+
+- On **every deploy**, the target namespace is added to that cluster's registry pull-secret resource for the Secret the declaration names (`harbor-registry` above, `ankra-registry-pull` by default), and the resource is re-applied so the Secret exists in the new namespace.
+- A cluster carries **one resource per Secret name**, so an application pulling from your Harbor coexists with every other application pulling from Ankra's own registry - registering a namespace on one never rewrites the other's.
+- **Rotation fans out**: rotating the robot flips the deployed resources so the new login replaces the old one in each cluster.
+- Clusters imported before the registry existed get the resource created on the spot.
+
+```bash
+# What the cluster actually holds
+ankra cluster select <cluster>
+ankra cluster get secrets --all-namespaces
+```
+
+```
+harbor-registry        commerce    kubernetes.io/dockerconfigjson
+harbor-registry        insight     kubernetes.io/dockerconfigjson
+ankra-registry-pull    default     kubernetes.io/dockerconfigjson
+```
+
+<Note>
+The Secret is built from the declaration's **read** credential, at the declared host. A declaration with no read credential registers no namespace and creates no Secret, which surfaces in the cluster as `ImagePullBackOff` on a private project rather than as an error in Ankra.
+</Note>
+
+---
+
+## Verifying the whole path
+
+`ankra application publish-readiness <application-id>` answers the four questions that matter, and distinguishes "nothing published" from "cannot see", so an unreadable registry never reads as an empty one.
+
+| Check | `ok` means | Common warning |
+| --- | --- | --- |
+| Image registry | The declaration resolved and Ankra can read the project with the named credential | No credential named, or the project is not visible to it |
+| Registry login secrets | The repository carries the two Actions secrets the workflow logs in with | Missing - mint the robot, or write them yourself |
+| Publish workflow | The workflow on the default branch publishes to the declared repository | Publishes somewhere else: the declaration changed after setup. Reconcile the application and merge its setup pull request |
+| Image artifact | At least one image exists in the repository | `No image has been pushed yet` - the first successful build publishes it, and deploy stays blocked until it exists |
+
+---
+
+## Troubleshooting
+
+| Symptom | Cause | Fix |
+| --- | --- | --- |
+| `robot ensure` fails with a Harbor permission error | `admin_credential_name` points at a project-scoped robot, which cannot administer robots | Use a Harbor user with Project Admin, or a system robot with robot permissions |
+| Publish readiness says the application never published, but images are in Harbor | No read credential on the declaration, or the credential cannot see the project | Name a read credential with project read + repository list/read |
+| Publish readiness says the workflow publishes elsewhere | The registry was declared after the application was created | `ankra application reconcile <application-id>`, then merge the setup pull request it raises |
+| Pods report `ImagePullBackOff` on a private project | No read credential, so no pull secret was created | Add `--credential` to the declaration and redeploy |
+| Images land at unexpected repository paths | Your Harbor's layout is not Ankra's nesting | `--flat-repositories`, or `--component-repository <component>=<repository>` |
+
+---
+
+## Related
+
+<CardGroup cols={2}>
+  <Card title="Using your own registry" icon="box" href="/concepts/applications#using-your-own-registry">
+    The declaration's every field, and how components inherit it.
+  </Card>
+  <Card title="Robot accounts" icon="robot" href="/concepts/applications#robot-accounts">
+    The per-application robot on Ankra's own registry.
+  </Card>
+  <Card title="Registry credentials" icon="key" href="/platform/credentials/registry">
+    Storing the credentials this guide names.
+  </Card>
+  <Card title="CI/CD pipeline" icon="arrows-spin" href="/guides/cicd-pipeline">
+    The build workflow that logs in with the robot.
+  </Card>
+</CardGroup>
