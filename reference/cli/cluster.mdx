@@ -350,6 +350,83 @@ ankra cluster clone <existing_cluster_file_or_url> <new_cluster_path> [flags]
 | `--force` | `false` | Force merge even when names conflict |
 | `--stack` | `[]` | Clone only specific stacks by name (can be used multiple times) |
 
+## ankra cluster custom-dns-zones
+
+Declare, list, and withdraw the DNS zones a cluster serves with the
+organisation's own external-dns webhook credential, alongside the generated
+domain Ankra serves itself.
+
+The external-dns Ankra manages publishes only under the cluster's generated
+subdomain: its credential is scoped to that zone by the DNS provider, so
+ingress hostnames on your own zones are dropped silently. Declaring a zone
+here has Ankra render and reconcile a separate external-dns for it, using a
+DNS credential you supply ('ankra org dns credentials'). Each controller is
+pinned to exactly its zone with its own record ownership, so it can never
+fight Ankra's controller or another cluster's.
+
+To serve a zone from every cluster in the organisation - including clusters
+created later - declare it once with 'ankra org custom-dns-zones add'
+instead. 'list' shows those inherited zones with source 'organisation'; a
+zone declared here on the cluster itself takes precedence over the
+organisation's on this cluster, which is how one cluster serves a zone with
+a different credential.
+
+Withdrawing a zone removes the controller Ankra rendered; the zone's records
+are yours and are left untouched.
+
+## ankra cluster custom-dns-zones add
+
+Declare a zone the cluster also serves, with the DNS credential that can
+publish into it. Ankra renders an external-dns for the zone on the next
+reconciler pass, scoped to exactly that zone.
+
+Refused when the zone is not a domain name, when the organisation has no DNS
+credential of that name, or when the zone overlaps the generated domain Ankra
+already serves for this cluster - that would put a second controller on names
+Ankra's own external-dns publishes.
+
+```bash
+ankra cluster custom-dns-zones add <cluster> [flags]
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--credential` |   | Name of the organisation DNS credential that publishes into the zone (required) |
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+| `--zone` |   | Zone to declare, e.g. launch.example.com (required) |
+
+## ankra cluster custom-dns-zones list
+
+List the zones declared on a cluster
+
+```bash
+ankra cluster custom-dns-zones list <cluster> [flags]
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+
+## ankra cluster custom-dns-zones remove
+
+Withdraw a declared zone. Ankra removes the controller it rendered on the
+next reconciler pass. The zone's records are yours and are left untouched.
+
+```bash
+ankra cluster custom-dns-zones remove <cluster> [flags]
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+| `--zone` |   | Zone to withdraw (required) |
+
 ## ankra cluster decrypt
 
 Decrypt SOPS-encrypted values stored on a cluster or in a local cluster.yaml.
@@ -417,7 +494,18 @@ ankra cluster decrypt manifest <manifest_name> [flags]
 
 ## ankra cluster deprovision
 
-Stop a running managed cluster. This will shut down the cluster but not delete it.
+Tear down a managed cluster. The cluster record is kept so it can be provisioned
+again later, but everything it runs on is released.
+
+This is a teardown, not a power-off:
+
+  - all cloud resources are released (servers, networks, SSH keys);
+  - every stack resource on the cluster is uninstalled, and a later
+    "ankra cluster provision" redeploys them from the stored stack definition.
+
+To power a cluster off and back on while keeping its state, use the provider's
+stop/start commands (for example "ankra hetzner cluster stop" and
+"ankra hetzner cluster start") or "ankra cluster power-schedules" instead.
 
 If no cluster name is provided, uses the currently selected cluster.
 
@@ -608,7 +696,7 @@ ankra cluster digitalocean create [flags]
 | `--gitops-branch` | `master` | GitOps branch to commit to |
 | `--gitops-credential-name` |   | GitOps GitHub credential name; when set with --gitops-repository, the generated digitalocean-cloud-provider stack is committed to Git (optional) |
 | `--gitops-repository` |   | GitOps repository (e.g. org/repo) to commit the generated stack to (optional) |
-| `--include-dns` | `true` | Give the cluster its own subdomain under ankra.cc and install external-dns, so an ingress hostname gets its DNS record and TLS certificate with no manual setup (default on; pass --include-dns=false to skip) |
+| `--include-dns` | `true` | Give the cluster its own subdomain under ankra.cc and install external-dns, so an ingress hostname under that subdomain gets its DNS record and TLS certificate with no manual setup. Scope: external-dns only manages the generated subdomain - ingress hosts on your own domains are ignored, and their DNS records stay yours to create (default on; pass --include-dns=false to skip) |
 | `--include-networking` | `true` | Install Traefik + cert-manager for ingress (default on; pass --include-networking=false to skip). Requires --external-cloud-provider (the ingress LoadBalancer is provisioned by the cloud controller manager) |
 | `--kubernetes-version` |   | Kubernetes version (optional; see `ankra cluster k3s-versions` or `ankra cluster kubeadm-versions`) |
 | `--name` |   | Cluster name (required) |
@@ -765,7 +853,7 @@ ankra cluster digitalocean stop <cluster_id> [flags]
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--force` | `false` | Also delete the cluster's block storage volumes and load balancers (destroys persisted data; they otherwise keep billing while stopped) |
+| `--force` | `false` | Force stop: cancel every in-flight operation and block new operations for 60 seconds while the stop lands, and also delete the cluster's block storage volumes and load balancers (destroys persisted data; they otherwise keep billing while stopped) |
 
 ## ankra cluster digitalocean workers
 
@@ -783,21 +871,44 @@ ankra cluster digitalocean workers <cluster_id> [flags]
 
 ## ankra cluster domain
 
-Show the cluster's generated public domain, queueing the zone if the
-cluster does not have one yet. The domain nests under the organisation's
-Ankra-managed root (ankra.cc by default; an organisation may register its
-own custom domain in the AI environment settings).
+Show the cluster's generated public domain. The domain nests under the
+organisation's Ankra-managed root - ankra.cc by default, or the organisation's
+own domain when one is registered (portal: AI &gt; Settings &gt; Workspaces, field
+"Custom Ankra domain"; CLI: 'ankra org domain').
 
-The call is idempotent: a cluster that already has a zone reports its
-existing domain unchanged, so this doubles as a lookup. A fresh zone reads
-"pending" until it is published to the authoritative nameservers and then
-turns "active"; external-dns is wired to it on the next cloud-provider pass,
-after which any ingress hostname under the domain resolves with TLS.
+The read also reports the cluster's PUBLIC domain: the domain hostnames on the
+cluster are published under, and what $&#123;&#123; ankra.cluster_domain &#125;&#125; resolves to
+in stacks and stack profiles. It is the organisation's preview domain
+('ankra org ai-environment set --demo-base-domain') whenever a custom DNS zone
+declared for the organisation or the cluster ('ankra org custom-dns-zones',
+'ankra cluster custom-dns-zones') covers it - the cluster's own external-dns
+then publishes every hostname under it - and the generated domain otherwise.
+An organisation whose domain cannot be registered as the Ankra root (it lives
+in its own DNS account) gets its own domain as the cluster domain this way.
 
---remove hands the zone back for teardown instead: the removal step before
-an organisation switches its Ankra root domain (the switch is refused while
-cluster zones still live under the old root). A later call without --remove
-re-enables it under the organisation's current root.
+The plain command is a read: it never creates a zone. A cluster that has no
+domain reports state "none", and 'ankra org dns zones' lists every cluster in
+the organisation that does have one.
+
+--enable queues the zone for a cluster that has none. It is idempotent: a
+cluster that already has a zone reports its existing domain unchanged. A fresh
+zone reads "pending" until it is published to the authoritative nameservers
+and then turns "active"; external-dns is wired to it on the next
+cloud-provider pass, after which any ingress hostname under the domain
+resolves with TLS.
+
+--remove hands the zone back for teardown: the removal step before an
+organisation switches its Ankra root domain (the switch is refused while
+cluster zones still live under the old root). The removal is then HELD -
+nothing re-creates the zone, including the external-dns Ankra runs on the
+cluster and the discovery that mints zones for clusters that lack one - until
+you ask for it back. A read reports "opted out" for as long as the hold
+stands.
+
+--enable withdraws the hold and re-creates the zone under the organisation's
+current root. The cluster's label is derived from its id, so the zone comes
+back under exactly the name it had before, and the external-dns Ankra manages
+for it keeps the same --txt-owner-id.
 
 ```bash
 ankra cluster domain <cluster> [flags]
@@ -807,8 +918,9 @@ ankra cluster domain <cluster> [flags]
 
 | Flag | Default | Description |
 |------|---------|-------------|
+| `--enable` | `false` | Create the cluster's generated public domain if it does not have one (idempotent) |
 | `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
-| `--remove` | `false` | Remove the cluster's generated public domain (tear the zone down) instead of enabling it |
+| `--remove` | `false` | Remove the cluster's generated public domain (tear the zone down) |
 
 ## ankra cluster draft
 
@@ -850,6 +962,13 @@ starts with a dot (such as ".dockerconfigjson") is kept literally. After
 encrypting, the CLI verifies every value is actually ENC[...] ciphertext and
 fails if any is not.
 
+--key glob:&lt;pattern&gt; encrypts every key whose name matches the pattern, now
+and on every later platform re-encrypt - including keys added afterwards.
+Only "*" is a wildcard; everything else is literal. The entry is recorded in
+encrypted_paths as written ("glob:*Password"). A pattern that matches no key
+fails, the same way a misspelled exact key does. Requires cluster#1867 on the
+platform.
+
 Two modes:
   Cluster mode (default): fetch the addon's values from a live cluster,
     encrypt the key, and push the result back via the partial-stack PATCH
@@ -868,6 +987,9 @@ Examples:
   # Encrypt several keys in one run
   ankra cluster encrypt addon --name grafana --key adminPassword --key smtpPassword
 
+  # Encrypt every *Password key, including ones added later
+  ankra cluster encrypt addon --name grafana --key 'glob:*Password' --cluster prod
+
   # File mode
   ankra cluster encrypt addon --name grafana --key adminPassword -f cluster.yaml
 
@@ -881,7 +1003,7 @@ ankra cluster encrypt addon [flags]
 |------|---------|-------------|
 | `--cluster` |   | Target cluster (name or ID); defaults to the active selection (cluster mode) |
 | `-f`, `--file` |   | Path to a local cluster YAML (enables file mode) |
-| `--key` | `[]` | YAML key name to encrypt (required; repeatable); dotted paths are normalised to the last segment, a leading-dot key like .dockerconfigjson is kept literally |
+| `--key` | `[]` | YAML key name to encrypt (required; repeatable), or glob:&lt;pattern&gt; to encrypt every key whose name matches (only * is a wildcard, e.g. glob:*Password); dotted paths are normalised to the last segment, a leading-dot key like .dockerconfigjson is kept literally |
 | `--name` |   | Name of the addon (required) |
 | `--stack` |   | Stack name (cluster mode; required when the addon exists in multiple stacks) |
 
@@ -897,6 +1019,15 @@ normalised to its last segment. A key whose own name starts with a dot (such as
 ".dockerconfigjson" in a kubernetes.io/dockerconfigjson Secret) is kept
 literally. After encrypting, the CLI verifies every value is actually ENC[...]
 ciphertext and fails if any is not.
+
+--key glob:&lt;pattern&gt; encrypts every key whose name matches the pattern, now
+and on every later platform re-encrypt - including keys added afterwards.
+Only "*" is a wildcard (any run of characters); everything else is literal,
+and a leading "data." or "stringData." is accepted and ignored, exactly as for
+an exact key. The entry is recorded in encrypted_paths as written
+("glob:stringData.DB_*"), which is the form the platform re-expands into the
+SOPS encrypted_regex on every push. A pattern that matches no key fails, the
+same way a misspelled exact key does. Requires cluster#1867 on the platform.
 
 --all-data selects every key under data and stringData of a Kubernetes Secret
 manifest instead of naming keys individually; keys whose values are already
@@ -940,6 +1071,9 @@ Examples:
   # Encrypt every data/stringData key of a Secret manifest
   ankra cluster encrypt manifest db-secret --all-data --cluster prod
 
+  # Encrypt every DB_* key, including ones added later
+  ankra cluster encrypt manifest db-secret --key 'glob:stringData.DB_*' --cluster prod
+
   # File mode
   ankra cluster encrypt manifest db-secret --key password -f cluster.yaml
 
@@ -954,7 +1088,7 @@ ankra cluster encrypt manifest <manifest_name> [flags]
 | `--all-data` | `false` | Encrypt every key under data and stringData of a Secret manifest, skipping values that are already encrypted |
 | `--cluster` |   | Target cluster (name or ID); defaults to the active selection (cluster mode) |
 | `-f`, `--file` |   | Path to a local cluster YAML (enables file mode) |
-| `--key` | `[]` | YAML key name to encrypt (repeatable); dotted paths are normalised to the last segment, a leading-dot key like .dockerconfigjson is kept literally |
+| `--key` | `[]` | YAML key name to encrypt (repeatable), or glob:&lt;pattern&gt; to encrypt every key whose name matches (only * is a wildcard, e.g. glob:stringData.DB_*); dotted paths are normalised to the last segment, a leading-dot key like .dockerconfigjson is kept literally |
 | `--set` | `[]` | Apply value edits in-memory before encrypting (same syntax as manifests upgrade --set, e.g. --set 'data.password=bmV3'); the plaintext value never reaches git (cluster mode only; repeatable) |
 
 ## ankra cluster events
@@ -983,7 +1117,7 @@ ankra cluster events [flags]
 |------|---------|-------------|
 | `-A`, `--all-namespaces` | `false` | List across all namespaces |
 | `--for` |   | Scope to one object's events, as kind/name (e.g. pod/web-7d9f-2xkvp) |
-| `--name` |   | Filter by event object name |
+| `--name` |   | Filter by the Event resource's own name; to scope by the object an event is about, use --for |
 | `-n`, `--namespace` |   | Kubernetes namespace |
 | `-o`, `--output` | `table` | Output format: table, json, yaml |
 | `-l`, `--selector` |   | Label selector |
@@ -1073,22 +1207,10 @@ ankra cluster get deployments [name] [flags]
 
 ## ankra cluster get events
 
-List Kubernetes events from the active cluster.
-
---for scopes the listing to a single object's involvedObject, which is what
-turns "the pod is Pending" into "no node matches the nodeSelector". This is
-a server-side field selector, not a substring match on the event text, so
-an object whose name is a prefix of another object's name is not conflated
-with it.
-
-Examples:
-  ankra cluster events -n default
-  ankra cluster events --for pod/web-7d9f-2xkvp -n default
-  ankra cluster events --for deployment/web -n default --type Warning
-  ankra cluster events --all-namespaces --type Warning -o json
+List events in the cluster
 
 ```bash
-ankra cluster get events [flags]
+ankra cluster get events [name] [flags]
 ```
 
 **Flags**
@@ -1097,7 +1219,7 @@ ankra cluster get events [flags]
 |------|---------|-------------|
 | `-A`, `--all-namespaces` | `false` | List across all namespaces |
 | `--for` |   | Scope to one object's events, as kind/name (e.g. pod/web-7d9f-2xkvp) |
-| `--name` |   | Filter by event object name |
+| `--name` |   | Filter by the Event resource's own name; to scope by the object an event is about, use --for |
 | `-n`, `--namespace` |   | Kubernetes namespace |
 | `-o`, `--output` | `table` | Output format: table, json, yaml |
 | `-l`, `--selector` |   | Label selector |
@@ -1483,7 +1605,7 @@ ankra cluster hetzner create [flags]
 | `--gitops-branch` | `master` | GitOps branch to commit to |
 | `--gitops-credential-name` |   | GitOps GitHub credential name; when set with --gitops-repository, the generated hcloud stack is committed to Git (optional) |
 | `--gitops-repository` |   | GitOps repository (e.g. org/repo) to commit the generated stack to (optional) |
-| `--include-dns` | `true` | Give the cluster its own subdomain under ankra.cc and install external-dns, so an ingress hostname gets its DNS record and TLS certificate with no manual setup (default on; pass --include-dns=false to skip) |
+| `--include-dns` | `true` | Give the cluster its own subdomain under ankra.cc and install external-dns, so an ingress hostname under that subdomain gets its DNS record and TLS certificate with no manual setup. Scope: external-dns only manages the generated subdomain - ingress hosts on your own domains are ignored, and their DNS records stay yours to create (default on; pass --include-dns=false to skip) |
 | `--include-networking` | `true` | Install Traefik + cert-manager for ingress (default on; pass --include-networking=false to skip). Requires --external-cloud-provider (the ingress LoadBalancer is provisioned by the cloud controller manager) |
 | `--kubernetes-version` |   | Kubernetes version (optional; see `ankra cluster k3s-versions` or `ankra cluster kubeadm-versions`) |
 | `--location` |   | Hetzner location (required) |
@@ -1643,7 +1765,7 @@ ankra cluster hetzner stop <cluster_id> [flags]
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--force` | `false` | Also delete the cluster's CSI volumes and load balancers (destroys persisted data; they otherwise keep billing while stopped) |
+| `--force` | `false` | Force stop: cancel every in-flight operation and block new operations for 60 seconds while the stop lands, and also delete the cluster's CSI volumes and load balancers (destroys persisted data; they otherwise keep billing while stopped) |
 | `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
 
 ## ankra cluster hetzner workers
@@ -2395,7 +2517,7 @@ ankra cluster morpheus create [flags]
 | `--etcd-plan-id` | `0` | Service plan ID for dedicated etcd nodes when --etcd-topology=external (optional) |
 | `--etcd-topology` | `stacked` | etcd topology for kubeadm clusters: stacked (on control plane) or external (dedicated instances) |
 | `--group-id` | `0` | Morpheus group ID (required; see `ankra cluster morpheus groups`) |
-| `--include-dns` | `true` | Give the cluster its own subdomain under ankra.cc and install external-dns, so an ingress hostname gets its DNS record and TLS certificate with no manual setup (default on; pass --include-dns=false to skip) |
+| `--include-dns` | `true` | Give the cluster its own subdomain under ankra.cc and install external-dns, so an ingress hostname under that subdomain gets its DNS record and TLS certificate with no manual setup. Scope: external-dns only manages the generated subdomain - ingress hosts on your own domains are ignored, and their DNS records stay yours to create (default on; pass --include-dns=false to skip) |
 | `--include-networking` | `true` | Install Traefik + cert-manager as Ankra-managed stacks for ingress (exposed via the built-in k3s service load balancer; default on) |
 | `--kubernetes-version` |   | Kubernetes version (optional; see `ankra cluster k3s-versions` or `ankra cluster kubeadm-versions`) |
 | `--layout-id` | `0` | Morpheus instance-type layout ID (required; see `ankra cluster morpheus layouts`) |
@@ -2530,8 +2652,14 @@ ankra cluster morpheus start <cluster_id> [flags]
 Stop an HPE Morpheus cluster's instances while keeping its configuration so it can be started again later.
 
 ```bash
-ankra cluster morpheus stop <cluster_id>
+ankra cluster morpheus stop <cluster_id> [flags]
 ```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--force` | `false` | Force stop: cancel every in-flight operation and block new operations for 60 seconds while the stop lands (also stops a cluster that is still being created) |
 
 ## ankra cluster morpheus workers
 
@@ -2566,7 +2694,7 @@ ankra cluster node-group add <cluster_id> [flags]
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--availability-zone` |   | Pin every node of the group to one availability zone, on OVH 3-AZ regions (e.g. eu-west-par-b). See 'ankra cluster ovh regions --with-zones'. Pin the group when it runs zonal storage: an OVH volume cannot attach from another zone |
+| `--availability-zone` |   | Pin every node of the group to one availability zone, on OVH 3-AZ regions (e.g. eu-west-par-b). See 'ankra cluster ovh regions --with-zones'. Pin the group when it runs zonal storage: an OVH volume cannot attach from another zone. Omitted on a zone-spread cluster, each node takes the zone with the fewest instances cluster-wide, so a one-node group lands wherever the cluster is thinnest, not where its name suggests; on a cluster with no zone pool OVH chooses |
 | `--count` | `1` | Number of nodes |
 | `--instance-type` |   | Server type / flavor / plan for nodes (required) |
 | `--name` |   | Node group name (required) |
@@ -2960,7 +3088,7 @@ ankra cluster ovh create [flags]
 | `--gitops-branch` | `master` | GitOps branch to commit to |
 | `--gitops-credential-name` |   | GitOps GitHub credential name; when set with --gitops-repository, the generated ovh-cloud stack is committed to Git (optional) |
 | `--gitops-repository` |   | GitOps repository (e.g. org/repo) to commit the generated stack to (optional) |
-| `--include-dns` | `true` | Give the cluster its own subdomain under ankra.cc and install external-dns, so an ingress hostname gets its DNS record and TLS certificate with no manual setup (default on; pass --include-dns=false to skip) |
+| `--include-dns` | `true` | Give the cluster its own subdomain under ankra.cc and install external-dns, so an ingress hostname under that subdomain gets its DNS record and TLS certificate with no manual setup. Scope: external-dns only manages the generated subdomain - ingress hosts on your own domains are ignored, and their DNS records stay yours to create (default on; pass --include-dns=false to skip) |
 | `--include-networking` | `true` | Install Traefik + cert-manager for ingress (default on; pass --include-networking=false to skip). Requires --external-cloud-provider (the ingress LoadBalancer is provisioned by the cloud controller manager) |
 | `--kubernetes-version` |   | Kubernetes version (optional; see `ankra cluster k3s-versions` or `ankra cluster kubeadm-versions`) |
 | `--name` |   | Cluster name (required) |
@@ -3109,7 +3237,7 @@ ankra cluster ovh stop <cluster_id> [flags]
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--force` | `false` | Also delete the cluster's Cinder volumes and load balancers (destroys persisted data; they otherwise keep billing while stopped) |
+| `--force` | `false` | Force stop: cancel every in-flight operation and block new operations for 60 seconds while the stop lands, and also delete the cluster's Cinder volumes and load balancers (destroys persisted data; they otherwise keep billing while stopped) |
 | `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
 
 ## ankra cluster ovh workers
@@ -3136,6 +3264,16 @@ Create the organisation's playground. Provisioning runs in the background: poll 
 
 ```bash
 ankra cluster playground create
+```
+
+## ankra cluster playground destroy
+
+Tear the organisation's playground down. Teardown runs in the background: poll `ankra cluster playground status <cluster_id>` until the phase reaches removed.
+
+This is also how a refused `ankra org domain set` is cleared. A playground publishes a wildcard DNS record in the organisation's zone, and that record is reconciled rather than written once - deleting it with `ankra org dns delete` only lasts until the provisioner's next pass. Destroying the environment is what removes it for good.
+
+```bash
+ankra cluster playground destroy <cluster_id>
 ```
 
 ## ankra cluster playground status
@@ -3245,7 +3383,16 @@ ankra cluster power-schedules update <schedule_id> [flags]
 
 ## ankra cluster provision
 
-Start a managed cluster that was previously created but is not yet running.
+Provision a managed cluster that was created or deprovisioned but is not running.
+
+Provisioning rebuilds the cluster's infrastructure and then redeploys its stack
+resources from the cluster's stored stack definition. Verify anything you patched
+in place afterwards - see "ankra cluster addons list &lt;addon&gt;" and
+"ankra cluster manifests list".
+
+This is not a power-on. To resume a cluster you powered off, use the provider's
+start command (for example "ankra hetzner cluster start") or
+"ankra cluster power-schedules".
 
 If no cluster name is provided, uses the currently selected cluster.
 
@@ -3392,7 +3539,7 @@ ankra cluster proxmox create [flags]
 | `--etcd-instance-type` | `px-medium` | Instance-size preset for dedicated etcd nodes when --etcd-topology=external |
 | `--etcd-node-count` | `3` | Number of dedicated etcd nodes when --etcd-topology=external (3 or 5) |
 | `--etcd-topology` | `stacked` | etcd topology for kubeadm clusters: stacked (on control plane) or external (dedicated VMs) |
-| `--include-dns` | `true` | Give the cluster its own subdomain under ankra.cc and install external-dns, so an ingress hostname gets its DNS record and TLS certificate with no manual setup (default on; pass --include-dns=false to skip) |
+| `--include-dns` | `true` | Give the cluster its own subdomain under ankra.cc and install external-dns, so an ingress hostname under that subdomain gets its DNS record and TLS certificate with no manual setup. Scope: external-dns only manages the generated subdomain - ingress hosts on your own domains are ignored, and their DNS records stay yours to create (default on; pass --include-dns=false to skip) |
 | `--include-networking` | `true` | Install Traefik + cert-manager as Ankra-managed stacks for ingress (exposed via the built-in k3s service load balancer; default on) |
 | `--kubernetes-version` |   | Kubernetes version (optional; see `ankra cluster k3s-versions` or `ankra cluster kubeadm-versions`) |
 | `--name` |   | Cluster name (required) |
@@ -3512,8 +3659,14 @@ ankra cluster proxmox start <cluster_id> [flags]
 Stop a Proxmox VE cluster's virtual machines while keeping its configuration so it can be started again later.
 
 ```bash
-ankra cluster proxmox stop <cluster_id>
+ankra cluster proxmox stop <cluster_id> [flags]
 ```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--force` | `false` | Force stop: cancel every in-flight operation and block new operations for 60 seconds while the stop lands (also stops a cluster that is still being created) |
 
 ## ankra cluster proxmox storages
 
@@ -3742,7 +3895,7 @@ ankra cluster scaleway stop <cluster_id> [flags]
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--force` | `false` | Also delete the cluster's tagged volumes and load balancers even when retention_policy is retain (destroys persisted data) |
+| `--force` | `false` | Force stop: cancel every in-flight operation and block new operations for 60 seconds while the stop lands, and also delete the cluster's tagged volumes and load balancers even when retention_policy is retain (destroys persisted data) |
 
 ## ankra cluster select
 
@@ -4012,6 +4165,9 @@ ankra cluster top nodes [flags]
 
 Show live CPU and memory usage per pod, measured by metrics-server.
 
+Without -n or --all-namespaces this reads every namespace, unlike kubectl
+top, which defaults to the current one.
+
 Examples:
   ankra cluster top pods -n default
   ankra cluster top pods --all-namespaces --sort-by memory
@@ -4161,6 +4317,7 @@ ankra cluster upcloud create [flags]
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--bastion-plan` | `1xCPU-2GB` | Bastion plan |
+| `--cni` |   | CNI plugin: flannel, calico, or cilium (optional; the platform default is used when omitted) |
 | `--control-plane-count` | `1` | Number of control plane nodes |
 | `--control-plane-plan` | `2xCPU-4GB` | Control plane plan |
 | `--credential-id` |   | UpCloud API credential ID (required) |
@@ -4172,7 +4329,7 @@ ankra cluster upcloud create [flags]
 | `--gitops-branch` | `master` | GitOps branch to commit to |
 | `--gitops-credential-name` |   | GitOps GitHub credential name; when set with --gitops-repository, the generated upcloud-cloud-provider stack is committed to Git (optional) |
 | `--gitops-repository` |   | GitOps repository (e.g. org/repo) to commit the generated stack to (optional) |
-| `--include-dns` | `true` | Give the cluster its own subdomain under ankra.cc and install external-dns, so an ingress hostname gets its DNS record and TLS certificate with no manual setup (default on; pass --include-dns=false to skip) |
+| `--include-dns` | `true` | Give the cluster its own subdomain under ankra.cc and install external-dns, so an ingress hostname under that subdomain gets its DNS record and TLS certificate with no manual setup. Scope: external-dns only manages the generated subdomain - ingress hosts on your own domains are ignored, and their DNS records stay yours to create (default on; pass --include-dns=false to skip) |
 | `--include-networking` | `true` | Install Traefik + cert-manager for ingress (default on; pass --include-networking=false to skip). Requires --external-cloud-provider (the ingress LoadBalancer is provisioned by the cloud controller manager) |
 | `--kubernetes-version` |   | Kubernetes version (optional; see `ankra cluster k3s-versions` or `ankra cluster kubeadm-versions`) |
 | `--name` |   | Cluster name (required) |
@@ -4301,7 +4458,7 @@ ankra cluster upcloud stop <cluster_id> [flags]
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--force` | `false` | Also delete the cluster's CSI storage volumes and load balancers (destroys persisted data; they otherwise keep billing while stopped) |
+| `--force` | `false` | Force stop: cancel every in-flight operation and block new operations for 60 seconds while the stop lands, and also delete the cluster's CSI storage volumes and load balancers (destroys persisted data; they otherwise keep billing while stopped) |
 
 ## ankra cluster upcloud workers
 
