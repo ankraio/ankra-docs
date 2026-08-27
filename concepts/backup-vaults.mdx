@@ -1,0 +1,60 @@
+---
+title: Backup Vaults
+description: How backup vaults, stack backup policies and restore points fit together, and why Ankra copies data between clusters by restoring from a backup.
+---
+
+<Note>
+A backup vault is an organisation-level record of an S3-compatible bucket you own, plus the credentials to reach it. Everything Ankra backs up is written there; nothing passes through the platform.
+</Note>
+
+## The three objects
+
+| Object | Scope | What it is |
+|--------|-------|-----------|
+| **Backup vault** | Organisation | A bucket + credentials, verified by Ankra before use. One organisation can have several - a production vault and a staging vault, or one per region. |
+| **Backup policy** | Stack | "Protect this stack": a vault, a schedule and a retention. Applies to every data asset the stack's inventory finds - persistent volumes, and databases run by an operator such as CloudNativePG or Percona. |
+| **Restore point** | Stack | One captured backup: when it was taken, what triggered it (manual, scheduled, or a clone), the engines involved, its size, and when it expires. |
+
+## Where the data flows
+
+```
+source cluster  ──write──▶  vault bucket  ◀──read──  target cluster
+      (agent)                 (your S3)                 (agent)
+```
+
+The source cluster's agent writes backups straight to the bucket. A target cluster - another Ankra cluster, a UAT environment, or a laptop running k3d - reads them back over HTTPS. The platform orchestrates and records; it never holds a byte of your data, which is why a vault must be reachable from the clusters themselves and not just from Ankra.
+
+## Why backup-first
+
+Copying a database live between two clusters needs a network path between them, a consistent snapshot, and a way to replay changes - and it produces nothing durable. Restoring from a backup needs only the bucket, produces a disaster-recovery copy as a side effect, and is how every database operator already models its own recovery. Ankra therefore recommends a backup policy on every stateful stack, and treats "clone with data" as *take a fresh restore point, then restore it on the target*.
+
+## Engines
+
+The engine that captures an asset decides how consistent its restore point is:
+
+| Engine | Handles | Consistency |
+|--------|---------|-------------|
+| Volume snapshot / filesystem backup | Any persistent volume (Redis, Prometheus, anything on a PVC) | Crash-consistent - the workload's own replay (WAL, AOF) finishes the job on restore |
+| CloudNativePG | PostgreSQL clusters run by the CNPG operator, including TimescaleDB on CNPG | Transactional, with point-in-time recovery |
+| Percona | MySQL clusters run by the Percona operators | Consistent (XtraBackup) |
+
+A volume owned by a database operator is backed up by that operator's engine, never twice.
+
+## Credentials
+
+Vault credentials live in Ankra's secret store from the moment you submit them. They are never returned by the API, the dashboard or the CLI, never written into a cluster's stack definitions, and never included in exports. Inside a cluster, the backup tooling reads them from a Secret the platform manages. Deleting a vault removes Ankra's record and credentials; the bucket and its objects are untouched.
+
+## Permissions
+
+`backups.read` sees vaults, policies and restore points; `backups.operate` takes restore points and runs restores and clones; `backups.manage` creates and deletes vaults and sets policies. Organisation admins hold all three, and cross-organisation data clones are refused regardless of permissions.
+
+## Related
+
+<CardGroup cols={2}>
+  <Card title="Register a backup vault" icon="vault" href="/guides/backups">
+    Dashboard and CLI walkthrough, with provider-specific endpoint notes.
+  </Card>
+  <Card title="Stacks" icon="layers" href="/concepts/stacks">
+    The unit a backup policy protects.
+  </Card>
+</CardGroup>
