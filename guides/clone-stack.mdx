@@ -39,7 +39,7 @@ Stack cloning is useful when you want to:
 | **Replicate entire clusters** | Select all stacks and clone them to a new cluster in one operation |
 
 <Warning>
-**Security Note:** Encrypted values (secrets) are not transferred during cloning for security reasons. You'll need to reconfigure them in the target cluster. This includes passwords, API keys, and any values encrypted with SOPS.
+**Security Note:** Encrypted values (secrets) are not transferred during cloning for security reasons. You'll need to reconfigure them in the target cluster. This includes passwords, API keys, and any values encrypted with SOPS. A stripped Secret is still a valid Kubernetes object - each cleared key holds the `ENCRYPTED_VALUE_REMOVED` placeholder (base64-encoded under `data`) so the draft deploys and the workload fails clearly on the placeholder rather than the apply failing on the manifest.
 </Warning>
 
 ---
@@ -178,9 +178,13 @@ Stack cloned successfully!
   Stack Name:  monitoring-stack
   Addons:      3
   Manifests:   2
+  Applications: 1
 
 Warnings:
   - Addon 'grafana' had encrypted configuration that needs to be reconfigured.
+  - Cluster variable 'db_host' was copied from the source cluster onto the cloned stack; review its value for the target cluster.
+  - Manifest 'prometheus' pins scheduling to nodes labelled purpose=monitoring - make sure the target cluster has matching nodes.
+  - Deploy check for addon 'grafana': registry 'bitnami' is not connected in this organisation.
 
 The stack has been created as a draft. Open the Ankra dashboard to review and deploy.
 ```
@@ -192,14 +196,24 @@ The stack has been created as a draft. Open the Ankra dashboard to review and de
 | Component | Cloned | Notes |
 |-----------|:------:|-------|
 | Stack name & description | Yes | Can be renamed during clone |
-| Stack variables | Yes | Transferred as-is |
+| Stack variables | Yes | Transferred as-is; cluster variables the content references are copied onto the stack (same organisation) |
 | Manifests | Yes | YAML content (encrypted values cleared) |
-| Addons | Yes | Chart references and versions |
+| Addons | Yes | Chart references, versions, settings, job timeouts and AGENTS.md notes |
+| Applications | Yes | Same organisation only - applications are organisation-scoped, so a cross-organisation clone drops them with a warning |
 | Addon configurations | Optional | Use `--include-config` flag |
 | Encrypted secrets | No | Must be reconfigured |
 | Deployment state | No | Created as draft |
-| Resource positions | No | Auto-layouted in target |
-| Dependencies | Yes | Parent relationships preserved by name |
+| Resource positions | Yes | Canvas layout and deploy wave carry over |
+| Dependencies | Yes | Parent relationships preserved by name and kind |
+
+### Pre-checks in the warnings
+
+The clone runs the checks a deploy would, and reports what it finds as warnings rather than refusing - a clone is always a draft:
+
+- **Variables**: a `${{ ankra.* }}` token the target cannot resolve is named, and a same-organisation clone copies the source cluster's value onto the stack so the manifest does not deploy the literal token.
+- **Node pinning**: manifests and applications whose `nodeSelector` targets labels the target may not have.
+- **SOPS readiness**: encrypted paths that survived the strip, on a target with no deployed SOPS key.
+- **Chart references**: registries not connected in the target organisation, and charts or versions the catalog does not know.
 
 ---
 
@@ -225,7 +239,7 @@ Ankra supports cloning stacks to clusters that belong to a different organisatio
 </Warning>
 
 <Tip>
-Organisation variables are scoped to each org. If the cloned stack references variables (e.g. `${ORG_DOMAIN}`), make sure equivalent variables exist in the target organisation or override them at the cluster/stack level.
+Organisation and cluster variables are scoped to their organisation, and no variable value crosses that boundary. A cross-organisation clone names every `${{ ankra.* }}` reference it could not resolve in its warnings - define those variables in the target organisation or on the target cluster before deploying.
 </Tip>
 
 ---
