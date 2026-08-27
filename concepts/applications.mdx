@@ -47,6 +47,72 @@ flowchart LR
 
 ---
 
+## Building on Ankra's builders
+
+The flow above puts the first image behind a merged pull request: until the generated workflow is on your default branch, your CI has nothing to run, and nothing to publish. Ankra can also build the image itself, on its own builders, with no workflow in the repository at all.
+
+<Warning>
+**Behind a feature flag.** Platform builds are enabled per organisation and off by default — the routes answer `404` until yours is enabled. [Contact support](/platform/support) to have it turned on. A `404` on an application you can otherwise read means the flag, not the application.
+</Warning>
+
+Ankra clones the commit, resolves a recipe for it, builds it, and pushes the image to the same registry the application publishes to. The recipe is the first of these that fits:
+
+1. **The repository's own `Dockerfile`** — used as-is.
+2. **A generated Dockerfile** — the one Ankra wrote for this application.
+3. **Buildpacks** — when there is no Dockerfile to use.
+
+No Actions minutes are spent, no runners need operating, and no registry credentials go anywhere near the repository.
+
+```bash
+# Queue a build and follow it to a result
+ankra application build start <application-id> --commit <full-sha> --ref main --wait
+
+# Read what the builders did
+ankra application build list <application-id>
+ankra application build get <application-id> <build-id>
+```
+
+Reach for this when the repository's own CI cannot do the job — a private repository on a plan whose Actions never leave the queue, a first image needed before anyone merges the setup PR, or an unattended caller with no browser to click through.
+
+<Note>
+`--commit` takes a **full** 40- or 64-character commit sha. The queue deduplicates on the string it is given, so an abbreviation would be a second key for the same commit and would build it twice. Asking twice for one commit joins a single build rather than racing two, and the answer's `already_requested` says when that happened.
+</Note>
+
+### Following a build
+
+A request is not yet a build. `start` answers with a **request id** immediately; the build itself is created when a builder claims the request. So there are two things to read:
+
+```bash
+# The queued ask - pending until claimed, then it names its build
+ankra application build request <application-id> <request-id>
+
+# The build itself
+ankra application build get <application-id> <build-id>
+```
+
+`ankra application build start --wait` walks both steps for you and exits non-zero if the build failed, which makes it usable as a pipeline gate. Watching the build list instead is a trap: a previous failed build of the same commit is still the newest one for that commit, so it would report an old failure as your build's result.
+
+### What a failure means
+
+A failed build carries an `error_class` that says whose failure it was:
+
+| `error_class` | Whose | What to do |
+|---------------|-------|------------|
+| `build_failed` | Yours | The recipe did not build. Read `error_message`. |
+| `clone_auth` | Yours | Ankra could not clone the repository — check the application's Git credential. |
+| `recipe_missing` | Yours | No Dockerfile and no buildpack matched the repository. |
+| `push_failed` | Ankra's | The image built but could not be pushed. |
+| `timeout` | Ankra's | The build exceeded its budget. |
+| `capacity` | Ankra's | No builder had room. |
+
+The last three are platform-side and are already visible to Ankra without anyone reporting them.
+
+<Note>
+This replaces the **image build**, not the whole generated pipeline. That workflow also runs a Semgrep scan, and packages a Helm chart for applications that publish one. If you plan to retire the workflow entirely, decide where those two go first.
+</Note>
+
+---
+
 ## What Ankra tracks
 
 For each application you see:
