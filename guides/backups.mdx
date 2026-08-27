@@ -27,11 +27,61 @@ That only works with somewhere to write to, which is what a vault is. Registerin
 | Bucket | The bucket backups are written to |
 | Region | Only needed when the endpoint does not imply it |
 | Path style | `https://endpoint/bucket` addressing - required by most self-hosted S3 services |
-| Status | `ready`, `error` (with the failure excerpt), or `provisioning` while a check runs |
+| Status | `ready`, `error` (with the failure excerpt), or `provisioning` while Ankra is still creating the bucket or checking the keys |
+| Kind | `ankra_provisioned` when Ankra created the bucket from one of your provider credentials, `customer_s3` when you registered a bucket you already had |
 
 The access key ID and secret you provide are written to Ankra's secret store and never returned by the API, the dashboard, or the CLI. Rotating keys means creating a new vault or re-verifying after updating the bucket policy.
 
-## Register a vault
+## Let Ankra create the bucket
+
+The quickest path: pick one of your organisation's provider credentials and a region, and Ankra creates the bucket, mints or stores the access keys, verifies the bucket and registers the vault. The vault shows **Provisioning** until that has finished, then **Ready** - or **Failed** with the excerpt of what the provider refused.
+
+| Credential | What Ankra does with it | What you still supply |
+|-----------|------------------------|-----------------------|
+| UpCloud | Creates a Managed Object Storage service in the region, a user with the `ECSS3FullAccess` policy and an access key, then the bucket | Nothing - the region is checked against your account's list |
+| DigitalOcean | Mints a Spaces access key with the API token and creates the Space | Nothing |
+| Scaleway | Uses the credential's own IAM key pair (Scaleway API keys are S3 keys) and creates the bucket in the credential's project | Nothing |
+| Hetzner | Creates the bucket at the chosen location with the Object Storage key pair you provide | The key pair: Hetzner issues it in the Cloud Console (**Object Storage > Manage credentials**), and its Cloud API cannot mint one - so neither can Ankra |
+
+Other credential kinds (OVH, AWS, GCP, Azure, Proxmox, Morpheus) cannot provision a bucket yet - register a bucket you own instead, below.
+
+<Tabs>
+  <Tab title="Dashboard">
+    <Steps>
+      <Step title="Open Backups">
+        Go to your organisation's **Settings** and choose **Backups**, then **Add vault** and **Let Ankra create the bucket**.
+      </Step>
+      <Step title="Choose the credential and region">
+        Pick the credential; the form tells you what that provider needs. Enter the region (the placeholder shows the provider's shape) and, if you want a specific name, the bucket - otherwise Ankra derives a unique one from the vault name.
+      </Step>
+      <Step title="Hetzner: paste the Object Storage keys">
+        For a Hetzner credential the form asks for the access key and secret key from the Cloud Console. They are stored in Ankra's secret store and never shown again.
+      </Step>
+      <Step title="Watch it come up">
+        The row shows **Provisioning** with "Creating the bucket on ..."; the page refreshes on its own until it reads **Ready**. A **Failed** vault shows what the provider answered - a region your account cannot use, a bucket name someone else holds, a token without the right scope - and can be deleted and re-added once that is fixed.
+      </Step>
+    </Steps>
+  </Tab>
+  <Tab title="CLI">
+    ```bash
+    ankra backup vaults provision offsite --credential upcloud-main --region europe-1 --wait
+    ```
+
+    `--credential` takes a credential name or id. `--wait` blocks until the vault is `ready` (or exits non-zero with the failure excerpt); without it the command returns as soon as the platform has accepted the request, and `ankra backup vaults get offsite` shows progress. `--bucket` names the bucket explicitly.
+
+    For a Hetzner credential the command prompts for the Object Storage access key and (hidden) secret key when they are not passed with `--access-key-id` / `--secret-access-key`:
+
+    ```bash
+    ankra backup vaults provision offsite --credential hetzner-main --region fsn1
+    ```
+  </Tab>
+</Tabs>
+
+<Note>
+Ankra records the provider-side handle it created (the UpCloud service, the DigitalOcean key) on the vault. Deleting the vault removes Ankra's record and stored keys only; the bucket, its contents, and the provider resources stay - tear them down in the provider console when the data is no longer needed.
+</Note>
+
+## Bring your own bucket
 
 <Tabs>
   <Tab title="Dashboard">
@@ -95,7 +145,7 @@ ankra backup vaults verify production-backups  # re-run the credential check
 ankra backup vaults delete production-backups  # confirms first; --yes to skip
 ```
 
-`get`, `verify` and `delete` accept a vault name or id, and `list` / `get` support `-o json|yaml`.
+`get`, `verify` and `delete` accept a vault name or id, and `list` / `get` support `-o json|yaml`. `verify` on a vault that is still provisioning answers that it is still being provisioned rather than recording a failed check.
 
 <Warning>
 **Deleting a vault never touches the bucket.** It removes Ankra's record and credentials only. A vault that a backup policy or an in-flight data clone still references cannot be deleted - retire those first.
