@@ -265,6 +265,115 @@ All node-group operations are also available via the REST API - see the [UpCloud
 
 ---
 
+## Multi-zone clusters
+
+UpCloud has no multi-zone region: every private SDN network, router and managed load balancer lives in one zone, so a cluster is single-zone by construction. Ankra can stretch a cluster across a **zone pool** instead - one private network and NAT gateway per zone, the nodes joined by a platform-managed kernel WireGuard mesh over UpCloud's account-wide utility network, and Kubernetes advertising the overlay address on every node. Losing a zone then costs capacity, not the cluster.
+
+<Note>
+Multi-zone placement is rolling out per organisation. Until it is enabled for yours, the `zones`, `network_mode` and node-group `zone` parameters are refused with "is not supported for upcloud clusters" and the wizard shows a single zone. Ask us to enable it. It needs the `kubeadm` distribution (the default).
+</Note>
+
+Two rules shape everything below. A pool has **at least three zones and three control planes** - one per zone - so etcd keeps quorum when any one zone is lost; a two-zone pool is refused. And the mesh is decided at create: a cluster created without it cannot be stretched later, so a single-zone cluster that may grow is created with `network_mode: wireguard_mesh`.
+
+### Create a cluster across zones
+
+`zone` stays the primary zone - bastion, first control plane and default network - and must be in `zones`. Control planes spread one per zone; workers spread per node group unless a group is pinned.
+
+<CodeGroup>
+
+```bash CLI
+ankra cluster upcloud create \
+  --name my-cluster \
+  --credential-id <upcloud-credential-id> \
+  --ssh-key-credential-id <ssh-key-credential-id> \
+  --zone fi-hel1 \
+  --zones fi-hel1,fi-hel2,se-sto1 \
+  --control-plane-count 3 \
+  --control-plane-plan 2xCPU-4GB \
+  --worker-count 3 \
+  --worker-plan 4xCPU-8GB
+```
+
+```bash cURL
+curl -X POST https://platform.ankra.app/api/v1/clusters/upcloud \
+  -H "Authorization: Bearer $ANKRA_API_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "my-cluster",
+    "credential_id": "<upcloud-credential-id>",
+    "ssh_key_credential_id": "<ssh-key-credential-id>",
+    "zone": "fi-hel1",
+    "zones": ["fi-hel1", "fi-hel2", "se-sto1"],
+    "control_plane_count": 3,
+    "control_plane_plan": "2xCPU-4GB",
+    "worker_count": 3,
+    "worker_plan": "4xCPU-8GB",
+    "distribution": "kubeadm"
+  }'
+```
+
+</CodeGroup>
+
+`network_mode` is derived - `wireguard_mesh` for a pool, `private_network` otherwise - and can be set to `wireguard_mesh` on a single-zone cluster to make it mesh-capable:
+
+```bash
+ankra cluster upcloud create --name my-cluster --zone fi-hel1 --network-mode wireguard_mesh \
+  --credential-id <upcloud-credential-id> --ssh-key-credential-id <ssh-key-credential-id>
+```
+
+<Warning>
+A pool of more than one zone requires **at least 3 zones and 3 control planes**, and the `kubeadm` distribution. Anything less is refused at create rather than producing a cluster that fails on its first zone outage.
+</Warning>
+
+### Grow the pool
+
+Zones can be added to a `wireguard_mesh` cluster, never removed. Pass the full desired pool, primary zone first; every new zone gets its router, private network and NAT gateway, and later node groups spread across the grown pool.
+
+<CodeGroup>
+
+```bash CLI
+ankra cluster upcloud zones <cluster_id> --zones fi-hel1,fi-hel2,se-sto1,de-fra1
+```
+
+```bash cURL
+curl -X PUT https://platform.ankra.app/api/v1/clusters/upcloud/<cluster_id>/zones \
+  -H "Authorization: Bearer $ANKRA_API_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"zones": ["fi-hel1", "fi-hel2", "se-sto1", "de-fra1"]}'
+```
+
+</CodeGroup>
+
+### Pin a node group to one zone
+
+Pin the group that runs zonal storage: an UpCloud volume cannot attach from another zone.
+
+```bash
+ankra cluster upcloud node-group add <cluster_id> \
+  --name database-sto \
+  --instance-type 4xCPU-8GB \
+  --count 1 \
+  --zone se-sto1
+```
+
+Day-2 growth follows the stored pool: node group add, node group scale, worker scale, autoscaling and control plane growth balance new servers around where the existing ones are. A group whose nodes all share one zone is treated as pinned and grows there; a spread group keeps spreading. Control planes cannot be scaled below three on a multi-zone pool. `ankra cluster node-group list` ends each line with `zones=` and the zones the group's nodes were placed in (`zones` on the node-group listing API).
+
+### Node topology labels
+
+Every node carries `topology.kubernetes.io/zone` (the UpCloud zone, e.g. `fi-hel2`) and `topology.kubernetes.io/region` (the zone without its index, e.g. `fi-hel`), so `topologySpreadConstraints` and zone-aware scheduling work without extra configuration.
+
+### What stays in the primary zone
+
+UpCloud load balancers and block storage are zone-local, and the cluster's CCM and CSI are scoped to the primary zone:
+
+- `LoadBalancer` Services get backends from primary-zone nodes only. Cross-zone ingress needs a load balancer per zone and DNS failover.
+- `PersistentVolumeClaim`s are provisioned in the primary zone. Run stateful workloads there, or use replicated storage such as Longhorn for the other zones.
+- The bastion is in the primary zone: if that zone is lost, workloads keep running in the others, but provisioning and node management pause until it returns.
+
+Pod MTU is 1370 inside the mesh (WireGuard and VXLAN overheads), and Cilium's own WireGuard encryption is refused on a meshed cluster - the overlay already encrypts every node-to-node byte.
+
+---
+
 ## Restarting a Node
 
 Restart any node - a control plane node, a worker, or the bastion - as a tracked operation, from cluster **Settings** > **Nodes** in the dashboard, via the CLI, or via the API:
@@ -486,6 +595,7 @@ An UpCloud cluster provisions the following infrastructure:
 | **Router** | SDN router the private network and NAT gateway attach to |
 | **Private Network** | Isolated SDN network for inter-node communication, with DHCP handing out the default route |
 | **NAT Gateway** | Managed gateway on the router - the egress path for all node traffic |
+| **Zone trios** | On a multi-zone cluster, one router, private network and NAT gateway per additional zone, and a WireGuard mesh (`wg0`) between every node over the account-wide utility network |
 | **Bastion Host** | The only server with a public IP - SSH jump host Ankra uses to provision and manage nodes |
 | **Control Plane(s)** | Kubernetes control plane servers (no public interface) |
 | **Worker(s)** | Kubernetes worker servers for running workloads (no public interface) |
