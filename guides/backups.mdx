@@ -123,12 +123,20 @@ Ankra records the provider-side handle it created (the UpCloud service, the Digi
 
 | Provider | Endpoint shape | Notes |
 |----------|---------------|-------|
-| UpCloud Object Storage | `https://<region>.upcloudobjects.com` | Region is the endpoint prefix, for example `fi-hel2` |
+| UpCloud Object Storage | `https://<region>.upcloudobjects.com` | Region is the endpoint prefix, for example `fi-hel2`. Note that *provisioning* takes a Managed Object Storage region instead - `europe-1`, `us-1` - which Ankra checks against your account |
 | DigitalOcean Spaces | `https://<region>.digitaloceanspaces.com` | Spaces keys are separate from API tokens |
 | Scaleway Object Storage | `https://s3.<region>.scw.cloud` | Uses the same key pair as the API |
 | Hetzner Object Storage | `https://<region>.your-objectstorage.com` | Keys are issued in the console, not the cloud API |
 | Amazon S3 | `https://s3.<region>.amazonaws.com` | Turn **path style** off |
 | Other | Anything S3-compatible | MinIO, Garage, Ceph RGW; keep path style on |
+
+## When provisioning fails or stalls
+
+A vault Ankra provisions shows **Provisioning** until the bucket exists and its keys verify. Two things can go wrong, and both are recoverable the same way.
+
+**It reads Failed with an excerpt.** The excerpt is what the provider answered - a region your account cannot use, a bucket name someone else holds, a token without the right scope. There is nothing to re-verify: the run never minted keys, so **Verify** is not offered and the API refuses it. Delete the vault - tick **Also destroy the bucket Ankra created**, or pass `--destroy-provider-resources`, so anything the run got as far as creating goes with it - and provision again with the excerpt's cause fixed.
+
+**It stays on Provisioning.** Nothing retries a provisioning run, so a row that has not moved for quarter of an hour is stuck rather than slow, and the dashboard says so. Delete it the same way and try again.
 
 ## When verification fails
 
@@ -156,7 +164,13 @@ ankra backup vaults delete production-backups  # confirms first; --yes to skip
 
 ## Deleting a vault
 
-Deleting a vault removes Ankra's record of it and the access keys it stored. **By default the bucket is left exactly as it is** - with every restore point in it - along with anything Ankra created for it, so a deletion can never lose data on its own. A vault that a backup policy or an in-flight data clone still references cannot be deleted; retire those first.
+Deleting a vault removes Ankra's record of it and the access keys it stored. **By default the bucket is left exactly as it is** - with every restore point in it - along with anything Ankra created for it, so a deletion can never lose data on its own.
+
+<Warning>
+Nothing stops you deleting a vault that is still in use: Ankra does not yet refuse a delete on the grounds that something references the vault. Check before deleting one.
+</Warning>
+
+One exception, and it is deliberate: deleting a vault that is **still provisioning** always tears down the provider side, whether or not you ask for it. Such a vault has no restore points to lose, but the run may already have created a bucket or a provider resource - and once the record is gone nothing else can find them.
 
 For a vault **Ankra provisioned**, you can ask for the cloud side to be cleaned up in the same step. Ankra then empties and deletes the bucket and removes what it minted for the vault - the UpCloud Managed Object Storage service, the DigitalOcean Spaces key. Scaleway and Hetzner vaults use your own credential's keys, which are never touched.
 
@@ -181,15 +195,15 @@ For a vault **Ankra provisioned**, you can ask for the cloud side to be cleaned 
   </Tab>
 </Tabs>
 
-The teardown runs as a background job: the vault disappears from the list immediately and the bucket is removed shortly after. It is safe to retry - a bucket already gone, a service already deleted and keys already removed all count as done.
+The teardown runs as a background job: the vault disappears from the list immediately and the bucket is removed shortly after. Each of its steps is written to be repeatable - a bucket already gone, a service already deleted and keys already removed all count as done - but nothing retries it automatically today. If the teardown fails, the provider resources stay and have to be removed in the provider console.
 
 ## Permissions
 
 | Permission | Allows |
 |-----------|--------|
 | `backups.read` | Seeing vaults, policies and restore points |
-| `backups.operate` | Creating restore points, running restores and data clones |
-| `backups.manage` | Creating, verifying and deleting vaults; setting backup policies |
+| `backups.operate` | Verifying a vault; creating restore points, running restores and data clones |
+| `backups.manage` | Creating and deleting vaults; setting backup policies |
 
 Organisation admins hold all three. A member with only `backups.read` sees the vault list read-only; the page says so and names the permission an admin has to grant for adding, verifying or deleting a vault.
 
