@@ -1,24 +1,27 @@
 ---
 title: Azure Kubernetes Service (AKS)
-description: Provision, import, and operate Azure Kubernetes Service (AKS) clusters with Ankra - network plugins, SKU tiers, private clusters, node pools, upgrades, GitOps, and AI-assisted operations.
+description: Provision, import, and operate Azure Kubernetes Service (AKS) clusters with Ankra - region-scoped catalogue, availability zones, spot pools, VNet subnets, maintenance windows, retention-aware deletion, GitOps, and AI-assisted operations.
 icon: "microsoft"
 ---
 
-[Azure Kubernetes Service (AKS)](https://azure.microsoft.com/en-us/products/kubernetes-service) is Microsoft Azure's managed Kubernetes service. Azure runs the control plane; Ankra provisions the cluster, then manages everything on top - node pools, Kubernetes upgrades, addons, stacks, GitOps, and AI-assisted operations.
+[Azure Kubernetes Service (AKS)](https://azure.microsoft.com/en-us/products/kubernetes-service) is Microsoft Azure's managed Kubernetes service. Azure runs the control plane; Ankra provisions the cluster, then manages everything on top - node pools, Kubernetes upgrades, add-ons, Stacks, GitOps, and AI-assisted operations.
 
 This page covers AKS specifically. For the shared concepts across all managed providers - live options, discovery/import, and day-2 API patterns - see [Managed Kubernetes](/guides/managed-kubernetes).
 
 ## Why AKS with Ankra
 
-- **Network plugin and SKU tier** - choose `azure` or `kubenet` networking and the control-plane SKU tier that fits your uptime needs.
-- **Private clusters** - provision a private API endpoint when required.
-- **Live pricing and options** - locations, Kubernetes versions, and VM sizes are fetched live with your service principal, including spot and autoscaling where available.
+- **A catalogue for the location you pick** - Kubernetes versions, VM sizes, availability zones, subnets and prices are read for the selected Azure location, and sizes your subscription cannot launch there are left out.
+- **Spot node pools, zones and OS disks** - run a User pool on spot capacity with an optional price cap, spread a pool across availability zones, and choose a managed or ephemeral OS disk per pool.
+- **Bring your own network** - place every node pool in an existing virtual network subnet, or let AKS create its VNet.
+- **Planned maintenance** - pin the weekly window in which Azure may run control-plane upgrades and node reboots.
+- **Stop and start** - AKS is the only managed provider with native cluster stop/start, exposed in the portal, CLI, API and Ankra's AI.
+- **Retention-aware deletion** - keep or delete the resource group Ankra created for the cluster; a resource group you brought is never deleted.
 
 ## Prerequisites
 
-An **Azure service principal** stored in Ankra with **Contributor** on the target subscription. See [Azure Credentials](/platform/credentials/azure).
+An **Azure service principal** stored in Ankra with the roles described in [Azure Credentials](/platform/credentials/azure). Store it from the portal or with `ankra credentials azure create`.
 
-GitOps is optional: connect a repository at creation and Ankra commits the cluster's stack definitions to Git.
+GitOps is optional: connect a repository at creation and Ankra commits the cluster's Stack definitions to Git.
 
 ## Creating an AKS cluster
 
@@ -28,17 +31,17 @@ GitOps is optional: connect a repository at creation and Ankra commits the clust
       <Step title="Create Cluster">
         Go to **Clusters** → **Create Cluster** and pick Azure's **Cloud Managed** action.
       </Step>
-      <Step title="Credential & Location">
-        Select the Azure credential and a location (for example `westeurope`). Locations load live from Azure.
+      <Step title="Credential, location and network">
+        Select the Azure credential and a location (for example `westeurope`). The catalogue reloads for that location. Optionally pick a **virtual network subnet** for the node pools, and name an existing **resource group** to adopt - leave it empty and Ankra creates and owns one.
       </Step>
-      <Step title="Node Pools">
-        Define one or more worker pools: name, VM size (with live pricing), count, labels, and autoscaling bounds.
+      <Step title="Node pools">
+        Define one or more pools: name, VM size (with live pricing), count, labels, taints and autoscaling bounds. Per pool you can pick **availability zones**, the **OS disk** type and size, and - on every pool except the first - **spot capacity** with an optional hourly price cap. The first pool is the AKS System pool and always runs on regular capacity.
       </Step>
-      <Step title="Kubernetes & Network">
-        Pick a Kubernetes version or keep the default, choose the network plugin (`azure` or `kubenet`), the SKU tier (`Free`, `Standard`, or `Premium`), and whether the cluster is private.
+      <Step title="Kubernetes and control plane">
+        Pick a Kubernetes version or keep the default, then the **network plugin** (`azure` or `kubenet`), the **SKU tier** (`Free`, `Standard` with the uptime SLA, or `Premium`), whether the API server is **private**, and an optional **maintenance window**.
       </Step>
-      <Step title="GitOps (optional) & Create">
-        Optionally connect a Git repository, then create. Ankra runs AKS preflight checks, provisions the cluster, retrieves the kubeconfig, and installs the Ankra Agent.
+      <Step title="GitOps (optional) and create">
+        Optionally connect a Git repository, then create. Ankra runs the AKS preflight (credential, location, version, name, size availability, zones, OS disk support, vCPU quota, subnet), submits the cluster, shows it while Azure provisions it, retrieves the kubeconfig, and installs the Ankra Agent.
       </Step>
     </Steps>
   </Tab>
@@ -49,32 +52,41 @@ GitOps is optional: connect a repository at creation and Ankra commits the clust
       --name my-aks-cluster \
       --credential-id <azure-credential-id> \
       --location westeurope \
-      --node-pool-name workers \
+      --node-pool-name system \
       --node-pool-size Standard_D2s_v5 \
-      --node-pool-count 2
+      --node-pool-count 2 \
+      --zone 1,2,3 \
+      --os-disk-type Ephemeral \
+      --network-plugin azure \
+      --sku-tier Standard \
+      --vnet-subnet-id <subnet-arm-id> \
+      --maintenance-window Saturday:22:4
     ```
 
-    Network plugin, SKU tier, private-cluster, resource group, and node-pool autoscaling bounds are set from the portal or the API.
+    Every `--` flag after `--node-pool-count` is optional. `--maintenance-window` takes `<Weekday>:<start-hour>:<hours>` in UTC. Add spot pools after creation with `node-pool add --spot`.
   </Tab>
   <Tab title="API">
     ```bash
-    curl -X POST https://platform.ankra.app/org/clusters/managed/aks \
+    curl -X POST https://platform.ankra.app/api/v1/clusters/managed/aks \
       -H "Authorization: Bearer $ANKRA_API_TOKEN" \
       -H "Content-Type: application/json" \
       -d '{
         "name": "my-aks-cluster",
         "credential_id": "<azure-credential-id>",
         "location": "westeurope",
-        "kubernetes_version": "1.32.3",
+        "kubernetes_version": "1.31.1",
         "node_pools": [
-          {
-            "name": "workers",
-            "size": "Standard_D2s_v5",
-            "count": 2,
-            "autoscaling": {"enabled": true, "min_count": 2, "max_count": 5}
-          }
+          {"name": "system", "size": "Standard_D2s_v5", "count": 2, "zone": "1,2,3", "root_volume_type": "Ephemeral"},
+          {"name": "batch", "size": "Standard_E4s_v5", "count": 3, "spot": {"enabled": true, "max_price": 0.05},
+           "autoscaling": {"enabled": true, "min_count": 1, "max_count": 10}}
         ],
-        "aks": {"network_plugin": "azure", "sku_tier": "Standard"}
+        "aks": {
+          "network_plugin": "azure",
+          "sku_tier": "Standard",
+          "private_cluster": false,
+          "vnet_subnet_id": "<subnet-arm-id>",
+          "maintenance_window": {"day": "Saturday", "start_hour": 22, "duration_hours": 4}
+        }
       }'
     ```
   </Tab>
@@ -84,50 +96,99 @@ GitOps is optional: connect a repository at creation and Ankra commits the clust
 
 | Field | Description |
 |-------|-------------|
-| `aks.resource_group` | Target resource group |
-| `aks.network_plugin` | `azure` or `kubenet` |
-| `aks.private_cluster` | Provision a private API endpoint |
-| `aks.sku_tier` | `Free`, `Standard`, or `Premium` |
+| `aks.resource_group` | Existing resource group to adopt. Omit it and Ankra creates `ankra-<name>`, tags it as Ankra-owned, and deletes it with the cluster. An adopted group is never modified or deleted. |
+| `aks.network_plugin` | `azure` (default; pods get VNet addresses, required with a customer subnet) or `kubenet` |
+| `aks.sku_tier` | `Free` (default, no control-plane fee), `Standard` (uptime SLA, about $73 per month) or `Premium` |
+| `aks.private_cluster` | Private API server endpoint |
+| `aks.vnet_subnet_id` | ARM id of the subnet every node pool joins; pick one from the catalogue's `private_networks`. Omit for an AKS-managed VNet. |
+| `aks.maintenance_window` | `{day, start_hour, duration_hours}` - an English weekday, a 0-23 UTC hour and 4-24 hours |
+
+### Node pool options
+
+| Field | Description |
+|-------|-------------|
+| `zone` | Availability zone(s) from the catalogue's `zones`, comma-separated to spread the pool (`"1,2,3"`). Omit for a regional pool. |
+| `root_volume_type` | OS disk type, `Managed` or `Ephemeral`. Ephemeral needs a VM size that supports it; preflight checks. |
+| `root_volume_size_gb` | OS disk size, at least 30 GB |
+| `spot` | `{"enabled": true, "max_price": <hourly-cap>}` - spot capacity with an optional cap in USD per hour; omit `max_price` to pay up to the on-demand price. Refused on the first pool. |
 
 <Note>
-AKS node-pool names are lowercase alphanumeric and at most 12 characters; cluster names are at most 63 characters.
+AKS node pool names are lowercase alphanumeric, start with a letter and are at most 12 characters; cluster names are at most 63 characters. The first pool is the cluster's System pool: AKS requires at least one System pool, so Ankra refuses to delete the only one and refuses spot on it.
 </Note>
+
+### Preflight
+
+Every create runs a preflight you can also call on its own (`POST .../managed/aks/preflight` with the create body). It checks the service principal, pool names, the location and version, a name collision in the resource group, that each VM size is available to your subscription in that location and offered in the requested zones, ephemeral OS disk support, the subscription's regional and per-family vCPU quota against the pools' maximum node counts, the subnet, and the maintenance window. Catalogue reads the service principal lacks permission for become warnings; a failing item blocks the create.
 
 ## Day-2 operations
 
-Node pools, upgrades, and deletion work from the CLI, portal, or API. The CLI examples use `--provider aks`:
+Node pools, upgrades, stop/start and deletion work from the CLI, portal or API. The CLI examples use `--provider aks`:
 
 ```bash
+# add a spot pool spread over two zones
+ankra cluster managed node-pool add <cluster-id> --provider aks \
+  --name batch --size Standard_E4s_v5 --count 3 --zone 1,2 \
+  --spot --spot-max-price 0.05 --autoscaling --autoscaling-min 1 --autoscaling-max 10
+
 # scale a pool to a fixed count
-ankra cluster managed node-pool scale <cluster_id> workers --provider aks --count 5
+ankra cluster managed node-pool scale <cluster-id> batch --provider aks --count 5
+
+# turn autoscaling off again
+ankra cluster managed node-pool update <cluster-id> batch --provider aks --autoscaling=false --count 3
 
 # upgrade the cluster
-ankra cluster managed upgrade <cluster_id> --provider aks --version 1.32.3
+ankra cluster managed upgrade <cluster-id> --provider aks --version 1.32.3
 
 # delete the cluster
-ankra cluster managed delete <cluster_id> --provider aks
+ankra cluster managed delete <cluster-id> --provider aks
 ```
 
-Autoscaling bounds are set with `ankra cluster managed node-pool update <cluster_id> <pool> --provider aks --autoscaling --autoscaling-min 2 --autoscaling-max 8`, from the portal, or via the `PATCH .../node-pools/{name}` endpoint. See [Managed Kubernetes - day-2 operations](/guides/managed-kubernetes#day-2-operations) for the shared mechanics.
+In the portal, **Settings → Nodes** lists every pool with its zones, OS disk and spot state; new pools pick their VM size from the location's catalogue.
 
-## Stopping and Starting
+### Upgrades
 
-AKS is the only managed provider with native cluster stop/start, and Ankra exposes it in the portal Danger Zone, CLI, API, and Ankra AI/MCP. Stopping deallocates the control plane and agent pools (Azure stops billing for compute) while keeping all configuration, and starting brings the same cluster back.
+An upgrade moves the control plane **and every node pool** to the target version in one operation - the same request `az aks upgrade` sends. AKS refuses a control plane more than two minor versions ahead of a pool, so Ankra never leaves pools behind. Available targets come from Azure's upgrade profile; preview versions are skipped.
 
-In the portal, open **Settings** → **General** → **Danger Zone** and choose **Stop cluster**. When Azure finishes the operation, the same area offers **Start cluster**.
+### Stopping and starting
+
+AKS is the only managed provider with native cluster stop/start, and Ankra exposes it in the portal Danger Zone, CLI, API and Ankra's AI. Stopping deallocates the control plane and agent pools (Azure stops billing for compute) while keeping all configuration; starting brings the same cluster back.
 
 ```bash
-ankra cluster managed stop <cluster_id> --provider aks
-ankra cluster managed start <cluster_id> --provider aks
+ankra cluster managed stop <cluster-id> --provider aks
+ankra cluster managed start <cluster-id> --provider aks
 ```
 
-The API exposes the same asynchronous stop and start operations. You can also ask Ankra's AI or any MCP client to "stop my AKS cluster" or "start my AKS cluster"; write operations require confirmation.
-
-Both operations are asynchronous on Azure's side - the cluster shows `stopped` or `running` once Azure completes the transition. Other managed providers do not support stop/start; Ankra advertises the capability per provider as `supports_stop_start`.
+Both operations are asynchronous on Azure's side - the cluster shows `stopped` or `running` once Azure completes the transition. Ankra advertises the capability per provider as `supports_stop_start`.
 
 ## Importing an existing AKS cluster
 
-Already running AKS? Discover clusters in your subscription and adopt them into Ankra without touching them. Discovery and import run from the portal or API - see [Managed Kubernetes - importing existing clusters](/guides/managed-kubernetes#importing-existing-clusters).
+Discover the clusters in your subscription and adopt one into Ankra without touching it - discovery and import run from the portal or API (see [Managed Kubernetes - importing existing clusters](/guides/managed-kubernetes#importing-existing-clusters)). Import brings the cluster's node pools, their zones, OS disks, spot settings, labels and taints into Ankra, and records the subnet the pools use.
+
+<Warning>
+Ankra needs the cluster's admin kubeconfig, which Azure only issues while **local accounts** are enabled. A cluster configured for Microsoft Entra ID only (`disableLocalAccounts: true`) is refused at import with an explanation; enable local accounts (`az aks update --enable-local-accounts`) before importing it.
+</Warning>
+
+## Deleting, disconnecting and retention
+
+These operations are deliberately different:
+
+- **Disconnect** removes the Ankra integration and cluster-local privileged material but never calls Azure. Use it for imported clusters.
+- **Delete at Azure** deletes the AKS cluster (Azure removes its `MC_` node resource group with it) and then removes the Ankra integration. It is allowed normally for clusters Ankra created; an imported cluster needs the explicit force option.
+
+With `retention_policy=delete` (the default) Ankra also deletes the resource group it created for the cluster. With `retention_policy=retain` that group survives and is reported in `retained_resources`. A resource group you named at creation is adopted: Ankra never deletes it and always reports it as retained.
+
+<Warning>
+A deleted resource group takes every resource in it with it. Keep other workloads out of the `ankra-<name>` group Ankra creates, or adopt a group of your own.
+</Warning>
+
+## Troubleshooting
+
+- **403 on the resource group or subscription** - the service principal lacks a role listed in [Azure Credentials](/platform/credentials/azure). Catalogue reads need `Reader` at the subscription; creating clusters needs the AKS and network roles on the resource group.
+- **Preflight fails on `quota`** - the pools' maximum node counts exceed the free regional or per-family vCPUs. Request a quota increase for that location or pick smaller sizes.
+- **VM size "not available to this subscription"** - Azure restricts the SKU in that location for your subscription. The catalogue already omits such sizes; a size typed by hand is caught at preflight.
+- **"cannot run on spot capacity"** - spot was requested on the first pool. Put spot workloads in a later pool.
+- **Import refused with "local accounts disabled"** - see the warning under importing.
+- **Upgrade refused by Azure** - a pool is more than two minor versions behind the target. Upgrade in steps of one minor version.
 
 ## Related
 
