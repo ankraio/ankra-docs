@@ -1,0 +1,251 @@
+---
+title: "Write an ankra migrate Module"
+description: "Teach ankra migrate a new source format with an executable that answers describe, detect, convert and optionally export as JSON over stdin and stdout."
+tag: "Closed Beta"
+---
+
+import { CliVersion } from "/snippets/cli-version.jsx";
+
+<Warning>
+**Closed beta.** Modules extend `ankra migrate`, which is gated by the **backups** feature, in closed beta. The workflow is stable but the surface may still change, and the feature is enabled per organisation on request. `ankra migrate modules`, `detect`, `convert` and `export` read local files, need no login, and run whether or not the feature is on for you; `ankra migrate up` and `ankra migrate restore`, which carry the data into a cluster, need it enabled. [Contact support](/platform/support) to have it turned on for your organisation.
+</Warning>
+
+<Note>
+A module teaches `ankra migrate` one source format. It is an executable named `ankra-module-<name>` that answers three verbs, each with a JSON request on stdin and a JSON reply on stdout, so it can be written in any language. The built-in `docker` module is the same contract implemented in-process, and is the reference implementation.
+</Note>
+
+## When to write one
+
+`ankra migrate convert` turns a deployment description into an [ImportCluster](/guides/import-cluster) manifest plus the [manifests](/concepts/manifests) its [stack](/concepts/stacks) refers to. The `docker` module reads Compose files, bare Dockerfiles and the running Docker daemon, and is the only module that ships with the CLI. Every other source format is a module somebody writes: a Heroku-style Procfile, a Nomad job specification, a systemd unit directory, or the in-house deployment description your team has been maintaining for years.
+
+Write one when you convert the same format more than once. A module makes the translation repeatable and reviewable: the same input produces the same stack, in a pull request, for every service that uses that format.
+
+## How the CLI finds your module
+
+The executable is named `ankra-module-<name>`, where `<name>` is the token users type after `--module`. The CLI looks in `~/.ankra/modules` first and then in every directory on `PATH`, so a module can be installed without touching `PATH` at all. It must be executable, and a name that collides with a built-in is ignored, so no module can shadow `docker`.
+
+<CliVersion since="0.14.0" />
+
+```bash
+mkdir -p ~/.ankra/modules
+cp ankra-module-procfile ~/.ankra/modules/
+chmod +x ~/.ankra/modules/ankra-module-procfile
+
+ankra migrate modules
+```
+
+`ankra migrate modules` runs the `describe` verb of every candidate it finds and lists the name, version, source (`built-in`, or the path it was found at) and summary. A module that fails to load is reported on stderr as `skipped <path>: <reason>` and the listing carries on, so one broken executable never takes the command down. Pass `-o json` to see the full description, including the capabilities the table does not show.
+
+`ankra migrate convert`, `export` and `up` choose a module by asking every one of them whether it recognises the directory and taking the most confident answer. Ties are broken alphabetically by module name, and a directory nothing recognises is refused with `no module recognises <dir>`. `--module <name>` skips detection and picks one explicitly.
+
+## The protocol
+
+One verb per invocation, as `argv[1]`. The request is JSON on stdin, the reply is JSON on stdout. Exiting non-zero fails the verb, and the module's stderr becomes the reason the user sees (the last five lines of it). The protocol version is `1`; the CLI refuses a module that reports any other, rather than guessing at the shape of its output.
+
+| Verb | Request | Reply | Time limit |
+|------|---------|-------|------------|
+| `describe` | none | `name`, `version`, `protocol`, `summary`, `file_patterns`, `capabilities` | 15s |
+| `detect` | `dir` | `confidence`, `files`, `reason` | 30s |
+| `convert` | `dir`, `cluster_name`, `namespace`, `options` | `cluster`, `files`, `warnings` | 5m |
+| `export` | `dir`, `output_dir`, `namespace`, `options` | `databases`, `warnings` | 6h |
+
+`export` is optional and answered only by a module that lists `"export"` under `capabilities` in its description. The CLI trusts the capability, so a module that omits it is never asked.
+
+### describe
+
+No input. Report what the module is:
+
+```json
+{"name": "procfile", "version": "1.0", "protocol": 1,
+ "summary": "Heroku-style Procfile (one Deployment per process type)",
+ "file_patterns": ["Procfile"]}
+```
+
+`version` is the module's own version, not the CLI's. `file_patterns` is shown to users so an empty detection is explainable rather than mysterious. `describe` must not touch the filesystem: it is called for every listing.
+
+### detect
+
+The request is `{"dir": "/absolute/path"}`. Reply with a confidence from 0 (not mine) to 1 (certain), the files found, and a one-line reason - including for a zero score, because "not mine, and here is why" is an answer rather than a failure:
+
+```json
+{"confidence": 1, "files": ["Procfile"], "reason": "Procfile present"}
+```
+
+```json
+{"confidence": 0, "reason": "no Procfile"}
+```
+
+Reserve 1 for an unambiguous marker file. A module working from a heuristic should score itself lower so a more specific module wins the directory: the built-in `docker` module scores a Compose file 1 and a lone Dockerfile 0.6 for exactly that reason.
+
+### convert
+
+The request carries the directory, the names the output will use, and every `--option key=value` the user passed, untouched, so a module can take input the CLI knows nothing about:
+
+```json
+{"dir": "/absolute/path", "cluster_name": "shop", "namespace": "shop",
+ "options": {"image": "ghcr.io/org/shop:1.2"}}
+```
+
+The reply is the resources:
+
+```json
+{"cluster": {"apiVersion": "ankra.io/v1alpha1", "kind": "ImportCluster",
+   "metadata": {"name": "shop", "description": "Converted from Procfile"},
+   "spec": {"stacks": [{"name": "shop", "manifests": [
+     {"name": "namespace", "from_file": "manifests/namespace.yaml"},
+     {"name": "web", "from_file": "manifests/web.yaml", "namespace": "shop",
+      "parents": [{"name": "namespace", "kind": "manifest"}]}]}]}},
+ "files": {"manifests/namespace.yaml": "apiVersion: v1\n...",
+           "manifests/web.yaml": "apiVersion: apps/v1\n..."},
+ "warnings": ["web listens on 8080; put an Ingress in front of Service web to expose it"]}
+```
+
+- `cluster` is the ImportCluster the CLI writes to `cluster.yaml`. Every `from_file` in its stacks must name a key of `files`, and it must have a name; the CLI validates both before it writes anything.
+- `files` keys are paths relative to the output directory. An absolute path, or one containing `..`, is rejected before a byte is written.
+- `warnings` are for everything the module could not translate faithfully: an unmappable construct, a value the user has to supply, a credential written in plain text. A partial conversion a person can finish beats none, so warn rather than fail wherever you can.
+
+Four rules keep the output reviewable:
+
+- **Never write to the source directory.** Convert reads; the CLI writes.
+- **Be deterministic.** Sort everything. Output that reorders itself on each run cannot be reviewed in a pull request.
+- **Keep secrets out of ConfigMaps.** Put credentials in a `Secret` and warn that it needs encrypting with [`ankra cluster encrypt`](/guides/sops) before it is committed.
+- **Encode dependency order as `parents`.** A workload that must start after another lists it as `parents: [{name, kind: manifest}]`. That is how a source format's start order survives the conversion.
+
+Set `enableServiceLinks: false` on the pods you generate. Kubernetes injects a `<SERVICE>_PORT` variable for every Service in the namespace, and applications that read a variable of the same name break on it.
+
+## export, for a module that can dump its data
+
+A module that can also dump the databases behind its source lists `"capabilities": ["export"]` in `describe` and answers a fourth verb, which backs `ankra migrate export`. The request adds the output directory, which the CLI has already created:
+
+```json
+{"dir": "/absolute/path", "output_dir": "/absolute/output", "namespace": "shop",
+ "options": {"docker-host": "ssh://root@203.0.113.7"}}
+```
+
+Write each dump under `output_dir` and reply with what you wrote and where it restores to - the Service and Secret that `convert` generated for the same workload, so the restore needs nothing the user has to look up:
+
+```json
+{"databases": [{"workload": "db", "engine": "postgres", "server_version": "17.2",
+  "target": {"namespace": "shop", "host": "db", "port": 5432, "username": "app",
+             "password_secret": "db-secrets", "password_key": "POSTGRES_PASSWORD"},
+  "artifacts": [{"path": "db/globals.sql", "kind": "globals", "format": "sql"},
+                {"path": "db/app.dump", "kind": "database", "format": "pg_custom",
+                 "database": "app"}]}],
+ "warnings": ["dumped while the source was live"]}
+```
+
+- `engine` is `postgres` or `mysql`, and nothing else can be restored. `format` is `pg_custom` (a `pg_dump -Fc` archive, PostgreSQL only) or `sql` (plain SQL, including `pg_dumpall --globals-only` output and `mysqldump` files). `kind` is `database`, which must name its `database`, or `globals`, which only PostgreSQL has.
+- `target.host` must be a Service in `target.namespace`. The platform accepts `db`, `db.shop`, `db.shop.svc` and `db.shop.svc.cluster.local`, and refuses anything else with `Database db target host "..." is not a Service in namespace shop` - the restore Job carries the target's credentials, and a host the manifest could point anywhere would carry them out of the cluster.
+- Artifact paths are relative to `output_dir` and may not escape it. `manifest.json` and `SHA256SUMS` are refused as artifact names, because the CLI writes them itself: it measures every file's size and SHA-256 sum, rejects one that is empty or was never written, and finalises the export into a self-contained directory that `sha256sum -c` can verify. Do not report sizes or checksums yourself.
+- **Narrate progress on stderr.** It is relayed to the user live while the verb runs, which matters when a dump takes minutes, and it is shown as the reason on failure.
+- A single artifact above 625 GiB cannot be uploaded, so split a database that large across smaller dumps.
+
+## A worked example
+
+`examples/modules/ankra-module-procfile` in the CLI repository is a complete module in about a hundred lines of Python. It reads a Heroku-style Procfile - one `name: command` per line - and emits a Deployment per process type, plus a Service for `web`. The shape of it is the whole contract:
+
+```python
+#!/usr/bin/env python3
+import json
+import os
+import sys
+
+NAME = "procfile"
+VERSION = "1.0"
+PROTOCOL = 1
+
+
+def describe():
+    return {
+        "name": NAME,
+        "version": VERSION,
+        "protocol": PROTOCOL,
+        "summary": "Heroku-style Procfile (one Deployment per process type)",
+        "file_patterns": ["Procfile"],
+    }
+
+
+def detect(request):
+    if not os.path.isfile(os.path.join(request["dir"], "Procfile")):
+        return {"confidence": 0, "reason": "no Procfile"}
+    return {"confidence": 1, "files": ["Procfile"], "reason": "Procfile present"}
+
+
+def convert(request):
+    # Read the source, render the manifests, and name them in the cluster's
+    # stack. request["options"] holds every --option the user passed.
+    return {"cluster": cluster, "files": files, "warnings": warnings}
+
+
+def main():
+    verb = sys.argv[1] if len(sys.argv) > 1 else ""
+    if verb == "describe":
+        reply = describe()
+    elif verb in ("detect", "convert"):
+        request = json.load(sys.stdin)
+        reply = detect(request) if verb == "detect" else convert(request)
+    else:
+        sys.stderr.write(f"unknown verb {verb!r}; expected describe, detect, or convert\n")
+        sys.exit(2)
+    json.dump(reply, sys.stdout)
+
+
+if __name__ == "__main__":
+    main()
+```
+
+A Procfile says how to run a process, never what to run it from, so its `convert` exits 2 with `the procfile module needs --option image=<registry/repo:tag>` on stderr when that option is missing. That is the pattern for input the CLI knows nothing about.
+
+Install it and run it end to end:
+
+```bash
+cp examples/modules/ankra-module-procfile ~/.ankra/modules/
+chmod +x ~/.ankra/modules/ankra-module-procfile
+
+mkdir -p /tmp/demo
+printf 'web: bundle exec puma\nworker: bundle exec sidekiq\n' > /tmp/demo/Procfile
+
+ankra migrate modules
+ankra migrate detect /tmp/demo
+ankra migrate convert /tmp/demo --module procfile --option image=ghcr.io/org/app:1.0 --dry-run
+```
+
+## Testing a module
+
+The verbs are ordinary processes, so test them without the CLI in the way:
+
+```bash
+ankra-module-procfile describe
+echo '{"dir": "/tmp/demo"}' | ankra-module-procfile detect
+echo '{"dir": "/tmp/demo", "cluster_name": "demo", "namespace": "demo", "options": {"image": "ghcr.io/org/app:1.0"}}' \
+  | ankra-module-procfile convert
+```
+
+Then check how the CLI sees it. `ankra migrate detect <dir>` prints every module's confidence, files and reason, most confident first, which is exactly what `convert` picks from. `ankra migrate convert --dry-run` prints the rendered `cluster.yaml` and the files that would be written without writing any of them, and still runs the full validation, so an unsafe path or a manifest pointing at a file you did not return fails there rather than on disk.
+
+## What an external module does not get
+
+<Warning>
+Two capabilities of the built-in `docker` module are Go interfaces rather than protocol verbs, so an external module cannot implement them today.
+</Warning>
+
+- **No plan preflight in `ankra migrate up`.** The built-in module can describe an export before running it, which is how the plan reports each database's size against your free disk. An external module is exported without that preflight, and the plan says so: `the <name> module does not describe its export up front; sizes are unknown until the dump runs`.
+- **No `--stop-source`.** Stopping the source's non-database services before the final dump is the built-in module's, so `ankra migrate up --stop-source` is refused for an external module with `the <name> module cannot stop the source's services; stop them yourself, then run without --stop-source`.
+- **Restores are PostgreSQL and MySQL only**, in the `sql` and `pg_custom` formats, into a Service in the target namespace. A module can dump anything it likes, but the platform will only restore that.
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Move a Docker deployment" icon="docker" href="/guides/migrate-from-docker">
+    What the built-in module does, end to end.
+  </Card>
+  <Card title="Stacks" icon="layer-group" href="/concepts/stacks">
+    The shape your `cluster` reply has to produce.
+  </Card>
+  <Card title="Import a cluster" icon="circle-nodes" href="/guides/import-cluster">
+    The ImportCluster manifest a conversion writes.
+  </Card>
+  <Card title="Ankra CLI" icon="terminal" href="/integrations/ankra-cli">
+    Install the CLI and browse the rest of its commands.
+  </Card>
+</CardGroup>
