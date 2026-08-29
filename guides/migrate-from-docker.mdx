@@ -31,7 +31,7 @@ The plan names:
 - The **output directory** (`--out`, default `ankra-migration`): the conversion is written to `<out>/stack` and the dumps to `<out>/data`. A directory holding nothing but an earlier run's `stack/` and `data/` is reused, so running the same command again needs no extra flag.
 - Every **database server** it found, with its engine, version and user, and each database on it with the size read from the running container (`pg_database_size` on PostgreSQL, `information_schema` on MySQL and MariaDB).
 - The **estimated dump size** against the free disk where the dumps will be written. The run refuses rather than filling the disk.
-- **Warnings**, such as a database over 5 GiB (which cannot be uploaded in one piece yet), or the `postgres` maintenance database being skipped. If `postgres` really is your application database, say so with `--option databases.<workload>=postgres`.
+- **Warnings**, such as a database above 625 GiB (more than a single upload can carry), or the `postgres` maintenance database being skipped. If `postgres` really is your application database, say so with `--option databases.<workload>=postgres`.
 - A **not carried** list: files in the volumes of non-database workloads, and data in engines the export does not dump.
 
 Without `--plan` the same summary is printed and the run waits for a confirmation. `--yes` skips the prompt.
@@ -161,11 +161,31 @@ The workloads recognised as databases are the images whose names start with `pos
 
 Dumps are written `0600` alongside a `manifest.json` and a `SHA256SUMS`.
 
-On the way in, the CLI uploads straight to the vault's own bucket using presigned URLs the platform mints under `imports/<import_id>/`. The platform verifies each object's size with a `HEAD`, and then the cluster's agent runs a Kubernetes Job in the target namespace: an init container downloads the artifacts and checks them against their SHA-256 sums, and the engine client (`postgres:<major>-alpine`, or `mysql`/`mariadb:<version>`) waits for the database to accept connections and restores into it. Roles and globals go first, then each database, with `pg_restore --clean --if-exists --no-owner` or `mysql < file`. The Job connects using the Service and Secret the conversion generated.
+On the way in, the CLI uploads straight to the vault's own bucket using presigned URLs the platform mints under `imports/<import-id>/`. A dump above 1 GiB goes up in parts of 64 MiB, each retried on its own, so one stalled part costs a part rather than the whole upload. The platform starts the multipart upload and the CLI completes it, aborting it if it cannot finish, so the vault is never left holding half an artifact. The progress line names the size and the part count:
+
+```
+Uploading db/shop.dump (3.0 GiB, 49 parts)
+```
+
+The platform verifies each object's size with a `HEAD`, and then the cluster's agent runs a Kubernetes Job in the target namespace: an init container downloads the artifacts and checks them against their SHA-256 sums, and the engine client (`postgres:<major>-alpine`, or `mysql`/`mariadb:<version>`) waits for the database to accept connections and restores into it. Roles and globals go first, then each database, with `pg_restore --clean --if-exists --no-owner` or `mysql < file`. The Job connects using the Service and Secret the conversion generated.
 
 <Note>
 Ankra never holds your data: it goes from your source to your vault's bucket to your cluster. No vault credential is handed to the cluster, and nothing on the machine running the command needs `kubectl` or a database client.
 </Note>
+
+## The dumps a restore leaves in the vault
+
+Every restore keeps its upload under `imports/<import-id>/` in the vault, so the same import can be restored again without dumping the source a second time. The dumps stay there until you remove them.
+
+```bash
+ankra migrate imports list                  # what the vault holds
+ankra migrate imports list --vault offsite  # a particular vault
+ankra migrate imports delete <import-id>    # remove the dumps and forget the import
+```
+
+`list` gives each import's id, stack, status, databases, size and when it was created. `delete` removes the dumps from the vault and forgets the import, and refuses one whose restore is still running; `--yes` skips its confirmation. A restore that completes prints the `delete` command for the import it just finished, so the cleanup is there when you want it.
+
+Deleting the vault itself also removes the dumps of every import it held, on a bucket you own.
 
 ## What is not carried
 
@@ -175,7 +195,7 @@ The migration moves workloads and relational database contents. It does not move
 
 - **Files in the volumes of non-database workloads.** Uploads, caches and other on-disk state have to be copied into the PVC yourself.
 - **Data in engines the export does not dump**: Redis, Valkey, MongoDB, Elasticsearch and OpenSearch, RabbitMQ, MinIO, ClickHouse, InfluxDB, Neo4j, Cassandra and CouchDB. Their workloads are converted and deployed; they simply come up empty. The plan names each one it found.
-- **Anything over 5 GiB in one piece.** A single artifact above that is refused; multipart upload is in progress.
+- **A single artifact above 625 GiB**, which is the 10,000 parts of 64 MiB one upload can carry. `ankra migrate restore` refuses a larger one before it registers the import, saying `an upload carries at most 625.0 GiB`.
 - **PostgreSQL role passwords.** Roles are restored without them. The application user keeps the password from the cluster Secret, so the application works; any other login role needs an `ALTER ROLE ... PASSWORD` afterwards.
 
 A `pg_restore` that finishes with "errors ignored" (exit code 1) is reported as a warning and the restore is treated as successful, which is the normal outcome when the target database already holds some of the objects.
@@ -190,7 +210,7 @@ A `pg_restore` that finishes with "errors ignored" (exit code 1) is reported as 
 | `The cluster's agent does not support data restores yet; upgrade the agent first.` | The cluster's agent predates the restore lane | Upgrade the [cluster agent](/concepts/cluster-agent) |
 | Restore pod in `CreateContainerConfigError` naming the Secret | The stack was never applied in that namespace | Check the stack deployed, and that `--namespace` matches where it landed |
 | `no pod has been created for the restore job`, or `pod ... cannot be scheduled` | After five minutes the namespace still has no room for the restore Job | Free quota or capacity. The Job asks for ephemeral storage of the dump size times 1.1, plus 64 MiB |
-| An artifact above 5 GiB is refused | Single upload limit; multipart is not supported yet | Dump that database separately, or split it |
+| `an upload carries at most 625.0 GiB` | One dump is bigger than a single upload can carry | Dump that database on its own, or split it across smaller databases |
 
 A failed restore keeps its Job in the namespace for an hour. The agent already tails the Job's log into the failed step, so the reason usually travels with the operation, and the CLI reports `the restore of import <import-id> failed: ...`. To read the Job yourself while it is still there:
 
