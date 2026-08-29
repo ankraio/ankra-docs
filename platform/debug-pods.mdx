@@ -1,0 +1,109 @@
+---
+title: Debug Pods
+description: Spin up a pod that impersonates a workload - same service account, node, volumes and environment - under an image that has the tools you need, and open a recorded terminal into it.
+---
+
+A **debug pod** is a pod Ankra creates on your behalf, in any namespace of a cluster, from an image chosen for its tools rather than for the workload. Point it at an existing pod and it **impersonates** that pod: the same service account, the same node, the same volumes and volume mounts, the same environment variables and `envFrom` sources, the same tolerations and security context. What the workload's container sees, the debug pod sees - from a shell that actually has `curl`, `dig`, `psql` or `strace` in it.
+
+The workload itself is never touched. Unlike `kubectl debug`'s ephemeral containers, nothing is injected into the running pod; the debug pod is a separate object that copies the running pod's shape.
+
+---
+
+## When to reach for one
+
+- The image is **distroless** or has no shell, so the pod terminal cannot attach.
+- The pod is **crash-looping** and you need to inspect what it would have seen: the mounted config, the secret it could not read, the hostname it could not resolve.
+- You want to check a **volume's contents or permissions** - a PVC, a projected ConfigMap - exactly as the workload mounts them.
+- You need a scratch shell **in a namespace** with the namespace's network policies and DNS, with nothing mirrored at all.
+
+---
+
+## Creating a debug pod
+
+<Steps>
+  <Step title="From a pod, or from the pods list">
+    On a pod's page, click **Debug**. On **Kubernetes → Workloads → Pods**, click **New debug pod** to start from a namespace instead of a pod.
+  </Step>
+  <Step title="Choose an image">
+    Pick one from the catalogue - **netshoot** (the default: network and system troubleshooting tools plus database clients), **busybox**, **alpine**, or **ubuntu** - or enter a custom image reference. Every catalogue image is pinned to a tag.
+  </Step>
+  <Step title="Choose what to mirror">
+    When you started from a pod, pick which of its containers to mirror (the first one by default; init containers are offered too) and leave **Mirror volume mounts** and **Mirror environment variables** on unless you specifically want a clean shell.
+  </Step>
+  <Step title="Set a lifetime">
+    30 minutes to 8 hours, one hour by default. The pod ends itself when the lifetime is up whether or not anyone deletes it.
+  </Step>
+  <Step title="Create and open terminal">
+    Ankra waits for the pod to start and drops you into its [terminal](/platform/pod-terminal). If the image cannot be pulled or a mirrored reference cannot be resolved, the pod is removed again and the reason is shown.
+  </Step>
+</Steps>
+
+From the CLI:
+
+```bash
+# Impersonate a pod
+ankra cluster debug create --namespace payments --from-pod api-6d8f9c7b5-x2kq9
+
+# A plain shell in a namespace, with a specific image and a two-hour lifetime
+ankra cluster debug create --namespace payments --image docker.io/library/alpine:3.21 --ttl 2h
+
+ankra cluster debug images     # the catalogue
+ankra cluster debug list       # every debug pod on the cluster
+ankra cluster debug delete debug-api-6d8f9c7b5-x2kq9-7f3a --namespace payments
+```
+
+The CLI creates the pod and prints the portal link to its terminal; an interactive terminal from the CLI itself is on the roadmap.
+
+---
+
+## What is mirrored, and what is not
+
+| Mirrored from the target pod | Deliberately not mirrored |
+|---|---|
+| Service account (and whether its token is mounted) | **Labels** - a copy of the workload's labels would put the debug pod behind its Service, inside its PodDisruptionBudget and its NetworkPolicy peers |
+| Node (`nodeName`), so volumes that attach to one node attach here too | Host namespaces (`hostNetwork`, `hostPID`, `hostIPC`) |
+| Volumes and the chosen container's volume mounts | The projected service-account token volume - Kubernetes projects a fresh one for the debug pod's own identity |
+| `env` and `envFrom` of the chosen container | The workload's image, command and probes |
+| Tolerations, pod and container security contexts, resource requests and limits, working directory | |
+| Image pull secrets, DNS policy and config, host aliases, runtime class | |
+
+Some mirrored volumes cannot hold the target's data - an `emptyDir` is a fresh empty directory, an ephemeral claim is a new one, a `downwardAPI` volume describes the debug pod rather than the target. They are still mounted, because the mount path and its permissions are usually what is being debugged, and each one is named in the warnings shown after creation.
+
+Because the security context and resources are copied verbatim, a debug pod is admitted wherever its target is: Pod Security levels, LimitRanges and ResourceQuotas all see the same shape.
+
+Without a target, a debug pod is a plain pod of the chosen image with no service-account token.
+
+---
+
+## Lifetime and cleanup
+
+Every debug pod carries `activeDeadlineSeconds`, so the kubelet ends it at its lifetime even if Ankra never comes back to delete it. The cluster agent additionally removes debug pods that have expired or terminated, and never touches a pod that does not carry the `ankra.io/debug-pod=true` label. Delete one early from its page, from the pods list, or with `ankra cluster debug delete`.
+
+A debug pod is recognised by its label and annotations, never by its name:
+
+| Key | Meaning |
+|---|---|
+| `ankra.io/debug-pod=true` | This is a debug pod (label) |
+| `ankra.io/debug-target-pod`, `ankra.io/debug-target-container` | What it impersonates |
+| `ankra.io/debug-requested-by` | Who asked for it |
+| `ankra.io/debug-created-at`, `ankra.io/debug-expires-at` | When it started and when it ends |
+
+---
+
+## Permissions and audit
+
+Creating a debug pod needs both `kubernetes.write` (it creates a pod) and `kubernetes.exec` (its purpose is a shell, and mirroring a workload's environment is an effective read of its secrets). Deleting one needs `kubernetes.write`. The built-in **operator**, **admin** and **owner** roles hold both; **member** and **viewer** hold neither.
+
+Every create and delete writes an [audit log](/guides/audit-log) row (`create_debug_pod`, `delete_debug_pod`) naming the namespace, pod, image, what was mirrored and who asked - including a create the cluster refused. Every terminal session into a debug pod is recorded, like every other pod terminal session: see [Pod Terminal → Recorded sessions](/platform/pod-terminal#recorded-sessions).
+
+<Warning>
+A mirrored environment is the workload's environment. A debug pod's shell can print any secret the workload receives through `env` or `envFrom`, and the session recording will contain it. Treat transcript access (`audit.read`) accordingly.
+</Warning>
+
+---
+
+## Requirements
+
+- The **cluster agent** must be online and at version **2.1.1074** or newer. An older agent answers `AGENT_OUTDATED` and names the upgrade.
+- The chosen image must be pullable from the target namespace - a custom image from a private registry needs the same pull secret the workload uses (mirrored automatically when you impersonate a pod).
+- Debug pods are not available on sandbox clusters.
