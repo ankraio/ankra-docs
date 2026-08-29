@@ -1,0 +1,213 @@
+---
+title: Move a Docker Deployment Into a Cluster
+description: Use ankra migrate to convert a Docker Compose deployment into a stack, deploy it to a cluster, and restore its PostgreSQL, MySQL and MariaDB data in one command.
+---
+
+<Note>
+`ankra migrate up` takes a directory holding a Docker Compose file and moves the whole deployment into a cluster Ankra runs: it converts the services into a stack, applies the stack, and then moves the data out of the deployment's PostgreSQL, MySQL and MariaDB databases into the databases it just deployed. A bare `Dockerfile` and the running Docker daemon work as sources too.
+</Note>
+
+The command is re-runnable, so the usual shape is to rehearse it against a live source, check the result, and then run it once more with `--stop-source` to cut over.
+
+## Prerequisites
+
+- **The Ankra CLI**, v0.14.0 or newer. Until v0.14.0 is out, take the release candidate (`ankra config beta enable && ankra upgrade`) or build from master with `./build.sh --install`. See [installing the CLI](/integrations/ankra-cli#installation).
+- **A logged-in session**: `ankra login`, or `ANKRA_API_TOKEN` in the environment.
+- **A target cluster** in the organisation running an [Ankra agent](/concepts/cluster-agent) new enough to run data restores. An older agent makes the platform refuse the restore with `409`: `The cluster's agent does not support data restores yet; upgrade the agent first.`
+- **The backups feature enabled** for the organisation, and a [backup vault](/guides/backups) in the `ready` state. The dumps travel through the vault's bucket. `ankra backup vaults list` shows what you have, `ankra backup vaults provision` creates one. With exactly one ready vault the CLI picks it; with several, name one with `--vault`.
+- **Docker reachable** from wherever the command runs. Locally that is the daemon on your machine; for a deployment on another host, point at it with `--option docker-host=ssh://root@host`.
+
+## Plan first
+
+`--plan` prints what the run would do and changes nothing:
+
+```bash
+ankra migrate up ./app --cluster production --plan
+```
+
+The plan names:
+
+- The **module** detected in the source directory, the **target cluster**, the **stack** (new, or an existing one that will be updated) and the **namespace**. The stack defaults to the source directory's name and the namespace to the stack's name. `ankra migrate detect ./app` reports which modules recognise a directory, and `ankra migrate modules` lists the ones available.
+- The **output directory** (`--out`, default `ankra-migration`): the conversion is written to `<out>/stack` and the dumps to `<out>/data`. A directory that is not empty is refused unless you pass `--force`.
+- Every **database server** it found, with its engine, version and user, and each database on it with the size read from the running container (`pg_database_size` on PostgreSQL, `information_schema` on MySQL and MariaDB).
+- The **estimated dump size** against the free disk where the dumps will be written. The run refuses rather than filling the disk.
+- **Warnings**, such as a database over 5 GiB (which cannot be uploaded in one piece yet), or the `postgres` maintenance database being skipped. If `postgres` really is your application database, say so with `--option databases.<workload>=postgres`.
+- A **not carried** list: files in the volumes of non-database workloads, and data in engines the export does not dump.
+
+Without `--plan` the same summary is printed and the run waits for a confirmation. `--yes` skips the prompt.
+
+## Run it
+
+```bash
+ankra migrate up ./app --cluster production
+```
+
+<Steps>
+  <Step title="Convert">
+    The source is converted into a stack, exactly as `ankra migrate convert` would, and written to `<out>/stack`.
+  </Step>
+  <Step title="Deploy">
+    The stack is applied to the cluster under its name, the same write `ankra cluster apply` performs, and the command waits for the platform to accept it.
+  </Step>
+  <Step title="Wait for the databases">
+    Each database workload has to have a running, ready pod before anything is restored into it.
+  </Step>
+  <Step title="Export">
+    The dumps are taken from the source, as `ankra migrate export` would, into `<out>/data`.
+  </Step>
+  <Step title="Restore">
+    The dumps are uploaded through the vault, verified, restored in-cluster, and the command waits for the restore to finish.
+  </Step>
+</Steps>
+
+The summary at the end says where the deployment now runs, the **import id** for the restore, the URLs for any workload given one with `--option ingress.<workload>=<host>`, what is still running on the source, and whether the run was a rehearsal.
+
+To publish a workload and get TLS for it, pass the host and the issuer:
+
+```bash
+ankra migrate up ./app --cluster production \
+  --option ingress.web=app.example.com \
+  --option cluster-issuer=letsencrypt-prod
+```
+
+### Flags
+
+| Flag | Description |
+|------|-------------|
+| `--cluster` | Cluster to migrate into, by name or id; defaults to the selected cluster |
+| `--vault` | Backup vault the data goes through; defaults to the organisation's only ready vault |
+| `--module` | Conversion module to use; defaults to the most confident detection |
+| `--stack` | Name of the stack on the cluster; defaults to the directory name |
+| `--namespace` | Namespace the workloads run in; defaults to the stack name |
+| `--out` | Output directory (default `ankra-migration`), holding `stack/` and `data/` |
+| `--option k=v` | Repeatable; convert options and export options both apply here |
+| `--force` | Overwrite an output directory that is not empty |
+| `--no-data` | Deploy the workloads only; carry no data over |
+| `--stop-source` | Stop the source's non-database services before the export, so the dump is final |
+| `-y, --yes` | Skip the confirmation prompt |
+| `--plan` | Print the plan and stop; change nothing |
+| `--timeout` | How long to wait for the run to finish (default `10m`) |
+| `-o json\|yaml` | Machine-readable output |
+
+## Rehearse, then cut over
+
+Nothing about the run requires the source to be stopped, so rehearse with it live, look at what landed in the cluster, and repeat until you are happy. When you are, cut over:
+
+```bash
+ankra migrate up ./app --cluster production --stop-source --yes --force
+```
+
+<Note>
+A second run needs `--force`. The first run leaves `stack/` and `data/` in the output directory, and the command refuses to write into a directory that is not empty without it. `--plan` skips the check entirely, so a plan never needs the flag.
+</Note>
+
+`--stop-source` stops the source's non-database services before the final dump is taken, so nothing writes to the source databases while they are being read. The databases themselves stay up for the dump. The summary prints the `docker start ...` command that brings the source back if you need to roll back. Once you are satisfied, move DNS to the cluster.
+
+## Running the steps separately
+
+The same work is available as individual commands when you want to inspect what each one produced:
+
+```bash
+# 1. Convert the compose project into a stack
+ankra migrate convert ./app --out ./app-k8s
+
+# 2. Apply it (edit ./app-k8s/cluster.yaml first if you want to)
+ankra cluster apply -f ./app-k8s/cluster.yaml
+
+# 3. Dump the databases out of the source
+ankra migrate export ./app --out ./app-data
+
+# 4. Upload and restore into the cluster
+ankra migrate restore ./app-data --cluster production --wait
+```
+
+`ankra migrate data ./app --cluster production --wait` runs steps 3 and 4 together. A restore that was started without `--wait` can be followed with `ankra migrate restore-status <import-id> --wait`.
+
+### Options
+
+`--option` is repeatable, and `ankra migrate up` accepts both sets. The conversion takes:
+
+| Option | Meaning |
+|--------|---------|
+| `source=compose\|dockerfile\|daemon` | Which source to read; detected by default |
+| `profiles=app,dns` / `all-profiles=true` | Which Compose profiles to include |
+| `use-environment=true` | Let your shell satisfy `${VAR}` references |
+| `project=<name>` / `containers=a,b` | The Compose project, or specific containers, when reading the daemon |
+| `image.<workload>=<ref>` | The image to run for a workload the Compose file builds locally |
+| `ingress.<workload>=<host>` | Expose a workload through an Ingress |
+| `cluster-issuer=<name>` | Request TLS for every generated Ingress |
+| `volume-size=20Gi` / `storage-class=<name>` | Size and storage class for every PersistentVolumeClaim |
+
+The export takes:
+
+| Option | Meaning |
+|--------|---------|
+| `docker-host=<host>` | Reach a daemon somewhere else, for example `ssh://root@host` |
+| `databases.<workload>=a,b` | Dump exactly these databases from that workload |
+| `container.<workload>=<name>` | Dump from a specific container |
+
+## How the data travels
+
+The dump runs **inside each database container**, through the container's own shell. The password is read from the container's environment, `*_FILE` secrets are honoured, and no credential is ever put on the host's command line.
+
+- **PostgreSQL**: `pg_dump -Fc` per database, plus `pg_dumpall --globals-only --no-role-passwords` for the roles.
+- **MySQL and MariaDB**: `mysqldump --single-transaction --routines --triggers --events --databases`, as root where a root password exists and otherwise as the application user.
+
+The workloads recognised as databases are the images whose names start with `postgres`, `postgis`, `pgvector` or `timescaledb`, and `mysql`, `mariadb` or `percona`. Sidecars are left alone: an image whose name contains `exporter`, `proxy`, `bouncer`, `backup`, `operator`, `client` or `admin` is never dumped from.
+
+Dumps are written `0600` alongside a `manifest.json` and a `SHA256SUMS`.
+
+On the way in, the CLI uploads straight to the vault's own bucket using presigned URLs the platform mints under `imports/<import_id>/`. The platform verifies each object's size with a `HEAD`, and then the cluster's agent runs a Kubernetes Job in the target namespace: an init container downloads the artifacts and checks them against their SHA-256 sums, and the engine client (`postgres:<major>-alpine`, or `mysql`/`mariadb:<version>`) waits for the database to accept connections and restores into it. Roles and globals go first, then each database, with `pg_restore --clean --if-exists --no-owner` or `mysql < file`. The Job connects using the Service and Secret the conversion generated.
+
+<Note>
+Ankra never holds your data: it goes from your source to your vault's bucket to your cluster. No vault credential is handed to the cluster, and nothing on the machine running the command needs `kubectl` or a database client.
+</Note>
+
+## What is not carried
+
+<Warning>
+The migration moves workloads and relational database contents. It does not move everything.
+</Warning>
+
+- **Files in the volumes of non-database workloads.** Uploads, caches and other on-disk state have to be copied into the PVC yourself.
+- **Data in engines the export does not dump**: Redis, Valkey, MongoDB, Elasticsearch and OpenSearch, RabbitMQ, MinIO, ClickHouse, InfluxDB, Neo4j, Cassandra and CouchDB. Their workloads are converted and deployed; they simply come up empty. The plan names each one it found.
+- **Anything over 5 GiB in one piece.** A single artifact above that is refused; multipart upload is in progress.
+- **PostgreSQL role passwords.** Roles are restored without them. The application user keeps the password from the cluster Secret, so the application works; any other login role needs an `ALTER ROLE ... PASSWORD` afterwards.
+
+A `pg_restore` that finishes with "errors ignored" (exit code 1) is reported as a warning and the restore is treated as successful, which is the normal outcome when the target database already holds some of the objects.
+
+## Troubleshooting
+
+| Symptom | Cause | Fix |
+|---------|-------|-----|
+| Exit `2`: `the organisation has no ready backup vault` | Nothing to stage the dumps through | `ankra backup vaults provision`, then run again |
+| Exit `2`: `the organisation has N ready backup vaults` | The CLI will not guess between them | Name one with `--vault` |
+| Exit `2`: `... is not empty; pass --force to overwrite` | An earlier run left `stack/` and `data/` behind | Pass `--force`, or point `--out` somewhere new |
+| `The cluster's agent does not support data restores yet; upgrade the agent first.` | The cluster's agent predates the restore lane | Upgrade the [cluster agent](/concepts/cluster-agent) |
+| Restore pod in `CreateContainerConfigError` naming the Secret | The stack was never applied in that namespace | Check the stack deployed, and that `--namespace` matches where it landed |
+| `no pod has been created for the restore job`, or `pod ... cannot be scheduled` | After five minutes the namespace still has no room for the restore Job | Free quota or capacity. The Job asks for ephemeral storage of the dump size times 1.1, plus 64 MiB |
+| An artifact above 5 GiB is refused | Single upload limit; multipart is not supported yet | Dump that database separately, or split it |
+
+A failed restore keeps its Job in the namespace for an hour. The agent already tails the Job's log into the failed step, so the reason usually travels with the operation, and the CLI reports `the restore of import <import-id> failed: ...`. To read the Job yourself while it is still there:
+
+```bash
+kubectl -n <namespace> get jobs      # the restore Job is named ankra-restore-<suffix>
+kubectl -n <namespace> logs job/<name> --all-containers
+```
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Backup vaults" icon="vault" href="/guides/backups">
+    Provision the vault the dumps travel through.
+  </Card>
+  <Card title="Stacks" icon="layer-group" href="/concepts/stacks">
+    Understand the stack the conversion produced.
+  </Card>
+  <Card title="Ankra CLI" icon="terminal" href="/integrations/ankra-cli">
+    Install the CLI and browse the rest of its commands.
+  </Card>
+  <Card title="Import a cluster" icon="circle-nodes" href="/guides/import-cluster">
+    Connect the cluster you are migrating into.
+  </Card>
+</CardGroup>
