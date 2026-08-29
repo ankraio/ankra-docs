@@ -28,7 +28,7 @@ ankra migrate up ./app --cluster production --plan
 The plan names:
 
 - The **module** detected in the source directory, the **target cluster**, the **stack** (new, or an existing one that will be updated) and the **namespace**. The stack defaults to the source directory's name and the namespace to the stack's name. `ankra migrate detect ./app` reports which modules recognise a directory, and `ankra migrate modules` lists the ones available.
-- The **output directory** (`--out`, default `ankra-migration`): the conversion is written to `<out>/stack` and the dumps to `<out>/data`. A directory that is not empty is refused unless you pass `--force`.
+- The **output directory** (`--out`, default `ankra-migration`): the conversion is written to `<out>/stack` and the dumps to `<out>/data`. A directory holding nothing but an earlier run's `stack/` and `data/` is reused, so running the same command again needs no extra flag.
 - Every **database server** it found, with its engine, version and user, and each database on it with the size read from the running container (`pg_database_size` on PostgreSQL, `information_schema` on MySQL and MariaDB).
 - The **estimated dump size** against the free disk where the dumps will be written. The run refuses rather than filling the disk.
 - **Warnings**, such as a database over 5 GiB (which cannot be uploaded in one piece yet), or the `postgres` maintenance database being skipped. If `postgres` really is your application database, say so with `--option databases.<workload>=postgres`.
@@ -81,7 +81,7 @@ ankra migrate up ./app --cluster production \
 | `--namespace` | Namespace the workloads run in; defaults to the stack name |
 | `--out` | Output directory (default `ankra-migration`), holding `stack/` and `data/` |
 | `--option k=v` | Repeatable; convert options and export options both apply here |
-| `--force` | Overwrite an output directory that is not empty |
+| `--force` | Overwrite an output directory that holds files no earlier run of this command wrote |
 | `--no-data` | Deploy the workloads only; carry no data over |
 | `--stop-source` | Stop the source's non-database services before the export, so the dump is final |
 | `-y, --yes` | Skip the confirmation prompt |
@@ -94,11 +94,15 @@ ankra migrate up ./app --cluster production \
 Nothing about the run requires the source to be stopped, so rehearse with it live, look at what landed in the cluster, and repeat until you are happy. When you are, cut over:
 
 ```bash
-ankra migrate up ./app --cluster production --stop-source --yes --force
+# rehearse, as often as you like, with the source still serving
+ankra migrate up ./app --cluster production
+
+# cut over
+ankra migrate up ./app --cluster production --stop-source --yes
 ```
 
 <Note>
-A second run needs `--force`. The first run leaves `stack/` and `data/` in the output directory, and the command refuses to write into a directory that is not empty without it. `--plan` skips the check entirely, so a plan never needs the flag.
+Running again over the same output directory needs no extra flag: a directory holding nothing but an earlier run's `stack/` and `data/` is reused. `--force` is only for an output directory that holds something else, and the refusal names the file that is in the way: `<out> holds notes.txt, which no earlier run of this command wrote; pass --force to overwrite it or --out for another directory`.
 </Note>
 
 `--stop-source` stops the source's non-database services before the final dump is taken, so nothing writes to the source databases while they are being read. The databases themselves stay up for the dump. The summary prints the `docker start ...` command that brings the source back if you need to roll back. Once you are satisfied, move DNS to the cluster.
@@ -182,7 +186,7 @@ A `pg_restore` that finishes with "errors ignored" (exit code 1) is reported as 
 |---------|-------|-----|
 | Exit `2`: `the organisation has no ready backup vault` | Nothing to stage the dumps through | `ankra backup vaults provision`, then run again |
 | Exit `2`: `the organisation has N ready backup vaults` | The CLI will not guess between them | Name one with `--vault` |
-| Exit `2`: `... is not empty; pass --force to overwrite` | An earlier run left `stack/` and `data/` behind | Pass `--force`, or point `--out` somewhere new |
+| Exit `2`: `<out> holds notes.txt, which no earlier run of this command wrote` | The output directory holds a file the migration did not put there | Pass `--force` to overwrite it, or `--out` for another directory |
 | `The cluster's agent does not support data restores yet; upgrade the agent first.` | The cluster's agent predates the restore lane | Upgrade the [cluster agent](/concepts/cluster-agent) |
 | Restore pod in `CreateContainerConfigError` naming the Secret | The stack was never applied in that namespace | Check the stack deployed, and that `--namespace` matches where it landed |
 | `no pod has been created for the restore job`, or `pod ... cannot be scheduled` | After five minutes the namespace still has no room for the restore Job | Free quota or capacity. The Job asks for ephemeral storage of the dump size times 1.1, plus 64 MiB |
