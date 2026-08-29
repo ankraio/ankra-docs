@@ -368,11 +368,34 @@ Day-2 growth follows the stored pool: node group add, node group scale, worker s
 
 Every node carries `topology.kubernetes.io/zone` (the UpCloud zone, e.g. `fi-hel2`) and `topology.kubernetes.io/region` (the zone without its index, e.g. `fi-hel`), so `topologySpreadConstraints` and zone-aware scheduling work without extra configuration.
 
+### Node addressing on a meshed cluster
+
+Every node advertises its **overlay address** to Kubernetes, so that is what
+`kubectl get nodes -o wide` reports as `INTERNAL-IP` - not the node's private
+SDN address. Overlay addresses are allocated per cluster from a range Ankra
+manages (`172.30.0.0/16` by default) and stay stable for the life of a node,
+so anything keyed on a node IP - monitoring targets, `NO_PROXY` lists,
+allow-lists - should use the overlay address:
+
+```console
+$ kubectl get nodes -o wide
+NAME             STATUS   INTERNAL-IP   ...
+my-cluster-cp-0  Ready    172.30.0.4    ...   # fi-hel1
+my-cluster-cp-1  Ready    172.30.0.2    ...   # fi-hel2
+my-cluster-cp-2  Ready    172.30.0.3    ...   # se-sto1
+```
+
+Each zone in the pool also takes its own consecutive `/24` from the cluster's
+private range: with the default range, `fi-hel1` gets `10.166.78.0/24`,
+`fi-hel2` `10.166.79.0/24`, and so on. Pick `network_ip_range` with room for
+every zone you expect to add.
+
 ### What stays in the primary zone
 
 UpCloud load balancers and block storage are zone-local, and the cluster's CCM and CSI are scoped to the primary zone:
 
 - `LoadBalancer` Services get backends from primary-zone nodes only. Cross-zone ingress needs a load balancer per zone and DNS failover.
+- The UpCloud cloud controller manager cannot match a node's overlay address to an address UpCloud reports for the server, so it does not maintain node addresses on a meshed cluster and logs `failed to get node address from cloud provider that matches ip` for each node. Nodes are unaffected - they register, stay `Ready` and keep their `providerID` - but treat `LoadBalancer` Services as primary-zone only, and expect that message in the CCM log.
 - `PersistentVolumeClaim`s are provisioned in the primary zone. Run stateful workloads there, or use replicated storage such as Longhorn for the other zones.
 - The bastion is in the primary zone: if that zone is lost, workloads keep running in the others, but provisioning and node management pause until it returns.
 
