@@ -27,12 +27,32 @@ The executable is named `ankra-module-<name>`, where `<name>` is the token users
 <CliVersion since="0.14.0" />
 
 ```bash
-mkdir -p ~/.ankra/modules
-cp ankra-module-procfile ~/.ankra/modules/
-chmod +x ~/.ankra/modules/ankra-module-procfile
+ankra migrate modules install https://example.com/downloads/ankra-module-procfile \
+  --sha256 <hex-digest>
 
 ankra migrate modules
 ```
+
+### Installing a module
+
+`ankra migrate modules install <url-or-file>` fetches one module executable, from an `https` URL or a local file, into `~/.ankra/modules`. There is no index and no registration: the URL is the distribution, and the module's own `describe` answer is the handshake. Nothing is kept until that answer checks out, because the download is staged in a temporary file, run there, and only then moved into place under the name the module calls itself - which is the name you will later type after `--module`.
+
+| Flag | What it does |
+|------|--------------|
+| `--sha256 <hex>` | Pin the download. A digest that does not match is refused before anything runs |
+| `--name <name>` | Assert the name you expect. A module that calls itself something else is refused rather than installed under a surprise name |
+| `--force` | Replace a module of the same name that is already installed. Without it, an existing one is left alone |
+| `-y, --yes` | Skip the confirmation prompt |
+
+Plain `http://` is refused, because the network would otherwise choose which executable you run, and a download larger than 256 MiB is refused as well. The confirmation states in as many words that the module's `describe` verb is about to run and that the module later runs with your permissions. The command prints the sha256 of what it installed, so you can record it or compare it with a checksum the author published.
+
+<Warning>
+A module is an executable you are choosing to run. It reads your files, and an `export` module reaches whatever the source's data lives behind, such as your Docker socket. Install only modules you trust, and pass `--sha256` whenever the author publishes a digest.
+</Warning>
+
+`ankra migrate modules uninstall <name>` removes what `install` put in `~/.ankra/modules`, after a confirmation that `--yes` skips. It never deletes anything else: a module that lives on `PATH` was put there by something other than the CLI, so the command refuses it and names the location, leaving you to remove it the way it was installed.
+
+Placing the executable yourself still works, and discovery does not care how it got there. `install` exists so that fetching, verifying and naming a module is one auditable step rather than four.
 
 `ankra migrate modules` runs the `describe` verb of every candidate it finds and lists the name, version, source (`built-in`, or the path it was found at) and summary. A module that fails to load is reported on stderr as `skipped <path>: <reason>` and the listing carries on, so one broken executable never takes the command down. Pass `-o json` to see the full description, including the capabilities the table does not show.
 
@@ -199,8 +219,7 @@ A Procfile says how to run a process, never what to run it from, so its `convert
 Install it and run it end to end:
 
 ```bash
-cp examples/modules/ankra-module-procfile ~/.ankra/modules/
-chmod +x ~/.ankra/modules/ankra-module-procfile
+ankra migrate modules install ./examples/modules/ankra-module-procfile --yes
 
 mkdir -p /tmp/demo
 printf 'web: bundle exec puma\nworker: bundle exec sidekiq\n' > /tmp/demo/Procfile
@@ -232,6 +251,22 @@ Two capabilities of the built-in `docker` module are Go interfaces rather than p
 - **No plan preflight in `ankra migrate up`.** The built-in module can describe an export before running it, which is how the plan reports each database's size against your free disk. An external module is exported without that preflight, and the plan says so: `the <name> module does not describe its export up front; sizes are unknown until the dump runs`.
 - **No `--stop-source`.** Stopping the source's non-database services before the final dump is the built-in module's, so `ankra migrate up --stop-source` is refused for an external module with `the <name> module cannot stop the source's services; stop them yourself, then run without --stop-source`.
 - **Restores are PostgreSQL and MySQL only**, in the `sql` and `pg_custom` formats, into a Service in the target namespace. A module can dump anything it likes, but the platform will only restore that.
+
+## Plugins are a different mechanism
+
+A module teaches `ankra migrate` a source format. If what you want is a new `ankra` command instead, that is a **plugin**, and the CLI dispatches to them the way `kubectl` does.
+
+An executable named `ankra-<command>` in `~/.ankra/plugins` or anywhere on `PATH` runs as `ankra <command>`, with the remaining arguments, this terminal's standard input, output and error, and `ANKRA_CLI_VERSION` in its environment. Its exit code becomes the CLI's, so a plugin is scriptable exactly like a built-in command.
+
+```bash
+ankra plugins
+```
+
+- **Built-in commands always win.** A plugin can extend the CLI but never change it, and `ankra plugins` warns about one that a built-in shadows and will therefore never run.
+- **Multi-word names resolve longest first.** With both installed, `ankra foo bar` runs `ankra-foo-bar` rather than `ankra-foo` with `bar` as an argument.
+- `~/.ankra/plugins` is searched before `PATH`, the same order `ankra migrate modules` uses for `~/.ankra/modules`.
+
+The two mechanisms never collide, because they are told apart by the file name: `ankra-module-<name>` is a migrate module, listed by `ankra migrate modules`, and anything else beginning with `ankra-` is a plugin, listed by `ankra plugins`. There is no installer for plugins; put the executable in `~/.ankra/plugins` yourself. A plugin runs with your permissions, so the same rule applies as for modules: only install ones you trust.
 
 ## Next steps
 
