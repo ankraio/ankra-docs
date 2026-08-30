@@ -1,0 +1,132 @@
+---
+title: Service Tokens
+description: API credentials owned by the organisation rather than by a person, so an integration keeps working when the person who created it leaves.
+---
+
+A **service token** is an API credential that belongs to your organisation. It authenticates as a **service account** - a principal Ankra owns, carrying a role you chose - rather than as the person who created it.
+
+That difference matters the day someone leaves. A personal API token is tied to its owner's membership, so removing them from the organisation stops every token they minted. If one of those was deploying your production cluster, the pipeline fails with a `401` and nothing in the deploy log explains why.
+
+<Note>
+Personal API tokens still exist and are still the right choice for your own scripting and CLI use. Service tokens are for anything that runs without a person behind it: CI/CD, Terraform, agents, integrations.
+</Note>
+
+---
+
+## Personal token or service token?
+
+| | Personal API token | Service token |
+| --- | --- | --- |
+| Belongs to | The person who created it | The organisation |
+| Where it lives | **Profile → API** | **Organisation → Service tokens** |
+| Survives offboarding | No - it stops with the owner's membership | Yes |
+| Authority | Everything its owner can do | One role you pick for it |
+| Reaches other organisations | Yes, any the owner belongs to | No - pinned to one organisation |
+| Who can see it | Only its owner | Any administrator |
+
+---
+
+## Create one
+
+<Steps>
+  <Step title="Open Organisation → Service tokens">
+    The page requires the `members.manage` permission, so it is visible to owners and admins. That covers reading the list too - knowing which standing credentials exist, and what each one can do, is administrator-only.
+  </Step>
+  <Step title="Name the service account">
+    Name it after the thing that will use it - `ci-deploy`, `terraform`, `backup-runner` - not after yourself. The name is how you will recognise it in the audit log a year from now.
+  </Step>
+  <Step title="Pick its role">
+    The token carries this role and nothing else. Pick the narrowest one that does the job: a pipeline that deploys stacks does not need to manage members or read billing. See [Roles & Access](/guides/roles-and-access) for what each built-in role holds.
+
+    You can only grant a role whose permissions you already hold yourself. A token is usable the moment it is created, so this stops "can manage members" from quietly becoming "can escalate to owner".
+  </Step>
+  <Step title="Copy the token">
+    The secret is shown once. Put it straight into the consuming system's secret store - GitHub Actions secrets, GitLab CI variables, your Terraform backend - before leaving the page.
+  </Step>
+</Steps>
+
+---
+
+## Use it
+
+A service token authenticates exactly like a personal one:
+
+```bash
+export ANKRA_API_TOKEN="<your-service-token>"
+
+curl -sS \
+  -H "Authorization: Bearer $ANKRA_API_TOKEN" \
+  -H "Accept: application/json" \
+  https://platform.ankra.app/api/v1/clusters
+```
+
+Two behaviours differ from a personal token, both deliberate:
+
+- **It cannot switch organisations.** The `X-Ankra-Organisation-Id` header (what `ankra --org` uses) is refused. A service account belongs to one organisation and there is nowhere else for it to go, so "this credential reaches this organisation and no other" is something you can rely on.
+- **It cannot use the personal account surface.** `/org/account/*` - profile, MFA, personal tokens - is refused, so a service token can never mint further credentials for itself outside the page administrators watch.
+
+---
+
+## Rotate without downtime
+
+Rotating means overlapping the old credential and the new one, never a gap.
+
+<Steps>
+  <Step title="Mint a second token under the same account name">
+    Reusing the name adds a token to the **existing** service account rather than creating a new one. Both tokens work, both carry the same role, and the account keeps one continuous audit history across the rotation.
+  </Step>
+  <Step title="Update the consuming system">
+    Replace the secret in your CI, Terraform, or integration, and let it run once to confirm the new token works.
+  </Step>
+  <Step title="Revoke the old token">
+    Revoking stops that one credential immediately and leaves the account's other tokens untouched.
+  </Step>
+</Steps>
+
+---
+
+## Revoke and delete
+
+**Revoke** stops a token working, immediately. Do this the moment you suspect a credential has leaked - it takes effect within the authentication cache window and does not wait for the token's expiry.
+
+**Delete** removes an already-revoked token from the list. A token must be revoked before it can be deleted, so a credential can never disappear from the page while still working somewhere.
+
+<Warning>
+Deleting an account's **last** token also stands the service account down: it keeps its history, so past actions stay attributable, but it loses its role. A token minted under that name later starts from nothing and needs its role granted again deliberately.
+</Warning>
+
+---
+
+## MCP access
+
+A service token can be scoped to Ankra's hosted MCP server instead of the REST API:
+
+- **`mcp:read`** - the read-only tool surface (list, describe, query).
+- **`mcp:write`** - adds the mutating tools (apply, scale, delete).
+
+A token carrying either scope reaches the MCP endpoint **only**, never the REST API - so an agent's credential cannot quietly become a general-purpose API key. Leave both unchecked for an ordinary REST token.
+
+---
+
+## What is recorded
+
+Every mint, revoke, and delete is written to the [audit log](/guides/audit-log) with the administrator who did it, the service account, and the role involved. Actions the token itself takes are attributed to its service account, not to whoever created it - which is the point: a year later the log says `ci-deploy` restarted that workload, not a colleague who has since left.
+
+---
+
+## Related
+
+<CardGroup cols={2}>
+  <Card title="Roles & Access" icon="shield" href="/guides/roles-and-access">
+    What each role can do, and how scopes narrow it.
+  </Card>
+  <Card title="API reference" icon="code" href="/api-reference/introduction">
+    Authenticating and calling the REST API.
+  </Card>
+  <Card title="Audit log" icon="list-check" href="/guides/audit-log">
+    Reviewing who did what, including token lifecycle events.
+  </Card>
+  <Card title="CI/CD" icon="rocket" href="/guides/cicd-pipeline">
+    Wiring a pipeline that deploys through Ankra.
+  </Card>
+</CardGroup>
