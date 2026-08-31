@@ -1,0 +1,140 @@
+---
+title: Cluster Mesh
+description: Connect Kubernetes clusters with Cilium ClusterMesh over the Ankra WireGuard overlay
+---
+
+<Note>
+Cluster Mesh connects two or more of your clusters into one Cilium ClusterMesh: pods reach pods across clusters, and a global service resolves to healthy backends wherever they run — across providers, accounts and sites, over an encrypted WireGuard overlay the platform manages end to end.
+</Note>
+
+## Overview
+
+A mesh is an organisation-level object with clusters as members. When a cluster joins, Ankra handles the whole configuration: it mints the mesh's shared certificate authority on the first join and hands it to every member, re-renders each member's Cilium with its mesh identity and peer list, deploys the `clustermesh-apiserver`, and gives every node a WireGuard peer — and a route — for every node of every other member. Nothing about the mesh requires exposing your Kubernetes API or pod network to the internet: peers talk through the platform overlay.
+
+What you can do with a connected mesh:
+
+- **Global services** — annotate the same Service in two clusters with `service.cilium.io/global: "true"` and requests resolve to healthy backends in either cluster.
+- **Cross-cluster pod traffic** — pods reach pod IPs in other members directly.
+- **Network policy across clusters** — Cilium policies can select peers in other members by cluster name.
+
+## Prerequisites
+
+- The `network_overlay` and `cluster_mesh` features enabled for your organisation.
+- Every member runs the **kubeadm** distribution with **Cilium** — both are set at cluster creation.
+- Members must be *mesh-capable*: created with `--network-mode wireguard_mesh`, or made capable afterwards with `make-ready` (below).
+- Providers wired to the overlay today: **UpCloud** and **Proxmox**. A Proxmox site additionally needs a public address for its site gateway (see [Proxmox sites](#proxmox-and-on-prem-sites)).
+
+No two members may overlap pod ranges. Clusters created while the overlay feature is on get disjoint ranges from your organisation's pools automatically; `readiness` names any conflict before you join.
+
+## Connect two clusters
+
+<Steps>
+  <Step title="Check readiness">
+    ```bash
+    ankra cluster mesh readiness <cluster-a> <cluster-b>
+    ```
+    Each cluster is reported `ready`, or every failing check is spelled out — including which failures are fixable on a running cluster and which are set at create time.
+  </Step>
+  <Step title="Create the mesh and join both clusters">
+    ```bash
+    ankra cluster mesh create production-mesh
+    ankra cluster mesh join <mesh-id> <cluster-a>
+    ankra cluster mesh join <mesh-id> <cluster-b>
+    ```
+  </Step>
+  <Step title="Watch it converge">
+    ```bash
+    ankra cluster mesh show <mesh-id>
+    ```
+    The mesh and its members move `pending → configuring → ready` as the agents prove each step: identity installed, shared trust root in place, every expected peer connected. A healthy pair converges within a few reconcile cycles (typically 5–15 minutes).
+  </Step>
+</Steps>
+
+### What the statuses mean
+
+| Status | Meaning |
+| --- | --- |
+| `pending` | Nothing dispatched to the cluster yet. |
+| `configuring` | Mid-flight: the resource is rolling out, the trust root is not yet confirmed, or the peer list has not reached every member. Not an error. |
+| `ready` | The member's agent verified a connection to every expected peer. |
+| `degraded` | The member verified fewer connections than it expects — a peer is unreachable. |
+
+Statuses are derived from what each cluster's agent actually reported, never from what the platform intended, so `ready` means the connection was proven from inside the cluster.
+
+## Make an existing cluster mesh-capable
+
+A cluster created without `--network-mode wireguard_mesh` (or before the overlay existed) can be made mesh-capable in place — nothing is deleted or recreated:
+
+```bash
+ankra cluster mesh make-ready <cluster-id>
+# Proxmox clusters:
+ankra cluster mesh make-ready <cluster-id> --site-public-ip <address>
+```
+
+`make-ready` allocates the cluster's Cilium identity and an overlay range, keeps the pod and service ranges the cluster already runs, and sets its nodes converging onto the overlay: each node joins the WireGuard mesh, the node IP and API server address switch to overlay addresses, and Cilium re-renders with the identity.
+
+<Warning>
+Zero disruption is not possible: switching node IPs restarts each kubelet once. Plan it like a rolling node operation. Everything else — workloads, data, addresses your Services expose — stays.
+</Warning>
+
+`make-ready` refuses, with the reason, clusters it cannot serve: providers not yet wired to the overlay, non-kubeadm distributions, non-Cilium CNIs, and Proxmox clusters without a site address. Two clusters that were both created identity-less run the same default pod range; they can each mesh with pool-ranged members, and `readiness` names the overlap if you try to mesh them with each other.
+
+## How members connect
+
+Ankra picks the path per pair of members, most private first:
+
+- **Same provider account** — the provider's own account-wide network (UpCloud's utility network, Proxmox's shared SDN).
+- **Everything else** — the platform WireGuard overlay: every node holds an encrypted tunnel and a route to every node of every other member, dialled at the peer's public endpoint or through its site gateway. The `clustermesh-apiserver` is reached inside the tunnel on the peer's overlay address, so it is never exposed publicly.
+
+## Proxmox and on-prem sites
+
+Proxmox nodes sit on a private SDN with no public addresses, so a Proxmox cluster publishes one **site gateway**: its bastion, reached through the site's public address on a mapped UDP port range.
+
+A Proxmox site needs, once:
+
+1. **A public address** for the site, passed as `--site-public-ip` at create or make-ready.
+2. **A UDP port-range forward** on the site's edge to the Proxmox host, and on the host to the cluster's bastion: `51820–52074`. The platform maintains the per-node port mapping on the bastion itself.
+3. **Jump access for the platform**: the credential's jumphost must allow TCP forwarding to the bastion's dial address (the `permitopen` list of the platform's key).
+
+One reachable side is enough to bring tunnels up — the unreachable site initiates outbound and the tunnel is held open with keepalives — but forwarding both sites is more robust.
+
+<Note>
+Sites behind NAT in both directions still mesh, as long as at least one site's UDP range is reachable from the other.
+</Note>
+
+## Try it: a global service
+
+Deploy the same Service in both clusters, backends wherever you like:
+
+```yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: echo
+  namespace: demo
+  annotations:
+    service.cilium.io/global: "true"
+spec:
+  selector:
+    app: echo
+  ports:
+    - port: 80
+```
+
+A pod in either cluster that resolves `echo.demo` is served by healthy backends from both — remove the deployment on one side and traffic shifts to the other.
+
+## Leaving and deleting
+
+```bash
+ankra cluster mesh leave <mesh-id> <cluster-id>   # tears down the member's mesh config, re-renders the rest
+ankra cluster mesh delete <mesh-id>               # only when empty
+```
+
+A mesh with members cannot be deleted out from under them — remove the members first so their configuration is torn down deliberately.
+
+## Troubleshooting
+
+- **A member sits in `configuring`** — the agent has not yet confirmed the trust root or a verify has not run; check the cluster is online and its operations list for the mesh resource. The reconciler retries every five minutes.
+- **A member goes `degraded`** — it verified fewer peers than expected. Check the peer cluster's health first, then the site path (UDP forward, site address) if the pair crosses sites.
+- **`readiness` says a check "cannot be fixed on a running cluster"** — for the CNI and distribution that is true (recreate with kubeadm + Cilium); for the identity and overlay mode, `make-ready` is the fix.
+- **LoadBalancer Services on a meshed UpCloud cluster** — see the [UpCloud guide](/guides/upcloud-clusters): the provider's load balancers attach to the private network, not the overlay.
