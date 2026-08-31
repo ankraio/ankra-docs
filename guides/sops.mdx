@@ -164,6 +164,7 @@ For add-ons (Helm charts), you can encrypt specific values:
 | `adminPassword` | Top-level key |
 | `auth.password` | Nested key (uses dot notation) |
 | `credentials.apiKey` | Deeply nested key |
+| `glob:*Password` | Every key whose name ends in `Password`, at any depth (see [pattern entries](#encrypting-keys-by-pattern)) |
 
 **Example**: Encrypting Grafana admin password
 
@@ -176,6 +177,63 @@ persistence:
 ```
 
 Add `adminPassword` to the encrypted keys list.
+
+---
+
+## Encrypting Keys by Pattern
+
+An entry in the **Encrypted Keys (SOPS)** list is normally a literal key name, matched exactly. Prefix an entry with `glob:` to seal every key whose name matches a pattern instead - including keys added to the document later:
+
+```yaml
+encrypted_paths:
+  - username     # literal entry - matches the key "username" exactly
+  - glob:DB_*    # pattern entry - matches every key whose name starts with DB_
+```
+
+### Pattern Rules
+
+- **`glob:` is the opt-in.** Entries without the prefix keep their exact-match meaning, so a literal key name that contains a dot (`cloud.conf`, `.dockerconfigjson`) is never reinterpreted as a pattern.
+- **Only `*` is a wildcard.** It matches any run of characters, including none. Every other character is literal.
+- **A pattern describes a key name, not a path.** SOPS matches key names at every depth of the document, so `glob:DB_*` seals a top-level `DB_PASSWORD` and a nested `backups.DB_PASSWORD` alike.
+- **A leading `data.` or `stringData.` section is accepted and stripped**, the same as for a literal entry: `glob:stringData.DB_*` and `glob:DB_*` select the same keys.
+- **The entry is stored as written.** `encrypted_paths` keeps `glob:stringData.DB_*` verbatim, and Ankra re-expands it into the SOPS `encrypted_regex` on every push. A key added to the document next month is sealed by the same rule, with no change to the declaration - and because the rule lives in the SOPS metadata, a key you seal by hand with the `sops` editor is matched the same way.
+
+**Example**: Sealing every `DB_` key of a Secret with `glob:stringData.DB_*`
+
+```yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: app-database
+  namespace: app
+type: Opaque
+stringData:
+  LOG_LEVEL: info    # no entry matches - stays plaintext
+  DB_HOST: ENC[AES256_GCM,data:vxvYs7vKw+bPqNWO3tE=,iv:...,tag:...,type:str]
+  DB_PASSWORD: ENC[AES256_GCM,data:aXvYs7vKw+bPqNWO3tF=,iv:...,tag:...,type:str]
+sops:
+  age:
+    - recipient: age1ql3z7hjy54pw3hyww5ayyfg7zqgvc7w3j2elw8zmrj2kg5sfn9aqmcac8p
+      enc: |
+        -----BEGIN AGE ENCRYPTED FILE-----
+        YWdlLWVuY3J5cHRpb24ub3JnL3YxCi0+IFgyNTUxOSBxVEdI...
+        -----END AGE ENCRYPTED FILE-----
+  encrypted_regex: ^(DB_.*)$
+  version: 3.9.4
+```
+
+### Rejected Patterns
+
+A pattern that cannot mean what was intended is rejected when you save, with an error naming the entry and the reason (over the API this is an HTTP 422, for example `Invalid encrypted_paths entry "glob:password": contains no * wildcard; declare an exact key name without the glob: prefix`):
+
+| Entry | Why it is rejected |
+|-------|--------------------|
+| `glob:` | The prefix must be followed by a key-name pattern, such as `glob:stringData.DB_*` |
+| `glob:stringData.` | Names a section but no key-name pattern |
+| `glob:password` | Contains no `*` wildcard - declare the exact key name without the prefix so it keeps exact-match semantics |
+| `glob:*` | Would match every key in the document, `metadata.name` and `kind` included - keep at least one literal character |
+
+A valid pattern that matches **zero keys** fails later, at encrypt or push time, exactly like a misspelled literal key: rather than write a file that only looks encrypted, Ankra refuses with an error such as `declared encrypted_paths [glob:DB_*] match no key in this document, so sops encrypted nothing`. Fix the pattern (or add the keys it should match) and save again.
 
 ---
 
@@ -205,6 +263,22 @@ This will:
 # Encrypt a key in addon configuration
 ankra cluster encrypt addon --name grafana --key adminPassword -f cluster.yaml
 ```
+
+### Encrypting Keys by Pattern with the CLI
+
+<CliVersion since="0.13.0" command="cluster encrypt --key glob:..." />
+
+`--key` also accepts the `glob:` pattern form described in [Encrypting Keys by Pattern](#encrypting-keys-by-pattern):
+
+```bash
+# Encrypt every key ending in Password, now and on every later re-encrypt
+ankra cluster encrypt addon --name grafana --key 'glob:*Password' --cluster prod
+
+# Encrypt every DB_ key of a Secret manifest
+ankra cluster encrypt manifest db-secret --key 'glob:stringData.DB_*' --cluster prod
+```
+
+The pattern is recorded in `encrypted_paths` as written, so keys added later are sealed automatically the next time the values are encrypted. A pattern that matches no key fails the same way a misspelled exact key does. See [ankra cluster encrypt](/reference/cli/cluster#ankra-cluster-encrypt) for the full flag reference.
 
 ### Decrypting for Inspection
 
@@ -291,6 +365,15 @@ The helm-secrets plugin is automatically configured with:
     3. Ensure the key is added to the **Encrypted Keys** list before saving
 
     Keys must be top-level or specified with dot notation for nested paths.
+  </Accordion>
+  <Accordion title="Save Rejected with an Invalid encrypted_paths Entry">
+    A `glob:` pattern entry the grammar rejects fails the save with `Invalid encrypted_paths entry "...": <reason>`. The reason names the fix:
+
+    - `contains no * wildcard` - the pattern has no `*`; declare the exact key name without the `glob:` prefix
+    - `would match every key in the document` - the pattern is only wildcards; keep at least one literal character
+    - `must be followed by a key-name pattern` or `names a section but no key-name pattern` - add the pattern after the prefix or section, such as `glob:stringData.DB_*`
+
+    An error saying declared paths `match no key in this document` means every entry (literal or pattern) selected nothing - check the spelling against the document's actual key names. See [Encrypting Keys by Pattern](#encrypting-keys-by-pattern) for the full rules.
   </Accordion>
   <Accordion title="Key Rotation Stuck">
     If you initiated key rotation but can't complete it:
