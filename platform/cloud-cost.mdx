@@ -15,9 +15,11 @@ All figures are **estimates**, derived from on-demand and spot pricing for the r
 
 **Cost** has its own place in the sidebar, between **Credentials** and **Security**, with three sections:
 
-- **Overview** - the fleet rollup: projected month end (with its pace against the run rate), month to date, run rate, priced-cluster coverage, the split by provider, and your costliest clusters.
-- **Savings** - recommendations with an estimated monthly saving each, and actions that change cluster configuration in one click (see [Savings](#savings)).
+- **Overview** - the fleet rollup: projected month end (with its pace against the run rate), month to date, run rate, priced-cluster coverage, a fleet cost trend summed over your costliest analysed clusters, the split by provider, and your costliest clusters.
+- **Savings** - recommendations with an estimated monthly saving each, the organisation's orphaned-resource findings, and actions that change cluster configuration in one click (see [Savings](#savings)).
 - **Settings** - the display currency, effective discount and network egress estimate behind every figure.
+
+Every cluster in Savings links into its own **cost drill-down** (`/organisation/cost/clusters/<id>`) - the finest-grained view, with the measured evidence behind each recommendation (see [Per-cluster drill-down](#per-cluster-drill-down)).
 
 The clusters list carries the same rollup as a collapsible strip above the table, and the fleet numbers also appear on the [Dashboard](/platform/dashboard).
 
@@ -106,7 +108,49 @@ The **Savings** section turns the same data into actions:
 - **Stop non-production clusters off-hours** - a non-production cluster on a provider with [power schedule](/platform/cluster-power-schedules) support, running around the clock, gets a one-click schedule: weekdays 19:00 UTC the workers scale to zero, 07:00 UTC they come back, and weekends stay down - roughly 64% of its compute off the bill. The exact pair is spelled out before anything is written, and both schedules stay editable under the cluster's power schedules. A cluster with an unknown environment label is never offered a shutdown.
 - **Reduce unallocated spend** - when a quarter or more of a cluster's run rate is not allocated to any workload.
 
-Below the recommendations, **Where the money goes** breaks each analysed cluster into compute (on-demand and spot), storage, network, control plane and Bastion & VMs - with idle and unallocated called out - and **Costliest namespaces** lists the workload dependencies fleet-wide, each with its monthly cost and its share of the cluster. A cluster whose cost could not be read is counted as unanalysed and makes the savings total an explicit lower bound - it is never read as "no savings".
+Each cluster lane links into its [drill-down page](#per-cluster-drill-down), and **Costliest namespaces** lists the workload dependencies fleet-wide, each with its monthly cost and its share of the cluster. A cluster whose cost could not be read is counted as unanalysed and makes the savings total an explicit lower bound - it is never read as "no savings".
+
+### Orphaned & idle resources
+
+A six-hourly waste scan finds resources that bill money while doing no work and lists them on the Savings page (and, narrowed, on each cluster's drill-down):
+
+| Finding | What it means |
+|---------|---------------|
+| Stopped server (still billed) | A Hetzner server with `status: off` - Hetzner bills a stopped server fully as long as it exists |
+| Unattached volume | A block volume attached to no server |
+| Unassigned IP address | A primary IPv4 or floating IP assigned to nothing (unassigned primary IPv6 is free and not reported) |
+| Load balancer with no targets | A load balancer forwarding to nothing |
+| Released persistent volume | A Kubernetes PV stuck in phase `Released` - its disk keeps billing while no claim can bind it again |
+
+Every finding carries its estimated monthly cost (or "price unknown" - never a fabricated zero) and a one-click **Resolve with AI** that opens a chat naming the exact resource. The section is honest about its own limits: it says when the first scan is still pending, when a credential could not be listed (a partial scan, not "no waste"), and how long ago the last scan ran. The provider-side scan covers Hetzner accounts today; the released-PV check covers every cluster.
+
+```bash
+GET /org/cloud-cost/waste            # organisation-wide findings
+GET /org/cloud-cost/waste?cluster_id=<id>
+```
+
+---
+
+## Per-cluster drill-down
+
+Clicking a cluster in Savings (or a costliest-cluster row on the Overview) opens its cost drill-down - the page to use when you want to know **what exactly to adjust, and why it is safe**:
+
+- **Cost trend** - the daily run-rate over the last 30 days, with the delta over the window.
+- **Where the money goes** - a donut of the itemised components (compute on-demand and spot, storage, network, control plane, Bastion & VMs), with idle and unallocated called out.
+- **Node evidence** - the proof behind right-sizing: for every node, the measured **average, p95 and peak** CPU and memory usage over a selectable window (24h / 7d / 30d) against what the scheduler reserved, a derived monthly cost, and a verdict:
+  - *underutilised* - even the busy moments (p95) fit well under the reservation on **both** CPU and memory, with the estimated saving from sizing to 1.5x the observed p95;
+  - *spiky - keep headroom* - bursts make the average misleading, or p95 already approaches the reservation. A spiky node is never called safe to downsize, whatever its average;
+  - *well sized*, or *no metrics* when the store has no series for the node - usage unknown, never "0% used".
+- **Usage over time** - the per-node CPU and memory charts behind those numbers, so you can see the pattern (a nightly batch job, a business-hours curve) rather than trust a single statistic.
+- **Recommendations** - the same recommendations Savings shows (one model, one set of thresholds), now with the measured evidence attached, and the same one-click resolves.
+- **Namespace costs and efficiency** - the allocation donut next to requested-vs-used per namespace.
+- **This cluster's waste findings.**
+
+Node evidence needs the platform metrics pipeline; without it the page says so and keeps the recommendations request-based, and the endpoint answers:
+
+```bash
+GET /org/clusters/{cluster_id}/metrics/utilisation?range_seconds=604800
+```
 
 ---
 
