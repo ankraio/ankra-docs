@@ -1,0 +1,156 @@
+---
+title: Verify a Cluster Mesh
+description: Prove cross-cluster traffic on a Cilium Cluster Mesh with a global service, live from the pod terminal
+---
+
+<Note>
+This guide takes a connected [Cluster Mesh](/platform/cluster-mesh) and proves it end to end: a service with backends only in one cluster, consumed from a pod in the other, verified live in the portal's pod terminal. It is the exact test we run against every mesh change — about five minutes, nothing left behind.
+</Note>
+
+## What you need
+
+- Two clusters joined to the same mesh, both members showing `ready`:
+
+  ```bash
+  ankra cluster mesh show <mesh-id>
+  ```
+
+- `kubectl` contexts for both clusters (`ankra cluster kubeconfig add --use` on each).
+
+Throughout this guide, **cluster A** runs the backends and **cluster B** consumes them. The direction is arbitrary — swap it or run it both ways.
+
+## 1. Deploy backends and a global service on cluster A
+
+The whole trick is one annotation: `service.cilium.io/global: "true"`. A Service carrying it, with the **same name and namespace** in every cluster, is one service mesh-wide — Cilium merges the healthy backends from every member.
+
+```yaml mesh-echo-backend.yaml
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: mesh-test
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mesh-echo
+  namespace: mesh-test
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: mesh-echo
+  template:
+    metadata:
+      labels:
+        app: mesh-echo
+    spec:
+      containers:
+        - name: echo
+          image: ealen/echo-server:0.9.2
+          ports:
+            - containerPort: 80
+          env:
+            - name: PORT
+              value: "80"
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              cpu: 100m
+              memory: 64Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mesh-echo
+  namespace: mesh-test
+  annotations:
+    service.cilium.io/global: "true"
+spec:
+  selector:
+    app: mesh-echo
+  ports:
+    - port: 80
+      targetPort: 80
+```
+
+```bash
+kubectl --context <cluster-a> apply -f mesh-echo-backend.yaml
+```
+
+## 2. Create the same global service on cluster B — with no backends
+
+Cluster B gets the Service and namespace only. Its selector matches nothing locally, which is the point: any traffic it serves must have crossed the mesh.
+
+```yaml mesh-echo-frontend.yaml
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: mesh-test
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mesh-echo
+  namespace: mesh-test
+  annotations:
+    service.cilium.io/global: "true"
+spec:
+  selector:
+    app: mesh-echo
+  ports:
+    - port: 80
+      targetPort: 80
+```
+
+```bash
+kubectl --context <cluster-b> apply -f mesh-echo-frontend.yaml
+kubectl --context <cluster-b> -n mesh-test run mesh-client \
+  --restart=Never --image=curlimages/curl:8.10.1 --command -- sleep 14400
+```
+
+The `mesh-client` pod is your vantage point inside cluster B.
+
+## 3. Prove it from the pod terminal
+
+In the portal, open **cluster B → Kubernetes → Workloads → Pods**, search for `mesh-client`, open it, and switch to the **Terminal** tab. **Connect**, then run:
+
+```bash
+hostname; for i in 1 2 3 4 5; do curl -s mesh-echo.mesh-test | grep -o '"HOSTNAME":"[^"]*"'; done
+```
+
+<Frame caption="Five requests from a pod on one cluster, every response served by pods on the other — load-balanced between them.">
+  <img src="/images/cluster-mesh-terminal-proof.jpg" alt="Ankra pod terminal on the consuming cluster: hostname prints mesh-client, and five curl responses print the HOSTNAME of mesh-echo backend pods that run on the other cluster, alternating between the two" />
+</Frame>
+
+Read what the output says: `hostname` confirms you are in `mesh-client` on cluster B, and every response's `HOSTNAME` is a `mesh-echo-…` pod. Cluster B has **zero** backends for this service, so each of those responses was served across the mesh — and the alternation between pod names is Cilium load-balancing over the remote backends.
+
+## 4. Close the loop
+
+Open **cluster A → Kubernetes → Workloads → Pods** and search for `mesh-echo`:
+
+<Frame caption="The exact pods that served the requests, running on the other cluster.">
+  <img src="/images/cluster-mesh-backends-proof.jpg" alt="Cluster A's pod list showing the two mesh-echo backend pods, Running in the mesh-test namespace, whose names match the HOSTNAME values the terminal printed" />
+</Frame>
+
+The pod names match the `HOSTNAME` values from the terminal, byte for byte. Request made on one cluster, served by the other.
+
+## What this verifies — and what it does not
+
+A passing run proves the whole chain at once: the shared trust root, both `clustermesh-apiserver`s, the cross-cluster service catalogue, and the pod-to-pod data path over the overlay. If you want the layer-by-layer view instead, `cilium-dbg status` inside a Cilium agent pod reports `ClusterMesh: 1/1 remote clusters ready`, and `cilium-health status` probes every node and endpoint in both clusters.
+
+For real workloads, run backends in **both** clusters behind the global service: Cilium prefers healthy backends and a cluster losing its local ones fails over to the remote side. This guide keeps backends on one side only because asymmetry is what makes the proof unambiguous.
+
+## Troubleshooting
+
+- **`curl` times out** — check both members read `ready` in `ankra cluster mesh show`; a member in `configuring` has not converged yet, and `degraded` means it verified fewer peers than expected. The [Cluster Mesh page](/platform/cluster-mesh#troubleshooting) maps each status to its fix.
+- **DNS resolves but only local backends answer** — the Service must carry `service.cilium.io/global: "true"` and identical name + namespace in *both* clusters; a mismatch on either side splits it back into two local services.
+- **A Proxmox or on-prem pair** — confirm the site prerequisites (site address, UDP port-range forward): one reachable side is enough, but none is not.
+
+## Clean up
+
+```bash
+kubectl --context <cluster-a> delete namespace mesh-test
+kubectl --context <cluster-b> delete namespace mesh-test
+```
