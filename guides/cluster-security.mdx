@@ -39,6 +39,9 @@ Trivy Operator must be running in each cluster you want to assess. If it is not 
   <Step title="Open Security">
     Use the organisation **Security** entry for fleet triage, or a cluster's **Security** sidebar entry for a scoped view.
   </Step>
+  <Step title="Optional: publish a software bill of materials">
+    The **SBOM** tab reads the operator's SbomReports, which are off by default because they are the largest objects it writes. On a cluster with control-plane headroom, set the security baseline input **Software bill of materials per image** (`trivy_sbom_generation_enabled`) to `true`; the next scan pass fills the tab. A package list, never image content, then leaves that cluster.
+  </Step>
 </Steps>
 
 ---
@@ -117,7 +120,7 @@ The platform reads advisories for every CVE its security findings reference, kno
 
 ## Organisation Security Center
 
-The organisation Security Center has six sections:
+The organisation Security Center has eight sections:
 
 ### Overview
 
@@ -138,6 +141,26 @@ Every number on a row opens the rows behind it. The **Occurrences** chips (**Ope
 ### Clusters
 
 Per-cluster actionable posture, observed/accepted context, scanner freshness, and a deep link into that cluster's Security view.
+
+### Workloads
+
+The fleet broken down the way a platform team owns it: **cluster, then namespace, then workload, then pod**. Each row is one namespace on one cluster with its scanned workloads and images, the pods the cluster runs there right now, the actionable findings by severity, the known-exploited count, fixable severe findings, and the last scan. Cluster-scoped reports (node and control-plane images) keep a row of their own, labelled **Cluster-scoped**, so the rows still add up to the cluster's totals. Search by namespace or cluster, scope to one cluster, and sort by actionable findings, severity, known exploited, workloads, or pods.
+
+**Show workloads** on a row lists the scanned workload images in that namespace, riskiest first, each linking to its live Kubernetes page. **Show pods** under a workload lists the pods it owns right now - resolved through the owner chain, so a Deployment's report on its ReplicaSet reaches the pods - with every container joined to the findings of the workload container behind it: critical and high counts, known-exploited markers, readiness and restarts, and the running image digest. A container the scanner has no report for is marked **Not scanned**, never shown as clean, and a pod nobody scanned reads **Not scanned** rather than healthy. A namespace with more than 2,000 pods says the listing is capped.
+
+The API exposes the same three levels: `GET /api/v1/org/security/namespaces?cluster_id=&search=&sort=&order=`, the existing `GET /api/v1/org/security/workloads?cluster_id=&namespace=`, and `GET /api/v1/org/security/pods?cluster_id=&namespace=&workload_uid=` (or `workload_kind` + `workload_name`).
+
+### SBOM
+
+The fleet's **software bill of materials**: every package the scanner found in every container image, where it runs, and whether a finding names it. It answers the question a new CVE raises - *where do we run this package* - without waiting for a rescan.
+
+**Components** lists one row per package name, version and ecosystem across every image that carries it: its licences, how many images, workloads and clusters carry it, and the findings that name that exact package and version on those images (with **actionable** and **known exploited** counts; the findings count links to the Findings tab searched for the package). Search by name or package URL, filter by ecosystem (the chips carry live counts), keep only packages with or without findings, and scope to one cluster or namespace.
+
+**Images** lists every image with a bill of materials: OS, component count, the workloads, clusters and namespaces running it, the actionable findings attributed to it, and when the bill of materials was generated. Opening an image shows its identity (reference, digest, registry, CycloneDX version), the workload containers running it, and its full component list with the same search, ecosystem and findings-first controls.
+
+The bill of materials is **opt-in per cluster** (see [Prerequisites](#prerequisites)). The tab's coverage line says how many scanned clusters publish one, and the empty state names the input to turn on, so an empty inventory reads as a switch nobody has flipped rather than a fleet with no packages. Images are keyed by digest and their components stored once, so an image running on ten clusters costs one bill of materials; an image no cluster runs any more keeps its last bill of materials but shows no workloads.
+
+The API exposes `GET /api/v1/org/security/sbom` (components; `search`, `package_type`, `vulnerable`, `cluster_id`, `namespace`, `image`, `sort`, `order`), `GET /api/v1/org/security/sbom/images`, and `GET /api/v1/org/security/sbom/image?image=<digest or reference>`; every response carries a `coverage` block with `scanned_clusters` against `clusters_with_sbom`.
 
 ### Policies
 
@@ -181,7 +204,7 @@ Each cluster Security page shares the same domain model, scoped to that cluster:
 - Quiet scanner/freshness status with refresh and secondary actions ([schedule a report](/guides/security-reports), create an alert).
 - **Overview** — the exploited-in-the-wild banner, the actionable summary, and then the breakdowns: a **Known exploited (CISA KEV)** card (how many of this cluster's findings CISA lists as exploited, their share of its actionable occurrences, how many are past CISA's deadline or used in ransomware, and the exploited findings themselves with their deadlines), the **Risk breakdown** (severity mix, review state, fix readiness), the ranked remediation list, the cluster's **Application hotspots** (workloads ranked by weighted actionable risk), and the trend.
 - **Findings** — server-side list and detail sheet with acknowledge / accept-risk flows, including the KEV markers, EPSS scores, and exploitability sort.
-- **Workloads** — risk explorer with namespace and add-on filters.
+- **Workloads** — risk explorer with namespace and add-on filters. The organisation-wide [Workloads](#workloads) tab adds the namespace and pod levels above and below it.
 - **Network Exposure** - the same NetworkPolicy scoping scores and findings described above, for this cluster alone.
 - **Compliance**: failed and passed benchmark checks, configuration-audit hotspots, scanner remediation, and **Fix with AI** actions.
 
