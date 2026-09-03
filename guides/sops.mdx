@@ -161,9 +161,9 @@ For add-ons (Helm charts), you can encrypt specific values:
 
 | Path | Description |
 |------|-------------|
-| `adminPassword` | Top-level key |
-| `auth.password` | Nested key (uses dot notation) |
-| `credentials.apiKey` | Deeply nested key |
+| `adminPassword` | The key `adminPassword` |
+| `auth.password` | Dot notation locates the key `password` under `auth` |
+| `credentials.apiKey` | Dot notation locates the key `apiKey` under `credentials` |
 | `glob:*Password` | Every key whose name ends in `Password`, at any depth (see [pattern entries](#encrypting-keys-by-pattern)) |
 
 **Example**: Encrypting Grafana admin password
@@ -177,6 +177,48 @@ persistence:
 ```
 
 Add `adminPassword` to the encrypted keys list.
+
+### What an Entry Actually Matches
+
+Dot notation tells Ankra **which key you mean**; it does not confine the
+encryption to that one place in the file. Ankra compiles the entries into a SOPS
+`encrypted_regex` built from the key **names**, and SOPS applies that regex to
+every key at every depth of the document. So an entry `auth.password` names the
+key `password`, and **every** key called `password` in that file is sealed -
+`auth.password`, `backups.password`, and any other.
+
+That is usually what you want, and it is why a key added under a new section
+next month is sealed without changing the declaration. It becomes a problem when
+the key name is not unique to your secret.
+
+<Warning>
+**Do not mark a key whose name is a structural YAML or Kubernetes field**, such
+as `key`, `name`, `path`, `value`, `type`, `host`, `port` or `operator`. The
+entry seals every field of that name in the file, including the ones the chart
+needs to read in plaintext.
+
+Marking a key called `key` in a kube-prometheus-stack values file produces
+`encrypted_regex: ^(key)$`, which seals the node-affinity term as well:
+
+```yaml
+prometheusSpec:
+  affinity:
+    nodeAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        nodeSelectorTerms:
+          - matchExpressions:
+              - key: ENC[AES256_GCM,data:...]   # ← sealed by ^(key)$, not a secret
+                operator: In
+                values: [linux]
+```
+
+The rendered chart then fails, and every GitOps sync of that cluster fails to
+decrypt with `Input string kubernetes.io/hostname does not match sops data
+format`, until the file is decrypted again.
+
+Give the value a distinctive key name instead (`opsgenieApiKey`, `smtpPassword`),
+or seal the whole credential as its own Secret manifest.
+</Warning>
 
 ---
 
@@ -364,7 +406,12 @@ The helm-secrets plugin is automatically configured with:
     2. Verify SOPS is initialized at the organisation level
     3. Ensure the key is added to the **Encrypted Keys** list before saving
 
-    Keys must be top-level or specified with dot notation for nested paths.
+    Name a top-level key directly, or use dot notation to locate a nested one. Either way the entry names a key, and every key of that name in the document is sealed - see [What an Entry Actually Matches](#what-an-entry-actually-matches).
+  </Accordion>
+  <Accordion title="A Chart Field Was Encrypted That Should Not Have Been">
+    An entry seals every key of that name at every depth, so an entry named after a structural field (`key`, `name`, `path`, `value`, `type`, `host`, `port`, `operator`) also seals the chart's own fields. The symptom is a render or sync failure naming a value that was never a secret, such as `Input string kubernetes.io/hostname does not match sops data format`.
+
+    Decrypt the file, remove the over-broad entry from **Encrypted Keys (SOPS)**, give the secret a distinctive key name, and re-encrypt. See [What an Entry Actually Matches](#what-an-entry-actually-matches).
   </Accordion>
   <Accordion title="Save Rejected with an Invalid encrypted_paths Entry">
     A `glob:` pattern entry the grammar rejects fails the save with `Invalid encrypted_paths entry "...": <reason>`. The reason names the fix:
