@@ -176,6 +176,33 @@ flowchart LR
     E --> F[Cluster Updated]
 ```
 
+## What Ankra Writes Back to Git
+
+Sync is two-way. Changes you commit are applied to the cluster, and changes made through the portal, the CLI, the API or Ankra AI are written back to the cluster's directory in the repository, so Git stays the record. A platform write lands as a commit authored by `ankra-platform[bot]` (a change made in the portal, CLI or API) or by `Ankra Reconciler` with the subject `Sync cluster state from Ankra` (the reconciler exporting stored state).
+
+### The ownership manifest: `.ankra-owned.json`
+
+Every cluster directory carries a file named `.ankra-owned.json`. Ankra rewrites it on each platform write. It is a record of what that write rendered - not an inventory of the directory, and not a claim on it:
+
+- `paths` lists the files the last write rendered. It bounds **deletion**: when a stack or add-on is removed, only files listed here are pruned. A file Ankra never rendered is never deleted, only reported.
+- `contents` maps each rendered file to a digest of the bytes Ankra itself last wrote there. It bounds **overwriting**: before writing a file, Ankra compares what is in Git with that digest. If they differ, the file was edited since, and Ankra keeps the Git version instead of replacing it.
+
+Because the manifest is regenerated from each render, it grows when the cluster gains stacks or add-ons, and a write scoped to one stack may list a path it chose not to write. Neither means Ankra will overwrite that path; the digest decides.
+
+<Warning>
+**Never delete or hand-edit `.ankra-owned.json`.** It does not fail safe. With no manifest at head, Ankra has no record of what it wrote, so the overwrite boundary switches off and the next platform write replaces whatever is in Git. If it has been removed, restore it from Git history.
+</Warning>
+
+### Hand-maintaining a file
+
+To keep a value Ankra would otherwise render - an image tag pinned above a chart's `appVersion` for a CVE fix, an `updateStrategy`, `topologySpreadConstraints` - edit the file in Git and merge it. Ankra syncs the change into the cluster, and from then on the file's bytes in Git no longer match the digest Ankra recorded, so no platform write replaces them. This holds for every write path: portal, CLI, API, Ankra AI and the reconciler's own export.
+
+Three limits apply today:
+
+- **SOPS-encrypted files are not covered.** Their committed bytes are ciphertext that cannot be reproduced from the render, so Ankra keys them on the embedded content fingerprint instead, and re-encrypts the file whenever its stored values change. A hand edit to an encrypted file is overwritten by that re-encryption; change the value in Ankra instead (see [SOPS](/guides/sops)).
+- **`.sops.yaml` in the cluster directory is generated** from the organisation's key on every export. Rules added to it by hand are not kept.
+- **Preservation is silent.** Ankra logs `Preserving git content the platform did not write` on its side, but the sync status still reads in sync and no portal, CLI or API surface lists the preserved paths yet. While a file is preserved, a change made to it in Ankra does not reach Git - make the change in Git instead, which also brings Ankra's copy back in line.
+
 ---
 
 ## Monitoring Sync Status
@@ -327,6 +354,8 @@ If Ankra isn't syncing as expected:
 | Unsure which repository a cluster deploys from | Run `ankra cluster gitops status --cluster <name>`. It reports the configured repository and branch, and `observed_source` - the repository the last successful sync actually read. If they disagree, `source_mismatch` is `true` |
 | A `prometheus_metrics` or `log_source` block you deleted keeps coming back | Removing the block is not a disconnect - the platform re-renders it. Disconnect the source in the cluster's **Settings** → **Data Sources** |
 | A field you added to a data source block fails the sync | Only the fields in the [ImportCluster schema](/reference/importcluster#observability-sources-in-git) are accepted; the error names the offending key. Credential fields (`username`, `password`, `token`, `auth_scheme`) are always refused - reference a credential by `credential_name` |
+| A value you set in Git is reverted by a platform write | Check that `.ankra-owned.json` exists in the cluster directory - without it the overwrite boundary is off ([What Ankra Writes Back to Git](#what-ankra-writes-back-to-git)). Restore it from history, and report the reverting commit: its author, `ankra-platform[bot]` or `Ankra Reconciler`, tells support which write path produced it |
+| A change made in the portal never reaches Git | The file is hand-maintained - its bytes in Git are not what Ankra last wrote, so Ankra preserves it. Make the change in Git; Ankra syncs it in and the file becomes writable again |
 
 <Tip>
 Use the Ankra WebUI to see sync status and any errors. The Operations page shows deployment history and helps identify issues.
