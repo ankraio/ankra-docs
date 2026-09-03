@@ -183,8 +183,9 @@ Add `adminPassword` to the encrypted keys list.
 Dot notation tells Ankra **which key you mean**; it does not confine the
 encryption to that one place in the file. Ankra compiles the entries into a SOPS
 `encrypted_regex` built from the key **names**, and SOPS applies that regex to
-every key at every depth of the document. So an entry `auth.password` names the
-key `password`, and **every** key called `password` in that file is sealed -
+every key at every depth of the document. A dotted entry contributes its **last
+segment** as one of those names. So an entry `auth.password` names the key
+`password`, and **every** key called `password` in that file is sealed -
 `auth.password`, `backups.password`, and any other.
 
 That is usually what you want, and it is why a key added under a new section
@@ -196,6 +197,11 @@ the key name is not unique to your secret.
 as `key`, `name`, `path`, `value`, `type`, `host`, `port` or `operator`. The
 entry seals every field of that name in the file, including the ones the chart
 needs to read in plaintext.
+
+**This applies to dotted entries too, by their last segment.** `tls.key`,
+`metadata.name` and `spec.host` end in a structural field name, so they seal
+every `key`, `name` and `host` in the document exactly as the bare entry would.
+Writing the parent section does not scope the seal to it.
 
 Marking a key called `key` in a kube-prometheus-stack values file produces
 `encrypted_regex: ^(key)$`, which seals the node-affinity term as well:
@@ -212,12 +218,17 @@ prometheusSpec:
                 values: [linux]
 ```
 
+Marking `tls.key` on the same file produces `^(key|tls\.key)$` — a different
+regex, but it still carries `key` as an alternative, so it seals that same
+affinity term.
+
 The rendered chart then fails, and every GitOps sync of that cluster fails to
 decrypt with `Input string kubernetes.io/hostname does not match sops data
 format`, until the file is decrypted again.
 
 Give the value a distinctive key name instead (`opsgenieApiKey`, `smtpPassword`),
-or seal the whole credential as its own Secret manifest.
+or seal the whole credential as its own Secret manifest. Renaming the parent
+section does not help; only the last segment decides what is matched.
 </Warning>
 
 ---
@@ -409,7 +420,7 @@ The helm-secrets plugin is automatically configured with:
     Name a top-level key directly, or use dot notation to locate a nested one. Either way the entry names a key, and every key of that name in the document is sealed - see [What an Entry Actually Matches](#what-an-entry-actually-matches).
   </Accordion>
   <Accordion title="A Chart Field Was Encrypted That Should Not Have Been">
-    An entry seals every key of that name at every depth, so an entry named after a structural field (`key`, `name`, `path`, `value`, `type`, `host`, `port`, `operator`) also seals the chart's own fields. The symptom is a render or sync failure naming a value that was never a secret, such as `Input string kubernetes.io/hostname does not match sops data format`.
+    An entry seals every key of that name at every depth, so an entry named after a structural field (`key`, `name`, `path`, `value`, `type`, `host`, `port`, `operator`) also seals the chart's own fields. Check dotted entries by their **last segment**: `tls.key` and `metadata.name` are the same hazard as a bare `key` or `name`. The symptom is a render or sync failure naming a value that was never a secret, such as `Input string kubernetes.io/hostname does not match sops data format`.
 
     Decrypt the file, remove the over-broad entry from **Encrypted Keys (SOPS)**, give the secret a distinctive key name, and re-encrypt. See [What an Entry Actually Matches](#what-an-entry-actually-matches).
   </Accordion>
