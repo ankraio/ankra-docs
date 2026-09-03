@@ -1,0 +1,377 @@
+---
+title: pipeline.yaml reference
+description: Every key of .ankra/pipeline.yaml with its type and default, the expression language and its contexts, the trigger table with the reason a run records, and the validator's diagnostics.
+---
+
+import { CliVersion } from "/snippets/cli-version.jsx";
+
+`.ankra/pipeline.yaml` is the one file an [Ankra pipeline](/guides/ankra-pipelines) is planned from. It sits beside `.ankra/ankra.yaml` in the repository, and its parser, validator and planner live in exactly one place on the platform, so the dry run you get from `ankra pipeline validate` is the run.
+
+## The document
+
+```yaml
+apiVersion: ankra.io/v1
+kind: Pipeline
+metadata:
+  name: "orders-api"
+stages:
+  - name: "test"
+    kind: "run"
+    image: "golang:1.26"
+    run: "go test ./..."
+```
+
+The parser is lenient about anything that does not change what the pipeline does, and strict about anything that would:
+
+- Unknown keys are ignored. A single scalar stands in for a one-element list (`branches: main`), a quoted number reads as a number (`retention_days: "30"`), and a flag accepts `true`/`false`, `yes`/`no`, `on`/`off` and `1`/`0`. YAML anchors are resolved, so an anchored `services` or `defaults` block behaves like an inline one.
+- An empty document, a document that is not YAML, an `apiVersion` other than `ankra.io/v1`, a `kind` other than `Pipeline`, or a `stages` block that is not a list is fatal: the pipeline cannot be planned.
+- `metadata.name` and at least one stage are required.
+
+A pipeline mistakenly committed under `.ankra/manifests/` is refused by the manifest gate, because the file carries a `kind` and an `apiVersion` and would otherwise be applied to a cluster.
+
+## Top-level keys
+
+| Key | Type | Default | Meaning |
+|-----|------|---------|---------|
+| `apiVersion` | string | required | `ankra.io/v1` |
+| `kind` | string | required | `Pipeline` |
+| `metadata.name` | string | required | The pipeline's name |
+| `on` | block | none | The triggers - see [Triggers](#triggers). A pipeline that declares none is still runnable by API dispatch. |
+| `concurrency.group` | string | none | Runs sharing a group serialise: a new run waits queued behind the group's holder. Expressions are allowed, for example `"${{ ankra.repository }}-${{ ankra.ref }}"`. |
+| `concurrency.cancel_in_progress` | flag | `false` | With a group, an in-flight run of the same group is superseded and cancelled when a new one arrives. Set without a group it does nothing, and the validator warns. |
+| `workspace.size` | quantity | none | The per-run volume every stage shares, for example `"10Gi"` |
+| `workspace.access` | `rwo` or `rwx` | `rwo` | `rwo` keeps every step of the run on the node the volume bound to. `rwx` needs a StorageClass that serves it named on the claim; nothing names one today, so an `rwx` workspace is refused at dispatch rather than left waiting for a claim that never binds. |
+| `defaults.image` | string | none | The image of every stage that names none |
+| `defaults.timeout` | duration | 30 minutes | The timeout of every stage that names none, for example `"15m"` |
+| `defaults.resources` | block | 500m CPU, 1Gi memory | `cpu`, `memory`, `gpu` for every stage that names none |
+| `defaults.cache` | list | none | Cache volumes mounted into every stage |
+| `defaults.working_directory` | string | the workspace root | Working directory of every stage that names none |
+| `defaults.network` | tier | `none` | Network tier of every stage that names none. A value above `egress-https` is a protected section. |
+| `defaults.env` | map | none | Environment variables for every stage |
+| `defaults.secrets` | list | none | Declared secrets every stage may read |
+| `permissions` | map | none | Scope to `none`, `read` or `write`. The authority granted is the intersection of this block, the organisation's policy and the target environment; it can only narrow. Protected. |
+| `secrets` | list | none | `name`, `from` (`app_env_secret`, `org_variable`, `registry` or `credential`) and optional `key`. A stage may only name a secret this list declares. Protected. |
+| `credentials` | list | none | `name`, `from` (`cloud`, `git`, `registry` or `object_storage`) and `as`, the name it is materialised under. Protected, and refused for a fork run. |
+| `services` | map | none | Sidecars by name: `image` (required), `env`, `ports`, and `ready.tcp` (a port) or `ready.http` (a path, probed on the first declared port). Without a probe the stage starts as soon as the container does. |
+| `stages` | list | required | The main DAG |
+| `on_failure` | list | none | Stages that run only when the run is failing |
+| `finally` | list | none | Stages that run after everything else whatever the outcome, including a cancelled run |
+| `environments` | map | none | The pipeline's half of each deployment environment binding: `data` (`none`, `restore_point` or `seed`), `verify` (stage names), `rollout` (`recreate`, `rolling`, `blue_green` or `canary`) and `gate` (`automatic`, `manual` or `custom`). Protected. |
+
+Stage names must be unique across `stages`, `on_failure` and `finally`, because the three share one run and one output namespace.
+
+## Triggers
+
+| Key | Fields | Fires on |
+|-----|--------|----------|
+| `on.push` | `branches`, `paths` | A push to a matching branch whose changed files match `paths`. Empty `branches` matches every branch; empty `paths` matches every change. |
+| `on.pull_request` | `branches`, `paths`, `fork_policy` | A pull request opened, synchronised or reopened against a matching **base** branch. `fork_policy` is `none` (refuse), `read_only` (the default: no secrets, no credentials, no identity beyond reading the run) or `trusted`; it is a protected section. |
+| `on.tag` | `patterns` | A pushed tag matching one of the glob patterns |
+| `on.schedule` | list of `cron`, `branch`, `stages` | A five-field cron expression, numeric fields only (`MON` and `JAN` are refused, because the scheduler evaluates the fields numerically). `branch` defaults to the repository's default branch; `stages` restricts the run to a subset, which is how a nightly runs only the expensive suites. Schedules are stored and validated today; the loop that fires them has not shipped. |
+| `on.manual` | `inputs` | A dispatch from the CLI or the API with the declared inputs |
+| `on.webhook` | none | Declares an inbound dispatch against a per-pipeline token. Presence is the declaration; the tokens are not available yet. |
+
+A manual input has a `name` (letters, digits and underscores, so it can be addressed as `${{ inputs.<name> }}`), a `type` (`string`, the default, `boolean`, `number` or `choice`), an optional `default`, an `enum` (required for `choice`, and the default must be one of its values), `required` and `description`. A dispatch whose inputs do not match is refused with the planner's diagnostics and records nothing.
+
+A path filter is decided on the event's changed files, and never excludes a run when the diff could not be read or was truncated - a file the planner could not see is not a file that did not change; the run records that it passed on incomplete information.
+
+## Stages
+
+Every stage has a `name` (lower-case letters, digits, dashes and underscores, starting with a letter or digit - it becomes an expression key, a Job name component and a check-run title) and a `kind`. The kinds are a closed vocabulary; an unknown kind is fatal rather than a stage the planner skips.
+
+| Kind | What it does | Today |
+|------|--------------|-------|
+| `checkout` | Materialises the repository at the run's ref into the workspace | Dispatched to the cluster; the runner image that performs it has not shipped |
+| `run` | Executes `run` (a script, under `/bin/sh -eu`) or `uses` in an image the organisation's policy allows | Executes end to end |
+| `build` | Builds a container image by digest in a rootless BuildKit pod in `ankra-ci-build` | Refused at dispatch until the build lane ships |
+| `scan` | Runs the scanners over the source and the built image | Dispatched; runner not shipped |
+| `gate` | Evaluates persisted findings against organisation policy | Settled by the platform; stays pending today |
+| `publish` | Re-tags an approved image digest in the registry | Settled by the platform; stays pending today |
+| `preview` | Deploys the run's artefact into a per-pull-request environment | Settled by the platform; stays pending today |
+| `verify` | Runs one verification: `probe`, `smoke`, `load_test`, `assert_promql` or `restore_verify` | Dispatched; runner not shipped |
+| `deploy` | Applies the run's artefact to a bound environment | Settled by the platform; stays pending today |
+| `agent` | An AI mission with a `goal`, `tool_profile`, `mode` (`ask` or `agent`), `budget` (`tool_calls`, `turns`, `minutes`) and `context` | Settled by the platform; stays pending today |
+| `approval` | Blocks the run on a human decision: `roles` (required), `min_approvals`, `timeout`, `message`. Never satisfiable by an AI or a service token | Settled by the platform; stays pending today |
+| `webhook` | Posts a signed payload to `url` with `method`, optionally `wait_for_callback` within `timeout` | Settled by the platform; stays pending today |
+| `automation` | Runs an AI automation graph and reads its outputs | Settled by the platform; stays pending today |
+| `ankra` | Runs a platform verb through the run's scoped identity | Settled by the platform; stays pending today |
+| `external` | Waits on a provider's own CI: `provider`, `workflow`, `inputs` | Settled by the platform; stays pending today |
+
+A stage of a platform-settled kind is left exactly as the dispatcher found it; a run containing one does not conclude until that kind's evaluator ships, and `ankra pipeline cancel` is how to release its concurrency group in the meantime.
+
+### Fields common to every stage
+
+| Field | Type | Default | Meaning |
+|-------|------|---------|---------|
+| `image` | string | `defaults.image` | The container the stage runs in; required for `checkout`, `run`, `scan` and `verify`, ignored for `build` (the builder is Ankra's) |
+| `uses` | string | none | A reusable step, spelled `ankra/<name>`, `custom_tool/<name>` or `repo:<owner>/<name>@<ref>#<path>`. Only the spelling is validated today; resolution is not available. A stage declares `run` or `uses`, not both. |
+| `with` | map | none | Inputs to `uses` |
+| `run` | string | none | The script; required on a `run` stage without `uses` |
+| `needs` | list | none | Stages this one waits for. Every name must exist and the graph must be acyclic. |
+| `if` | expression | none | Runs the stage only when the expression is true; see [Expressions](#expressions) |
+| `when.branches`, `when.paths`, `when.events` | lists | none | Filters on the event without an expression, decided before any expression context exists |
+| `matrix` | map | none | Axes (`name: [values]`) plus `include` and `exclude` lists, with GitHub Actions semantics; at most 64 legs after exclusions. An axis may not be named `include` or `exclude`. |
+| `services` | list | none | Names from the `services` block this stage reaches |
+| `env` | map | none | Environment variables; names beginning `ANKRA_`, `PATH` and the loader variables, and the builder's own `BUILDKIT*`, `BUILDCTL`, `ROOTLESSKIT` and `DOCKER_CONFIG` are refused |
+| `secrets` | list | none | Names from the `secrets` block this stage may read |
+| `cache` | list | `defaults.cache` | `key` (expressions allowed, typically `hashFiles`) and `paths` under the workspace; one 5Gi volume per path, reused by key across runs |
+| `artifacts` | list | none | `name`, `paths` and optional `retention_days` (zero takes the organisation default) |
+| `test_results` | list | none | `format` (`junit`, `go-test`, `pytest` or `playwright`) and `path` |
+| `outputs` | map | none | The names the stage writes to `$ANKRA_OUTPUT`, read back onto the step |
+| `timeout` | duration | `defaults.timeout`, else 30 minutes | Wall-clock budget; at most 6 hours, longer values are clamped and recorded |
+| `resources.cpu`, `resources.memory`, `resources.gpu` | quantities | 500m, 1Gi, none | Requests equal limits; at most 8 cores, 32 GiB and 4 GPUs. `gpu` is protected and needs `runs_on.node_selector`. |
+| `runs_on.cluster`, `node_selector`, `tolerations`, `runtime_class`, `arch` | placement | none | Every field is protected |
+| `network` | `none`, `egress-https`, `services` | `defaults.network`, else `none` | `services` needs at least one service; anything above `egress-https` is protected |
+| `shm_size` | quantity | `64Mi` | Size of `/dev/shm` |
+| `working_directory` | string | `defaults.working_directory` | Under the workspace mount |
+| `allow_failure` | flag | `false` | The stage may fail without failing the run |
+| `continue_on_error` | flag | `false` | Stages depending on this one still run when it fails. Setting both flags earns a warning: `allow_failure` alone is what keeps the run green. |
+| `retry` | block | none | `max_attempts` (counts the first attempt; at most 5), `backoff` (`fixed` or `exponential`), `on` (`failure`, `timeout`, `infra_error`). Validated and carried today, not applied. |
+| `gate.approval_roles`, `gate.require_stages` | lists | none | The `gate` block; protected |
+| `environment` | string | none | An environment this stage targets; a name the pipeline does not declare earns a warning |
+
+### Kind-specific blocks
+
+| Block | Fields |
+|-------|--------|
+| `build` | `dockerfile`, `context`, `platforms`, `build_args` (names only), `provenance`, `sbom`, `cache_to` |
+| `scan` | `scanners` (`semgrep`, `checkov`, `trivy`) and `fail_on`, a map from scanner to the severity that blocks; a scanner absent from the map reports without blocking |
+| `preview` | `database.enabled`, `database.extensions`, `database.seed_from_restore_point`, `migrate`, `ingress_path` |
+| `verify` | Exactly one of `probe` (`url`, `status`, `timeout`), `smoke` (`image`, `run`), `load_test` (`script`, `virtual_users`, `duration`, `thresholds`), `assert_promql` (`query`, `comparison`, `threshold`, `for`) or `restore_verify` (`restore_point`, `queries`) |
+| `agent` | `goal` (required), `tool_profile`, `mode`, `budget.tool_calls`, `budget.turns`, `budget.minutes`, `context` |
+| `approval` | `roles` (required), `min_approvals`, `timeout`, `message` |
+| `webhook` | `url` (required), `method`, `wait_for_callback`, `timeout` |
+| `external` | `provider` (required), `workflow`, `inputs` |
+
+### What every step carries
+
+A step's container mounts the run's workspace at `/workspace` and runs with these variables set: `ANKRA_RUN_ID`, `ANKRA_STEP_ID`, `ANKRA_STEP_KEY`, `ANKRA_STEP_KIND`, `ANKRA_ORGANISATION_ID`, `ANKRA_CLUSTER_ID`, `ANKRA_REPOSITORY_ID`, `ANKRA_APPLICATION_ID`, `ANKRA_HEAD_SHA`, `ANKRA_REF`, `ANKRA_IS_FORK` and `ANKRA_WORKSPACE`. `ANKRA_OUTPUT` names a file on a memory-backed volume: append `key=value` lines to it (at most 64 KiB) and they are recorded as the step's outputs when the script exits, whether it succeeded or not. Declared secrets are delivered as files under `/run/agent-secrets` or as environment variables once secret delivery ships.
+
+## Expressions
+
+Any string field may embed expressions between `${{` and `}}`; the text inside is [CEL](https://cel.dev). Evaluation is deterministic and performs no I/O: everything an expression can reach arrives in its context, and `hashFiles` is served by the agent, which has the workspace.
+
+| Context | Paths |
+|---------|-------|
+| `ankra` | `organisation`, `repository.owner`, `repository.name`, `repository.provider`, `application` (empty for a bare repository), `ref` (the full git reference, for example `refs/heads/main` or `refs/tags/v1.2.0`), `sha`, `sha_short` (7 characters), `run.id`, `run.number`, `environment.name`, `environment.url`, `urls.run`, `urls.portal` |
+| `event` | `kind` (`push`, `pull_request`, `tag`, `schedule`, `manual`, `api`), `provider` (`github`, `gitlab`, `bitbucket`), `pull_request.number`, `pull_request.is_fork`, `pull_request.head_repo`, `ref`, `before_sha`, `changed_files` |
+| `inputs.<name>` | The validated dispatch inputs |
+| `matrix.<name>` | The current matrix leg |
+| `vars.<name>` | Organisation, cluster and environment variables |
+| `env.<NAME>` | Environment variables in scope for the step |
+| `steps.<key>.outputs.<name>`, `steps.<key>.outcome` | Concluded steps of this run |
+| `needs.<stage>.outputs.<name>`, `needs.<stage>.result` | The stages this one depends on |
+| `secrets.<NAME>` | `true` when the secret is declared - never its value, so no expression can leak one into a log line or a check-run summary |
+
+Functions: `hashFiles(pattern, …)`, `contains(haystack, needle)` (substring or list membership), `startsWith`, `endsWith`, `fromJSON`, `toJSON` (compact, keys sorted), `format(template, args…)` with GitHub-style `{0}` placeholders, `join(list)` and `join(list, separator)`, and the status functions `always()`, `success()`, `failure()`, `cancelled()` and `skipped()`. CEL's standard library - `size`, `matches`, the bounded `all`/`exists`/`map`/`filter` macros, arithmetic and comparisons - is available on top.
+
+Rules worth knowing:
+
+- A stage condition is compiled at plan time against a schema without `steps.*`, so a reference to a step that has not run is reported as a diagnostic rather than resolving to nothing; the dispatcher evaluates the same definition with the concluded steps in scope.
+- `has()` is refused on `inputs`, `matrix`, `vars`, `env`, `steps`, `needs` and `secrets`: an absent key on those roots resolves to the zero value, so a converted `env.DEPLOY == 'true'` keeps its meaning when the variable is unset. Compare the value instead. `has()` still works on `ankra` and `event`, whose paths are fixed.
+- Converted GitHub expressions keep working - single-quoted strings, `==`, `!=`, `&&`, `||`, `!`, the functions above, and the `steps`, `matrix`, `inputs`, `env` and `needs` references map one to one. A reference to the `github`, `runner`, `job` or `strategy` context is a diagnostic naming the Ankra equivalent (`github.sha` is `ankra.sha`, `github.event_name` is `event.kind`). Two deliberate departures: `toJSON` emits compact JSON, and comparisons follow CEL's typed rules, so `'1' == 1` is a type error rather than true.
+- A template is at most 8,192 bytes with at most 64 expressions; an expression is at most 2,048 bytes and 24 levels deep; the evaluation cost is capped. Each bound is refused with a fixed sentence at validation time.
+
+## Triggers and reasons
+
+Every event that reaches the trigger is decided in order, and the answer is recorded as one of these tokens. Where a run row is written, `ankra pipeline list` shows it; where none is, the reason is in the platform's logs and metrics.
+
+| Reason | Meaning | Run recorded |
+|--------|---------|--------------|
+| `enqueued` | One run was queued | Yes |
+| `already_queued` | A run for this event is still queued; the redelivery joined it | No new run |
+| `already_recorded` | A run for the same commit, trigger, reference and pull request exists inside the recent-run window - running, or concluded skipped; the redelivery joined it | No new run |
+| `skipped` | The trigger matched but its branch, tag or path filter excluded the event | Yes, concluded with outcome `skipped` and the planner's sentence |
+| `refused` | A dispatch the planner refused - an undeclared `on.manual`, an input outside its declared type | No; the diagnostics go back to the caller |
+| `repository_not_onboarded` | The repository is not connected to a pipeline | No |
+| `no_ci_cluster` | The organisation has no CI cluster and no AI staging cluster | No, for a provider event; a dispatch still gets its run row |
+| `no_definition` | The repository has no stored definition | No |
+| `trigger_not_declared` | The definition's `on:` block does not declare this event kind | No |
+| `fork_policy_pending` | The pull request's head lives in a fork, or its provenance could not be established | No, until the fork policy lane ships |
+
+Dispatches (`manual`, `api`, `agent`, `rerun`) are exempt from the recent-run deduplication: a person who presses run twice asked for two runs.
+
+Inside a run, a stage that is not planned carries a skip reason: `event_filter`, `branch_filter`, `path_filter`, `schedule_subset`, `condition_false`, `condition_unreadable` (a condition nobody can read is not a condition that passed), `fork_policy` or `dependency_skipped`. A run refused as a whole carries one fixed sentence, for example "Every stage this pipeline declares is filtered out for this event, so the run would do nothing." or "A stage fans out over more matrix legs than the number one run may plan."
+
+## Validation
+
+<CliVersion since="0.15.0" />
+
+```bash
+ankra pipeline validate --application my-service
+ankra pipeline validate path/to/pipeline.yaml --application my-service
+```
+
+The command reads `.ankra/pipeline.yaml` (or the file you name), validates it, and plans it for a synthetic push to the default branch and a synthetic pull request, printing for each the steps that would run, the stages that would be skipped with their reason, and every diagnostic. Its exit code is non-zero when the severity is `fatal`. Without a file and without a stored definition there is nothing to validate. The same validator answers `POST …/pipeline/validate` on the API and the `cicd_validate_pipeline_yaml` tool in chat, which needs no repository at all.
+
+A result has a severity - `ok`, `warn` (the pipeline runs, but not the way its author probably meant; reported on the pull request, never blocking) or `fatal` (the pipeline cannot be planned) - and a list of violations, each prefixed with a fixed key:
+
+| Key | Covers |
+|-----|--------|
+| `pipeline_parse:` | A document that is not readable YAML, or whose shape the decoder could not take |
+| `pipeline_kind:` | A wrong `apiVersion` or `kind` |
+| `pipeline_metadata:` | A missing `metadata.name` |
+| `pipeline_stages:` | The stage list and stage identity: missing or duplicate names, an unusable name, both `allow_failure` and `continue_on_error` (warning) |
+| `pipeline_stage_kind:` | A kind outside the vocabulary, or a kind missing what it requires (`run` without `run` or `uses`, `approval` without roles, `agent` without a goal, `webhook` without a URL, `external` without a provider, `verify` without a sub-block) |
+| `pipeline_uses:` | A `uses` reference not spelled as one of the three forms |
+| `pipeline_needs:`, `pipeline_cycle:` | A `needs` entry naming no stage; a stage needing itself; a cycle |
+| `pipeline_trigger:` | The `on:` block: an unknown `fork_policy`; `cancel_in_progress` without a group (warning) |
+| `pipeline_schedule:` | A cron that is not five numeric fields; a schedule naming a stage that does not exist |
+| `pipeline_inputs:` | Input names, types, a `choice` without an enum, a default outside the enum |
+| `pipeline_secrets:`, `pipeline_credentials:`, `pipeline_permissions:` | An unknown source, a duplicate name, an unknown permission level, a stage naming an undeclared secret |
+| `pipeline_services:` | A service without an image; a stage naming an undeclared service |
+| `pipeline_expression:` | An unterminated `${{` in `if`, `run`, `uses`, `image`, `timeout`, `with` or `env` (a stray `}}` is not reported: scripts legitimately carry them) |
+| `pipeline_matrix:` | An axis with no values; an exclusion on an axis that does not exist (warning) |
+| `pipeline_network:` | A tier outside `none`, `egress-https`, `services` |
+| `pipeline_retry:` | More than 5 attempts, a negative count, an unknown backoff or condition |
+| `pipeline_artifacts:` | An artifact without a name or paths; a negative retention (warning); an unknown test result format or a missing path |
+| `pipeline_environment:` | A stage targeting an environment the pipeline does not declare (warning) |
+
+The planner adds diagnostics with `plan_` keys (`plan_trigger:`, `plan_paths:`, `plan_matrix:`, `plan_condition:`, `plan_fork:`, `plan_concurrency:`, `plan_interpolation:`, `plan_timeout:`, `plan_needs:`, `plan_spec:`), and the step renderer records what it decided on incomplete information: `image_policy_open` when the organisation set no image policy, `resources_defaulted`, `service_without_readiness`, `service_undeclared`, `build_without_registry_auth`, `registry_push_withheld`, `build_namespace_workspace` and `multi_platform_build`. A step the renderer refuses outright - an image outside the policy, more compute than one step may have, a missing timeout, a `services` tier without services, host privilege - is a fixed sentence naming the field, and the same refusal at dispatch time is what a step that never started shows.
+
+## A complete example
+
+This is the pipeline Ankra's own documentation repository is written against - a bare repository with nothing to build, which is the case that proves pipelines are repository-scoped with an optional application link.
+
+```yaml
+# ankraio/ankra-docs as an Ankra pipeline.
+apiVersion: ankra.io/v1
+kind: Pipeline
+metadata:
+  name: "ankra-docs"
+on:
+  push:
+    branches:
+      - "master"
+  pull_request:
+    branches:
+      - "master"
+    fork_policy: "read_only"
+  schedule:
+    - cron: "0 6 * * *"
+      branch: "master"
+      stages:
+        - "checkout"
+        - "install"
+        - "broken-links"
+        - "live-openapi-reachable"
+concurrency:
+  group: "ankra-docs-${{ ankra.ref }}"
+  cancel_in_progress: true
+workspace:
+  size: "10Gi"
+  access: "rwo"
+defaults:
+  image: "node:22-bookworm-slim"
+  timeout: "15m"
+  network: "egress-https"
+permissions:
+  contents: "read"
+  pipelines: "read"
+stages:
+  - name: "checkout"
+    kind: "checkout"
+    network: "none"
+
+  - name: "install"
+    kind: "run"
+    run: |-
+      set -eu
+      corepack enable
+      pnpm install --frozen-lockfile
+    needs:
+      - "checkout"
+    cache:
+      - key: "pnpm-store-${{ hashFiles('pnpm-lock.yaml') }}"
+        paths:
+          - ".pnpm-store"
+    timeout: "10m"
+
+  # The structure checks read the repository and nothing else; only the
+  # pyyaml install needs egress.
+  - name: "structure"
+    kind: "run"
+    image: "python:3.12-slim"
+    run: |-
+      set -eu
+      pip install --quiet pyyaml
+      python3 scripts/check_nav.py
+      python3 scripts/check_frontmatter.py
+      python3 scripts/check_snippets.py
+    needs:
+      - "checkout"
+    timeout: "10m"
+
+  # Split out because it is the only check that leaves the repository: it
+  # fails on production being down rather than on the docs being wrong, and
+  # as its own stage that distinction is visible on the run.
+  - name: "live-openapi-reachable"
+    kind: "verify"
+    needs:
+      - "checkout"
+    verify:
+      probe:
+        url: "https://platform.ankra.app/openapi.json"
+        status: 200
+        timeout: "1m"
+
+  - name: "broken-links"
+    kind: "run"
+    run: |-
+      set -eu
+      pnpm exec mint broken-links
+    needs:
+      - "install"
+    timeout: "15m"
+
+  # allow_failure keeps the run green while the prose warnings stay visible
+  # on the stage.
+  - name: "prose"
+    kind: "run"
+    image: "jdkato/vale:v3.9.1"
+    run: |-
+      set -eu
+      vale --output=line --minAlertLevel=warning .
+    needs:
+      - "checkout"
+    allow_failure: true
+    timeout: "10m"
+
+on_failure:
+  - name: "triage"
+    kind: "agent"
+    agent:
+      goal: "Explain which docs check failed and propose the smallest edit that fixes it."
+      tool_profile: "ci-read-only"
+      mode: "ask"
+      budget:
+        tool_calls: 15
+        turns: 6
+        minutes: 10
+      context:
+        - "diff"
+        - "logs"
+
+finally:
+  # A Slack incoming-webhook URL is a bearer credential, so it is read from
+  # the organisation's variables rather than committed here.
+  - name: "notify"
+    kind: "webhook"
+    webhook:
+      url: "${{ vars.SLACK_CI_ALERTS_WEBHOOK }}"
+      method: "POST"
+      timeout: "30s"
+```
+
+Reading it against [what executes today](/guides/ankra-pipelines#what-is-in-place-today): the four `run` stages execute in the cluster; `checkout` and the `verify` probe are dispatched but wait on runner images that have not shipped; the `agent` triage and the `webhook` notification are platform-settled kinds that stay pending. The schedule is stored but not fired. The definition validates as `ok` today, which is the point of the closed vocabulary: the file describes the pipeline the platform will run, and says nothing it will not do.
+
+## Related
+
+<CardGroup cols={2}>
+  <Card title="Ankra Pipelines" icon="diagram-project" href="/guides/ankra-pipelines">
+    How a run happens, the security model, failure handling and limits.
+  </Card>
+  <Card title="Migrate from GitHub Actions" icon="arrow-right-arrow-left" href="/guides/migrate-from-github-actions">
+    Convert an existing definition and review the notes.
+  </Card>
+</CardGroup>

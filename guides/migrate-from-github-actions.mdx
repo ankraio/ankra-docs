@@ -1,0 +1,145 @@
+---
+title: Migrate from GitHub Actions
+description: Convert a GitHub Actions workflow, a GitLab CI file, a Bitbucket pipeline or a CircleCI config into .ankra/pipeline.yaml, read every note the converter leaves, and run both side by side until you trust it.
+---
+
+import { CliVersion } from "/snippets/cli-version.jsx";
+
+Ankra converts an existing CI definition into an [Ankra pipeline](/guides/ankra-pipelines) - the `.ankra/pipeline.yaml` its own engine runs inside your cluster. One converter reads four formats: GitHub Actions workflows, a `.gitlab-ci.yml`, a `bitbucket-pipelines.yml` and a `.circleci/config.yml`.
+
+<Note>
+A converted pipeline is a starting point a person reviews, never a drop-in replacement. The rule the converter holds to: something it cannot map is either carried across as a stage that **fails with an explanation**, or reported as a note with the job or step it came from - never dropped silently. A converted pipeline that quietly skipped a toolchain step would go green having built nothing.
+</Note>
+
+## Convert with Ankra AI
+
+Ask Ankra AI in the portal chat, or call the tool through the [MCP server](/platform/mcp-server). Example prompts:
+
+- "Convert `.github/workflows/ci.yml` and `.github/workflows/build-deploy.yml` into an Ankra pipeline and show me every note."
+- "Convert this `.gitlab-ci.yml` into `.ankra/pipeline.yaml` for the `orders-api` application."
+
+The tool behind it is `cicd_convert_workflow_to_pipeline`:
+
+| Parameter | Meaning |
+|-----------|---------|
+| `workflow_files` | The files to convert, each with its repository `path` and its `content`, at most 20 files and 256 KB per call. For GitHub Actions pass every workflow that takes part in the build - they become **one** pipeline, because a repository's workflows share one checkout and one run. For GitLab, Bitbucket and CircleCI pass exactly one file. |
+| `format` | Optional: `github_actions`, `gitlab_ci`, `bitbucket_pipelines` or `circleci`. Omitted, it is inferred from the paths - a file named `.gitlab-ci*` selects `gitlab_ci`, `bitbucket-pipelines*` selects `bitbucket_pipelines`, a path under `.circleci/` selects `circleci`, anything else `github_actions`. |
+| `application_id` | Optional: when it resolves, the pipeline's `metadata.name` is the application's name; otherwise one is derived from the workflow and the notes say so. |
+
+It answers with the rendered `pipeline_yaml`, the `notes` naming every construct it could not carry across faithfully, and a validation verdict. It writes nothing to the repository: open the pull request yourself, or ask the AI to open one. Its twin, `cicd_validate_pipeline_yaml`, validates a definition you wrote or edited and lists every violation with its key and severity - see [Validation](/guides/pipeline-reference#validation).
+
+## What maps to what
+
+Jobs become stages, `needs` becomes `needs`, conditions keep their `${{ }}` delimiters, and the `steps`, `matrix`, `inputs`, `env` and `needs` references map one to one. A reference to the `github` context does not: the validator reports it with the Ankra equivalent (`github.sha` is `ankra.sha`, `github.event_name` is `event.kind`, and so on) for you to rewrite. See [Expressions](/guides/pipeline-reference#expressions) for the two deliberate departures.
+
+Third-party steps go through one mapping table, so a GitHub action, a Bitbucket pipe and a CircleCI orb command that do the same work become the same stage. A row matches every version of its identifier (`actions/checkout@v4`, `atlassian/slack-notify:2.1.0`).
+
+### Steps that become a stage
+
+| Source | Becomes |
+|--------|---------|
+| `actions/checkout` | A `checkout` stage; `ref`, `fetch-depth`, `submodules` and `lfs` are carried as inputs |
+| `docker/build-push-action`, `depot/build-push-action`, `circleci/docker/build` | A `build` stage: `file`/`dockerfile`, `context`, `platforms`, `build-args`, `provenance`, `sbom`, `cache-to`. `push: true` is understood and needs nothing - publishing is the `publish` stage's. Build argument **names** are kept and their values dropped, because a value in a workflow is routinely a secret expression that must not be committed. The `tags` input is reported and left behind: an Ankra build produces a digest, and the publish stage is what tags it. |
+| `aquasecurity/trivy-action`, `aquasecurity/trivy-pipe` | A `scan` stage running Trivy that blocks per the organisation's image gate; a `severity` input is reported, because the scan blocks per the gate and reports every finding either way |
+| `slackapi/slack-github-action`, `8398a7/action-slack`, `atlassian/slack-notify`, `atlassian/microsoft-teams-notify`, `circleci/slack/notify` | A `run` stage using `ankra/notify` with `channel` and `message`; a CircleCI `event` of `pass`, `fail` or `always` becomes the stage's `if:` (`success()`, `failure()`, `always()`) |
+| A script that only packages and pushes a Helm chart (`helm package`, `helm push`, `helm lint`, `helm dependency`, `helm registry`) | A `run` stage using `ankra/helm-push` with `chart`, `registry` and `version`; the registry login the script performed is what the run's own credential does. A script that does anything else stays a script. |
+| `circleci/node/install-packages`, `circleci/python/install-packages` | The shell command the selector stands for: `npm ci`, `yarn install --frozen-lockfile`, `yarn install --immutable`, `pnpm install --frozen-lockfile`; `pip install -r requirements.txt`, `pipenv install`, `poetry install`. An unknown package manager becomes a failing stage. |
+
+The `ankra/*` references are validated for their spelling today; the built-in step library that resolves them has not shipped, so a converted stage that uses one does not execute yet.
+
+### Steps that become the stage image
+
+`actions/setup-node`, `actions/setup-go`, `actions/setup-python`, `actions/setup-java`, `circleci/node/install` and `circleci/go/install` do not become stages. Each becomes the image the job's later stages run in - `node:<version>`, `golang:<version>`, `python:<version>`, `eclipse-temurin:<version>` - because a stage that runs in that image has the toolchain the step installed. `20.x` and `20` both become `node:20`; a matrix expression such as `${{ matrix.node }}` is carried into the image. `lts/*`, `latest`, a range or a version file names a resolution rule rather than a version, so no image is derived and the note tells you to pin one on the job's stages. A setup step with no version at all leaves the job's stages on the default image, which then has to ship the toolchain.
+
+### Steps that are dropped, with a note
+
+| Source | Why |
+|--------|-----|
+| `docker/login-action`, `docker/setup-buildx-action`, `docker/setup-qemu-action`, `depot/setup-action`, `circleci/docker/check` | An Ankra run authenticates to the registry with its own credential and the build stage brings its own builder |
+| `aws-actions/configure-aws-credentials`, `google-github-actions/auth`, `azure/login`, `circleci/aws-cli/setup` | A cloud credential is materialised through the pipeline's `credentials` block, not configured by a step |
+| `azure/setup-helm`, `circleci/helm/install_helm_client` | Helm ships in the stage image, and the `ankra/helm-push` step packages and pushes a chart with the run's registry credential |
+
+### Everything else
+
+A third-party step the table does not know becomes a `run` stage that stops the run and says what has to be replaced:
+
+```bash
+echo "This step used <reference>, which the converter could not map to an Ankra stage."
+echo "Replace it with an image that already provides what the action did, a script, or an ankra/* step."
+exit 1
+```
+
+Failing is the point: a dropped step would produce a pipeline that runs green having skipped whatever the step did, and you would have no way to tell a converted step from a discarded one.
+
+## What each source loses
+
+Every item below arrives as a note with the file, job or step it came from. Read the notes before the YAML.
+
+**GitHub Actions**
+
+- The `permissions` block is not converted: a run's authority is the intersection of the pipeline's own `permissions`, the organisation's CI policy and the target environment, not the workflow token's scopes.
+- A trigger with no Ankra equivalent is not converted, and a trigger that narrows on something an Ankra trigger cannot (for example pull request `types`) loses the narrowing: the pipeline runs on **more** of those events than the workflow did.
+- `defaults.run.shell` is not converted; a stage runs its script with the shell its image provides.
+- A second `concurrency` block is not converted: a pipeline carries one concurrency group, and the first workflow claimed it.
+- A job that calls a reusable workflow (`uses: ./.github/workflows/…`) cannot be followed; its stage fails until it is replaced.
+- A workflow that is not valid YAML contributes nothing, and the note says which.
+
+**GitLab CI**
+
+- `workflow:rules` is not converted, so runs it filtered out are not filtered here.
+- A top-level `services:` block, which gives every job a sidecar, is not converted: declare the services the stages need in the pipeline's `services` block and list them on each stage, or the jobs that relied on them fail at runtime.
+- A job that triggers a downstream pipeline has no equivalent.
+- `except:` is not converted: an Ankra stage filters on the branches, paths and events it runs *for*, never on the ones it skips. `rules:` is not converted either, and its `changes:` paths go with it - a rule carrying `when: never` skips the paths it names, and an Ankra `when.paths` says which paths the stage runs *for*, so carrying them across would invert the meaning. Such a stage runs on every event the pipeline triggers on until you add a `when:` or an `if:`.
+
+**Bitbucket Pipelines**
+
+- A step `size` of `1x`, `2x`, `4x` or `8x` becomes a memory request; any other value is reported and you declare `resources.memory` yourself.
+- `bookmarks:` pipelines are Mercurial's and are not converted.
+- A parallel group's fail-fast is not converted: an Ankra run lets the other stages of a group finish when one fails.
+- A pipeline that imports from another repository cannot be followed and contributes nothing.
+- `runs-on` labels are not converted: an Ankra stage is placed by the organisation's CI cluster and the stage's own `runs_on` block.
+- A manual trigger becomes an `approval` stage approvable by the `admin` and `operator` roles, because anyone with write access could press the Bitbucket button and no Ankra role maps onto that; narrow the roles to whoever actually held the button.
+
+**CircleCI**
+
+- A version 2.0 configuration converts the way a 2.1 one does; any orb, command or parameter it cannot declare is simply absent. A setup configuration's continuation pipeline cannot be followed; only the jobs declared in the file are converted.
+- An inline orb is not converted; every step that calls it becomes a stage that fails until it is replaced. An orb job the converter cannot follow is reported the same way.
+- A parameter whose name carries a dash is renamed (an input name may not carry one), and every reference to it is renamed the same way.
+- An approval job becomes an `approval` stage approvable by the `admin` and `operator` roles, with the same advice to narrow them.
+- Anchors and aliases are resolved before conversion, so an anchored executor or step list behaves like an inline one.
+
+## What to review after conversion
+
+1. **The notes, first.** Each is a decision the converter took on your behalf or could not take. Stages that fail by design (`exit 1` with the reference) are in the YAML so you cannot miss them.
+2. **Images.** Every stage needs an image the organisation's [image policy](/guides/ankra-pipelines#organisation-ci-settings) allows. Pin the toolchain images the notes could not derive.
+3. **Network.** A stage's tier defaults to `none`, which denies all egress; give `defaults.network: egress-https` to the stages that install packages or reach a registry, and remember that anything above it is a protected section.
+4. **Secrets and credentials.** The converter declares what the workflow referenced; the `secrets` block names a source (`app_env_secret`, `org_variable`, `registry`, `credential`) that has to exist in the organisation. Delivery of secrets into steps has not shipped yet, so a stage that needs one does not run correctly until it does.
+5. **Filters.** Where a `rules:`, `except:` or trigger `types` narrowing was lost, add `when:` or `if:` so the pipeline does not run more often than the workflow did.
+6. **Resources and timeouts.** A stage takes 500m CPU, 1Gi memory and 30 minutes unless it says otherwise; a Go build or a Playwright suite wants more of the first two.
+7. **What executes today.** `run` stages execute end to end; `checkout`, `build`, `scan`, `verify` and the platform-settled kinds do not yet - see [What is in place today](/guides/ankra-pipelines#what-is-in-place-today). A converted pipeline whose first stage is `checkout` waits on that runner.
+
+Then validate it:
+
+<CliVersion since="0.15.0" />
+
+```bash
+ankra pipeline validate .ankra/pipeline.yaml --application my-service
+```
+
+## Run both side by side
+
+Keep the workflow. A pipeline run and a workflow run on the same commit are independent: the workflow's checks keep their names, the pipeline's is `Ankra pipeline`, and both appear on the pull request. Ankra keeps reading the workflow's results for publish readiness, push-to-deploy and previews until the pipeline's `build` and `publish` stages run in the cluster, so the workflow stays the thing that publishes your image in the meantime.
+
+Two rules for the overlap:
+
+- Do not make `Ankra pipeline` a required check in branch protection until it has been green for as long as you would trust any new CI system, and never while its stages include a kind that does not execute yet.
+- Retire the workflow deliberately. Ankra does not delete a workflow for you; when it proposes retiring a generated one, it will be a reviewable pull request that you merge.
+
+<CardGroup cols={2}>
+  <Card title="Ankra Pipelines" icon="diagram-project" href="/guides/ankra-pipelines">
+    Prerequisites, the first green run, the security model and limits.
+  </Card>
+  <Card title="pipeline.yaml reference" icon="book" href="/guides/pipeline-reference">
+    Every key, the expression language and the validator's diagnostics.
+  </Card>
+</CardGroup>
