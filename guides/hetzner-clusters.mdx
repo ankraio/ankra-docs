@@ -598,24 +598,35 @@ This action is irreversible. All data on the cluster will be permanently deleted
 </Warning>
 
 <Warning>
-**Clean up Hetzner Cloud resources before terminating.** The Hetzner CCM and CSI driver create resources in your Hetzner Cloud project (Load Balancers, Volumes) that Ankra does not manage or track. These resources will **not** be automatically deleted when you terminate the cluster and will continue to incur charges.
+**Load Balancers are always deleted, Volumes only with `--force`.** The Hetzner CCM and CSI driver create objects in your Hetzner Cloud project, and terminating does not treat them the same way:
 
-Before terminating, delete any Kubernetes resources that created Hetzner Cloud objects:
-- Delete all `Service` resources of type `LoadBalancer` (these create Hetzner Cloud Load Balancers via the CCM)
-- Delete all `PersistentVolumeClaim` resources using the `hcloud-volumes` StorageClass (these create Hetzner Cloud Volumes via the CSI driver)
-- Delete any addons or Helm releases that create LoadBalancer services or PVCs (e.g., ingress-nginx, databases, monitoring stacks)
-
-Alternatively, check your [Hetzner Console](https://console.hetzner.cloud) after terminating and manually delete any orphaned Load Balancers and Volumes associated with the cluster.
+- **Load Balancers** (created by `Service` resources of type `LoadBalancer`) are deleted on every terminate, with or without `--force`. An attached Load Balancer blocks the network delete itself, so removing it is part of the teardown.
+- **Volumes** (created by `PersistentVolumeClaim` resources on the `hcloud-volumes` StorageClass) are **kept** unless you pass `--force`. `hcloud-volumes` ships `reclaimPolicy: Retain`, so a plain terminate deliberately leaves the data intact. Kept volumes stay in your project and keep billing - delete them in the [Hetzner Console](https://console.hetzner.cloud), or terminate with `--force`, which deletes them and destroys their data.
 </Warning>
+
+<Note>
+**What a terminate touches in your Hetzner project.** Every delete is scoped to this one cluster. Servers, the network, and SSH keys are deleted by the resource IDs Ankra recorded when it created them - Ankra never enumerates your project and deletes what it finds there. The only account-wide list calls are three scoped sweeps run just before the network is deleted: servers carrying this cluster's `ankra-cluster-id` label **and** attached to its network, volumes carrying that label (`--force` only), and Load Balancers attached to its network **or** carrying that label.
+
+Two effects reach beyond the objects Ankra created for the cluster, so they are worth knowing before you terminate:
+
+- That last filter is a union: a Load Balancer you attached to this cluster's Ankra-managed network by hand, without the `ankra-cluster-id` label, is swept along with the rest.
+- SSH keys are registered in Hetzner by fingerprint, so the same public key used on several Ankra Hetzner clusters is one Hetzner key object. Terminating any one of those clusters deletes it. Running nodes are unaffected (their `authorized_keys` are already written), and the next key sync re-registers it.
+
+Other clusters' servers, networks and volumes are not reachable by this teardown, and your Hetzner API token is never touched.
+</Note>
 
 <CodeGroup>
 
 ```bash CLI
 ankra cluster hetzner deprovision <cluster_id>
+ankra cluster hetzner deprovision <cluster_id> --force  # also delete CSI volumes
 ```
 
 ```bash cURL
 curl -X DELETE https://platform.ankra.app/api/v1/clusters/hetzner/<cluster_id> \
+  -H "Authorization: Bearer $ANKRA_API_TOKEN"
+
+curl -X DELETE "https://platform.ankra.app/api/v1/clusters/hetzner/<cluster_id>?force=true" \
   -H "Authorization: Bearer $ANKRA_API_TOKEN"
 ```
 
