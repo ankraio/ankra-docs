@@ -4,27 +4,76 @@ description: Connect Kubernetes clusters with Cilium ClusterMesh over the Ankra 
 ---
 
 <Note>
-Cluster Mesh connects two or more of your clusters into one Cilium ClusterMesh: pods reach pods across clusters, and a global service resolves to healthy backends wherever they run — across providers, accounts and sites, over an encrypted WireGuard overlay the platform manages end to end.
+Cluster Mesh connects two or more of your clusters into one Cilium ClusterMesh: pods reach pods across clusters, and a global service resolves to healthy backends wherever they run, across providers, accounts and sites, over an encrypted WireGuard overlay the platform manages end to end.
 </Note>
 
 ## Overview
 
-A mesh is an organisation-level object with clusters as members. When a cluster joins, Ankra handles the whole configuration: it mints the mesh's shared certificate authority on the first join and hands it to every member, re-renders each member's Cilium with its mesh identity and peer list, deploys the `clustermesh-apiserver`, and gives every node a WireGuard peer — and a route — for every node of every other member. Nothing about the mesh requires exposing your Kubernetes API or pod network to the internet: peers talk through the platform overlay.
+A mesh is an organisation-level object with clusters as members. When a cluster joins, Ankra handles the whole configuration: it mints the mesh's shared certificate authority on the first join and hands it to every member, re-renders each member's Cilium with its mesh identity and peer list, deploys the `clustermesh-apiserver`, and gives every node a WireGuard peer, and a route, for every node of every other member. Nothing about the mesh requires exposing your Kubernetes API or pod network to the internet: peers talk through the platform overlay.
 
 What you can do with a connected mesh:
 
-- **Global services** — annotate the same Service in two clusters with `service.cilium.io/global: "true"` and requests resolve to healthy backends in either cluster.
-- **Cross-cluster pod traffic** — pods reach pod IPs in other members directly.
-- **Network policy across clusters** — Cilium policies can select peers in other members by cluster name.
+- **Global services**: annotate the same Service in two clusters with `service.cilium.io/global: "true"` and requests resolve to healthy backends in either cluster.
+- **Cross-cluster pod traffic**: pods reach pod IPs in other members directly.
+- **Network policy across clusters**: Cilium policies can select peers in other members by cluster name.
 
-## Prerequisites
+## Requirements
 
-- The `network_overlay` and `cluster_mesh` features enabled for your organisation.
-- Every member runs the **kubeadm** distribution with **Cilium** — both are set at cluster creation.
-- Members must be *mesh-capable*: created with `--network-mode wireguard_mesh`, or made capable afterwards with `make-ready` (below).
-- Providers wired to the overlay today: **UpCloud** and **Proxmox**. A Proxmox site additionally needs a public address for its site gateway (see [Proxmox sites](#proxmox-and-on-prem-sites)).
+Mesh requirements fall into three groups, and the group a requirement is in tells you what to do about it: one group is settled when the cluster is built, one is fixable on a running cluster, and one is about the clusters you mesh *together* rather than any one of them.
 
-No two members may overlap pod ranges. Clusters created while the overlay feature is on get disjoint ranges from your organisation's pools automatically; `readiness` names any conflict before you join.
+### Settled when the cluster is built
+
+These three are baked into a cluster and no operation changes them. A cluster that fails any of them can only mesh if you rebuild it.
+
+| Requirement | Accepted today | Why |
+| --- | --- | --- |
+| **Provider** | UpCloud, Proxmox | The clouds wired to the platform WireGuard overlay. |
+| **Distribution** | kubeadm | Only kubeadm renders the mesh identity into the control plane. |
+| **CNI** | Cilium | ClusterMesh is a Cilium feature. |
+
+Readiness reports the provider and distribution under its `platform` check and the CNI under `cni`, each marked not remediable.
+
+### Fixable on a running cluster
+
+A cluster that clears the three above is *mesh-capable*, which is not the same as ready. Two more things must be true, and both can be arranged in place with [make-ready](#make-an-existing-cluster-mesh-capable):
+
+- **A Cilium cluster identity.** An id in the range 1 to 255, and a name unique across the mesh. Clusters created while your organisation's `network_overlay` feature was on already have one. Anything older gets one allocated day-2 by `make-ready`.
+- **A routable node network.** A mesh forwards pod traffic to remote node addresses, so nodes on a per-cluster private network nothing else reaches can never carry it. One of three networks qualifies: the platform WireGuard overlay (`--network-mode wireguard_mesh`), Proxmox's EVPN network, or a tailnet the nodes advertise.
+
+`make-ready` itself needs the cluster to be **online**. A cluster still provisioning would race its own create jobs, and one mid-update could interleave with the update in flight, so wait for it to settle. Proxmox clusters additionally need `--site-public-ip` (see [Proxmox sites](#proxmox-and-on-prem-sites)).
+
+<Note>
+One case `make-ready` cannot serve: a cluster whose network identity was allocated without an overlay range, from before overlay allocation existed. It is refused by name rather than half-prepared, and needs re-allocation.
+</Note>
+
+### Requirements across the members
+
+These are properties of a mesh, not of a cluster, so they can only fail once you try to put two particular clusters together.
+
+- **No overlapping ranges.** Both the pod CIDR and the service CIDR of every member must be disjoint from every other member's. Clusters created while the overlay feature is on draw disjoint ranges from your organisation's pools automatically; readiness names any conflict before you join. Two clusters that were both prepared with `make-ready` from an identity-less state run the same kubeadm default ranges, so they can each mesh with pool-ranged members but not with each other.
+- **Unique Cilium cluster ids.** Every member holds a different one, which caps a mesh at **255 members**.
+- **A routable path per pair.** Connecting two apiservers is not enough. Ankra resolves each pair to one address family and refuses pairs with no route (see [How members connect](#how-members-connect)). In short: two clusters in *different* provider accounts must **both** be on the WireGuard overlay, and a Proxmox EVPN cluster meshes only with clusters on the same Proxmox credential.
+- **Each member publishes an apiserver address.** A member publishes one once the platform has recorded its nodes, so this is not checked before a join (it would refuse a cluster that is minutes from ready). It is checked afterwards, and a member nobody can reach is reported rather than left silently unconnected.
+- **One mesh per cluster.** A cluster belongs to at most one mesh; joining a second is refused.
+
+### On the platform side
+
+- **The feature flags.** The `network_overlay` and `cluster_mesh` features must be enabled for your organisation. `cluster_mesh` is a child of `network_overlay`, so it is never on for an organisation whose clusters cannot join the overlay. While it is dark, every mesh route answers 404 and no mesh surface appears.
+- **Permissions.** Reading meshes and running readiness needs `clusters.read`; creating a mesh, joining, leaving and `make-ready` need `clusters.write`. Both are checked at *organisation* scope, because admitting a cluster changes the configuration every other member runs with.
+- **A fixed NodePort.** Every member publishes its `clustermesh-apiserver` on NodePort **32379**, the same across the fleet so a peer needs only an address to dial one. Keep it free, and let it through any firewall between members.
+- **MTU is pinned to 1420** on mesh members, matching the overlay. Cilium's VXLAN rides inside the overlay's WireGuard frame, and a member configured above that black-holes pod traffic *between* clusters while everything inside each cluster keeps working.
+- **Cilium's own encryption is off** on mesh members, deliberately. Every transport the mesh uses already carries packets encrypted, so Cilium's WireGuard layer would encrypt a second time and shrink the MTU again for no gain.
+- **The shared trust root gates the rollout.** A member's mesh values are withheld until its agent confirms the mesh CA is installed. Cilium's chart mints its own authority when `cilium-ca` is absent, so a member that switched ClusterMesh on early would present a certificate no peer believes and report a healthy mesh while connecting nothing.
+
+### Where the Cluster Mesh section appears
+
+A cluster's sidebar carries a **Cluster Mesh** entry when the organisation's `cluster_mesh` feature is on **and** that cluster can actually use it: it is already a mesh member, or it is *eligible*, meaning it can join now or after a `make-ready`. A cluster that fails one of the settled-at-build requirements has no entry, because nothing you could do from that page would change the answer. The organisation-level **Cluster Meshes** page lists every mesh regardless and stays reachable from the main menu.
+
+Eligibility is exactly what readiness reports, so the API and the CLI answer the same question the sidebar does:
+
+```bash
+ankra cluster mesh readiness <cluster-id>
+```
 
 ## Connect two clusters
 
@@ -33,7 +82,7 @@ No two members may overlap pod ranges. Clusters created while the overlay featur
     ```bash
     ankra cluster mesh readiness <cluster-a> <cluster-b>
     ```
-    Each cluster is reported `ready`, or every failing check is spelled out — including which failures are fixable on a running cluster and which are set at create time.
+    Each cluster is reported `ready`, or every failing check is spelled out, including which failures are fixable on a running cluster and which are settled when the cluster is built.
   </Step>
   <Step title="Create the mesh and join both clusters">
     ```bash
@@ -57,13 +106,13 @@ No two members may overlap pod ranges. Clusters created while the overlay featur
 | `pending` | Nothing dispatched to the cluster yet. |
 | `configuring` | Mid-flight: the resource is rolling out, the trust root is not yet confirmed, or the peer list has not reached every member. Not an error. |
 | `ready` | The member's agent verified a connection to every expected peer. |
-| `degraded` | The member verified fewer connections than it expects — a peer is unreachable. |
+| `degraded` | The member verified fewer connections than it expects, so a peer is unreachable. |
 
 Statuses are derived from what each cluster's agent actually reported, never from what the platform intended, so `ready` means the connection was proven from inside the cluster.
 
 ## Make an existing cluster mesh-capable
 
-A cluster created without `--network-mode wireguard_mesh` (or before the overlay existed) can be made mesh-capable in place — nothing is deleted or recreated:
+A cluster created without `--network-mode wireguard_mesh` (or before the overlay existed) can be made mesh-capable in place, with nothing deleted or recreated:
 
 ```bash
 ankra cluster mesh make-ready <cluster-id>
@@ -74,17 +123,30 @@ ankra cluster mesh make-ready <cluster-id> --site-public-ip <address>
 `make-ready` allocates the cluster's Cilium identity and an overlay range, keeps the pod and service ranges the cluster already runs, and sets its nodes converging onto the overlay: each node joins the WireGuard mesh, the node IP and API server address switch to overlay addresses, and Cilium re-renders with the identity.
 
 <Warning>
-Zero disruption is not possible: switching node IPs restarts each kubelet once. Plan it like a rolling node operation. Everything else — workloads, data, addresses your Services expose — stays.
+Zero disruption is not possible: switching node IPs restarts each kubelet once. Plan it like a rolling node operation. Everything else stays: workloads, data, and the addresses your Services expose.
 </Warning>
 
 `make-ready` refuses, with the reason, clusters it cannot serve: providers not yet wired to the overlay, non-kubeadm distributions, non-Cilium CNIs, and Proxmox clusters without a site address. Two clusters that were both created identity-less run the same default pod range; they can each mesh with pool-ranged members, and `readiness` names the overlap if you try to mesh them with each other.
 
 ## How members connect
 
-Ankra picks the path per pair of members, most private first:
+Ankra resolves each *pair* of members to one address family, taking the first that fits:
 
-- **Same provider account** — the provider's own account-wide network (UpCloud's utility network, Proxmox's shared SDN).
-- **Everything else** — the platform WireGuard overlay: every node holds an encrypted tunnel and a route to every node of every other member, dialled at the peer's public endpoint or through its site gateway. The `clustermesh-apiserver` is reached inside the tunnel on the peer's overlay address, so it is never exposed publicly.
+| Family | When it applies | Routes pod traffic? |
+| --- | --- | --- |
+| **Overlay** | Both members are on the platform WireGuard overlay and advertise overlay addresses. | Always. The mesh peering installs a WireGuard peer, and a route, for every remote node. |
+| **Utility** | Both members were created from the same provider credential, so they share the provider's account-wide network (UpCloud's utility network, Proxmox's EVPN vnet). | Yes, as long as both have a routable node network. |
+| **Tailnet** | Both members advertise tailnet addresses. | Only if both really are on the tailnet. |
+| **Public** | Nothing else fits. | Only if both members are on the WireGuard overlay, which is what turns a public endpoint into a routable node address. |
+
+The overlay wins over the others on purpose. It is the one network the mesh peering itself makes routable between two members, so it works across accounts, providers and sites alike, and it keeps every overlay pair on one code path and one MTU. A same-account pair could ride the provider network instead, but preferring the overlay is simpler to reason about.
+
+Two consequences worth knowing before you plan a mesh:
+
+- Two clusters in **different provider accounts** mesh only if **both** are on the WireGuard overlay. Otherwise their apiservers might connect while pod traffic has nowhere to go, which is why Ankra refuses the pair outright instead.
+- A **Proxmox** cluster on the EVPN network has nothing that turns a public endpoint into a routable node address, so it meshes only with clusters on the **same Proxmox credential**.
+
+The `clustermesh-apiserver` is reached inside the tunnel on the peer's overlay address, so nothing about a mesh requires exposing your Kubernetes API or pod network to the internet.
 
 ## Proxmox and on-prem sites
 
@@ -96,7 +158,7 @@ A Proxmox site needs, once:
 2. **A UDP port-range forward** on the site's edge to the Proxmox host, and on the host to the cluster's bastion: `51820–52074`. The platform maintains the per-node port mapping on the bastion itself.
 3. **Jump access for the platform**: the credential's jumphost must allow TCP forwarding to the bastion's dial address (the `permitopen` list of the platform's key).
 
-One reachable side is enough to bring tunnels up — the unreachable site initiates outbound and the tunnel is held open with keepalives — but forwarding both sites is more robust.
+One reachable side is enough to bring tunnels up, because the unreachable site initiates outbound and the tunnel is held open with keepalives, but forwarding both sites is more robust.
 
 <Note>
 Sites behind NAT in both directions still mesh, as long as at least one site's UDP range is reachable from the other.
@@ -121,7 +183,7 @@ spec:
     - port: 80
 ```
 
-A pod in either cluster that resolves `echo.demo` is served by healthy backends from both — remove the deployment on one side and traffic shifts to the other.
+A pod in either cluster that resolves `echo.demo` is served by healthy backends from both. Remove the deployment on one side and traffic shifts to the other.
 
 ## Leaving and deleting
 
@@ -130,11 +192,11 @@ ankra cluster mesh leave <mesh-id> <cluster-id>   # tears down the member's mesh
 ankra cluster mesh delete <mesh-id>               # only when empty
 ```
 
-A mesh with members cannot be deleted out from under them — remove the members first so their configuration is torn down deliberately.
+A mesh with members cannot be deleted out from under them. Remove the members first so their configuration is torn down deliberately.
 
 ## Troubleshooting
 
-- **A member sits in `configuring`** — the agent has not yet confirmed the trust root or a verify has not run; check the cluster is online and its operations list for the mesh resource. The reconciler retries every five minutes.
-- **A member goes `degraded`** — it verified fewer peers than expected. Check the peer cluster's health first, then the site path (UDP forward, site address) if the pair crosses sites.
-- **`readiness` says a check "cannot be fixed on a running cluster"** — for the CNI and distribution that is true (recreate with kubeadm + Cilium); for the identity and overlay mode, `make-ready` is the fix.
-- **LoadBalancer Services on a meshed UpCloud cluster** — node addressing changes on the overlay; see the [UpCloud guide](/guides/upcloud-clusters) for the current behaviour of provider load balancers on meshed clusters.
+- **A member sits in `configuring`**: the agent has not yet confirmed the trust root or a verify has not run; check the cluster is online and its operations list for the mesh resource. The reconciler retries every five minutes.
+- **A member goes `degraded`**: it verified fewer peers than expected. Check the peer cluster's health first, then the site path (UDP forward, site address) if the pair crosses sites.
+- **A readiness check is marked not remediable**: for the provider, the distribution and the CNI that is final, and a new cluster is the only fix. For the identity and the node network, `make-ready` is the fix and readiness marks them remediable.
+- **LoadBalancer Services on a meshed UpCloud cluster**: node addressing changes on the overlay; see the [UpCloud guide](/guides/upcloud-clusters) for the current behaviour of provider load balancers on meshed clusters.
