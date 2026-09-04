@@ -67,7 +67,7 @@ Stage names must be unique across `stages`, `on_failure` and `finally`, because 
 | `on.push` | `branches`, `paths` | A push to a matching branch whose changed files match `paths`. Empty `branches` matches every branch; empty `paths` matches every change. |
 | `on.pull_request` | `branches`, `paths`, `fork_policy` | A pull request opened, synchronised or reopened against a matching **base** branch. `fork_policy` is `none` (refuse), `read_only` (the default: no secrets, no credentials, no identity beyond reading the run) or `trusted`; it is a protected section. |
 | `on.tag` | `patterns` | A pushed tag matching one of the glob patterns |
-| `on.schedule` | list of `cron`, `branch`, `stages` | A five-field cron expression, numeric fields only (`MON` and `JAN` are refused, because the scheduler evaluates the fields numerically). `branch` defaults to the repository's default branch; `stages` restricts the run to a subset, which is how a nightly runs only the expensive suites. Schedules are stored and validated today; the loop that fires them has not shipped. |
+| `on.schedule` | list of `cron`, `branch`, `stages` | A five-field cron expression, numeric fields only (`MON` and `JAN` are refused, because the scheduler evaluates the fields numerically). `branch` defaults to the repository's default branch; `stages` restricts the run to a subset, which is how a nightly runs only the expensive suites. Schedules fire from a stored watermark, through the same trigger every push and pull request uses. |
 | `on.manual` | `inputs` | A dispatch from the CLI or the API with the declared inputs |
 | `on.webhook` | none | Declares an inbound dispatch against a per-pipeline token. Presence is the declaration; the tokens are not available yet. |
 
@@ -81,9 +81,9 @@ Every stage has a `name` (lower-case letters, digits, dashes and underscores, st
 
 | Kind | What it does | Today |
 |------|--------------|-------|
-| `checkout` | Materialises the repository at the run's ref into the workspace | Dispatched to the cluster; the runner image that performs it has not shipped |
+| `checkout` | Materialises the repository at the run's ref into the workspace, reading `with.fetch_depth` (default `1`, `0` for full history), `with.submodules` (`false`, `true` or `recursive`) and `with.lfs` | Executes end to end: a pinned public git image, a shallow fetch of the exact commit with a fallback to its ref, `lfs: true` refused by name rather than silently checking out pointer files. A fork head whose own repository is not yet recorded on the run is refused rather than guessed. |
 | `run` | Executes `run` (a script, under `/bin/sh -eu`) or `uses` in an image the organisation's policy allows | Executes end to end |
-| `build` | Builds a container image by digest in a rootless BuildKit pod in `ankra-ci-build` | Refused at dispatch until the build lane ships |
+| `build` | Builds a container image by digest in a rootless BuildKit pod in `ankra-ci-build` | Refused at dispatch: the dispatcher does not yet resolve which recipe, source and push target the step builds against, so every attempt concludes `step_refused` before it reaches the builder |
 | `scan` | Runs the scanners over the source and the built image | Dispatched; runner not shipped |
 | `gate` | Evaluates persisted findings against organisation policy | Settled by the platform; stays pending today |
 | `publish` | Re-tags an approved image digest in the registry | Settled by the platform; stays pending today |
@@ -103,7 +103,7 @@ A stage of a platform-settled kind is left exactly as the dispatcher found it; a
 
 | Field | Type | Default | Meaning |
 |-------|------|---------|---------|
-| `image` | string | `defaults.image` | The container the stage runs in; required for `checkout`, `run`, `scan` and `verify`, ignored for `build` (the builder is Ankra's) |
+| `image` | string | `defaults.image` | The container the stage runs in; required for `run`, `scan` and `verify`. Ignored for `build` (the builder is Ankra's) and `checkout` (the git client is Ankra's own, pinned by digest) - either may be declared for readability, but the platform's own image runs regardless. |
 | `uses` | string | none | A reusable step, spelled `ankra/<name>`, `custom_tool/<name>` or `repo:<owner>/<name>@<ref>#<path>`. Only the spelling is validated today; resolution is not available. A stage declares `run` or `uses`, not both. |
 | `with` | map | none | Inputs to `uses` |
 | `run` | string | none | The script; required on a `run` stage without `uses` |
@@ -145,7 +145,7 @@ A stage of a platform-settled kind is left exactly as the dispatcher found it; a
 
 ### What every step carries
 
-A step's container mounts the run's workspace at `/workspace` and runs with these variables set: `ANKRA_RUN_ID`, `ANKRA_STEP_ID`, `ANKRA_STEP_KEY`, `ANKRA_STEP_KIND`, `ANKRA_ORGANISATION_ID`, `ANKRA_CLUSTER_ID`, `ANKRA_REPOSITORY_ID`, `ANKRA_APPLICATION_ID`, `ANKRA_HEAD_SHA`, `ANKRA_REF`, `ANKRA_IS_FORK` and `ANKRA_WORKSPACE`. `ANKRA_OUTPUT` names a file on a memory-backed volume: append `key=value` lines to it (at most 64 KiB) and they are recorded as the step's outputs when the script exits, whether it succeeded or not. Declared secrets are delivered as files under `/run/agent-secrets` or as environment variables once secret delivery ships.
+A step's container mounts the run's workspace at `/workspace` and runs with these variables set: `ANKRA_RUN_ID`, `ANKRA_STEP_ID`, `ANKRA_STEP_KEY`, `ANKRA_STEP_KIND`, `ANKRA_ORGANISATION_ID`, `ANKRA_CLUSTER_ID`, `ANKRA_REPOSITORY_ID`, `ANKRA_APPLICATION_ID`, `ANKRA_HEAD_SHA`, `ANKRA_REF`, `ANKRA_IS_FORK` and `ANKRA_WORKSPACE`. `ANKRA_OUTPUT` names a file on a memory-backed volume: append `key=value` lines to it (at most 64 KiB) and they are recorded as the step's outputs when the script exits, whether it succeeded or not. A declared secret or credential the step may read is delivered as a file under `/run/agent-secrets`, named after the binding: the agent reveals it once, at step start, by calling back with its own session token, so the value never rides in the payload the platform sent or in a log line. A `secrets` binding sourced `app_env_secret`, `org_variable` or `registry` resolves; `from: credential` validates but is not deliverable yet. A `credentials` binding sourced `git` or `registry` resolves; `cloud` and `object_storage` are refused by name until the run has its own scoped identity.
 
 ## Expressions
 
@@ -363,7 +363,7 @@ finally:
       timeout: "30s"
 ```
 
-Reading it against [what executes today](/guides/ankra-pipelines#what-is-in-place-today): the four `run` stages execute in the cluster; `checkout` and the `verify` probe are dispatched but wait on runner images that have not shipped; the `agent` triage and the `webhook` notification are platform-settled kinds that stay pending. The schedule is stored but not fired. The definition validates as `ok` today, which is the point of the closed vocabulary: the file describes the pipeline the platform will run, and says nothing it will not do.
+Reading it against [what executes today](/guides/ankra-pipelines#what-is-in-place-today): `checkout` and the four `run` stages execute in the cluster; the `verify` probe is dispatched but waits on a runner image that has not shipped; the `agent` triage and the `webhook` notification are platform-settled kinds that stay pending. The schedule fires. The definition validates as `ok` today, which is the point of the closed vocabulary: the file describes the pipeline the platform will run, and says nothing it will not do.
 
 ## Related
 

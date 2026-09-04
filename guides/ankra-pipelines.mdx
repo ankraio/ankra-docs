@@ -1,87 +1,52 @@
 ---
 title: Ankra Pipelines
-description: Run your CI inside your own Kubernetes cluster from one committed file - triggers, a hardened Job per stage, check runs, artifacts, and what a pull request can and cannot change.
+description: Connect a repository, push a commit, and watch it run inside your own cluster - triggers, a hardened Job per stage, check runs, artifacts, and what a pull request can and cannot change.
 ---
 
 import { CliVersion } from "/snippets/cli-version.jsx";
 
 <Note>
-Ankra Pipelines runs a repository's CI as Kubernetes Jobs inside a cluster you already operate through Ankra. One file, `.ankra/pipeline.yaml`, declares the triggers and the stages; a push, a pull request or a tag starts a run, every stage runs as a hardened Job in the `ankra-ci` namespace of your CI cluster, and the result lands as an `Ankra pipeline` check on the commit, one section of the pull request's status comment, and a run you can follow with `ankra pipeline logs --follow`. There are no GitHub-hosted or self-hosted runners to keep alive.
+Ankra Pipelines runs a repository's CI as Kubernetes Jobs inside a cluster you already operate through Ankra. One file, `.ankra/pipeline.yaml`, declares the triggers and the stages; a push, a pull request or a tag starts a run, every in-cluster stage runs as a hardened Job in the `ankra-ci` namespace of your CI cluster, and the result lands as an `Ankra pipeline` check on the commit and a run you can follow with `ankra pipeline logs --follow`. There are no GitHub-hosted or self-hosted runners to keep alive.
 </Note>
 
-This page is for a platform engineer deciding whether to move CI onto Ankra. It says what the product does, exactly what is in place today, and what is not yet.
-
-## Why CI belongs in your cluster
-
-The generated GitHub Actions workflow Ankra Applications ship with works, and keeps working - see [Bring your own CI](#bring-your-own-ci-github-actions) below. Ankra Pipelines exists because of what that model cannot fix:
-
-- **Runners are a second fleet.** GitHub-hosted runners are shared and rate limited; a self-hosted runner pool is one more set of machines to size, patch and pay for. A pipeline step is a Job on nodes you already have, scheduled under the quota and node selectors you set, and never at the expense of a deploy - the agent runs pipeline work in its own worker pool.
-- **Credentials live in CI secrets.** A workflow needs registry logins, cloud credentials and deploy tokens as repository secrets, copied per repository and readable by any workflow that names them. In a pipeline definition those are *references* the platform resolves, and the sections that grant them are protected: a pull request can rewrite what a pipeline does, and cannot widen what it may touch.
-- **Publish happens before the gate.** A workflow that pushes an image and scans it afterwards has already published a vulnerable image by the time the scan fails. The pipeline vocabulary separates `build`, `scan`, `gate` and `publish` so that nothing is published that the gate did not pass.
-- **The evidence is somewhere else.** Run history, logs, scan artifacts and the check on the commit all lived on the CI provider. A pipeline run is an Ankra object: `ankra pipeline get`, live logs, artifacts in your own backup vault, and the same status on GitHub, GitLab or Bitbucket.
-
-## What is in place today
-
-Ankra Pipelines is landing in pieces, and this page is honest about the line. Everything in the first list is on the platform and the agent now; everything in the second is not, and is described in [What comes next](#what-comes-next).
-
-**In place**
-
-- The definition: `.ankra/pipeline.yaml` (`apiVersion: ankra.io/v1`, `kind: Pipeline`) with its parser, validator and dry-run planner - see the [pipeline.yaml reference](/guides/pipeline-reference).
-- Conversion of an existing GitHub Actions, GitLab CI, Bitbucket Pipelines or CircleCI definition into a pipeline, from chat or the MCP server - see [Migrate from GitHub Actions](/guides/migrate-from-github-actions).
-- The organisation's CI settings (which cluster runs pipelines, parallelism, image allow-list, retention, image gate) and its pipeline policy (the authority ceiling an administrator sets).
-- The runs API and the `ankra pipeline` commands: dispatch, list, get, cancel, re-run, live step logs, artifacts, the stored definition, schedules.
-- Triggers from push, pull request and tag deliveries on GitHub, GitLab and Bitbucket Cloud, deduplicated across redeliveries, with a recorded reason whenever nothing runs.
-- In-cluster execution of `run` stages on the organisation's CI cluster: a hardened Job per step in `ankra-ci`, a per-run workspace volume, keyed cache volumes, service sidecars, network tiers, resource ceilings, timeouts, live logs, and one automatic retry of Ankra's own failures.
-- SCM feedback: one `Ankra pipeline` check run per run on GitHub with a real conclusion and a Cancel button, a commit status on GitLab and Bitbucket, a comment fallback when the GitHub App lacks `checks:write`, and the pipeline section of the single status comment on the pull request.
-- Step logs and declared artifacts stored in the organisation's backup vault, listed and downloaded through the API and CLI.
-
-**Not in place yet**
-
-- Connecting a repository to a pipeline. The lane that connects a repository and writes `.ankra/pipeline.yaml` through the setup pull request has not shipped. Until it does, a push to a repository records `repository_not_onboarded` and the by-application pipeline commands answer not found.
-- Reading the committed file at each commit. The definition a run executes is the stored definition of record (`ankra pipeline definition put`); commit the same file so the two do not drift.
-- The runners for `checkout`, `build`, `scan` and `verify` stages, and the platform-side settling of `gate`, `publish` and every other kind that does not run in the cluster. Today `run` is the stage kind that executes end to end.
-- Delivering declared `secrets` and `credentials` into a step, and the run identity that `permissions` mints.
-- Runs for pull requests from forks, schedules firing, and the user-declared `retry` block being applied.
-
-## How a run happens
-
-```mermaid
-flowchart LR
-    Event[Push, pull request, tag or dispatch] --> Trigger[Trigger decision]
-    Trigger -->|enqueued| Plan[Plan: stages, matrix, needs, skipped]
-    Trigger -->|no run| Reason[Recorded reason]
-    Plan --> Dispatch[Org-fair dispatch to the CI cluster]
-    Dispatch --> Job[One Job per step in ankra-ci]
-    Job --> Settle[Settle: outcome, unblock, conclude]
-    Settle --> Check[Check run and status comment]
-    Settle --> Vault[Logs and artifacts in your vault]
-```
-
-1. **Trigger.** A verified delivery from GitHub, GitLab or Bitbucket Cloud - a branch push, a pull request opened, synchronised or reopened, or a tag - is normalised into one event and decided in a fixed order: is the repository connected, is the head trusted, is there a cluster to run on, is there a definition, does the definition's `on:` block accept the event. A dispatch from the CLI, the API or an agent goes through the same decision. Every answer is recorded, so a push that started nothing still says why ([the reason tokens](/guides/pipeline-reference#triggers-and-reasons)).
-2. **Plan.** The planner turns the definition and the event into the step DAG: which stages survive the trigger and stage filters, how a matrix fans out (at most 64 legs per stage), what each step depends on, which `if:` conditions can be settled now. Nothing is dropped silently - a filtered stage is recorded with a reason code, and a run whose every stage is filtered out is recorded as concluded with outcome `skipped`.
-3. **Dispatch.** Steps are claimed org-fairly, never global FIFO: organisations are served in order of how many steps they already have running, inside each organisation's own parallelism cap. The dispatcher resolves the cluster per step - the organisation's CI cluster, otherwise the staging cluster it already nominated for AI work - and probes that the cluster's agent advertises the `run_pipeline_step` job before sending anything.
-4. **Run.** The agent renders the step's own Kubernetes objects from the signed payload - it never applies what the platform sent verbatim - and runs a hardened batch/v1 Job. Output streams live while the step runs; the complete log and the declared artifacts are uploaded to your backup vault when it concludes.
-5. **Settle.** The settle loop records the verdict, unblocks the steps that waited on it and concludes the run when nothing is left. Only Ankra's own failures are retried, once; a non-zero exit is the step's verdict and is final.
-6. **Report.** The `Ankra pipeline` check run (or commit status) is updated on every change, and the pipeline section of the pull request's status comment with it.
-
-Deploying the result is unchanged: Ankra Applications deploy the image your CI published, and push-to-deploy, previews and rollback read that same observation. Once the `build` and `publish` stages run in the cluster, the pipeline is what publishes the digest they read.
+This page gets a repository connected, its first commit through a run, and the result on your pull request - then says exactly what is and is not in place yet, so nothing here claims more than the platform does today.
 
 ## Prerequisites
 
-- **A connected repository.** The repository is connected through the [Ankra GitHub App](/integrations/github), GitLab, or [Bitbucket Cloud](/integrations/bitbucket-cloud), so Ankra receives its webhooks. Pipelines are repository-scoped with an optional link to an [Application](/concepts/applications); a repository with nothing to build can have a pipeline too.
+- **A connected repository.** The repository is connected through the [Ankra GitHub App](/integrations/github), GitLab, or [Bitbucket Cloud](/integrations/bitbucket-cloud), so Ankra receives its webhooks - and then connected to Ankra Pipelines itself, which is self-service: automatically when it backs an Ankra Application, or with one call for a bare repository (below). Pipelines are repository-scoped with an optional link to an [Application](/concepts/applications); a repository with nothing to build can have a pipeline too.
 - **A CI cluster.** An organisation administrator sets `ci_cluster_id` in the organisation's CI settings. Without one, the staging cluster the organisation nominated for AI work is used; with neither, a provider event records `no_ci_cluster` and nothing runs.
 - **The agent's `ci` worker pool.** The cluster's agent runs pipeline steps in a third scheduler that is off by default. Set the chart value `ci_worker_count` above zero (`AGENT_CI_WORKER_COUNT`); an agent with the pool disabled does not advertise the pipeline job names, and the platform refuses a step for that cluster up front instead of dispatching it.
 - **Optionally, a backup vault.** Step logs and artifacts are stored as objects in the organisation's oldest ready [backup vault](/concepts/backup-vaults). An organisation without one still runs its steps; it keeps no durable log or artifact, and the step's own outcome is unaffected.
 - **For check runs, `checks:write`.** Without it the GitHub App cannot create a check run, and the run's status is carried by a comment on the pull request instead - the comment says so and names the permission.
 
-## Your first green run
-
-<Warning>
-Steps 4 to 6 address a repository that is connected to a pipeline. Connecting one is [not self-service yet](#what-is-in-place-today): until that lane ships, `ankra pipeline validate --application` and `ankra pipeline definition put` answer that no pipeline repository exists for the application. Steps 1 to 3 can be done now, and the validation in step 3 works without any repository.
-</Warning>
+## Connect a repository, push, see the run
 
 <Steps>
-  <Step title="Choose the cluster that runs pipelines">
+  <Step title="Connect the repository">
+    Two paths, both self-service:
+
+    - **An Ankra Application.** Creating or reconciling an Application connects its repository and decides its pipeline automatically. For a genuinely new application, the setup pull request now commits `.ankra/pipeline.yaml` instead of a generated GitHub Actions workflow - unless the repository already carries an Ankra-authored workflow (which keeps healing rather than switching underneath you) or you asked for `github_actions` explicitly. A monorepo gets one file with each component's stages suffixed by its name, not one workflow per app. Ankra AI's proposal tool on the [MCP server](/platform/mcp-server) takes the same choice as `target: "ankra_pipeline"` or `"github_actions"`.
+    - **A bare repository** - nothing to build, or you'd rather write the file yourself:
+
+      <CodeGroup>
+      ```bash cURL
+      curl -X POST https://platform.ankra.app/api/v1/org/pipelines/repositories \
+        -H "Authorization: Bearer <your-token>" \
+        -H "Content-Type: application/json" \
+        -d '{
+          "provider": "github",
+          "owner": "my-org",
+          "name": "my-repo",
+          "default_branch": "main"
+        }'
+      ```
+      </CodeGroup>
+
+      Needs `pipelines.manage`. For a **GitHub** repository, Ankra reads `.ankra/pipeline.yaml` at `default_branch` itself, through the organisation's stored Git credential, and stores a valid file as the definition of record in the same call - connect a repository that already commits one and the first webhook after connecting has something to run. GitLab and Bitbucket Cloud repositories connect the same way but need `ankra pipeline definition put` afterwards (step three, below): reading the committed file at connect time is GitHub-only today. `default_branch` defaults to `main`; `credential_name` is optional for a public repository. Connecting a repository the organisation already connected answers `409` with the existing repository's id, not a second row.
+
+    `GET /org/pipelines/repositories` lists what is connected, keyset paginated; `GET /org/pipelines/repositories/{id}` reads one. The CLI verbs (`ankra pipeline repositories connect|list|get`) are in an open pull request, not merged yet - use the API or the portal's **Settings → Pipelines** page, which lists connected repositories today.
+  </Step>
+  <Step title="Choose the cluster that runs pipelines, and turn on its agent's ci pool">
     An organisation administrator sets the CI cluster. Any member can read the settings; changing them answers `403` for everyone else.
 
     <CodeGroup>
@@ -94,9 +59,8 @@ Steps 4 to 6 address a repository that is connected to a pipeline. Connecting on
     </CodeGroup>
 
     The same request takes the rest of the CI settings - see [Organisation CI settings](#organisation-ci-settings). Leave `ci_cluster_id` unset and the organisation's AI staging cluster is used instead.
-  </Step>
-  <Step title="Enable the agent's ci pool on that cluster">
-    Set `ci_worker_count` on the `ankra-agent` chart - the number of pipeline steps the agent runs at once, in slots separate from its read and write pools. For a cluster whose agent you installed yourself:
+
+    Then set `ci_worker_count` on the `ankra-agent` chart of that cluster - the number of pipeline steps the agent runs at once, in slots separate from its read and write pools:
 
     ```bash
     helm upgrade ankra-agent oci://ghcr.io/ankraio/ankra-agent/ankra-agent \
@@ -108,13 +72,13 @@ Steps 4 to 6 address a repository that is connected to a pipeline. Connecting on
     The agent creates the `ankra-ci` and `ankra-ci-build` namespaces on first use, with their Pod Security admission labels, a `ResourceQuota` and a `LimitRange`. `ci_storage_class` names the StorageClass for cache volumes and for a workspace claim that names none; leave it empty for the cluster default. See the [agent Helm values](/reference/agent-helm-values).
   </Step>
   <Step title="Write and validate .ankra/pipeline.yaml">
-    Start with `run` stages, the kind that executes end to end today. A public repository can fetch its own source over the `egress-https` tier; the `checkout` stage kind is declared in the vocabulary but its runner has not shipped.
+    This is the shape Ankra's own setup pull request commits for a new Go application - reuse it as a starting point. `checkout` and `test` are stages that execute today; `build`, `scan`, `gate` and `publish` are declared for the day they do too (see [What is in place today](#what-is-in-place-today)).
 
     ```yaml
     apiVersion: ankra.io/v1
     kind: Pipeline
     metadata:
-      name: "my-service"
+      name: "orders-api"
     on:
       push:
         branches:
@@ -122,65 +86,168 @@ Steps 4 to 6 address a repository that is connected to a pipeline. Connecting on
       pull_request:
         branches:
           - "main"
+        fork_policy: "read_only"
     concurrency:
-      group: "my-service-${{ ankra.ref }}"
+      group: "${{ ankra.repository }}-${{ ankra.ref }}"
       cancel_in_progress: true
     workspace:
       size: "10Gi"
       access: "rwo"
     defaults:
       image: "golang:1.26"
-      timeout: "20m"
+      timeout: "30m"
       network: "egress-https"
+    permissions:
+      contents: "read"
     stages:
-      - name: "fetch"
-        kind: "run"
-        run: |-
-          set -eu
-          git clone --depth 1 https://github.com/my-org/my-repo.git .
-          git fetch --depth 1 origin "$ANKRA_HEAD_SHA"
-          git checkout --detach "$ANKRA_HEAD_SHA"
+      - name: "checkout"
+        kind: "checkout"
       - name: "test"
         kind: "run"
+        image: "golang:1.26"
         run: "go test ./..."
         needs:
-          - "fetch"
-        resources:
-          cpu: "2"
-          memory: "4Gi"
+          - "checkout"
+        test_results:
+          - format: "go-test"
+            path: "test-results.json"
+      - name: "build"
+        kind: "build"
+        needs:
+          - "test"
+        build:
+          dockerfile: "Dockerfile"
+          platforms:
+            - "linux/amd64"
+          build_args:
+            - "VERSION"
+          provenance: true
+          sbom: true
+      - name: "scan"
+        kind: "scan"
+        needs:
+          - "build"
+        scan:
+          scanners:
+            - "semgrep"
+            - "checkov"
+            - "trivy"
+          fail_on:
+            checkov: "none"
+            semgrep: "error"
+            trivy: "app"
+      - name: "gate"
+        kind: "gate"
+        needs:
+          - "scan"
+        gate:
+          require_stages:
+            - "scan"
+      - name: "publish"
+        kind: "publish"
+        with:
+          image: "harbor.ankra.cloud/orders/orders-api"
+        needs:
+          - "gate"
+        when:
+          events:
+            - "push"
     ```
 
-    Ask Ankra AI to validate it - in the portal chat or through the [MCP server](/platform/mcp-server), the `cicd_validate_pipeline_yaml` tool answers with a severity (`ok`, `warn` or `fatal`) and every violation with its key. A `fatal` definition cannot be planned; fix it before committing. Every stage inherits `defaults`, and `$ANKRA_HEAD_SHA`, `$ANKRA_REF` and `$ANKRA_WORKSPACE` are among the variables every step carries.
-  </Step>
-  <Step title="Dry-run it against the platform">
+    Ask Ankra AI to validate it - in the portal chat or through the [MCP server](/platform/mcp-server), the `cicd_validate_pipeline_yaml` tool answers with a severity (`ok`, `warn` or `fatal`) and every violation with its key. A `fatal` definition cannot be planned; fix it before committing.
+
     <CliVersion since="0.15.0" />
 
     ```bash
     ankra pipeline validate --application my-service
     ```
 
-    The command reads `.ankra/pipeline.yaml` from the current directory (or the file you name), validates it, and plans it for a synthetic push and a synthetic pull request: which steps would run, which stages would be skipped and why, and every diagnostic. The exit code is non-zero when the definition has a fatal violation.
+    Reads `.ankra/pipeline.yaml` from the current directory (or the file you name), plans it for a synthetic push and a synthetic pull request, and prints the steps that would run, the stages that would be skipped and why, and every diagnostic - no repository connection required for this step alone. `--repository <repository-id>` validates for a bare repository instead of `--application`.
   </Step>
-  <Step title="Store the definition of record and commit the file">
+  <Step title="Store the definition, commit, push, and follow the run">
     ```bash
     ankra pipeline definition put .ankra/pipeline.yaml --application my-service
     git add .ankra/pipeline.yaml && git commit -m "Add the Ankra pipeline" && git push
     ```
 
-    `definition put` needs the `pipelines.manage` permission and stores the definition server-side; it does not touch the repository. The stored definition is what every run executes today, so keep the committed file identical to it.
-  </Step>
-  <Step title="Run it, follow it, read the check">
-    The push you just made triggers a run if the repository is connected. To dispatch one by hand, name the commit - a run that names no commit is refused rather than run against whatever the platform stored last:
+    `definition put` needs `pipelines.manage` and stores the definition server-side; it does not touch the repository. Every run executes the stored definition of record, so keep the committed file identical to it - see [What is in place today](#what-is-in-place-today).
+
+    The push you just made triggers a run on a connected repository. To dispatch one by hand, name the commit - a run that names no commit is refused rather than run against whatever the platform stored last:
 
     ```bash
     ankra pipeline run --application my-service --sha "$(git rev-parse HEAD)" --wait
     ankra pipeline list --application my-service
-    ankra pipeline logs <run-id> --application my-service --step test --follow
+    ankra pipeline logs <run-id> --application my-service --step checkout --follow
     ```
 
-    `--wait` follows the run to its conclusion and exits non-zero on anything but `success`, the way a CI step should. On GitHub the commit carries an `Ankra pipeline` check with a step table; on a pull request the pipeline section of Ankra's status comment shows the same.
+    `--wait` follows the run to its conclusion and exits non-zero on anything but `success`. `checkout` clones the commit for real - follow it to watch the fetch happen - and `test` runs your script; `build` refuses at dispatch until the wiring that resolves its push target ships (below), and `scan`, `gate` and `publish` stay pending. On GitHub the commit carries an `Ankra pipeline` check with a step table and a Cancel button; the portal's **CI/CD** tab shows the same run with a timeline and an in-app log viewer, and **Settings → Pipelines** lists the repository you connected in step one.
   </Step>
 </Steps>
+
+That loop - webhook, trigger decision, plan, dispatch, a real checkout, your steps, a check run, the portal - is what the rest of this page documents in depth: the mechanics behind it, why CI belongs in your cluster at all, exactly which stage kinds execute today, what a pull request can and cannot change, and the limits every run is held to.
+
+## How a run happens
+
+```mermaid
+flowchart LR
+    Event[Push, pull request, tag or dispatch] --> Trigger[Trigger decision]
+    Trigger -->|enqueued| Plan[Plan: stages, matrix, needs, skipped]
+    Trigger -->|no run| Reason[Recorded reason]
+    Plan --> Dispatch[Org-fair dispatch to the CI cluster]
+    Dispatch --> Job[One Job per step in ankra-ci]
+    Job --> Settle[Settle: outcome, unblock, conclude]
+    Settle --> Check[Check run and commit status]
+    Settle --> Vault[Logs and artifacts in your vault]
+```
+
+1. **Trigger.** A verified delivery from GitHub, GitLab or Bitbucket Cloud - a branch push, a pull request opened, synchronised or reopened, or a tag - is normalised into one event and decided in a fixed order: is the repository connected, is the head trusted, is there a cluster to run on, is there a definition, does the definition's `on:` block accept the event. A dispatch from the CLI, the API or an agent goes through the same decision. Every answer is recorded, so a push that started nothing still says why ([the reason tokens](/guides/pipeline-reference#triggers-and-reasons)).
+2. **Plan.** The planner turns the definition and the event into the step DAG: which stages survive the trigger and stage filters, how a matrix fans out (at most 64 legs per stage), what each step depends on, which `if:` conditions can be settled now, and - for a pull request that touches a protected section - which authority the run actually executes under (see [Logic is open, authority is closed](#logic-is-open-authority-is-closed)). Nothing is dropped silently - a filtered stage is recorded with a reason code, and a run whose every stage is filtered out is recorded as concluded with outcome `skipped`.
+3. **Dispatch.** Steps are claimed org-fairly, never global FIFO: organisations are served in order of how many steps they already have running, inside each organisation's own parallelism cap. The dispatcher resolves the cluster per step - the organisation's CI cluster, otherwise the staging cluster it already nominated for AI work - and probes that the cluster's agent advertises the `run_pipeline_step` job before sending anything. Declared secrets and credentials are resolved into one-time, per-step reveal grants at this point, never written into the payload itself.
+4. **Run.** The agent renders the step's own Kubernetes objects from the signed payload - it never applies what the platform sent verbatim - and runs a hardened batch/v1 Job. A `checkout` step clones the run's commit with a pinned public git image, reading a revealed credential only if the host it is cloning from matches; a `run` step executes your script. Output streams live while the step runs; the complete log and the declared artifacts are uploaded to your backup vault when it concludes.
+5. **Settle.** The settle loop records the verdict, unblocks the steps that waited on it and concludes the run when nothing is left. Only Ankra's own failures are retried, once; a non-zero exit is the step's verdict and is final. A concluded `build` step's digest is stamped as the application's build observation, ranked below your own CI's, so push-to-deploy, previews and rollback already read a pipeline-built image once dispatch can reach one.
+6. **Report.** The `Ankra pipeline` check run (or commit status) is updated on every change, naming the authority the run executed under when it differs from what the head asked for.
+
+Deploying the result is otherwise unchanged: Ankra Applications deploy the image your CI published. The `publish` stage that re-tags an approved digest into your real repository, and previews deployed straight from a build's digest, are still platform-settled and pending - until they ship, the [generated GitHub Actions workflow](#bring-your-own-ci-github-actions) stays what actually publishes your image.
+
+## Why CI belongs in your cluster
+
+The generated GitHub Actions workflow Ankra Applications ship with works, and keeps working - see [Bring your own CI](#bring-your-own-ci-github-actions) below. Ankra Pipelines exists because of what that model cannot fix:
+
+- **Runners are a second fleet.** GitHub-hosted runners are shared and rate limited; a self-hosted runner pool is one more set of machines to size, patch and pay for. A pipeline step is a Job on nodes you already have, scheduled under the quota and node selectors you set, and never at the expense of a deploy - the agent runs pipeline work in its own worker pool.
+- **Credentials live in CI secrets.** A workflow needs registry logins, cloud credentials and deploy tokens as repository secrets, copied per repository and readable by any workflow that names them. In a pipeline definition those are *references* the platform resolves and delivers as a one-time, per-step reveal - never written into a job spec or a log - and the sections that grant them are protected: a pull request can rewrite what a pipeline does, and cannot widen what it may touch.
+- **Publish happens before the gate.** A workflow that pushes an image and scans it afterwards has already published a vulnerable image by the time the scan fails. The pipeline vocabulary separates `build`, `scan`, `gate` and `publish` so that nothing is published that the gate did not pass.
+- **The evidence is somewhere else.** Run history, logs, scan artifacts and the check on the commit all lived on the CI provider. A pipeline run is an Ankra object: `ankra pipeline get`, live logs, artifacts in your own backup vault, and the same status on GitHub, GitLab or Bitbucket.
+
+## What is in place today
+
+Ankra Pipelines is landing in pieces, and this page is honest about the line. Everything in the first list is on the platform and the agent now; everything in the second is not, and is described in [What comes next](#what-comes-next).
+
+**In place**
+
+- The definition: `.ankra/pipeline.yaml` (`apiVersion: ankra.io/v1`, `kind: Pipeline`) with its parser, validator and dry-run planner - see the [pipeline.yaml reference](/guides/pipeline-reference).
+- Conversion of an existing GitHub Actions, GitLab CI, Bitbucket Pipelines or CircleCI definition into a pipeline, from chat or the MCP server - see [Migrate from GitHub Actions](/guides/migrate-from-github-actions).
+- The organisation's CI settings (which cluster runs pipelines, parallelism, image allow-list, retention, image gate) and its pipeline policy (the authority ceiling an administrator sets).
+- **Connecting a repository.** `POST /org/pipelines/repositories` connects a bare repository and, on GitHub, reads its committed `.ankra/pipeline.yaml` as the definition of record in the same call; an Ankra Application connects and decides its own repository automatically on create and on every reconcile. A new application's setup pull request commits `.ankra/pipeline.yaml` by default instead of a generated workflow.
+- The runs API and the `ankra pipeline` commands: dispatch, list, get, cancel, re-run, live step logs, artifacts, the stored definition, schedules.
+- Triggers from push, pull request and tag deliveries on GitHub, GitLab and Bitbucket Cloud, deduplicated across redeliveries, with a recorded reason whenever nothing runs.
+- **In-cluster execution of `checkout` and `run` stages** on the organisation's CI cluster: a hardened Job per step in `ankra-ci`, a per-run workspace volume, keyed cache volumes, service sidecars, network tiers, resource ceilings, timeouts, live logs, and one automatic retry of Ankra's own failures. `checkout` clones with a pinned public git image, a shallow fetch of the exact commit with a fallback to fetching its ref, and refuses an `lfs:` request by name rather than silently checking out pointer files.
+- **Secrets and credentials delivered into steps** as one-time, per-step reveal grants collected by the agent at step start: a `secrets` binding sourced `app_env_secret`, `org_variable` or `registry` resolves, and a `credentials` binding sourced `git` or `registry` resolves; `secrets: [{from: credential}]` validates but is not deliverable yet, and `cloud` and `object_storage` credentials are refused by name until the run gets its own scoped identity (below).
+- **Schedules fire.** The cron trigger dispatches through the same trigger every push and pull request uses, advancing from a stored watermark so a loop that was down for a while does not replay every occurrence it missed.
+- **Protected authority is enforced, not only modelled.** Every run plans under the default branch's admin-approved definition; a pull request that changes a protected section (below) executes under the last approved authority instead, and the check run, commit status and the definition response say so.
+- SCM feedback: one `Ankra pipeline` check run per run on GitHub with a real conclusion and a Cancel button, a commit status on GitLab and Bitbucket, and a comment fallback when the GitHub App lacks `checks:write`.
+- Step logs and declared artifacts stored in the organisation's backup vault, listed and downloaded through the API and CLI.
+- **The portal.** The Application's **CI/CD** tab shows Ankra pipeline runs with a timeline and an in-app log viewer beside the GitHub Actions view; organisation **Settings → Pipelines** lists connected repositories.
+
+**Not in place yet**
+
+- **The runners for `build`, `scan` and `verify`.** `build` is dispatched to a rootless BuildKit pod but refuses immediately: the dispatcher does not yet resolve which recipe, source and push target the step builds against, so every attempt concludes `step_refused` rather than reaching the builder. `scan` and `verify` are dispatched with no runner image at all. Persisting scan findings and serving the Security tab from a pipeline run has landed on the platform, but stays dormant until a `scan` step can actually produce a report to ingest.
+- The platform-side settling of `gate`, `publish`, `preview`, `deploy`, `agent`, `approval`, `webhook`, `automation`, `ankra` and `external` - every kind that does not run as a Job in your cluster.
+- The `publish` stage's digest re-tag into your real repository, and previews deployed straight from a build's digest.
+- **The pull request's unified status comment's dedicated pipeline section.** The check run and the commit status are real and load-bearing; nothing yet calls the section producer with a run's live data, so the comment's pipeline section stays unpopulated.
+- Runs for pull requests from forks whose head repository is not yet recorded on the run - `checkout` refuses those with a named error rather than guessing a remote.
+- The per-run identity `permissions` mints, so a step can call the `ankra` CLI with exactly the authority the default branch granted; `cloud` and `object_storage` credentials wait on it too.
+- The built-in `ankra/*` step library behind `uses:`, organisation step templates, and `custom_tool/<name>` steps.
+- The user-declared `retry` block being applied, and cache retention sweeps.
 
 ## Organisation CI settings
 
@@ -211,30 +278,43 @@ Anyone who can push can change what a pipeline *does*: add stages, rewrite scrip
 - A `gate` stage's approval roles and required stages, an `approval` stage's roles and minimum approvals, an `agent` stage in `agent` mode and its tool profile, a `webhook` stage's URL, an `external` stage's provider and workflow.
 - The `environments` block - data policy, verification, rollout and gate per environment.
 
-A stage the default-branch definition does not have gets no authority at all: adding a stage is free, adding a privileged stage is impossible. On the default branch, a definition that declares no authority runs as written; one that does runs with its logic and without its authority until an administrator approves that exact protected hash for that repository (`POST /api/v1/org/applications/{application_id}/pipeline/approve-definition`, `pipelines.manage`). An administrator narrowing the image allow-list later does not invalidate an approval, because the policy is applied at plan time and is not part of the hash.
+A stage the default-branch definition does not have gets no authority at all: adding a stage is free, adding a privileged stage is impossible.
 
-<Note>
-Today every run executes the stored definition of record. Resolving a pull request head's logic against the default branch's authority, and the `protected_hash` the definition reports, are part of the lane that connects repositories and are not applied yet - `protected_hash` is `null` in the definition response until then.
-</Note>
+Every run plans under one trusted authority, resolved in a fixed order: the default branch's own definition, once it declares no protected section at all (there is nothing to approve) or an administrator has approved that exact protected hash; failing that, the newest authority an administrator ever did approve on this repository; failing that, none. A pull request's *logic* always executes as written - its stages, scripts and images run - but its *authority* is whichever of those three the resolution landed on, never the pull request's own copy:
+
+- **`approved`** - the head declares exactly the trusted authority. An ordinary pull request that changed no protected section reads this way.
+- **`unapproved`** - a push to the default branch itself changed a protected section nobody has approved yet; the run executes under the last approved authority (or none) until an administrator does.
+- **`changed_on_head`** - a pull request added a credential, widened its egress, or moved a step onto another node pool. The change is ignored for this run and surfaced, never silently granted because a commit landed.
+
+The check run's summary and the commit status description lead with the authority sentence whenever a run is not `approved`, naming what changed and what to do about it; `GET /org/pipelines/definitions/{id}` reports the definition's `protected_hash` and whether it is the currently approved one. An administrator approves a repository's current protected sections with:
+
+```bash
+curl -X POST https://platform.ankra.app/api/v1/org/pipelines/definitions/<definition-id>/approve \
+  -H "Authorization: Bearer <your-token>" \
+  -H "Content-Type: application/json"
+```
+
+Needs `pipelines.manage` and a human actor - a service token cannot approve. Answers `409` rather than silently agreeing when the definition is no longer the repository's current default-branch definition (a later push replaced it) or is already approved. A CLI verb for this has not shipped yet. Narrowing the image allow-list afterwards does not invalidate an approval, because the policy is applied at plan time and is not part of the hash.
 
 ### What a step runs as
 
-Every step is a hardened batch/v1 Job in the `ankra-ci` namespace, which enforces the Pod Security Standards' Restricted profile: uid and gid 65532, the `RuntimeDefault` seccomp profile, no privilege escalation, a read-only root filesystem, every capability dropped, no service account token, no service links, one attempt, an explicit deadline and a TTL. A pipeline cannot ask for host privilege, host namespaces, host paths or control-plane placement; the request is refused at plan time. The one relaxation is the rootless BuildKit pod a `build` stage runs, in its own `ankra-ci-build` namespace under the Baseline profile - never privileged, never root, and no pipeline can name its own build image.
+Every step is a hardened batch/v1 Job in the `ankra-ci` namespace, which enforces the Pod Security Standards' Restricted profile: uid and gid 65532, the `RuntimeDefault` seccomp profile, no privilege escalation, a read-only root filesystem, every capability dropped, no service account token, no service links, one attempt, an explicit deadline and a TTL. A pipeline cannot ask for host privilege, host namespaces, host paths or control-plane placement; the request is refused at plan time. The one relaxation is the rootless BuildKit pod a `build` stage runs, in its own `ankra-ci-build` namespace under the Baseline profile - never privileged, never root, and no pipeline can name its own build or checkout image: both are Ankra's own, pinned by digest.
 
 Beyond containment:
 
-- **Network tiers.** `none` (the default) denies all egress. `egress-https` permits outbound port 443 to every destination except the cloud metadata endpoint. `services` is deny-all plus the run's own pods; the sidecars a step declares are containers in its own pod, reached over loopback by name. A step that needs both outbound HTTPS and a separate service pod has no tier to name yet.
-- **Image policy.** A `run` stage's image is checked against `ci_allowed_image_prefixes` on the platform and again by the agent before anything runs.
+- **Network tiers.** `none` (the default) denies all egress. `egress-https` permits outbound port 443 to every destination except the cloud metadata endpoint - `checkout` is clamped to this tier regardless of what is declared, because a step with no way to reach its source is not one broken step, it is an organisation locked out of running any pipeline at all. `services` is deny-all plus the run's own pods; the sidecars a step declares are containers in its own pod, reached over loopback by name.
+- **Image policy.** A `run` or `scan` stage's image is checked against `ci_allowed_image_prefixes` on the platform and again by the agent before anything runs; `checkout` and `build` always run Ankra's own pinned images regardless of the organisation's list.
 - **Resources.** A step requests exactly what it limits. It may ask for at most 8 CPU cores, 32 GiB of memory and 4 GPU devices, and a GPU step must name a `runs_on.node_selector`, so it is refused here rather than left Pending until it times out.
 - **Reserved names.** A step may not set environment variables beginning `ANKRA_`, the loader and `PATH` variables, or the image builder's own `BUILDKIT*`, `BUILDCTL`, `ROOTLESSKIT` and `DOCKER_CONFIG`.
-- **Forks.** A pull request whose head lives in a fork - or whose provenance the delivery could not establish - is refused with `fork_policy_pending` until the fork policy lane ships. The default `fork_policy` is `read_only`: a run with no secrets, no credentials and no identity beyond reading itself.
-- **Permissions.** `pipelines.read` covers listing and reading runs, logs, artifacts, the stored definition, schedules and validation; `pipelines.operate` covers dispatch, cancel and re-run; `pipelines.manage` covers replacing the stored definition, creating, changing and deleting schedules, the pipeline policy and its approvals, and a dispatch with a `--spec-file` override.
+- **Secrets and credentials.** A declared binding is revealed once, to a file under `/run/agent-secrets` named after the binding, by the agent calling back with its own session token - never written into the step's payload or a log line. A `checkout` step's own git credential is granted the same way and read by a credential helper that answers only for the host it was minted for, so a malicious submodule URL cannot walk off with it.
+- **Forks.** A pull request whose head lives in a fork - or whose provenance the delivery could not establish - runs with no secrets, no credentials and no identity beyond reading itself (`fork_policy: read_only`, the default); `checkout` clones the fork's own head anonymously, and refuses outright when the fork head's own repository has not been recorded on the run yet.
+- **Permissions.** `pipelines.read` covers listing and reading runs, logs, artifacts, the stored definition, schedules and validation; `pipelines.operate` covers dispatch, cancel and re-run; `pipelines.manage` covers connecting a repository, replacing the stored definition, creating, changing and deleting schedules, the pipeline policy and its approvals, and a dispatch with a `--spec-file` override.
 
 ## When something fails
 
 Every failed step carries an error class, and the class decides whose failure it is.
 
-- **Yours, never retried automatically.** `step_failed` (the script exited non-zero), `step_refused` (the definition asked for something the policy or the renderer refuses - an image outside the allow-list, a missing script, too much compute), and `timeout`. A step that ran out of time did run; running it again is a retry policy to declare. The `retry:` block is validated and carried to the agent but not applied yet, so today a non-zero exit is final.
+- **Yours, never retried automatically.** `step_failed` (the script exited non-zero), `step_refused` (the definition asked for something the policy or the renderer refuses - an image outside the allow-list, a missing script, too much compute, or a `build` step dispatched before its push target can be resolved), and `timeout`. A step that ran out of time did run; running it again is a retry policy to declare. The `retry:` block is validated and carried to the agent but not applied yet, so today a non-zero exit is final.
 - **Ankra's, retried once.** `agent_infra` (the cluster could not create the namespace, bind the volume or pull the image), `worker_lost` (the agent claimed the step and stopped reporting), `result_malformed`, `agent_offline`, `agent_never_started` (no agent claimed the step inside its timeout - check that the cluster is connected and `ci_worker_count` is above zero), `execution_vanished` and `stranded`. Each of these writes the next attempt instead of a conclusion, up to two attempts in total; the second failure concludes the step as `infra_error`, and the check run settles as `action_required` naming the class - Ankra failing never reads as your code failing.
 - **Timeouts.** A stage runs under its `timeout`, or `defaults.timeout`, or 30 minutes; the ceiling is 6 hours and a longer value is clamped and recorded. The agent stops a step at its deadline with a 60-second grace, and a reaper on the platform sweeps every 30 seconds for steps two watchdogs missed - a step five minutes past its deadline, an agent that has not checked in for ten.
 - **Cancel.** `ankra pipeline cancel <run>`, `POST …/pipeline-runs/{run_id}/cancel`, or the **Cancel** button on the check run while the run is live. A run that is cancelled concludes with outcome `cancelled`.
@@ -257,6 +337,7 @@ A run's outcome is one of `success`, `failure`, `cancelled`, `timed_out`, `skipp
 | Parallelism | 4 runs and 8 steps per organisation at once by default, up to 64 and 256; org-fair claiming |
 | Artifacts | 512 MiB per object, 2 GiB per run, 20 uploads per step; download links are valid for 5 minutes |
 | Retention | Artifacts and step logs 30 days by default, caches 14 days, each 1 to 365 |
+| Secret and credential grants | At most 32 bindings per step; each revealed once, alive for the step's own timeout plus 15 minutes, capped at 7 hours |
 | Step outputs | `$ANKRA_OUTPUT` takes `key=value` lines, at most 64 KiB, recorded on the step |
 | Live log | 1,024 lines are queued; when the reader falls behind the agent blocks for 250 ms and then drops, writing a `… N lines dropped` marker where the loss happened; the uploaded log keeps the last 8 MiB |
 | Log history | The live stream has no replay: `ankra pipeline logs` shows output from the moment it connects; the complete log is the `step.log` artifact |
@@ -283,21 +364,24 @@ Every command addresses one pipeline with `--application <name-or-id>` or `--rep
 | `ankra pipeline artifacts <run>` and `artifacts download <artifact-id> [--out <file>]` | List a run's stored logs and artifacts, and fetch one through its presigned URL |
 | `ankra pipeline validate [file]` | Validate and dry-run a definition without writing anything |
 | `ankra pipeline definition get\|put <file>` | Read or replace the stored definition of record |
-| `ankra pipeline schedules list\|create\|update\|delete` | Manage cron schedules (`--cron`, `--timezone`, `--ref`, `--input`, `--enabled`) - stored and validated now, fired when the schedule loop ships |
+| `ankra pipeline schedules list\|create\|update\|delete` | Manage cron schedules (`--cron`, `--timezone`, `--ref`, `--input`, `--enabled`) - stored, validated and now fired |
 
-The same operations are on the API under `/api/v1/org/applications/{application_id}/pipeline-runs` and `/api/v1/org/pipeline-repositories/{repository_id}/pipeline-runs` with a bearer [token](/reference/tokens): list and create runs, `…/{run_id}`, `…/{run_id}/rerun`, `…/{run_id}/cancel`, `…/{run_id}/steps/{step_id}/logs` (server-sent events, resumable with `from_seq`), `…/{run_id}/artifacts`, `…/artifacts/{artifact_id}/download` (a `302` to a presigned URL), and beside them `…/pipeline` (`GET`, `PUT`), `…/pipeline/validate` and `…/pipeline/schedules`. Creating a run answers `202` with the run id and its number.
+`ankra pipeline repositories connect|list|get` is proposed in an open, unreleased pull request; connect and list a repository through the API or the portal until it merges.
+
+The same run and repository operations are on the API under `/api/v1/org/applications/{application_id}/pipeline-runs`, `/api/v1/org/pipeline-repositories/{repository_id}/pipeline-runs` and `/api/v1/org/pipelines/repositories` with a bearer [token](/reference/tokens): list and create runs, `…/{run_id}`, `…/{run_id}/rerun`, `…/{run_id}/cancel`, `…/{run_id}/steps/{step_id}/logs` (server-sent events, resumable with `from_seq`), `…/{run_id}/artifacts`, `…/artifacts/{artifact_id}/download` (a `302` to a presigned URL), and beside them `…/pipeline` (`GET`, `PUT`), `…/pipeline/validate`, `…/pipeline/schedules` and `…/pipelines/definitions/{id}[/approve]`. Creating a run answers `202` with the run id and its number; connecting a repository answers `201` with the repository and what happened to its committed definition, or `409` naming the one that already exists.
 
 ## What comes next
 
 These are on the plan of record and not available yet. None of them is usable today, and this page will say so when that changes.
 
-- Connecting a repository and writing `.ankra/pipeline.yaml` from the setup pull request; reading the committed file at each commit; retiring a generated workflow through a reviewable pull request.
-- The runners for `checkout`, `build` (rootless BuildKit by digest), `scan` and `verify`; the platform-settled `gate` over persisted findings and `publish` as a re-tag of the digest the gate approved; previews deployed by digest.
-- Secrets and credentials delivered into steps; the per-run identity that `permissions` mints, so a step can call the `ankra` CLI with exactly the authority the default branch granted.
+- The dispatcher resolving a `build` step's recipe, source and push target, so a build runs instead of refusing; the runners for `scan` and `verify`.
+- The platform-settled `gate` over persisted findings, `publish` as a re-tag of the digest the gate approved, and previews deployed by digest.
+- The pull request status comment's dedicated pipeline section actually being populated from a run.
+- Fork-head checkout, once the fork head's own repository is recorded on the run.
+- The per-run identity that `permissions` mints, so a step can call the `ankra` CLI with exactly the authority the default branch granted; `cloud` and `object_storage` credentials once it exists.
 - The built-in `ankra/*` step library behind `uses:`, organisation step templates, and `custom_tool/<name>` steps.
 - The `agent`, `approval`, `webhook`, `automation`, `ankra` and `external` stage kinds; `on.webhook` inbound dispatch tokens.
-- Fork policy - `read_only` runs with no secrets, no push and no egress - so public repositories can accept contributions safely.
-- Schedules firing, the user-declared `retry` block, cache retention sweeps, and a run page in the portal.
+- The user-declared `retry` block, cache retention sweeps, and a dedicated run page in the portal (the CI/CD tab shows runs today; a standalone page with more depth is still to come).
 - Environments hydrated from restore points, verification stages (HTTP probes, smoke scripts, k6 load tests, PromQL assertions, restore verification), promotions with approvals, and canary rollouts through Traefik weighted traffic.
 
 ## Next steps
