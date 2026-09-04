@@ -97,7 +97,7 @@ Every stage has a `name` (lower-case letters, digits, dashes and underscores, st
 | `ankra` | Runs a platform verb through the run's scoped identity | Settled by the platform; stays pending today |
 | `external` | Waits on a provider's own CI: `provider`, `workflow`, `inputs` | Settled by the platform; stays pending today |
 
-A stage of a platform-settled kind is left exactly as the dispatcher found it; a run containing one does not conclude until that kind's evaluator ships, and `ankra pipeline cancel` is how to release its concurrency group in the meantime.
+A stage of a platform-settled kind is left exactly as the dispatcher found it; a run containing one does not conclude until that kind's evaluator ships, and `ankra pipeline cancel` is how to release its concurrency group in the meantime. A validator change to refuse a platform-settled kind up front, with a named diagnostic, rather than let a run hang on one until it is cancelled, is planned but not shipped.
 
 ### Fields common to every stage
 
@@ -114,9 +114,9 @@ A stage of a platform-settled kind is left exactly as the dispatcher found it; a
 | `services` | list | none | Names from the `services` block this stage reaches |
 | `env` | map | none | Environment variables; names beginning `ANKRA_`, `PATH` and the loader variables, and the builder's own `BUILDKIT*`, `BUILDCTL`, `ROOTLESSKIT` and `DOCKER_CONFIG` are refused |
 | `secrets` | list | none | Names from the `secrets` block this stage may read |
-| `cache` | list | `defaults.cache` | `key` (expressions allowed, typically `hashFiles`) and `paths` under the workspace; one 5Gi volume per path. The volume is real, but scoped to the run that created it - every run's cache is cold today, reused by key across runs only once that follow-up ships. |
+| `cache` | list | `defaults.cache` | `key` (expressions allowed, typically `hashFiles`) and `paths` under the workspace; one 5Gi volume per path, keyed by (repository, cluster, key, path) so the same key resolves to the same volume across runs. `restore_keys` is an ordered list of prefixes a miss on `key` falls back to, restoring the most recently used matching volume instead of starting cold - GitHub Actions' own cache semantics. A volume nothing resolves to for `ci_cache_retention_days` is reaped. |
 | `artifacts` | list | none | `name`, `paths` and optional `retention_days` (zero takes the organisation default) |
-| `test_results` | list | none | `format` (`junit`, `go-test`, `pytest` or `playwright`) and `path` |
+| `test_results` | list | none | `format` (`junit`, `go-test`, `pytest` or `playwright`) and `path`. Validated and carried to the agent; not ingested anywhere yet - there is no reader for the report this points at, so it has no effect on the run, the check run, or the pull request review today. |
 | `outputs` | map | none | The names the stage writes to `$ANKRA_OUTPUT`, read back onto the step |
 | `timeout` | duration | `defaults.timeout`, else 30 minutes | Wall-clock budget; at most 6 hours, longer values are clamped and recorded |
 | `resources.cpu`, `resources.memory`, `resources.gpu` | quantities | 500m, 1Gi, none | Requests equal limits; at most 8 cores, 32 GiB and 4 GPUs. `gpu` is protected and needs `runs_on.node_selector`. |
@@ -135,7 +135,7 @@ A stage of a platform-settled kind is left exactly as the dispatcher found it; a
 | Block | Fields |
 |-------|--------|
 | `build` | `dockerfile`, `context`, `platforms`, `build_args` (names only), `provenance`, `sbom`, `cache_to`. `provenance`/`sbom` ask BuildKit to attest the digest it pushes to the CI staging repository - `publish`'s re-tag does not carry those attestations into the real repository yet (below). |
-| `scan` | `scanners` (`semgrep`, `checkov`, `trivy`) and `fail_on`, a map from scanner to the severity that blocks; a scanner absent from the map reports without blocking. `with.semgrep_config` names the space-separated Semgrep registry packs to run (for example `"p/default p/docker p/golang"`); undeclared, Semgrep runs its own `--config=auto`. |
+| `scan` | `scanners` (`semgrep`, `checkov`, `trivy`) and `fail_on`, a map from scanner to a severity. `fail_on` is accepted and carried today, but nothing reads it back: it does not decide what blocks a `publish`. What actually blocks is the `gate` stage's own policy (below) - the organisation's [`ci_image_gate`](/guides/ankra-pipelines#organisation-ci-settings), tightened, never loosened, by a `gate` stage's `with:`. `with.semgrep_config` names the space-separated Semgrep registry packs to run (for example `"p/default p/docker p/golang"`); undeclared, Semgrep runs its own `--config=auto`. |
 | `gate` | No block of its own beyond `gate.approval_roles`/`gate.require_stages` (above) - a `kind: gate` stage's `with.image_gate` (`app`, `all` or `off`, case-insensitive, the same vocabulary as [`ci_image_gate`](/guides/ankra-pipelines#organisation-ci-settings)) and `with.severity` (`critical`, `high`, `medium` or `low`) may only make the organisation's policy *stricter*, never looser; `with.ignore_unfixed` (`true` by default, excludes a Trivy finding with no published fix) carries no such floor and is freely overridable either way. |
 | `publish` | `with.image` is accepted and validated but not read: the real target is the organisation's own registry, resolved for the run's application and component exactly as `build`'s push target was - never a value a stage can name. |
 | `preview` | `database.enabled`, `database.extensions`, `database.seed_from_restore_point`, `migrate`, `ingress_path` |
