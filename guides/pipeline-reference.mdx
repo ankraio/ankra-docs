@@ -81,13 +81,13 @@ Every stage has a `name` (lower-case letters, digits, dashes and underscores, st
 
 | Kind | What it does | Today |
 |------|--------------|-------|
-| `checkout` | Materialises the repository at the run's ref into the workspace, reading `with.fetch_depth` (default `1`, `0` for full history), `with.submodules` (`false`, `true` or `recursive`) and `with.lfs` | Executes end to end: a pinned public git image, a shallow fetch of the exact commit with a fallback to its ref, `lfs: true` refused by name rather than silently checking out pointer files. A fork head whose own repository is not yet recorded on the run is refused rather than guessed. |
+| `checkout` | Materialises the repository at the run's ref into the workspace, reading `with.fetch_depth` (default `1`, `0` for full history), `with.submodules` (`false`, `true` or `recursive`) and `with.lfs` | Executes end to end: a pinned public git image, a shallow fetch of the exact commit with a fallback to its ref, `lfs: true` refused by name rather than silently checking out pointer files. A pull request from a fork clones the fork's own head anonymously, reading the head repository the trigger recorded on the run; refused, rather than guessed, only on the rare delivery whose fork head repository could not be established at all. |
 | `run` | Executes `run` (a script, under `/bin/sh -eu`) or `uses` in an image the organisation's policy allows | Executes end to end |
-| `build` | Builds a container image by digest in a rootless BuildKit pod in `ankra-ci-build` | Refused at dispatch: the dispatcher does not yet resolve which recipe, source and push target the step builds against, so every attempt concludes `step_refused` before it reaches the builder |
-| `scan` | Runs the scanners over the source and the built image | Dispatched; runner not shipped |
-| `gate` | Evaluates persisted findings against organisation policy | Settled by the platform; stays pending today |
-| `publish` | Re-tags an approved image digest in the registry | Settled by the platform; stays pending today |
-| `preview` | Deploys the run's artefact into a per-pull-request environment | Settled by the platform; stays pending today |
+| `build` | Builds a container image by digest in a rootless BuildKit pod in `ankra-ci-build` | Executes end to end: resolves its own builder, source and push target at dispatch (a bare repository, or a component with no resolvable registry, gets a named refusal instead of a guess) and pushes by digest to the organisation's CI staging repository; a fork run's build has no push target, so it builds and discards |
+| `scan` | Runs the scanners over the source and the built image | Executes end to end: one step per declared scanner - Trivy, Semgrep, Checkov - each a pinned public image, writing the reports `gate` and the application's Security tab both read |
+| `gate` | Evaluates persisted findings against organisation policy | Executes end to end: judges the run's own persisted findings against [`ci_image_gate`](/guides/ankra-pipelines#organisation-ci-settings), which the stage's own `with:` may only tighten (below); a declared scanner that recorded nothing fails the gate by name |
+| `publish` | Re-tags an approved image digest in the registry | Executes end to end: re-tags the exact digest `gate` approved as `sha-<7>` in the application's real repository; refuses by name when its run has no successful `gate` step |
+| `preview` | Deploys the run's artefact into a per-pull-request environment, from inside the pipeline DAG | Settled by the platform; stays pending today - distinct from an Application's own pull-request preview, which already deploys an `ankra_pipeline` application's `build` digest without this stage kind existing (see [Ankra Pipelines](/guides/ankra-pipelines#how-a-run-happens)) |
 | `verify` | Runs one verification: `probe`, `smoke`, `load_test`, `assert_promql` or `restore_verify` | Dispatched; runner not shipped |
 | `deploy` | Applies the run's artefact to a bound environment | Settled by the platform; stays pending today |
 | `agent` | An AI mission with a `goal`, `tool_profile`, `mode` (`ask` or `agent`), `budget` (`tool_calls`, `turns`, `minutes`) and `context` | Settled by the platform; stays pending today |
@@ -114,7 +114,7 @@ A stage of a platform-settled kind is left exactly as the dispatcher found it; a
 | `services` | list | none | Names from the `services` block this stage reaches |
 | `env` | map | none | Environment variables; names beginning `ANKRA_`, `PATH` and the loader variables, and the builder's own `BUILDKIT*`, `BUILDCTL`, `ROOTLESSKIT` and `DOCKER_CONFIG` are refused |
 | `secrets` | list | none | Names from the `secrets` block this stage may read |
-| `cache` | list | `defaults.cache` | `key` (expressions allowed, typically `hashFiles`) and `paths` under the workspace; one 5Gi volume per path, reused by key across runs |
+| `cache` | list | `defaults.cache` | `key` (expressions allowed, typically `hashFiles`) and `paths` under the workspace; one 5Gi volume per path. The volume is real, but scoped to the run that created it - every run's cache is cold today, reused by key across runs only once that follow-up ships. |
 | `artifacts` | list | none | `name`, `paths` and optional `retention_days` (zero takes the organisation default) |
 | `test_results` | list | none | `format` (`junit`, `go-test`, `pytest` or `playwright`) and `path` |
 | `outputs` | map | none | The names the stage writes to `$ANKRA_OUTPUT`, read back onto the step |
@@ -134,8 +134,10 @@ A stage of a platform-settled kind is left exactly as the dispatcher found it; a
 
 | Block | Fields |
 |-------|--------|
-| `build` | `dockerfile`, `context`, `platforms`, `build_args` (names only), `provenance`, `sbom`, `cache_to` |
-| `scan` | `scanners` (`semgrep`, `checkov`, `trivy`) and `fail_on`, a map from scanner to the severity that blocks; a scanner absent from the map reports without blocking |
+| `build` | `dockerfile`, `context`, `platforms`, `build_args` (names only), `provenance`, `sbom`, `cache_to`. `provenance`/`sbom` ask BuildKit to attest the digest it pushes to the CI staging repository - `publish`'s re-tag does not carry those attestations into the real repository yet (below). |
+| `scan` | `scanners` (`semgrep`, `checkov`, `trivy`) and `fail_on`, a map from scanner to the severity that blocks; a scanner absent from the map reports without blocking. `with.semgrep_config` names the space-separated Semgrep registry packs to run (for example `"p/default p/docker p/golang"`); undeclared, Semgrep runs its own `--config=auto`. |
+| `gate` | No block of its own beyond `gate.approval_roles`/`gate.require_stages` (above) - a `kind: gate` stage's `with.image_gate` (`app`, `all` or `off`, case-insensitive, the same vocabulary as [`ci_image_gate`](/guides/ankra-pipelines#organisation-ci-settings)) and `with.severity` (`critical`, `high`, `medium` or `low`) may only make the organisation's policy *stricter*, never looser; `with.ignore_unfixed` (`true` by default, excludes a Trivy finding with no published fix) carries no such floor and is freely overridable either way. |
+| `publish` | `with.image` is accepted and validated but not read: the real target is the organisation's own registry, resolved for the run's application and component exactly as `build`'s push target was - never a value a stage can name. |
 | `preview` | `database.enabled`, `database.extensions`, `database.seed_from_restore_point`, `migrate`, `ingress_path` |
 | `verify` | Exactly one of `probe` (`url`, `status`, `timeout`), `smoke` (`image`, `run`), `load_test` (`script`, `virtual_users`, `duration`, `thresholds`), `assert_promql` (`query`, `comparison`, `threshold`, `for`) or `restore_verify` (`restore_point`, `queries`) |
 | `agent` | `goal` (required), `tool_profile`, `mode`, `budget.tool_calls`, `budget.turns`, `budget.minutes`, `context` |
@@ -187,7 +189,7 @@ Every event that reaches the trigger is decided in order, and the answer is reco
 | `no_ci_cluster` | The organisation has no CI cluster and no AI staging cluster | No, for a provider event; a dispatch still gets its run row |
 | `no_definition` | The repository has no stored definition | No |
 | `trigger_not_declared` | The definition's `on:` block does not declare this event kind | No |
-| `fork_policy_pending` | The pull request's head lives in a fork, or its provenance could not be established | No, until the fork policy lane ships |
+| `fork_policy_pending` | Reserved in the metric's stable label set; no longer returned in the ordinary case. A pull request whose head lives in a fork, or whose provenance could not be established, is enqueued and runs restricted today - see [Forks](/guides/ankra-pipelines#what-a-step-runs-as) | No |
 
 Dispatches (`manual`, `api`, `agent`, `rerun`) are exempt from the recent-run deduplication: a person who presses run twice asked for two runs.
 
