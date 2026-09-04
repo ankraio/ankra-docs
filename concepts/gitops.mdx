@@ -200,8 +200,26 @@ To keep a value Ankra would otherwise render - an image tag pinned above a chart
 Three limits apply today:
 
 - **SOPS-encrypted files are not covered.** Their committed bytes are ciphertext that cannot be reproduced from the render, so Ankra keys them on the embedded content fingerprint instead, and re-encrypts the file whenever its stored values change. A hand edit to an encrypted file is overwritten by that re-encryption; change the value in Ankra instead (see [SOPS](/guides/sops)).
-- **`.sops.yaml` in the cluster directory is generated** from the organisation's key on every export. Rules added to it by hand are not kept.
+- **`.sops.yaml` in the cluster directory has its own rule.** Ankra rewrites the creation rules it generates there on every export, but it no longer replaces the file: rules you add by hand are kept, and kept above Ankra's own. See [Merging the SOPS configuration file](#merging-the-sops-configuration-file) below.
 - **Preservation is silent.** Ankra logs `Preserving git content the platform did not write` on its side, but the sync status still reads in sync and no portal, CLI or API surface lists the preserved paths yet. While a file is preserved, a change made to it in Ankra does not reach Git - make the change in Git instead, which also brings Ankra's copy back in line.
+
+### Merging the SOPS configuration file
+
+The `.sops.yaml` in a cluster directory has two authors, so it is not covered by the digest boundary above: it is **merged** on every platform write instead of replaced, and the file it writes opens with a header saying so.
+
+- **Ankra owns only the rules it generates**: a rule carrying both a `path_regex` Ankra generates and an `age` key, and nothing else. Ankra rewrites those on every sync and lists them **last** in the file.
+- **Every other rule is yours.** It is preserved verbatim and kept **above** Ankra's own. SOPS applies the **first matching** creation rule, so a rule of yours takes precedence over Ankra's - including a deliberately keyless first rule, which is the supported way to keep a path out of encryption and make an external `sops -e` on it fail loudly rather than seal a file that must stay plaintext.
+- **To override one of Ankra's rules, write a rule that is not shaped like Ankra's**: keyless, using `key_groups`, carrying an extra field, or on a different `path_regex`. A rule that is exactly a `path_regex` Ankra generates plus an `age` key cannot be told apart from Ankra's own output and is replaced - that is what lets a key rotation reach the file.
+- **Other top-level keys are yours too.** `stores`, `kms`, `shamir_threshold` and anything else in the file are carried through untouched.
+- **Ankra does not read these rules.** Its own encryption is driven per resource by that resource's `encrypted_paths` declaration, compiled to a SOPS `encrypted_regex` when the resource is sealed (see [SOPS](/guides/sops)). The file exists for external tooling that runs `sops` against the repository.
+
+A `.sops.yaml` Ankra cannot parse is left exactly as it is, rather than rewritten.
+
+<Warning>
+**Removing the last `encrypted_paths` entry on a cluster deletes `.sops.yaml`, and your own rules with it.** Ankra renders the file only while the cluster has encrypted content. Clear the last `encrypted_paths` entry from the last add-on or manifest that had one, and the next platform write stops rendering `.sops.yaml`, so the export prunes it from the cluster directory. Ankra never reads `.sops.yaml` back in, so there is no copy in the platform to restore from - recover it from Git history.
+
+This matters most in the case that leads you there: removing an over-broad entry is the fix for a chart field that was sealed and should not have been (see [SOPS](/guides/sops#troubleshooting)). If that entry is the cluster's last one, keep a copy of `.sops.yaml` first, and re-commit your rules after Ankra's next write.
+</Warning>
 
 ---
 
