@@ -209,11 +209,41 @@ The `.sops.yaml` in a cluster directory has two authors, so it is not covered by
 
 - **Ankra owns only the rules it generates**: a rule carrying both a `path_regex` Ankra generates and an `age` key, and nothing else. Ankra rewrites those on every sync and lists them **last** in the file.
 - **Every other rule is yours.** It is preserved verbatim and kept **above** Ankra's own. SOPS applies the **first matching** creation rule, so a rule of yours takes precedence over Ankra's - including a deliberately keyless first rule, which is the supported way to keep a path out of encryption and make an external `sops -e` on it fail loudly rather than seal a file that must stay plaintext.
-- **To override one of Ankra's rules, write a rule that is not shaped like Ankra's**: keyless, using `key_groups`, carrying an extra field, or on a different `path_regex`. A rule that is exactly a `path_regex` Ankra generates plus an `age` key cannot be told apart from Ankra's own output and is replaced - that is what lets a key rotation reach the file.
+- **To override one of Ankra's rules, write a rule that is not shaped like Ankra's**: keyless, using `key_groups`, carrying an extra field, or on a different `path_regex`. A rule that is exactly a `path_regex` Ankra generates plus an `age` key cannot be told apart from Ankra's own output and is replaced - that is what lets a key rotation reach the file, and it happens silently. Keep a rule you need out of that shape; the warning below spells it out.
 - **Other top-level keys are yours too.** `stores`, `kms`, `shamir_threshold` and anything else in the file are carried through untouched.
 - **Ankra does not read these rules.** Its own encryption is driven per resource by that resource's `encrypted_paths` declaration, compiled to a SOPS `encrypted_regex` when the resource is sealed (see [SOPS](/guides/sops)). The file exists for external tooling that runs `sops` against the repository.
 
 A `.sops.yaml` Ankra cannot parse is left exactly as it is, rather than rewritten.
+
+<Warning>
+**The shape to avoid: one of Ankra's own `path_regex` values, an `age` key, and nothing else.** A rule in exactly that shape cannot be told apart from Ankra's output, so the next platform write replaces it - with no signal anywhere. The sync succeeds, and no portal, CLI or API surface reports it. The only trace is the reconciler's own `Sync cluster state from Ankra` commit, where the rule is simply gone from the diff.
+
+All three conditions have to hold together, so the only rules at risk are those whose `path_regex` is character-for-character one of the two Ankra generates for the cluster's own directory:
+
+```yaml
+- path_regex: <cluster-directory>/.*values\.yaml$
+- path_regex: <cluster-directory>/.*manifests/.*\.yaml$
+```
+
+The trap is tidying. A deliberately keyless rule on one of those two patterns is yours and is kept - but give it an `age` key, to "complete" it or to seal that path with your own recipient, and it becomes Ankra's shape and disappears on the next write:
+
+```yaml
+# Kept - keyless, so not Ankra's shape.
+- path_regex: <cluster-directory>/.*values\.yaml$
+
+# Replaced silently - Ankra's exact shape: its path_regex, an age key, nothing else.
+- path_regex: <cluster-directory>/.*values\.yaml$
+  age: age1...
+
+# Kept - same path, your own recipients, named with key_groups.
+- path_regex: <cluster-directory>/.*values\.yaml$
+  key_groups:
+  - age:
+    - age1...
+```
+
+Any one of these keeps a rule out of Ankra's shape: leave it keyless, name recipients with `key_groups`, carry any additional field such as `encrypted_regex`, or write it on a `path_regex` Ankra does not generate. The header Ankra writes at the top of the file states the same test.
+</Warning>
 
 <Warning>
 **Removing the last `encrypted_paths` entry on a cluster deletes `.sops.yaml`, and your own rules with it.** Ankra renders the file only while the cluster has encrypted content. Clear the last `encrypted_paths` entry from the last add-on or manifest that had one, and the next platform write stops rendering `.sops.yaml`, so the export prunes it from the cluster directory. Ankra never reads `.sops.yaml` back in, so there is no copy in the platform to restore from - recover it from Git history.
