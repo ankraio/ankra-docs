@@ -211,6 +211,39 @@ flowchart LR
 
 Deploying the result follows straight from what `publish` just did: an Ankra Application deploys the `sha-<7>` image `publish` tagged into your real repository, exactly as it would deploy an image your own CI published. A pull request gets its own preview from the same pipeline, before `publish` ever runs (`publish` fires only on `push`, per the example above) - the application's preview deploys the digest `build` produced for that head, by digest, never a mutable tag, and GitLab and Bitbucket Cloud pull requests now get previews the same way GitHub ones always could. The [generated GitHub Actions workflow](#bring-your-own-ci-github-actions) still works and is still what an application with no pipeline connected uses; nothing forces you off it.
 
+## What a pull request gets
+
+A connected pull request carries one comment, not several: a run, its preview and Ankra AI's own review each write into that comment's own `pipeline`, `preview` and `review` sections in place rather than posting separately - see [One status comment per pull request](/changelog#one-status-comment-per-pull-request). The pipeline section is the run's own state, plus the authority sentence whenever the run executed under anything but the plainly approved definition; the preview section is the throwaway environment deployed from the run's own digest; the review section is Ankra AI's verdict on the diff.
+
+### The review reads your pipeline, not just GitHub Actions
+
+Ankra's pull request review used to read a GitHub check run for its "is this commit passing" signal, so a repository already running on Ankra Pipelines still got a review that could not see its own pipeline. The review now resolves the newest pipeline run of the reviewed commit first, and falls back to GitHub's own check runs only for an application whose real build authority is still its own CI or the generated workflow, or for a head no pipeline run has touched yet. When a pipeline run answers, the review's prompt carries a bounded set of facts about it, each independently sourced so an absent one never reads as a clean one:
+
+- the failing step's name, kind and error message, when the run is failing - not its log, which stays behind `ankra pipeline logs`
+- the run's scan findings, by tool and severity, with the highest-severity individual findings named
+- the `gate` step's own verdict and blocking count, once one has concluded
+- the `build` step's reported image digest, once one has concluded
+- the authority sentence, when the run executed under anything other than the plainly approved definition
+
+The branch **Code review** lane (no pull request involved, see [Application AI Settings](/platform/application-ai)) does not read this block - only the pull request review does.
+
+### A human can say "merge when green"
+
+Mention **`@ankraai merge when green`** in a pull request comment, ask Ankra AI in chat, or call the API, and Ankra records the request and watches the pull request, merging it (squash) the moment every condition holds:
+
+- the requester is a linked member of your Ankra organisation, and the binding's [AI mode](/integrations/github#ask-ankra-in-a-comment) is **Agent** - in **Ask** mode the request is refused, naming the setting to change
+- the pull request's head is not a fork
+- the newest pipeline run for the head concluded successfully, and its `gate` step, if the definition declares one, passed
+- the run executed under plainly approved authority - one that fell back to an earlier approval, or none, is refused rather than merged under it
+- Ankra's own review has not requested changes on that exact commit
+- no human reviewer's most recent review is **Changes requested** - unlike the AI review's check, this one is not scoped to the current commit, so a changes-requested left on an earlier push still blocks until the same reviewer clears it with a later review
+
+The request expires 24 hours after it is made, and a new push to the pull request invalidates it. Every refusal is posted once, naming the exact condition that failed. This works on GitHub only today: a request against GitLab or Bitbucket Cloud is accepted and then refused, because neither provider adapter reports the capability to merge yet.
+
+### Chat watches a run, and a failed build gets a fix
+
+Ask Ankra AI to watch a run - or dispatch one, which registers the watch itself - and the `watch_pipeline_run` tool wakes the same conversation the moment it concludes, with the failing step, a bounded tail of its log, the findings and the gate verdict already in the prompt. Separately and unattended, a failed `build` step (never `infra_error`, a stranded step, or one a protected policy refused - only a genuine script failure) on a **direct push** to the tracked branch, in **Agent** mode, dispatches the same auto-fix mission the generated GitHub Actions workflow's own failed-build webhook already dispatches, with a log excerpt as evidence. A failed build on a **pull request** never gets an unattended commit from this lane, in either mode - it gets its diagnosis (the failing step, its error class, a log excerpt) posted into the status comment's `pipeline` section instead, pointing at Agent mode's **Propose a fix** on the [pull request review](/integrations/github#ask-ankra-in-a-comment) as the actual route to a fix.
+
 ## Why CI belongs in your cluster
 
 The generated GitHub Actions workflow Ankra Applications ship with works, and keeps working - see [Bring your own CI](#bring-your-own-ci-github-actions) below. Ankra Pipelines exists because of what that model cannot fix:
@@ -230,10 +263,12 @@ Ankra Pipelines is landing in pieces, and this page is honest about the line. Ev
 - Conversion of an existing GitHub Actions, GitLab CI, Bitbucket Pipelines or CircleCI definition into a pipeline, from chat or the MCP server - see [Migrate from GitHub Actions](/guides/migrate-from-github-actions).
 - The organisation's CI settings (which cluster runs pipelines, parallelism, image allow-list, retention, the image gate) and its pipeline policy (the authority ceiling an administrator sets). The image gate is no longer only a setting: `gate` steps (below) evaluate every run against it.
 - **Connecting a repository**, with an optional link to an application and a CI-cluster override, and **disconnecting** one. `POST /org/pipelines/repositories` connects a bare repository and, on GitHub, reads its committed `.ankra/pipeline.yaml` as the definition of record in the same call; `DELETE /org/pipelines/repositories/{id}` disconnects it, `409` while a run is still live. An Ankra Application connects and decides its own repository automatically on create and on every reconcile. A new application's setup pull request commits `.ankra/pipeline.yaml` by default instead of a generated workflow.
+- **Migrating an existing application onto a pipeline with one call** - see [Migrate an existing application](/guides/migrate-from-github-actions#migrate-an-existing-application-with-one-call).
 - The runs API and the `ankra pipeline` commands: dispatch, list, get, cancel, re-run, live step logs, artifacts, the stored definition, schedules.
 - Triggers from push, pull request and tag deliveries on GitHub, GitLab and Bitbucket Cloud, deduplicated across redeliveries, with a recorded reason whenever nothing runs.
 - **In-cluster execution of `checkout` and `run` stages** on the organisation's CI cluster: a hardened Job per step in `ankra-ci`, a per-run workspace volume, keyed cache volumes, service sidecars, network tiers, resource ceilings, timeouts, live logs, and one automatic retry of Ankra's own failures. `checkout` clones with a pinned public git image, a shallow fetch of the exact commit with a fallback to fetching its ref, and refuses an `lfs:` request by name rather than silently checking out pointer files.
 - **`build` produces a real digest.** A rootless BuildKit pod in its own `ankra-ci-build` namespace resolves its own builder, source and push target at dispatch and pushes the image it builds, by digest, to the organisation's CI staging repository; a bare repository with no application link, or a component with no resolvable registry, gets a named refusal instead of a guess. `provenance: true` and `sbom: true` ask BuildKit to attest the digest it pushes.
+- **The platform-operated build fallback builds.** When the CI cluster's own agent cannot run pipeline steps and the organisation set `ci_build_fallback: platform_builders` (and the `platform_builds` organisation flag is on), a `build` step runs on Ankra's own platform-builders lane instead - the same staging-repository push and the same `scan`/`gate`/`publish` downstream, with the step's `executor` recorded as whichever lane actually ran it.
 - **`scan` runs three tools for real, one step per tool.** Trivy (filesystem, a CycloneDX SBOM, and - once a build produced one - the image itself), Semgrep and Checkov, each from a pinned, digest-referenced public image the organisation's own `ci_allowed_image_prefixes` cannot turn off, writing the reports `gate` and the application's **Security** tab both read. `with.semgrep_config` names the registry packs to run (`p/default p/docker …`); undeclared, Semgrep runs its own `--config=auto`.
 - **`gate` judges what `scan` found.** It reads the run's own persisted findings against the organisation's `ci_image_gate` policy (below), which a `gate` stage's own `with:` may only tighten, never loosen; a declared scanner that recorded nothing fails the gate by name rather than passing as clean.
 - **`publish` re-tags only the digest `gate` approved.** A `publish` step refuses by name when its run has no successful `gate` step; otherwise it re-tags the exact digest `build` pushed to staging as `sha-<7>` in the application's real repository - never rebuilt, never a different digest than the one `scan` and `gate` judged.
@@ -243,6 +278,7 @@ Ankra Pipelines is landing in pieces, and this page is honest about the line. Ev
 - **Schedules fire.** The cron trigger dispatches through the same trigger every push and pull request uses, advancing from a stored watermark so a loop that was down for a while does not replay every occurrence it missed.
 - **Protected authority is enforced, not only modelled.** Every run plans under the default branch's admin-approved definition; a pull request that changes a protected section (below) executes under the last approved authority instead, and the check run, commit status, the definition response and the pull request's own status comment all say so.
 - SCM feedback: one `Ankra pipeline` check run per run on GitHub with a real conclusion and a Cancel button, a commit status on GitLab and Bitbucket, a comment fallback when the GitHub App lacks `checks:write`, and - on a pull request - the same run state and authority sentence in the `pipeline` section of Ankra's one status comment.
+- **The AI review reads your pipeline, and a human can say "merge when green".** See [What a pull request gets](#what-a-pull-request-gets) above: a bounded pipeline-facts block in the review prompt, a `merge when green` pull request comment gated on the run, its gate, both reviews and its authority, and a `watch_pipeline_run` chat tool whose unattended fix loop reacts to a failed `build` step.
 - Step logs and declared artifacts stored in the organisation's backup vault, listed and downloaded through the API and CLI.
 - **The portal.** The Application's **CI/CD** tab shows Ankra pipeline runs with a timeline and an in-app log viewer beside the GitHub Actions view; organisation **Settings → Pipelines** lists connected repositories; the application's **Security** tab reads a pipeline's own findings once a run has concluded for its repository, falling back to the GitHub-artifact reader until one has.
 
@@ -254,8 +290,7 @@ Ankra Pipelines is landing in pieces, and this page is honest about the line. Ev
 - The built-in `ankra/*` step library behind `uses:`, organisation step templates, and `custom_tool/<name>` steps - only the spelling of a reference is validated today.
 - **A cache actually surviving between runs.** A stage's `cache:` block mints a real volume today, but it is scoped to the run that created it, so every run's cache is cold; the reuse-by-key that makes it a cache, and the retention sweep that bounds what unused ones cost, are the same follow-up. The user-declared `retry` block is validated and carried to the agent but not applied either.
 - **Attestations and SBOM referrers on the image you actually deploy.** `build`'s `provenance`/`sbom` flags attest the digest it pushes to the CI staging repository; `publish`'s re-tag copies that one image manifest, not the attestation manifests beside it, so they are not on the digest your application deploys. Trivy's SBOM is an artifact in your backup vault today, not an OCI referrer on any image.
-- Whether the AI review reads a pipeline run's own state before it comments, a merge-when-green policy gated on a pipeline's conclusion, and a `watch_pipeline_run` chat tool - none has shipped yet.
-- **The platform-operated build fallback** (`ci_build_fallback: platform_builders`, for an organisation whose own cluster cannot build). The setting validates and stores on `ci-settings` today; nothing yet reads it back.
+- **Merge-when-green and automatic disposition re-evaluation are GitHub only.** A GitLab or Bitbucket Cloud `merge when green` request is accepted and then refused, because neither provider adapter reports the capability to merge yet; a push to a GitLab or Bitbucket Cloud default branch that adds or removes `.ankra/pipeline.yaml` answers `insufficient evidence` rather than re-evaluating the application's pipeline source, because the raw-file read that evaluation needs has no GitLab or Bitbucket equivalent wired in yet.
 - Environments hydrated from restore points, verification stages, promotions with approvals, and canary rollouts - see [What comes next](#what-comes-next).
 
 ## Organisation CI settings
@@ -356,7 +391,7 @@ A run's outcome is one of `success`, `failure`, `cancelled`, `timed_out`, `skipp
 
 You do not have to delete your existing CI to try Ankra Pipelines - the [generated GitHub Actions workflow](/guides/cicd-pipeline) keeps building, scanning and publishing images to your registry, and a pipeline run on the same commit is a second, independent check, `Ankra pipeline` beside the workflow's own. But connecting the repository is not inert: the moment `.ankra/pipeline.yaml` is the definition of record and the organisation has a CI cluster, the application is read as pipeline-sourced and its pull-request **previews** switch to the pipeline's own digest from then on - not when you decide you trust it. A merge to your default branch is more forgiving, because your own CI's build observation always outranks the pipeline's for it, so the workflow stays what actually deploys production until the pipeline's `publish` catches up or you retire the workflow. Retirement is deliberate either way: Ankra will not delete a workflow for you; when it does propose one, it will be a reviewable pull request.
 
-`build` and `publish` now run in the cluster, so a pipeline can publish your image on its own once you trust it - review [what to check after conversion](/guides/migrate-from-github-actions#what-to-review-after-conversion) first, and keep the workflow live until you have watched the pipeline publish correctly a few times. [Migrate from GitHub Actions](/guides/migrate-from-github-actions) explains how a converted pipeline maps onto it and what to review.
+`build` and `publish` now run in the cluster, so a pipeline can publish your image on its own once you trust it - review [what to check after conversion](/guides/migrate-from-github-actions#what-to-review-after-conversion) first, and keep the workflow live until you have watched the pipeline publish correctly a few times. [Migrate from GitHub Actions](/guides/migrate-from-github-actions) explains how a converted pipeline maps onto it and what to review; an application already connected to Ankra can skip the manual conversion entirely and [migrate with one call](/guides/migrate-from-github-actions#migrate-an-existing-application-with-one-call).
 
 ## Commands and API
 
@@ -389,7 +424,7 @@ These are on the plan of record and not available yet. None of them is usable to
 - The `preview` (inside the pipeline DAG), `deploy`, `agent`, `approval`, `webhook`, `automation`, `ankra` and `external` stage kinds; `on.webhook` inbound dispatch tokens.
 - A cache actually reused between runs (today's `cache:` volume is cold on every run) and its retention sweep; the user-declared `retry` block being applied; a dedicated run page in the portal (the CI/CD tab shows runs today; a standalone page with more depth is still to come).
 - Attestations and SBOM referrers carried onto the digest `publish` re-tags into your real repository, not only the one `build` pushes to staging.
-- The AI review reading a pipeline run's own state before it comments, a merge-when-green policy gated on a pipeline's conclusion, a `watch_pipeline_run` chat tool, and the platform-operated build fallback (`ci_build_fallback: platform_builders`) actually building anything.
+- Merge-when-green and automatic disposition re-evaluation on GitLab and Bitbucket Cloud (GitHub only today).
 - Environments hydrated from restore points, verification stages, promotions with approvals, and canary rollouts through Traefik weighted traffic.
 
 ## Next steps
