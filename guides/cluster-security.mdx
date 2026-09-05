@@ -5,7 +5,7 @@ description: Fleet-wide Trivy vulnerability and compliance posture, actionable c
 
 import { CliVersion } from "/snippets/cli-version.jsx";
 
-Ankra turns [Trivy Operator](https://aquasecurity.github.io/trivy-operator/latest/) vulnerability and compliance reports into a prioritised security workflow across your organisation. The platform reads the operator's Kubernetes reports through the agent. No scanner runs on Ankra's side and no image data leaves your cluster.
+Ankra turns [Trivy Operator](https://aquasecurity.github.io/trivy-operator/latest/) vulnerability and compliance reports into a prioritised security workflow across your organisation, and computes pod-security posture itself from the inventory the agent already streams. The platform reads the operator's Kubernetes reports through the agent. No scanner runs on Ankra's side and no image data leaves your cluster.
 
 <Note>
 Security is a **read and policy layer** over Trivy Operator image CVEs, benchmark compliance, and configuration audits. You install and configure the operator like any other add-on. Ankra surfaces, ranks, explains, and helps remediate what it finds.
@@ -43,6 +43,47 @@ Trivy Operator must be running in each cluster you want to assess. If it is not 
     The **SBOM** tab reads the operator's SbomReports, which are off by default because they are the largest objects it writes. On a cluster with control-plane headroom, set the security baseline input **Software bill of materials per image** (`trivy_sbom_generation_enabled`) to `true`; the next scan pass fills the tab. A package list, never image content, then leaves that cluster.
   </Step>
 </Steps>
+
+---
+
+## Security baseline
+
+`ankra-security-baseline` is the public stack profile the platform installs on every cluster it provisions, unless the organisation opted out, and the one **Enable security baseline** installs on an imported cluster's Security page. Like every profile it is a catalogue entry you can open, copy and fork. From version 5 it carries:
+
+- **Trivy Operator** for image vulnerabilities, configuration audits and the CIS benchmark, sized for a small cluster by default.
+- **Pod Security Standards, enforced by Kubernetes itself.** The profile ships an `ankra-pod-security` ConfigMap declaring the standard (`baseline` or `restricted`), the policy mode and the exempt namespaces. The Ankra agent labels every other namespace for [Pod Security Admission](https://kubernetes.io/docs/concepts/security/pod-security-admission/), the admission controller built into every API server: `pod-security.kubernetes.io/audit` and `/warn` at the standard in Audit mode, and `/enforce` as well once you switch the cluster to Enforce. Labels are only ever raised, so a namespace you hold at a stricter level keeps it, and the agent records what it set so switching back to Audit restores the previous state exactly.
+- **A guard for the enforce label.** A ValidatingAdmissionPolicy (Kubernetes 1.30 or newer) refuses lowering the enforce label of a managed namespace below the declared floor for anyone but the agent, so enforcement cannot be switched off with a namespace edit. It fails open: an admission it cannot evaluate is admitted.
+
+No policy engine runs on the cluster. Earlier versions of the baseline carried Kyverno with its Pod Security Standards preset; a cluster that installed one keeps it, receives the new manifests on its next update, and the policy mode toggle drives both mechanisms until you remove the two Kyverno add-ons from the stack. Kyverno remains available as the opt-in `ankra-policy-engine` profile, in the same safe mode, for image-signature verification and policies of your own.
+
+### What runs where
+
+| Concern | Where it is computed |
+|---|---|
+| Image vulnerabilities, configuration audits, CIS benchmark | Trivy Operator, on the cluster; the platform reads its reports |
+| Pod Security Standards and configuration posture of every workload | The platform, from the inventory the agent streams; no report object is written on the cluster |
+| Pod-security enforcement | The API server's Pod Security Admission, from namespace labels the agent manages |
+| Enforce-label protection | A ValidatingAdmissionPolicy the API server evaluates in-process |
+
+The Security Center's **Policies** tab shows both halves per cluster: the platform posture table (every check, how many workloads pass and fail it, and when the inventory it was computed from was last seen) and the Pod Security Admission line (mode, standard, and how many namespaces carry the labels), beside the policy engine's own reports where one is installed. Enforcement is measured from the namespaces, not assumed from the setting.
+
+### Sizing
+
+The platform sizes the baseline from the cluster's shape. A control plane below **8 GB** of memory, or one whose size the platform cannot determine, gets the **lite** shape: the CIS node assessment is off so no collector job lands on the control plane, and one image scan runs at a time. The cluster carries a notification saying so until the control plane grows. A control plane of 8 GB or more gets the standard shape, and three or more workers let two scans run at once. A cluster you moved to Enforce, or whose exempt list you changed, keeps that across every republish.
+
+### Inputs
+
+| Input | Default | Meaning |
+|---|---|---|
+| `pod_security_standard` | `baseline` | The standard every managed namespace is labelled with; `restricted` will flag most off-the-shelf charts |
+| `policy_mode` | `Audit` | Audit reports and warns and never blocks; Enforce makes the API server refuse pods that violate the standard |
+| `pod_security_exempt_namespaces` | the control plane, scanner, agent, GitOps, CNI, Hetzner and cert-manager namespaces | Namespaces the standard is never applied to. `kube-system`, `kube-public`, `kube-node-lease` and the agent's namespace are exempt whatever the list says; a single `-` exempts nothing else |
+| `trivy_scan_concurrency` | `1` | Image scans that run at once |
+| `trivy_scan_job_timeout` | `10m` | How long one image scan may run |
+| `trivy_infra_assessment_enabled` | `true` | The CIS node assessment (the lite shape turns it off) |
+| `trivy_sbom_generation_enabled` | `false` | The SBOM opt-in described above |
+
+The policy mode is also on the API: `POST /org/clusters/imported/{cluster_id}/security/policy-mode` with `{"mode": "audit"}` or `{"mode": "enforce"}`, and the per-cluster `GET .../security/policy-violations` read carries `policy_mode` beside a `platform_posture` block with the posture table and the `pod_security` coverage figures.
 
 ---
 
