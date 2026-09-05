@@ -66,6 +66,10 @@ import { CliVersion } from "/snippets/cli-version.jsx";
 - `snippets/cli-version.jsx` holds `latestStableCli`. A `since` above it renders the pre-release hint (enable the beta channel before upgrading) automatically, so a page can document an rc-only command truthfully; bump `latestStableCli` in the same PR that bumps `integrations/ankra-cli.mdx` and `integrations/ankra-cli-changelog.mdx` for a stable release, and the hints disappear on their own.
 - `note` is optional free text for a genuine caveat (a flag that needs a newer agent, a provider-specific command), one sentence.
 
+## API paths
+
+Every `/api/v1/...` and `/org/...` path stated by hand (curl examples, endpoint tables, `GET /org/...` lines, inline mentions) is checked against the cluster's route census by `pnpm run check:api-paths`; a path or method the router does not serve fails CI. Write the path the reader will actually send: the bearer-token form is `/api/v1/...` and the session form is `/org/...`, and they are different routes on the cluster, so a curl example for a token user shows `/api/v1/`. Placeholders are `{snake_case}` in prose and tables and `<kebab-case>` only inside copy-pasteable curl; both count as one dynamic segment, and a trailing `...` means "and whatever follows". An endpoint documented before it ships goes in `scripts/api-paths-allowlist.json` and comes out when it lands.
+
 ## Code blocks
 
 - Shell fences are `bash`. Use `bash CLI` / `bash cURL` titles inside `<CodeGroup>`.
