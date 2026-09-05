@@ -207,9 +207,9 @@ Three limits apply today:
 
 The `.sops.yaml` in a cluster directory has two authors, so it is not covered by the digest boundary above: it is **merged** on every platform write instead of replaced, and the file it writes opens with a header saying so.
 
-- **Ankra owns only the rules it generates**: a rule carrying both a `path_regex` Ankra generates and an `age` key, and nothing else. Ankra rewrites those on every sync and lists them **last** in the file.
+- **Ankra owns only the rules it generates**: a rule carrying a `path_regex` Ankra generates, an `age` key, and at most an `encrypted_regex` - and nothing else. Ankra rewrites those on every sync and lists them **last** in the file. While the cluster declares `encrypted_paths`, each generated rule carries an `encrypted_regex` built from the union of every declaration across the cluster's stacks, rebuilt on every sync as the declarations change, so a `sops -e` that applies the rule seals only declared secret keys and leaves every other key readable. It is one union per cluster, so it is broader per file than what Ankra itself seals per resource: a key declared secret for any resource in the cluster is sealed in every matching file.
 - **Every other rule is yours.** It is preserved verbatim and kept **above** Ankra's own. SOPS applies the **first matching** creation rule, so a rule of yours takes precedence over Ankra's - including a deliberately keyless first rule, which is the supported way to keep a path out of encryption and make an external `sops -e` on it fail loudly rather than seal a file that must stay plaintext. **Write its `path_regex` relative to the cluster directory**, not the repository root: `sops` matches a rule against the file's path relative to the directory holding the `.sops.yaml` it is using, so for the cluster's file the path being tested is `stacks/<stack>/add-ons/<add-on>/values.yaml`. A rule written from the repository root never matches, and a refusal caused by *nothing* matching is an accident, not protection - see [Checking that a keyless rule applies](#checking-that-a-keyless-rule-applies).
-- **To override one of Ankra's rules, write a rule that is not shaped like Ankra's**: keyless, using `key_groups`, carrying an extra field, or on a different `path_regex`. A rule that is exactly a `path_regex` Ankra generates plus an `age` key cannot be told apart from Ankra's own output and is replaced - that is what lets a key rotation reach the file, and it happens silently. Keep a rule you need out of that shape; the warning below spells it out.
+- **To override one of Ankra's rules, write a rule that is not shaped like Ankra's**: keyless, using `key_groups`, carrying a field other than `path_regex`, `age` and `encrypted_regex`, or on a different `path_regex`. A rule that is a `path_regex` Ankra generates plus an `age` key, with or without an `encrypted_regex`, cannot be told apart from Ankra's own output and is replaced whatever its `age` or `encrypted_regex` values are - that is what lets a key rotation or a changed declaration reach the file, and it happens silently. To keep your own recipients or your own `encrypted_regex` on a path Ankra covers, name the recipients with `key_groups`. The warning below spells it out.
 - **Other top-level keys are yours too.** `stores`, `kms`, `shamir_threshold` and anything else in the file are carried through untouched.
 - **Ankra does not read these rules.** Its own encryption is driven per resource by that resource's `encrypted_paths` declaration, compiled to a SOPS `encrypted_regex` when the resource is sealed (see [SOPS](/guides/sops)). The file exists for external tooling that runs `sops` against the repository.
 
@@ -235,23 +235,28 @@ What comes back says which rule decided. The wording is from sops 3.13.3 and is 
 Pair the check with a positive control in the same run: a neighbouring file that only a rule *with* recipients covers must encrypt, or the refusal proves nothing about your rule. Ankra's generated rules are written from the repository root, so `sops` run against the cluster's `.sops.yaml` does not match them today; a control needs a keyed rule of your own, written relative to the cluster directory like the keyless one.
 
 <Warning>
-**The shape to avoid: one of Ankra's own `path_regex` values, an `age` key, and nothing else.** A rule in exactly that shape cannot be told apart from Ankra's output, so the next platform write replaces it - with no signal anywhere. The sync succeeds, and no portal, CLI or API surface reports it. The only trace is the reconciler's own `Sync cluster state from Ankra` commit, where the rule is simply gone from the diff.
+**The shape to avoid: one of Ankra's own `path_regex` values, an `age` key, and nothing else except an `encrypted_regex`.** A rule in that shape cannot be told apart from Ankra's output, so the next platform write replaces it - with no signal anywhere. The sync succeeds, and no portal, CLI or API surface reports it. The only trace is the reconciler's own `Sync cluster state from Ankra` commit, where the rule is simply gone from the diff.
 
-All three conditions have to hold together, so the only rules at risk are those whose `path_regex` is character-for-character one of the two Ankra generates for the cluster's own directory:
+All three conditions have to hold together - that `path_regex`, an `age` key, and no field beyond those two and `encrypted_regex` - so the only rules at risk are those whose `path_regex` is character-for-character one of the two Ankra generates for the cluster's own directory:
 
 ```yaml
 - path_regex: <cluster-directory>/.*values\.yaml$
 - path_regex: <cluster-directory>/.*manifests/.*\.yaml$
 ```
 
-The trap is tidying. A deliberately keyless rule on one of those two patterns is yours and is kept - but give it an `age` key, to "complete" it or to seal that path with your own recipient, and it becomes Ankra's shape and disappears on the next write:
+The trap is tidying. A deliberately keyless rule on one of those two patterns is yours and is kept - but give it an `age` key, to "complete" it or to seal that path with your own recipient, and it becomes Ankra's shape and disappears on the next write. Adding an `encrypted_regex` of your own does not take it back out: that field is part of Ankra's shape, so the rule is still replaced, and your selector with it:
 
 ```yaml
 # Kept - keyless, so not Ankra's shape.
 - path_regex: <cluster-directory>/.*values\.yaml$
 
-# Replaced silently - Ankra's exact shape: its path_regex, an age key, nothing else.
+# Replaced silently - Ankra's shape: its path_regex, an age key, nothing else.
 - path_regex: <cluster-directory>/.*values\.yaml$
+  age: age1...
+
+# Replaced silently too - encrypted_regex is part of Ankra's shape, whatever its value.
+- path_regex: <cluster-directory>/.*values\.yaml$
+  encrypted_regex: ^(password)$
   age: age1...
 
 # Kept - same path, your own recipients, named with key_groups.
@@ -261,7 +266,7 @@ The trap is tidying. A deliberately keyless rule on one of those two patterns is
     - age1...
 ```
 
-Any one of these keeps a rule out of Ankra's shape: leave it keyless, name recipients with `key_groups`, carry any additional field such as `encrypted_regex`, or write it on a `path_regex` Ankra does not generate. The header Ankra writes at the top of the file states the same test. The paths in this example show the ownership test only; a rule you rely on `sops` to apply must be written relative to the cluster directory, as described above.
+Any one of these keeps a rule out of Ankra's shape: leave it keyless, name recipients with `key_groups`, carry a field outside `path_regex`, `age` and `encrypted_regex` (`unencrypted_suffix`, for example), or write it on a `path_regex` Ankra does not generate. An `encrypted_regex` on its own does not: it is part of Ankra's shape. The header Ankra writes at the top of the file states the same test. The paths in this example show the ownership test only; a rule you rely on `sops` to apply must be written relative to the cluster directory, as described above.
 </Warning>
 
 <Warning>
