@@ -13,9 +13,13 @@ Checks (see STYLEGUIDE.md "Changelog"):
   2. A label is a ship date (YYYY-MM-DD) or one of the frozen archive months.
      No new month record can be created.
   3. Only the frozen archive months may contain a '#' heading.
-  4. Dated entries: 1-2 tags from the allowed set, a bold headline under 140
-     characters, a body of at most 80 words, and exactly one link, last.
-  5. "Also shipped" roll-ups instead carry bold-lead lines that each link out.
+  4. Dated entries: 1-2 tags from the allowed set, an H2 headline under 140
+     characters, a body of at most 80 words, and exactly one link, last. The
+     headline is an H2 because that is what gives the entry its permalink -
+     Mintlify anchors an <Update> by its label, and two changes shipping on
+     one day share a label.
+  5. "Also shipped" roll-ups instead carry bold-lead lines that each link out;
+     a weekly bucket is addressed by its label, not per line.
   6. Dated entries sit above the archive, newest first.
 
 Usage: check_changelog.py [path ...]   (defaults to changelog.mdx)
@@ -165,7 +169,7 @@ def check_no_new_h1(block, rel, failures):
         if line.startswith("# "):
             failures.append(
                 f"{rel}:{n}: '#' heading inside {block.label!r}. The headline is "
-                f"the first body line, bold - an H1 is how the mega-headline "
+                f"an H2 on the first body line - an H1 is how the mega-headline "
                 f"came back."
             )
 
@@ -217,17 +221,24 @@ def check_entry(block, rel, failures):
         return
 
     head_n, head = lines[0]
-    stripped = head.strip()
-    if not (stripped.startswith("**") and stripped.endswith("**")):
+    if not head.startswith("## "):
         failures.append(
-            f"{rel}:{head_n}: the first line is the headline and must be bold "
-            f"(**one sentence**)."
+            f"{rel}:{head_n}: the first line is the headline and must be an H2 "
+            f"('## One sentence.'). It is what gives the entry its permalink - "
+            f"a bold line has no anchor."
         )
-    if len(stripped) > MAX_HEADLINE_CHARS:
+    headline = head[3:].strip() if head.startswith("## ") else head.strip()
+    if len(headline) > MAX_HEADLINE_CHARS:
         failures.append(
-            f"{rel}:{head_n}: headline is {len(stripped)} characters (max "
+            f"{rel}:{head_n}: headline is {len(headline)} characters (max "
             f"{MAX_HEADLINE_CHARS})."
         )
+    for n, line in lines[1:]:
+        if line.startswith("#"):
+            failures.append(
+                f"{rel}:{n}: an entry carries one heading, its headline. Split "
+                f"this into its own <Update>."
+            )
 
     links = [(n, l) for n, l in lines if LINK_RE.search(l)]
     if len(links) != 1:

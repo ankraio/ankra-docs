@@ -40,7 +40,7 @@ Every new entry is its own block, appended at the top of the file:
 
 ```mdx
 <Update label="2026-09-04" tags={["Pipelines"]}>
-**Stages Ankra cannot run yet are now skipped, not left pending forever.**
+## Stages Ankra cannot run yet are now skipped, not left pending forever
 
 A pipeline declaring an unsupported stage kind used to validate cleanly, then hold its run and its concurrency group indefinitely. Validation now warns and names the stage, and the planner skips it with reason `kind_unavailable`.
 
@@ -51,7 +51,8 @@ A pipeline declaring an unsupported stage kind used to validate cleanly, then ho
 Rules:
 
 - **`label` is the ship date, `YYYY-MM-DD`.** It renders in the left rail and creates the entry's anchor. Never a month name - a month label is a month record, which is the thing this format removes.
-- **No `#` heading anywhere.** The headline is the first line of the body, bold, one complete sentence under 140 characters. There is no H1 to concatenate into, so the mega-headline cannot come back.
+- **The headline is an `##` heading**, first line of the body, one complete sentence under 140 characters, and the entry's only heading. Never `#` - there is no H1 to concatenate into, so the mega-headline cannot come back.
+- **The `##` is what makes the entry linkable.** Mintlify anchors an `<Update>` by its `label`, and two changes shipping on one day share a label, so the label alone cannot address an entry. The heading gives it a readable permalink - `/changelog#stages-ankra-cannot-run-yet-are-skipped` - that a feature page or a support reply can point at, and it is heading changes inside an `<Update>` that publish to RSS.
 - **Body of at most 80 words**, saying what the reader can now do that they could not before. Not how it is implemented.
 - **Exactly one link**, to the canonical docs page, as the last line.
 - **One tag**, two at most, from: `Pipelines`, `Security`, `Cost`, `Clusters`, `AI`, `GitOps`, `CLI`, `API`, `Fixes`. Mintlify renders these as a filter panel beside the changelog. More tags per entry and the filter stops meaning anything.
@@ -63,10 +64,10 @@ Most changes are the smallest. Without a cheap tier a one-line fix has to become
 | Size | What earns it | Shape |
 |------|---------------|-------|
 | Line | Fixes, small improvements, an added API field | One bold-lead bullet in the week's `Also shipped` entry, about 20 words. No record of its own. |
-| Entry | Something a user can now do that they could not before | Its own `<Update>`: headline, 80 words, one link. |
+| Entry | Something a user can now do that they could not before | Its own `<Update>`: `##` headline, 80 words, one link. |
 | Launch | A subsystem arriving - Ankra Pipelines, the Cost center | Its own `<Update>`, same 80 words, pointing at a guide that carries the depth. |
 
-A week's small changes collect into one entry:
+A week's small changes collect into one entry. A roll-up has no `##` headline - it is a bucket, not a change, and it is addressed by its label:
 
 ```mdx
 <Update label="2026-09-05" tags={["Fixes"]} description="Also shipped this week">
