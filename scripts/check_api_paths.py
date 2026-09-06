@@ -23,8 +23,14 @@ What is extracted: on every line of every hand-written .mdx/.md page (the
 generated reference/cli pages are skipped), each path that starts with
 /api/v1/ or /org/, bare or under https://platform.ankra.app. Placeholders
 are one dynamic segment whatever their spelling: {cluster_id}, <cluster-id>,
-$CLUSTER_ID, ${CLUSTER_ID} and a literal UUID. A trailing `...` means "and
-whatever follows", so the path is checked as a prefix. A query string, a
+$CLUSTER_ID, ${CLUSTER_ID} and a literal UUID. The one exception is
+{provider}: the cluster registers its provider routes per provider
+(/api/v1/clusters/ovh/..., /api/v1/clusters/hetzner/..., ...), and a page
+that documents the family once writes {provider} where the name goes, so
+that placeholder stands for a provider name and matches a literal segment
+as well as a route parameter (the managed-cluster routes take the provider
+as one). A trailing `...` means "and whatever follows", so the path is
+checked as a prefix. A query string, a
 fragment and trailing punctuation are dropped. When the line states exactly
 one HTTP verb (an endpoint table row, a `POST /org/...` fence line, a
 `curl -X DELETE` example) the method is checked too, because a page that
@@ -34,7 +40,8 @@ that is gone.
 Matching is shape-based: a route's {param} segment accepts any documented
 segment and a trailing * on a route swallows the rest, but a documented
 placeholder matches only a route parameter, never a literal, because the
-request a reader builds from it would 404. A path is checked as written:
+request a reader builds from it would 404 ({provider} is the exception:
+a name, so a literal or a parameter). A path is checked as written:
 /org/x and /api/v1/org/x are different routes on the cluster (the session
 route and its bearer-token twin), and a curl example that shows the wrong
 one sends the reader to the wrong place.
@@ -70,6 +77,7 @@ VERB = re.compile(r"\b(GET|POST|PUT|PATCH|DELETE)\b")
 TRAILING_NOISE = "`|'\")],;:"
 UUID = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
 PLACEHOLDER = re.compile(r"\{[^}]*\}|<[^>]*>|\$\{[^}]*\}|\$[A-Za-z_][A-Za-z0-9_]*")
+PROVIDER_PLACEHOLDER = re.compile(r"^(\{provider\}|<provider>|\$\{PROVIDER\}|\$PROVIDER)$")
 
 
 def hand_written_pages():
@@ -115,7 +123,9 @@ def normalize(path):
     segments = []
     for segment in path.split("/"):
         collapsed = PLACEHOLDER.sub("{}", segment)
-        if collapsed == "*":
+        if PROVIDER_PLACEHOLDER.match(segment):
+            segments.append("{provider}")
+        elif collapsed == "*":
             segments.append("*")
         elif "{}" in collapsed or UUID.match(segment):
             segments.append("{}")
@@ -141,6 +151,8 @@ def matches(documented, route):
         call_segment = call[index]
         if call_segment == "*":
             return True
+        if call_segment == "{provider}":
+            continue
         if route_segment == "{}" or route_segment == call_segment:
             continue
         return False
@@ -190,6 +202,11 @@ def self_test():
     assert matches("/org/clusters/{}/cost", "/org/clusters/{}/cost")
     assert matches("/org/clusters/abc/cost", "/org/clusters/{}/cost")
     assert not matches("/org/clusters/{}/cost", "/org/clusters/managed/cost"), "a placeholder must not match a literal"
+    assert normalize("/api/v1/clusters/{provider}/{id}/node-groups") == "/api/v1/clusters/{provider}/{}/node-groups"
+    assert normalize("/org/clusters/<provider>/<cluster-id>/vms") == "/org/clusters/{provider}/{}/vms"
+    assert matches("/api/v1/clusters/{provider}/{}/node-groups", "/api/v1/clusters/ovh/{}/node-groups"), "{provider} stands for a literal"
+    assert matches("/org/clusters/managed/{provider}/discover", "/org/clusters/managed/{}/discover"), "{provider} also stands for a provider parameter"
+    assert not matches("/api/v1/clusters/{}/{}/node-groups", "/api/v1/clusters/ovh/{}/node-groups"), "a plain placeholder still never matches a literal"
     assert matches("/api/v1/clusters/{}/k8s/*", "/api/v1/clusters/{}/k8s/*")
     assert matches("/api/v1/clusters/{}/k8s/*", "/api/v1/clusters/{}/k8s/pods")
     assert not matches("/org/runs", "/org/runs/{}")
