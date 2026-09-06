@@ -26,6 +26,10 @@ Rules:
 - Every page needs `title` and `description` frontmatter (CI enforces this).
 - One canonical page per topic. Link to it; never restate setup steps on a second page.
 - No REST endpoint tables in feature pages - the API Reference tab renders the live OpenAPI spec.
+- The API Reference "Endpoints" sidebar is **not editable from this repo**. Mintlify generates one
+  group per OpenAPI tag from the spec `docs.json` points at, so a wrong or duplicated group name is
+  fixed in `ankraio/cluster` (`openapi.json` plus the convention in
+  `.claude/rules/frozen-behaviour.md`), not here.
 - No "Best Practices" card grids of generic advice. If a practice matters, work it into the step where it applies.
 - Never fabricate AI conversation transcripts or invented metrics. Show example *prompts*, not invented responses.
 - No placeholder or real customer data in examples - use `my-org/my-repo`, `my-cluster`, `<cluster-id>`.
