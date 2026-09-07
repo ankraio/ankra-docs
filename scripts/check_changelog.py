@@ -333,11 +333,28 @@ def check_order(blocks, rel, failures):
         previous = (block.label, block.line)
 
 
+def check_page_mode(text, rel, failures):
+    """`mode: wide` hides Mintlify's side panel - and the tag filter lives in
+    that panel, so the tags become decoration and the page loses the only
+    control that narrows 284 entries. Mintlify's own changelog sets no mode
+    for exactly this reason."""
+    front = text.split("---", 2)
+    if len(front) < 3:
+        return
+    for n, line in enumerate(front[1].split("\n"), 2):
+        if re.match(r"^\s*mode:\s*wide\s*$", line):
+            failures.append(
+                f"{rel}:{n}: 'mode: wide' hides the side panel that holds the "
+                f"tag filter, so tags stop filtering anything. Remove it."
+            )
+
+
 def check(path, failures):
     full = os.path.abspath(path)
     rel = os.path.relpath(full, ROOT) if full.startswith(ROOT + os.sep) else path
     with open(path) as f:
         text = f.read()
+    check_page_mode(text, rel, failures)
     blocks = parse(text, rel, failures)
     for block in blocks:
         check_label(block, rel, failures)
