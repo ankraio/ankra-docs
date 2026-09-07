@@ -61,6 +61,7 @@ Rules:
 - **Body of at most 80 words**, saying what the reader can now do that they could not before. Not how it is implemented.
 - **Exactly one link**, to the canonical docs page, as the last line.
 - **One tag**, two at most, from: `Pipelines`, `Security`, `Cost`, `Clusters`, `AI`, `GitOps`, `CLI`, `API`, `Fixes`. Mintlify renders these as a filter panel beside the changelog. More tags per entry and the filter stops meaning anything.
+- **The page sets no `mode`.** The tag filter lives in Mintlify's side panel, and `mode: wide` hides that panel - tags then render as inert labels and nothing on the page narrows 284 entries. Mintlify's own changelog sets no mode for the same reason. `check_changelog.py` fails the build if `mode: wide` returns.
 
 ### Three sizes
 
