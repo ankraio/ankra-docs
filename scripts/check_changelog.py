@@ -21,6 +21,9 @@ Checks (see STYLEGUIDE.md "Changelog"):
   5. "Also shipped" roll-ups instead carry bold-lead lines that each link out;
      a weekly bucket is addressed by its label, not per line.
   6. Dated entries sit above the archive, newest first.
+  7. Every dated entry carries an rss title matching its headline. Mintlify
+     publishes one feed item per <Update> and titles it with the label, so a
+     dated entry reaches subscribers as a bare "2026-09-06" without one.
 
 Usage: check_changelog.py [path ...]   (defaults to changelog.mdx)
 """
@@ -79,14 +82,27 @@ DESC_RE = re.compile(r'\bdescription="([^"]*)"')
 TAGS_RE = re.compile(r"\btags=\{\[([^\]]*)\]\}")
 LINK_RE = re.compile(r"\[[^\]]*\]\([^)]+\)")
 ONLY_LINK_RE = re.compile(r"^\s*" + LINK_RE.pattern + r"\s*$")
+RSS_RE = re.compile(r"\brss=\{\{(.*?)\}\}")
+RSS_TITLE_RE = re.compile(r'\btitle:\s*"([^"]*)"')
+
+
+def plain(text):
+    """The words a feed reader sees. RSS carries pure Markdown, so inline code
+    and bold are stripped from the item title either way; comparing on the
+    stripped form keeps `egress-https` in the headline without forcing the
+    backticks into the feed."""
+    text = text.replace("`", "")
+    text = re.sub(r"\*\*(.+?)\*\*", r"\1", text)
+    return re.sub(r"\s+", " ", text).strip()
 
 
 class Block:
-    def __init__(self, label, line, tags, description, body):
+    def __init__(self, label, line, tags, description, rss_title, body):
         self.label = label
         self.line = line
         self.tags = tags
         self.description = description
+        self.rss_title = rss_title
         self.body = body
 
     @property
@@ -134,12 +150,18 @@ def parse(text, rel, failures):
                         if t.strip()
                     ]
                 desc_m = DESC_RE.search(header)
+                rss_m = RSS_RE.search(header)
+                rss_title = None
+                if rss_m:
+                    title_m = RSS_TITLE_RE.search(rss_m.group(1))
+                    rss_title = title_m.group(1) if title_m else None
                 blocks.append(
                     Block(
                         label=m.group(1),
                         line=open_line,
                         tags=tags,
                         description=desc_m.group(1) if desc_m else None,
+                        rss_title=rss_title,
                         body=body,
                     )
                 )
@@ -194,7 +216,27 @@ def check_tags(block, rel, failures):
             )
 
 
+def check_rss_title(block, rel, failures, expected, what):
+    """Mintlify titles a feed item with the <Update>'s label and publishes one
+    item per Update, not one per heading. A dated label therefore reaches
+    subscribers as a bare '2026-09-06' unless the entry carries an rss title."""
+    if block.rss_title is None:
+        failures.append(
+            f"{rel}:{block.line}: {block.label!r} has no rss title. Mintlify "
+            f"titles the feed item with the label, so this reaches subscribers "
+            f'as {block.label!r}. Add rss={{{{ title: "{plain(expected)}" }}}}.'
+        )
+        return
+    if plain(block.rss_title) != plain(expected):
+        failures.append(
+            f"{rel}:{block.line}: rss title {block.rss_title!r} does not match "
+            f"the {what} {plain(expected)!r}. The feed and the page name the "
+            f"same change."
+        )
+
+
 def check_rollup(block, rel, failures):
+    check_rss_title(block, rel, failures, block.description or "", "description")
     words = 0
     for n, line in block.body:
         if not line.strip():
@@ -228,6 +270,7 @@ def check_entry(block, rel, failures):
             f"a bold line has no anchor."
         )
     headline = head[3:].strip() if head.startswith("## ") else head.strip()
+    check_rss_title(block, rel, failures, headline, "headline")
     if len(headline) > MAX_HEADLINE_CHARS:
         failures.append(
             f"{rel}:{head_n}: headline is {len(headline)} characters (max "
