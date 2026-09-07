@@ -39,7 +39,6 @@ DEFAULT_TARGET = os.path.join(ROOT, "changelog.mdx")
 # month-labelled <Update> is a new month record, which is the thing this check
 # exists to prevent.
 LEGACY_LABELS = {
-    "September 2026",
     "August 2026",
     "July 2026",
     "June 2026",
@@ -54,9 +53,9 @@ LEGACY_LABELS = {
     "March–April 2025",
 }
 
-# Of those, the ones still carrying their original '#' headline. September and
-# August retired theirs into the description prop; nothing may grow one back.
-LEGACY_H1_LABELS = LEGACY_LABELS - {"September 2026", "August 2026"}
+# Of those, the ones still carrying their original '#' headline. August retired
+# its own into the description prop; nothing may grow one back.
+LEGACY_H1_LABELS = LEGACY_LABELS - {"August 2026"}
 
 ALLOWED_TAGS = [
     "Pipelines",
