@@ -48,7 +48,7 @@ A pipeline mistakenly committed under `.ankra/manifests/` is refused by the mani
 | `defaults.resources` | block | 500m CPU, 1Gi memory | `cpu`, `memory`, `gpu` for every stage that names none |
 | `defaults.cache` | list | none | Cache volumes mounted into every stage |
 | `defaults.working_directory` | string | the workspace root | Working directory of every stage that names none |
-| `defaults.network` | tier | `none` | Network tier of every stage that names none. A value above `egress-https` is a protected section. |
+| `defaults.network` | tier | the kind's default | Network tier of every stage that names none, in place of that kind's own default - so `defaults.network: "none"` denies egress to a `build` or a `scan` stage that names no tier of its own, and does it quietly, because the validator's warning reads a stage's own declaration rather than this one. A value above `egress-https` is a protected section. |
 | `defaults.env` | map | none | Environment variables for every stage |
 | `defaults.secrets` | list | none | Declared secrets every stage may read |
 | `permissions` | map | none | Scope to `none`, `read` or `write`. The authority granted is the intersection of this block, the organisation's policy and the target environment; it can only narrow. Protected. |
@@ -123,7 +123,7 @@ A stage whose kind has no executor on this build is reported twice, in the same 
 | `timeout` | duration | `defaults.timeout`, else 30 minutes | Wall-clock budget; at most 6 hours, longer values are clamped and recorded - 60 minutes on a restricted fork run. Protected, so a head cannot remove its own or the trusted definition's |
 | `resources.cpu`, `resources.memory`, `resources.gpu` | quantities | 500m, 1Gi, none | Requests equal limits; at most 8 cores, 32 GiB and 4 GPUs - 2 cores and 4Gi on a restricted fork run, where a quantity the planner cannot read is clamped to the ceiling rather than passed through. All three are protected, and `gpu` also needs `runs_on.node_selector`. |
 | `runs_on.cluster`, `node_selector`, `tolerations`, `runtime_class`, `arch` | placement | none | Every field is protected |
-| `network` | `none`, `egress-https`, `services` | `defaults.network`, else `none` | `none` denies all egress. `egress-https` allows 53/UDP and 53/TCP to the cluster's own DNS (the `kube-system` namespace, plus `169.254.0.0/16` for NodeLocal DNSCache) and 443/TCP to public addresses only - RFC1918, `169.254.0.0/16`, `100.64.0.0/10`, `fd00::/8`, `fe80::/10` and `fd00:ec2::254` are excluded, so private space and every cloud metadata endpoint are out of reach unless the organisation names the range in [`ci_egress_allowed_cidrs`](/guides/ankra-pipelines#organisation-ci-settings). `services` is deny-all plus the run's own pods and that same DNS rule, and needs at least one service. Anything above `egress-https` is protected. |
+| `network` | `none`, `egress-https`, `services` | `defaults.network`, else [the kind's default](#the-tier-a-stage-gets-by-default) | `none` denies all egress. `egress-https` allows 53/UDP and 53/TCP to the cluster's own DNS (the `kube-system` namespace, plus `169.254.0.0/16` for NodeLocal DNSCache) and 443/TCP to public addresses only - RFC1918, `169.254.0.0/16`, `100.64.0.0/10`, `fd00::/8`, `fe80::/10` and `fd00:ec2::254` are excluded, so private space and every cloud metadata endpoint are out of reach unless the organisation names the range in [`ci_egress_allowed_cidrs`](/guides/ankra-pipelines#organisation-ci-settings). `services` is deny-all plus the run's own pods and that same DNS rule, and needs at least one service. Anything above `egress-https` is protected. A stage that names no tier takes [its kind's default](#the-tier-a-stage-gets-by-default), which is `egress-https` rather than `none` for `checkout`, `build` and `scan`. |
 | `shm_size` | quantity | `64Mi` | Size of `/dev/shm` |
 | `working_directory` | string | `defaults.working_directory` | Under the workspace mount. A `scan` stage's filesystem scanners honour it too, so a monorepo component scans its own subtree; the reports still land at the workspace root |
 | `allow_failure` | flag | `false` | The stage may fail without failing the run |
@@ -131,6 +131,19 @@ A stage whose kind has no executor on this build is reported twice, in the same 
 | `retry` | block | none | `max_attempts` (counts the first attempt; at most 5), `backoff` (`fixed` or `exponential`), `on` (`failure`, `timeout`, `infra_error`). Validated and carried today, not applied. |
 | `gate.approval_roles`, `gate.require_stages` | lists | none | The `gate` block; protected |
 | `environment` | string | none | An environment this stage targets; a name the pipeline does not declare earns a warning |
+
+#### The tier a stage gets by default
+
+A stage's egress tier is decided in one place, in one order: the tier the stage names, then `defaults.network`, then the default for the stage's kind.
+
+| Kind | Tier when nothing names one |
+|------|------------------------------|
+| `checkout`, `build`, `scan` | `egress-https` |
+| `run` and every other kind | `none` |
+
+Those three cannot do their only job inside the cluster. `checkout` clones the run's source from a remote. `build` resolves the base images its Dockerfile names and pushes what it produces, both against a registry - a build with no egress fails on its first `FROM`. `scan` fetches a vulnerability database, a policy set and a rule registry, one per built-in scanner, and pulls the image its Trivy leg reads. Every other kind, `run` above all, works out of the shared workspace and asks nothing further of the network, so it keeps the deny-all default.
+
+An explicit `network: "none"` on one of the three is still honoured - a pipeline that asks for no egress gets no egress - and the validator raises a `pipeline_network:` **warning** naming what that stage will no longer be able to do, rather than widening the tier back.
 
 ### Kind-specific blocks
 
@@ -213,6 +226,8 @@ ankra pipeline validate path/to/pipeline.yaml --application my-service
 
 The command reads `.ankra/pipeline.yaml` (or the file you name), validates it, and plans it for a synthetic push to the default branch and a synthetic pull request, printing for each the steps that would run, the stages that would be skipped with their reason, and every diagnostic. Its exit code is non-zero when the severity is `fatal`. Without a file and without a stored definition there is nothing to validate. The same validator answers `POST …/pipeline/validate` on the API and the `cicd_validate_pipeline_yaml` tool in chat, which needs no repository at all.
 
+Every planned step of that dry run carries the [network tier it resolved to](#the-tier-a-stage-gets-by-default) - `network` on each node of the DAG - so a definition that names no tier anywhere still says what each of its stages will be allowed to reach. The field is on the API's answer today; the CLI's own step line prints the step key, the stage and the kind only.
+
 A result has a severity - `ok`, `warn` (the pipeline runs, but not the way its author probably meant; reported on the pull request, never blocking) or `fatal` (the pipeline cannot be planned) - and a list of violations, each prefixed with a fixed key:
 
 | Key | Covers |
@@ -233,7 +248,7 @@ A result has a severity - `ok`, `warn` (the pipeline runs, but not the way its a
 | `pipeline_services:` | A service without an image; a stage naming an undeclared service |
 | `pipeline_expression:` | An unterminated `${{` in `if`, `run`, `uses`, `image`, `timeout`, `with` or `env` (a stray `}}` is not reported: scripts legitimately carry them) |
 | `pipeline_matrix:` | An axis with no values; an exclusion on an axis that does not exist (warning) |
-| `pipeline_network:` | A tier outside `none`, `egress-https`, `services` |
+| `pipeline_network:` | A tier outside `none`, `egress-https`, `services`; an explicit `network: "none"` on a `checkout`, `build` or `scan` stage (warning), naming what that stage can no longer reach |
 | `pipeline_retry:` | More than 5 attempts, a negative count, an unknown backoff or condition |
 | `pipeline_artifacts:` | An artifact without a name or paths; a negative retention (warning); an unknown test result format or a missing path |
 | `pipeline_environment:` | A stage targeting an environment the pipeline does not declare (warning) |
@@ -282,7 +297,6 @@ permissions:
 stages:
   - name: "checkout"
     kind: "checkout"
-    network: "none"
 
   - name: "install"
     kind: "run"
