@@ -6,7 +6,7 @@ rss: true
 
 Every change to the Ankra platform, newest first. Use the tag filter beside this page to narrow it to `Pipelines`, `Security`, `Cost`, `Clusters`, `AI`, `GitOps`, `CLI`, `API` or `Fixes` - the selection is in the URL, so a filtered view is a link you can share. Subscribe at [docs.ankra.ai/changelog/rss.xml](https://docs.ankra.ai/changelog/rss.xml) to get each change as it ships.
 
-Records up to and including September 2026 are grouped by month; everything after is one entry per change. Command-line releases have their own [CLI changelog](/integrations/ankra-cli-changelog).
+Records up to and including August 2026 are grouped by month; everything after is one entry per change. Command-line releases have their own [CLI changelog](/integrations/ankra-cli-changelog).
 
 <Update label="2026-09-07" tags={["Clusters"]} rss={{ title: "Product films now play inside the docs, starting with the playground spin-up" }}>
 
@@ -125,215 +125,296 @@ Every switch under **Source control & AI review** is now documented in one place
 
 </Update>
 
-<Update label="September 2026" description="Ankra Pipelines from connect to publish, per-container security reports, and cost in your own currency">
+<Update label="2026-09-05" tags={["Security"]} rss={{ title: "Pod security enforced by Kubernetes itself, not a policy engine" }}>
 
 ## Pod security enforced by Kubernetes itself, not a policy engine
 
-The security baseline used to carry Kyverno and its Pod Security Standards preset. On a small control plane that was the wrong trade: a policy engine on the admission path, a report object written per admission and an event per violation are exactly the load that turned one July outage from slow into stuck. Version 5 of the baseline removes the engine.
-
-Pod security is now enforced by **Pod Security Admission**, the controller built into every Kubernetes API server. The baseline ships a small ConfigMap declaring the standard, the mode and the exempt namespaces; the Ankra agent labels every other namespace from it - audit and warn in Audit mode, enforce too once you switch a cluster to Enforce - and never lowers a label you set yourself. A ValidatingAdmissionPolicy, evaluated by the API server in-process, keeps anyone but the agent from lowering a managed namespace's enforce label, so enforcement cannot be switched off with a namespace edit. Nothing here runs as a pod, and the guard fails open.
-
-The posture you see is computed by the platform. Every workload's Pod Security Standards and configuration checks are evaluated from the inventory the agent already streams, so the Security Center's **Policies** tab shows the full check table for every cluster - with or without a policy engine - beside a new line that says which mode and standard the cluster is in and how many namespaces actually carry the labels. Enforcement is measured, not assumed.
-
-Since version 3 the baseline is also sized from the cluster: a control plane under 8 GB, or one the platform cannot size, gets a lite shape with the CIS node assessment off and one scan at a time, and says so in a notification. A cluster that installed an earlier baseline keeps its Kyverno releases and gets the new manifests on its next update; the policy mode toggle drives both until you remove the two add-ons. Kyverno itself moves to the opt-in **ankra-policy-engine** profile, in the same safe mode, for image-signature verification and policies of your own.
+Version 5 of the security baseline drops Kyverno. Pod security is enforced by Pod Security Admission, built into every API server, with a ValidatingAdmissionPolicy stopping anyone but the agent lowering a managed namespace's label. Nothing here runs as a pod. The Security Center's Policies tab now shows the full check table for every cluster, with or without a policy engine, and says which mode and standard it is in.
 
 [Security baseline →](/guides/cluster-security#security-baseline)
 
+</Update>
+
+<Update label="2026-09-05" tags={["Pipelines"]} rss={{ title: "Ankra Pipelines: egress-https reaches only public addresses" }}>
+
 ## Ankra Pipelines: `egress-https` reaches only public addresses
 
-A pipeline step on the `egress-https` tier could reach **any** address on 443 except one, and port 53 on **any pod in the cluster** - so an in-cluster Service, a VPC-internal host and every cloud metadata endpoint answering on something other than `169.254.169.254` were each one request away from a script anyone who can open a pull request may edit. Both are tightened. The 443 rule now excludes RFC1918, the whole of link-local `169.254.0.0/16` (which covers AWS ECS task metadata at `169.254.170.2`) and carrier-grade NAT `100.64.0.0/10` (Alibaba Cloud answers inside it, at `100.100.100.200`), and there is an IPv6 rule at all now, excluding `fd00::/8`, `fe80::/10` and AWS's `fd00:ec2::254`; DNS is restricted to the `kube-system` namespace plus `169.254.0.0/16`, where NodeLocal DNSCache listens, and the `services` tier gained that same DNS rule, having had none before. **This breaks any pipeline that reaches a private HTTPS endpoint**, with a connection timeout rather than a refusal, so the remedy ships in the same change: **`ci_egress_allowed_cidrs`** on the organisation's CI settings names the private ranges a step may still reach, and a `build` that pushes to a registry on a private address needs its entry to exist *before* the step runs, not after it times out. Each entry must be a CIDR written as its own network address, sit wholly inside `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16` or `fd00::/8`, and cover no cloud metadata endpoint - `fd00::/8` itself is refused, because AWS's `fd00:ec2::254` sits inside it, so name your own pod or Service CIDR instead; entries are trimmed and de-duplicated, the list is re-validated when a step is rendered rather than trusted from the settings row, and empty - the default, and where every organisation starts - is strict. It is on the API today, with no portal field yet. In the same release, an image policy prefix ending in `/`, `:` or `@` stopped matching nothing and started admitting exactly its own boundary: `ghcr.io/my-org/` admits `ghcr.io/my-org/api` and not `ghcr.io/my-org:v1`, and `registry.example.com/` never admits `registry.example.com:5000/anything`, which is a different endpoint on that host. The settings API refuses a trailing separator at write time and always has, so that fix is defence in depth for the prefixes Ankra sets in code and the copy a step's payload carries, rather than a change to what an administrator can store.
-
-Both halves shipped with the agent release of 5 September 2026. Your cluster's agent renders a step's NetworkPolicy and boundary-checks its image itself, so a cluster still on an older agent keeps the previous `egress-https` tier and the plain textual prefix check until the fleet roll reaches it.
+The tier could reach any address on 443, and port 53 on any pod in the cluster. It now excludes RFC1918, link-local and carrier-grade NAT with their IPv6 equivalents, and restricts DNS to `kube-system`. This breaks a step that reaches a private HTTPS endpoint, so `ci_egress_allowed_cidrs` names the ranges a step may still reach. An image policy prefix ending in a separator now admits exactly its own boundary.
 
 [Ankra Pipelines →](/guides/ankra-pipelines#what-a-step-runs-as)
 
+</Update>
+
+<Update label="2026-09-05" tags={["Pipelines"]} rss={{ title: "Ankra Pipelines: forks never share a cache, and every cache carries a trust scope" }}>
+
 ## Ankra Pipelines: forks never share a cache, and every cache carries a trust scope
 
-A pull request from a fork resolved the same cache volume a trusted run does, and a trusted feature branch shared one claim with the repository's default branch - so a less-trusted ref could write into what the next production build restores, with `restore_keys`' prefix match making that easy to hit without knowing the exact key. Both are closed. A **restricted fork run now resolves no shared cache at all**: every declared cache degrades to a pod-lifetime volume and the step records `pipeline_caches: "caches are not shared with fork runs"`, on the same predicate that already withholds a fork run's secrets and credentials. And every claim carries a **trust scope** - `default_branch` for a run on the repository's own default branch, `branch` for a feature branch, a pull request, a tag or a dispatch of a non-default ref - with no exact-key hit and no `restore_keys` prefix match ever crossing between the two. **Claims written before this deploy were backfilled into `branch`, the untrusted scope**, because nothing on a row records which run wrote it and defaulting the other way would have carried the hole forward; the cost is one cold build per cache key on your default branch, once. `ci_cache_retention_days` and the reaper behind it are unchanged. A restricted fork run is also **budgeted** rather than only restricted: at most 8 matrix legs per stage, a 60-minute step timeout, 2 CPU and 4Gi per step, no sidecar services, no cache volumes, and 256 MiB of artifacts and logs across the whole run. The first four are applied when the run is planned, so the plan `ankra pipeline validate` and the pull request's status comment render is the run that actually executes, and the artifact budget bounds what the run is granted from its declared sizes - the same ceiling on the bytes that actually arrive is in place in the artifact store, waiting on the settle lane that will call it. A `plan_fork_budget:` diagnostic states the ceilings once per run and names each stage that hit one.
-
-The narrower `egress-https`, the per-organisation `ci_egress_allowed_cidrs` allow-list that makes the tightening survivable, and the fix for an image-policy prefix written with a trailing separator - all listed here once - have since shipped on the platform, above, and their agent halves shipped with the agent release of 5 September 2026.
+A pull request from a fork resolved the same cache volume a trusted run does. A restricted fork run now resolves no shared cache at all, and every claim carries a trust scope of `default_branch` or `branch` that no exact key or prefix match crosses. Claims written before the deploy were backfilled as untrusted, costing one cold build per key, once. Fork runs are budgeted as well as restricted.
 
 [Ankra Pipelines →](/guides/ankra-pipelines#what-is-in-place-today)
+
+</Update>
+
+<Update label="2026-09-05" tags={["Pipelines"]} rss={{ title: "Ankra Pipelines: one approval route, and a dispatch that proves its commit" }}>
 
 ## Ankra Pipelines: one approval route, and a dispatch that proves its commit
 
-A security review of the pipeline authority boundary found seven ways a caller holding only `pipelines.manage` could give a run more authority than an administrator ever approved. All seven are closed. There is now **one approval route**: the application-addressed `POST /org/applications/{id}/pipeline/approve-definition` is an alias for the definition-addressed one, so both require a human actor rather than a service principal, both refuse a definition that is not the repository's *current* default-branch definition, both answer a conflict on a second approval, and both write the same audit row - previously that route had none of those checks and could approve any definition row belonging to the application's repository, including one sourced from a pull request head that never was the default branch's own content. The last-approved fallback is held to the same standard: it now offers only definitions proved from the repository's run history to have been the default branch's own head, never a row whose approval columns merely say so. A **dispatch proves its commit**: `POST .../pipeline-runs` resolves the `ref` it was given through the repository's own host and accepts a caller-supplied `head_sha` only when it is that reference's tip or - on GitHub, through a compare read - a provable ancestor of it, refusing anything else and refusing a question the host could not answer at all, because an unanswerable question is not a yes. Re-runs are exempt and keep working: their commit is one Ankra itself recorded, not one the call claims. A dispatch's **own definition is now what runs** - `--spec-file` (`spec_yaml`) is persisted verbatim on the run and both the planner and the dispatcher render from it, instead of shaping the plan and then silently executing the stored definition; the authority path is unchanged, so an override's protected sections are still resolved against the default branch's approved definition. `services`, `cache`, `resources.cpu`/`resources.memory`, `timeout` and a stage's `with:` are **protected sections** now, a named service's image goes through the organisation's image policy and its `env` through the reserved-name check, `ci_ignore_unfixed` is a new organisation-wide floor a `gate` stage's `with:` may only tighten, and `max_cache_size` on the pipeline policy is finally stored and enforced after existing in code with nothing able to set it.
-
-**At this release, re-approve your definitions, and re-run anything that was mid-flight.** The protected hash now covers more of the document, so it moves for every definition, including ones whose content did not change. A stored approval keeps applying and its own content supplies the trusted values for the newly protected sections, but the stored hash no longer describes what it fingerprints and nothing backfills it - approve the repository's current default-branch definition again. And a run **planned before this deploy and dispatched after it** refuses with an authority-hash mismatch and has to be re-run; the window is the runs whose steps were still pending across one restart.
-
-Trust isolation for a fork's cache claims and the narrower `egress-https`, both listed here, have since shipped, above.
+A security review found seven ways a caller holding only `pipelines.manage` could give a run more authority than an administrator ever approved. All seven are closed: one approval route, requiring a human actor and the repository's current default-branch definition, and a dispatch that resolves its `ref` through the host and proves any caller-supplied `head_sha`. Re-approve your definitions at this release, and re-run anything that was mid-flight.
 
 [Ankra Pipelines →](/guides/ankra-pipelines#logic-is-open-authority-is-closed)
 
+</Update>
+
+<Update label="2026-09-05" tags={["Pipelines"]} rss={{ title: "Ankra Pipelines: a stage nothing can run is skipped, not left hanging" }}>
+
 ## Ankra Pipelines: a stage nothing can run is skipped, not left hanging
 
-A pipeline that declared a stage kind Ankra cannot execute yet - `preview`, `deploy`, `agent`, `approval`, `webhook`, `automation`, `ankra` or `external`, and `verify` whose runner image does not exist - used to validate cleanly and then sit `pending` forever, holding its run and its concurrency group with it. Those kinds now raise a validation **warning** naming the stage, its kind and the wave that ships its executor, and the planner skips exactly that stage with reason `kind_unavailable`, so the run concludes on the stages that do execute; a `pending` step whose run has outlived the sum of every step's `timeout` is reaped as `infra_error` / `step_stranded` for the same reason. `uses:` is refused outright at validation now - "Reusable steps are not available yet; write the step as `run:`" - and every converter emits a real `run:` stage in its place: a chart push becomes `helm package` and `helm push` on a pinned `alpine/helm` image, and a Slack or Teams notification becomes a placeholder carrying every input across as a comment that **fails** until you complete it, because a green `notify` step that notified nobody is worse than a visibly unfinished one. A stage's deferred `if:` and its `${{ steps.*.outputs.* }}` and `needs.*` references are evaluated at dispatch, once the steps they wait on have concluded, before any secret is revealed. `scan.fail_on` finally decides something: each required scan stage's own `fail_on` tightens the gate per scanner and can never loosen the organisation's policy. Alongside that, runs stay alive and their history is bounded - the umbrella run is heartbeated, so a pipeline is no longer failed at twenty minutes for still working, and `ci_run_retention_days` (default 90, 7 to 365) with an hourly sweep bounds how long concluded runs are kept. Run outcomes leave the pull request: `pipeline_run_failed`, `pipeline_run_succeeded`, `image_gate_blocked`, `preview_ready` and `preview_failed` are notification kinds, so routing rules send them wherever your other alerts go. A step whose log the platform had to truncate now says so under its row on the check run and the status comment, and the check run names the failing step's own error instead of only the run's. A run plans its logic from `.ankra/pipeline.yaml` at its own commit on GitHub (authority still comes from the default branch's approved definition, and a re-run re-plans from the original run's definition); a monorepo's `publish`, `scan` and build observation are per component, and a `gate` records the digest it judged so a `publish` refuses any other. Private GitLab repositories build through a stored source credential and nested-group projects check out. And `@ankraai merge when green` now requires `pipelines.operate` on an OAuth-verified GitHub identity, refusing service principals and hand-claimed logins - re-checked at merge time, not only when the comment was written.
-
-Still ahead: the per-run identity that `permissions` mints, the `ankra/*` step library behind `uses:`, the executors for the kinds listed above (skipped rather than hanging in the meantime), and the agent release that moves live step output onto its own dedicated stream - the guide says exactly where the line is today. The five extra protected sections, the applied `--spec-file` override and trust isolation for a fork's cache claims, all listed here once, have since shipped.
+A pipeline declaring a stage kind Ankra cannot execute yet validated cleanly, then sat `pending` forever, holding its run and its concurrency group. Those kinds now raise a validation warning and the planner skips them with reason `kind_unavailable`, so the run concludes on the stages that do execute. `uses:` is refused at validation, `scan.fail_on` tightens the gate per scanner, and `ci_run_retention_days` bounds how long concluded runs are kept.
 
 [Ankra Pipelines →](/guides/ankra-pipelines#what-is-in-place-today)
+
+</Update>
+
+<Update label="2026-09-05" tags={["Security"]} rss={{ title: "Every container has its own CVE, SBOM and KEV reports" }}>
 
 ## Every container has its own CVE, SBOM and KEV reports
 
-A stack's **Security** tab now opens on what makes the stack up: its running pods, grouped under the add-on or manifest that deploys each, every container listed with its image, scan state, actionable findings, KEV count and bill of materials - and three openers, **CVE**, **SBOM** and **KEV**, into a dedicated view of that container. The container view carries the image's CVE report, its bill of materials with the CycloneDX and CSV downloads, and its KEV report (the CVE list filtered to the CISA catalog, reading *unknown* rather than empty while the catalog is unsynced), with the ring of links around it: the pod, the stack and member that deploy it, the owning workload, the image in the Security Center, every container running the same image, and the namespace's findings. The pod's Security tab opens the same view from its own container rows and now names the stack member that deploys the pod, linked back. The container and its section live in the URL, so a container's KEV report is one link. A stack summary strip stays above the pods with every figure opening the list it counts; the Findings and Components views remain for the stack as a whole. Nothing absent reads as clean: an unscanned cluster still lists its containers as **Not scanned**, a member with no pod attributed is listed as unmatched, and a capped listing says it is partial. On the API: `GET /org/clusters/imported/{cluster_id}/stacks/{stack_name}/security/pods`, a `stack` field on the pod read, and `known_exploited` on `/org/security/sbom/image/findings`, each with an `/api/v1` twin.
+A stack's Security tab opens on its running pods, grouped under the add-on or manifest that deploys each, with every container listed and three openers into a dedicated container view: CVE, SBOM and KEV. That view carries the image's findings, its bill of materials with the CycloneDX and CSV downloads, and the ring of links around it. An unscanned cluster reads Not scanned rather than clean.
 
 [Cluster security →](/guides/cluster-security#the-container-view)
 
+</Update>
+
+<Update label="2026-09-04" tags={["Security"]} rss={{ title: "A pod reads container by container" }}>
+
 ## A pod reads container by container
 
-A pod's detail page has a **Security** tab. It lists every container and init container the pod runs with the CVEs the scanner attributes to it - through the pod's owner chain, so a Deployment's report on its ReplicaSet reaches the pod - and the bill of materials of its image: components, OS, and when it was generated. The summary sums the actionable occurrences by severity, says how many of the containers the scanner covers, and how many have a bill of materials. **Findings** on a container opens the image's CVE list and **Components** its package inventory with the SBOM export, the same views the Security Center uses, so the drill-down from a pod to a package stays on one page. A container no report covers reads **Not scanned** and one without a bill of materials reads **Absent** - neither is clean. The same read is on the API as `GET /org/clusters/imported/{cluster_id}/security/pods/{namespace}/{pod_name}` with an `/api/v1` twin.
+A pod's detail page has a Security tab listing every container and init container with the CVEs the scanner attributes to it, through the pod's owner chain, and the bill of materials of its image. Findings opens the image's CVE list and Components its package inventory, the same views the Security Center uses. A container no report covers reads Not scanned; one without a bill of materials reads Absent.
 
 [Cluster security →](/guides/cluster-security#pod-security)
 
+</Update>
+
+<Update label="2026-09-04" tags={["Security"]} rss={{ title: "A stack reads as one security object" }}>
+
 ## A stack reads as one security object
 
-A stack's detail page has a **Security** tab. It reads every CVE, every CISA-listed exploited vulnerability and every bill of materials behind the workloads the stack's add-ons and manifests deploy as one object, so you no longer open the add-ons one at a time to learn what a stack ships. An add-on is attributed by its Helm release identity in the cluster's resource cache, whether or not its chart is in the catalog; a manifest by the objects its YAML declares; and both walk two owner levels down to the ReplicaSets, Jobs and Pods the scanner actually reports on. The overview shows actionable occurrences by severity, the distinct findings, the known-exploited count, the fixable severe count and the accepted risk - each a link to the findings view already filtered - then the stack's **CISA KEV** findings earliest deadline first, the software bill of materials with how many of its running containers are covered, a **By member** table, and a **Fix first** shortlist. The Findings and Components views carry the Security Center's filters, sorts and detail sheet, with facets computed for the stack alone, and the view and its filters live in the URL. Nothing absent reads as clean: an unscanned cluster, a stack that resolves to no running object, workloads without a report yet, a member with no matched workload and an unsynced CISA catalog each say so. The same read is on the API as `GET /org/clusters/imported/{cluster_id}/stacks/{stack_name}/security` with `/findings` and `/sbom` beside it, and `/api/v1` twins for API tokens.
+A stack's detail page has a Security tab reading every CVE, every CISA-listed exploited vulnerability and every bill of materials behind the workloads its add-ons and manifests deploy, as one object. An add-on is attributed by its Helm release identity, a manifest by the objects its YAML declares, both walking two owner levels down. The findings and components views carry facets computed for the stack alone.
 
 [Cluster security →](/guides/cluster-security#stack-security)
 
+</Update>
+
+<Update label="2026-09-04" tags={["GitOps"]} rss={{ title: "Hand-maintained files survive every sync" }}>
+
 ## Hand-maintained files survive every sync
 
-Ankra writes cluster state back to Git, and one of its write paths - the reconciler's export of stored state - did so without checking who last wrote each file. A value maintained by hand in the repository, such as an image tag pinned above a chart's `appVersion` for a CVE fix, could be reverted by the next export even though edits made through the portal and API already respected it. Every write path now applies the same per-file rule: `.ankra-owned.json` in each cluster directory records a digest of the bytes Ankra last wrote to every file it renders, and a file whose bytes in Git no longer match that record is kept, never overwritten. Editing a file in Git is the supported way to hand-maintain it, against every write path. The manifest is platform metadata - do not delete or edit it, because without it the boundary switches off. SOPS-encrypted files stay outside the rule, and preservation is still silent: the sync status reads in sync and no surface lists preserved paths yet.
+The reconciler's export of stored state wrote back to Git without checking who last wrote each file, so a value maintained by hand - an image tag pinned above a chart's `appVersion` for a CVE fix - could be reverted. Every write path now applies one rule: `.ankra-owned.json` records a digest of the bytes Ankra last wrote, and a file whose bytes no longer match it is kept, never overwritten.
 
 [GitOps →](/concepts/gitops#what-ankra-writes-back-to-git)
 
-## Live usage, agent and GitOps posture from chat and the MCP server
+</Update>
 
-Nine `ankra cluster` commands the assistant and the MCP server could not answer now have tools. Ask "what is eating CPU on prod-eu" and Ankra AI reads **live** usage per node or per pod from metrics-server, the same measurement `ankra cluster top` prints, never a cached figure: if the agent is unreachable it says so instead of showing a stale number. Ask why a change committed to Git has not reached the cluster and it reads the **GitOps sync state**, including the two failures the overview hides - a repository binding whose credential no longer exists, and a sync that resolved a different repository than the one configured. It can report the **agent's own status** and upgrade it on request, list **every Helm release** on the cluster to spot drift outside the GitOps record, cancel **one step** of a running operation, and **discover and adopt** managed Kubernetes clusters already running in a provider account. On the MCP server the tools are `get_node_usage`, `get_pod_usage`, `get_cluster_agent_status`, `upgrade_cluster_agent`, `get_gitops_status`, `list_helm_releases`, `cancel_execution_step`, `discover_managed_clusters` and `import_managed_cluster`.
-
-The same release gives the AI surfaces the organisation itself: ask "which organisation is this token for", "who has access here" or "what is waiting on me" and Ankra AI answers from `get_organisation`, `list_organisation_members`, `list_organisation_roles`, `list_limit_requests` and `list_pending_actions`; a parked action can be approved or rejected with `decide_pending_action` by the policy's designated approvers, and `get_ai_settings`, `list_ai_models`, `pause_ai_autonomy` and `resume_ai_autonomy` read and drive the organisation's AI configuration and its soft autonomy pause. Provider keys are never returned, and membership, role and key changes stay in the portal and CLI.
-
-Helm registries and charts join the AI surfaces as well: `list_helm_registries`, `get_helm_registry`, `list_helm_registry_sync_jobs`, `list_helm_registry_credentials` (names only) and `sync_helm_registry` answer where a chart comes from and whether a registry has synced, `get_chart_default_values` and `render_chart_template` show what a chart ships with and what it renders to before anything is installed, and `get_chart_details` reads a chart's maintainers and versions. The remaining small `ankra` lanes have tools too: `get_sops_config`, `get_cluster_dns_zone`, `list_organisation_custom_dns_zones`, `provision_backup_vault`, `verify_backup_vault`, `resize_bastion`, `resync_cluster_ssh_keys` and `test_notification_route`, each carrying the permission its API route requires.
-
-The declarative lane is on the AI surfaces too. Hand Ankra AI or an MCP client the same ImportCluster YAML `ankra cluster apply` reads and `validate_cluster_manifest` checks it the way the API does, `stage_cluster_manifest_drafts` parks every stack as a draft for a person to promote, and `apply_cluster_manifest` applies it declaratively - the cluster's definition becomes the manifest, with the same repoint acknowledgements the CLI requires. `roll_cluster_to_version` rolls a whole cluster back to an earlier resource version, and `export_stack_profile_iac` / `import_stack_profile` move a stack profile as ClusterInfrastructureAsCode.
-
-[MCP Tool Reference →](/platform/mcp-tools)
+<Update label="2026-09-04" tags={["Pipelines"]} rss={{ title: "Ankra Pipelines: connect a repository and watch it run" }}>
 
 ## Ankra Pipelines: connect a repository and watch it run
 
-Connecting a repository to Ankra Pipelines is now self-service: `POST /org/pipelines/repositories` connects a bare repository and, on GitHub, reads its committed `.ankra/pipeline.yaml` as the definition of record in the same call, and an Ankra Application connects and decides its own repository automatically on create and reconcile. A new application's setup pull request now commits `.ankra/pipeline.yaml` by default instead of a generated GitHub Actions workflow. `checkout` joins `run` as a stage that executes end to end - a pinned public git image no pipeline can override, a shallow fetch with a fallback to its ref, `lfs:` refused by name - as hardened Jobs in the `ankra-ci` namespace of your CI cluster. Declared secrets and credentials reach a step as a one-time, per-step reveal the agent collects at start; cron schedules fire from a stored watermark through the same trigger every push uses; and the protected-authority model is enforced, not only modelled - a pull request that changes a protected section (`permissions`, `secrets`, `credentials`, `network`, `runs_on`, an environment's gate, and more) runs with the last approved authority instead, and the check run, commit status and `GET /org/pipelines/definitions/{id}` say so. An administrator approves a repository's current protected sections with `POST /org/pipelines/definitions/{id}/approve`. The Application's **CI/CD** tab shows Ankra pipeline runs with a timeline and an in-app log viewer, and organisation **Settings → Pipelines** lists connected repositories.
-
-Still ahead: the dispatcher resolving a `build` step's push target so a build runs instead of refusing, the runners for `scan` and `verify`, the platform-settled `gate` and `publish` stages, and the pull request status comment's own pipeline section actually being populated - the guide says exactly where the line is today.
+Connecting a repository is now self-service, and on GitHub the same call reads its committed `.ankra/pipeline.yaml` as the definition of record. A new application's setup pull request commits that file instead of a generated GitHub Actions workflow. `checkout` joins `run` as a stage that executes end to end, and a pull request changing a protected section runs with the last approved authority instead, saying so on the check run.
 
 [Ankra Pipelines →](/guides/ankra-pipelines)
+
+</Update>
+
+<Update label="2026-09-04" tags={["Pipelines"]} rss={{ title: "Ankra Pipelines: build, scan, gate and publish by digest" }}>
 
 ## Ankra Pipelines: build, scan, gate and publish by digest
 
-A commit is now a straight line to a deployed image. `build` produces a real digest in a rootless BuildKit pod and pushes it to your organisation's own CI staging repository; `scan` runs Trivy, Semgrep and Checkov against it, one step per tool, from pinned public images your own image policy cannot turn off; `gate` judges what they found against your organisation's `ci_image_gate` policy, which a pipeline's own `gate` stage may only tighten, never loosen; and `publish` re-tags the one digest `gate` approved as `sha-<7>` in your real repository - nothing reaches it unscanned or ungated. Pull-request previews follow the same digest: an application built by its own committed pipeline now gets its preview from the `build` step's own image on GitHub, GitLab and Bitbucket Cloud alike, and the gateway re-drives a stalled preview the moment a run concludes. A pull request from a fork runs restricted rather than refused - `checkout` and `build` clone the fork's own head anonymously, `build` has no push target so nothing it produces can reach a registry, and every stage but `checkout`, `build` and `scan` runs with no network at all. The pull request's own status comment now carries a `pipeline` section written from the run's live state, including the sentence explaining a protected-authority decision, beside the check run and commit status it already had. Connecting a repository takes an optional application link and a CI-cluster override, and a connected repository can be disconnected.
-
-Still ahead: a runner for `verify`, the per-run identity that lets a step call the `ankra` CLI with its own scoped permissions (`cloud` and `object_storage` credentials wait on it too), and the built-in `ankra/*` step library behind `uses:` - the guide says exactly where the line is today.
+A commit is now a straight line to a deployed image. `build` produces a digest in a rootless BuildKit pod and pushes it to your organisation's CI staging repository; `scan` runs Trivy, Semgrep and Checkov against it; `gate` judges them against a policy a pipeline may only tighten; and `publish` re-tags the one digest `gate` approved. A pull request from a fork runs restricted rather than refused.
 
 [Ankra Pipelines →](/guides/ankra-pipelines)
 
+</Update>
+
+<Update label="2026-09-04" tags={["Pipelines"]} rss={{ title: "Ankra Pipelines: the review reads the run, and you can say merge when green" }}>
+
 ## Ankra Pipelines: the review reads the run, and you can say merge when green
 
-Ankra's pull request review used to answer "is this passing" from a GitHub check run alone, so a repository already running on Ankra Pipelines got a review blind to its own pipeline. It now resolves the newest pipeline run of the reviewed commit first, and when one answers, its prompt carries a bounded set of the run's own facts: the failing step's name and error, findings by tool and severity, the `gate` step's verdict, the `build` step's digest, and the authority sentence whenever the run fell back from what the head asked for. A human can act on what the review finds: mention **`@ankraai merge when green`** on a pull request in Agent mode - or ask Ankra AI in chat, or call the API - and Ankra watches it, merging the moment the run is green, its gate passed, neither the AI review nor a human's most recent review requests changes, and the run's authority is plainly approved. The request expires in 24 hours, a new push invalidates it, and every refusal is posted once, naming the exact condition that failed. Ask Ankra AI to watch a run instead, with `watch_pipeline_run`, and the conversation wakes up with the same facts the moment it concludes; unattended, a failed `build` step on a direct push to the tracked branch dispatches the same auto-fix mission a failed GitHub Actions build already gets, while a pull request's own failed build gets its diagnosis posted into the status comment instead of an unattended commit.
-
-Still ahead: merge-when-green and this same automatic re-evaluation on GitLab and Bitbucket Cloud - GitHub only today.
+Ankra's pull request review answered whether a change was passing from a GitHub check run alone, so a repository on Ankra Pipelines got a review blind to its own pipeline. It now resolves the commit's newest run first and carries its facts: the failing step, findings by tool and severity, the gate verdict, the build digest. Mention `@ankraai merge when green` and Ankra merges the moment those conditions hold.
 
 [Ankra Pipelines →](/guides/ankra-pipelines#what-a-pull-request-gets)
 
+</Update>
+
+<Update label="2026-09-04" tags={["Pipelines"]} rss={{ title: "Migrate an existing application onto Ankra Pipelines with one call" }}>
+
 ## Migrate an existing application onto Ankra Pipelines with one call
 
-Moving an application already running its own CI onto Ankra Pipelines meant converting the workflow by hand and opening the pull request yourself. `GET /org/applications/{id}/pipeline` now reads what builds the application today and what a migration would do, and `POST .../pipeline/migrate` converts it and opens the pull request for you, on a fixed `ankra/pipeline-migration` branch - calling it again while that pull request is open stacks a new commit onto it rather than resetting it, and `remove_workflows: true` deletes the Ankra-authored generated workflow in the same pull request, never a hand-rolled one. The disposition itself does not flip until the pull request merges, and from then on a push that adds or removes `.ankra/pipeline.yaml` or a `.github/workflows/*` file on the default branch re-evaluates it automatically, on GitHub today - so merging the migration pull request is what switches the application over, no separate **Reconcile** click needed.
+Moving an application already running its own CI meant converting the workflow by hand and opening the pull request yourself. `GET /org/applications/{id}/pipeline` now reads what builds it today and what a migration would do, and `POST .../pipeline/migrate` converts it and opens the pull request for you. Merging that pull request is what switches the application over, with no separate Reconcile click.
 
 [Migrate from GitHub Actions →](/guides/migrate-from-github-actions#migrate-an-existing-application-with-one-call)
 
+</Update>
+
+<Update label="2026-09-04" tags={["Pipelines"]} rss={{ title: "The platform-operated build fallback actually builds" }}>
+
 ## The platform-operated build fallback actually builds
 
-`ci_build_fallback: platform_builders` used to be a setting with nothing reading it back. When the CI cluster's own agent cannot run pipeline steps and an organisation has opted in, a `build` step now runs on Ankra's own platform-builders lane instead - the same push to the organisation's CI staging repository, the same `scan`, `gate` and `publish` downstream - with the step's `executor` recording which lane actually built it.
+`ci_build_fallback: platform_builders` was a setting with nothing reading it back. When the CI cluster's own agent cannot run pipeline steps and an organisation has opted in, a `build` step now runs on Ankra's own platform-builders lane instead, with the same push, scan, gate and publish downstream. The step's `executor` records which lane actually built it.
 
 [Ankra Pipelines →](/guides/ankra-pipelines#what-is-in-place-today)
 
+</Update>
+
+<Update label="2026-09-03" tags={["AI"]} rss={{ title: "Live usage, agent and GitOps posture from chat and the MCP server" }}>
+
+## Live usage, agent and GitOps posture from chat and the MCP server
+
+Nine `ankra cluster` commands the assistant and the MCP server could not answer now have tools. Ask what is eating CPU on a cluster and Ankra AI reads live usage per node or pod from metrics-server, never a cached figure. It also reads GitOps sync state including the two failures the overview hides, reports and upgrades the agent, lists every Helm release, and discovers managed clusters already running.
+
+[MCP Tool Reference →](/platform/mcp-tools)
+
+</Update>
+
+<Update label="2026-09-03" tags={["AI"]} rss={{ title: "Raise support tickets from chat and the MCP server" }}>
+
 ## Raise support tickets from chat and the MCP server
 
-Contacting Ankra support meant leaving the conversation: the assistant could diagnose a problem but not hand it to a human, and an MCP client had no way to open a ticket at all. Now the support desk is a tool surface. Tell Ankra AI "raise a support ticket about this" and it proposes a **Raise support ticket** action with the subject, category, severity and the cluster you were looking at; confirm, and the ticket is filed the way `ankra support create` files it, with the confirmation email and the same thread the portal shows. Ask "what did support say on ticket 12" and it reads the conversation; answer their question in the chat and the reply lands on the ticket as you, moving a ticket that was waiting on you back to in progress. Closing is a confirmed action too. On the MCP server the tools are `list_support_tickets`, `get_support_ticket`, `create_support_ticket`, `comment_support_ticket` and `close_support_ticket`; reads need `mcp:read`, the rest `mcp:write`.
+The assistant could diagnose a problem but not hand it to a human, and an MCP client had no way to open a ticket at all. Tell Ankra AI to raise a support ticket and it proposes one with the subject, category, severity and the cluster you were looking at; confirm, and it is filed. Ask what support said and it reads the thread; reply in chat and it lands on the ticket.
 
 [Support →](/platform/support#from-ankra-ai-and-the-mcp-server)
 
+</Update>
+
+<Update label="2026-09-03" tags={["Pipelines"]} rss={{ title: "One status comment per pull request" }}>
+
 ## One status comment per pull request
 
-Ankra used to leave several comments on a pull request as it worked - the AI review, the preview-environment card, each in its own place and each edited on its own clock. It now keeps **one** comment per pull request with a section for each thing it has to say - the pipeline, the preview, the review, and the promotion when there is one - and updates the sections in place as they change, so the comment you read is the current state of everything Ankra knows about that change rather than a trail to reassemble. An older preview card on an open pull request is adopted into the unified comment the next time it is updated, not left beside it. Nothing about the review itself changes: the same findings, the same read-only advisory stance, the same `Reviewed commit` footer.
+Ankra used to leave several comments on a pull request as it worked, each in its own place and each edited on its own clock. It now keeps one comment with a section for each thing it has to say - the pipeline, the preview, the review, and the promotion when there is one - updated in place. An older preview card is adopted into it rather than left beside it.
 
 [Pull request reviews →](/guides/pipeline-agents)
 
+</Update>
+
+<Update label="2026-09-03" tags={["Pipelines"]} rss={{ title: "Convert a workflow into an Ankra pipeline from chat" }}>
+
 ## Convert a workflow into an Ankra pipeline from chat
 
-Ankra is moving application builds off GitHub Actions and into the cluster that runs them, defined by one file, `.ankra/pipeline.yaml`. The first pieces are in your hands now: ask Ankra AI to **convert** an existing GitHub Actions workflow, GitLab CI file, Bitbucket Pipelines file or CircleCI config into that definition, and to **validate** a definition you have written, and it answers with the file and every diagnostic - what it mapped, what it could only carry over as a plain `run` step, what it refused - so you can commit a definition that parses before the runtime that executes it reaches your cluster. Marketplace actions, pipes and orbs with an Ankra equivalent (checkout, image build, Trivy, Helm push, Slack notify, toolchain setup) are mapped; the rest is kept as the script it was, with a note. On the MCP server the tools are `cicd_convert_workflow_to_pipeline` and `cicd_validate_pipeline_yaml`.
+Ask Ankra AI to convert an existing GitHub Actions workflow, GitLab CI file, Bitbucket Pipelines file or CircleCI config into `.ankra/pipeline.yaml`, and to validate a definition you have written. It answers with the file and every diagnostic: what it mapped, what it could only carry over as a plain `run` step, what it refused. Actions with an Ankra equivalent are mapped; the rest is kept as the script it was.
 
 [Migrate from GitHub Actions →](/guides/migrate-from-github-actions)
 
+</Update>
+
+<Update label="2026-09-03" tags={["AI"]} rss={{ title: "Ask Ankra AI to create your alerts" }}>
+
 ## Ask Ankra AI to create your alerts
 
-Ankra AI could list your alerts and mute them, but asked to *create* one it could only describe the alerts worth having and point you at the **New alert** button. It now creates them. Describe the alert in the chat - "page critical when any of my clusters goes offline", "warn when a production stack is down or a deploy job fails" - and the assistant proposes a **Create alert** action with every rule spelled out: severity, the clusters or environments it watches (or all of them), the conditions, the cooldown. Confirm, and the alert exists, evaluated every minute like one made in the portal. The assistant writes only conditions the evaluator implements - cluster state, GitOps sync, metric thresholds, metrics stopped flowing, security findings, resource state and job status - so an alert it creates cannot sit dead while reading as configured; a condition outside that vocabulary is refused with the accepted values named. A destination named on the alert must exist, too. The same assistant can now **delete** an alert (and says plainly that the firing history goes with it), and it still prefers muting to deleting. On the MCP server the tools are `create_alert`, `set_alert_enabled` and `delete_alert`.
+Ankra AI could list your alerts and mute them, but asked to create one it could only point you at the New alert button. Describe the alert in chat and it now proposes a Create alert action with severity, the clusters or environments it watches, the conditions and the cooldown spelled out. It writes only conditions the evaluator implements, so an alert it creates cannot sit dead while reading as configured.
 
 [Alerts →](/guides/alerts#creating-alert-rules)
 
-## A software bill of materials for the fleet
+</Update>
 
-The Security Center gains an **SBOM** tab: every package the scanner found in every container image, where it runs, and whether a finding names it. When the next CVE lands you search the package and read the workloads, namespaces and clusters running that exact version - without a rescan. **Components** groups one row per package, version and ecosystem across images, with licences, usage counts, and the findings that name it; **Images** lists every image with its OS, component count, where it runs and the findings attributed to it, and opens into the full component list. Images are keyed by digest and stored once, so an image on ten clusters costs one bill of materials.
-
-Generation is **opt-in per cluster**: the security baseline gains a **Software bill of materials per image** input (`trivy_sbom_generation_enabled`), off by default because the operator's SbomReports are the largest objects it writes. The tab says how many scanned clusters publish one and names the switch when none do. The same inventory is on the API (`GET /api/v1/org/security/sbom`, `/sbom/images`, `/sbom/image`) and the CLI (`ankra security sbom`, `ankra security sbom images`, `ankra security sbom image`).
-
-[Cluster security →](/guides/cluster-security#sbom)
-
-## Security by namespace, workload and pod
-
-A new **Workloads** tab in the Security Center breaks the fleet down the way a platform team owns it: cluster, then namespace, then workload, then pod. Each namespace row carries its scanned workloads and images, the pods running there right now, the actionable findings by severity, the known-exploited count and the last scan; cluster-scoped reports keep their own row so the totals still add up. **Show workloads** lists the namespace's scanned images riskiest first, and **Show pods** resolves each workload's owner chain to its live pods, joining every container to the findings of the scanned container behind it - readiness, restarts and running digest included. A container the scanner never covered says **Not scanned** rather than passing as clean. On the API: `GET /api/v1/org/security/namespaces` and `GET /api/v1/org/security/pods`; on the CLI: `ankra security namespaces` and `ankra security pods`.
-
-[Cluster security →](/guides/cluster-security#workloads)
-
-## A what-if draft that predicts the bill before you resize
-
-Every cluster's cost drill-down now carries a **what-if draft**: the node groups as they run today - node count, vCPU, memory and disk per node - and the load balancers beside them, editable in place. Grow a group, shrink one, resize it, add a spot group, add a load balancer, and the panel prices the draft and shows **today's bill**, the **predicted bill** and the **change** side by side. It is a draft in the plainest sense - it lives on the page, *Discard draft* or a reload throws it away, and nothing is applied to the cluster.
-
-The number is built the way you would want to check it. Pricing comes from the same price book or rate card the bill is metered from, so the prediction is today's bill plus the difference between the draft and the current configuration priced identically; the control plane, volumes and everything you did not touch carry over unchanged. A resized group lands on the **cheapest published size that holds it**, locked to its CPU architecture and preferring its current line, and the panel names the size beside the price; disk beyond what that size bundles is priced as volumes, and private capacity is priced per vCPU, GB of memory and GB of disk from its rate card. Whatever cannot be priced says so - *Not priced*, with the reason - and a prediction that would have to leave an unknown out is withheld rather than guessed. The same estimate answers over the API (`GET`/`POST /org/clusters/{id}/cost/estimate`).
-
-The draft can also be priced **on another provider**. Pick DigitalOcean, Hetzner, OVHcloud, Scaleway or UpCloud in the panel and the same node groups are placed on that provider's sizes - cheapest size that holds each group, architecture kept where the target sells it, extra disk as the target's volumes, load balancers at the target's price - while today's configuration stays priced where it runs, so the change reads as what moving would cost. It works from private capacity too: a Proxmox cluster priced by its rate card can be set beside the same shape on a public cloud.
-
-[What if the node groups changed? →](/platform/cloud-cost#what-if-the-node-groups-changed)
-
-## Your money, in your currency
-
-The organisation sets a default display currency; you can now set **your own** on top (Cost → Settings), and every cost figure you see follows - the fleet overview, cluster drill-downs, credentials, workloads, savings. Provider quotes in the cluster-create wizards got honest at the same time: UpCloud quotes arrive in US dollars and were being shown with a euro sign; they now convert into your display currency at the latest exchange rate, and when a rate is not known they keep the provider's own currency with the right symbol - a dollar figure is never dressed as euros. Thirteen currencies are supported - USD, EUR, GBP, SEK, NOK, DKK, CHF, PLN, CZK, JPY, CAD, AUD and INR - each with a live exchange rate refreshed twice a day.
-
-## A Cost center that answers whose money, and what it runs
-
-The Cost page could say what the fleet costs - but not whose account the money is on, or what it is actually running. It now breaks spend down the way a bill actually arrives, across six tabs. **Clusters** is the whole fleet in one table - every cluster's run rate, month to date, projection and confidence, with the unpriced ones marked instead of shown as free. **Credentials** groups the same money by the account paying for it: provider, then the credential that provisions the capacity - resolved from each cluster's own resource graph, the same lookup provisioning uses - with a page per credential showing its figures, its clusters and, for private capacity, the rate card pricing it. A credential deleted after its clusters were built keeps its name (its clusters still cost money), and clusters naming no credential land in an honest *No credential recorded* bucket, so the totals always account for the whole fleet. **Workloads** answers where the money runs with names you recognise: namespace allocations across the fleet joined to the stacks, addons and applications living in them, searchable, filterable, and linked through to each application. The overview becomes a dashboard again - figures, trend, then the same money three ways, each column one click from its complete breakdown - and the per-cluster drill-down joins the loop by naming the credential that pays for it and what runs in each namespace.
-
-[Cloud cost →](/platform/cloud-cost)
-
-## Cost for the capacity nobody publishes a price for
-
-If your clusters run on Proxmox, VMware or hardware you imported yourself, the Cost page had nothing to show you: public providers publish a price for every machine size, and your capacity has no size anyone sells. You can now state what it costs. A **rate card** is three monthly rates in your own currency - per vCPU, per GB of memory, per GB of provisioned storage - set on the **credential** that provisions the capacity, so one datacentre is priced once and every cluster built from it inherits those rates. Ankra multiplies them by what each cluster actually holds, then runs them through the same pipeline as a public provider's bill: hourly snapshots, month-to-date and projection, namespace allocation, savings recommendations.
-
-**Proxmox ships with defaults**, so a cluster reports a number the day it is connected - labelled as Ankra's defaults, not yours, until you save your own. Other private providers ship none on purpose: a made-up price for hardware we know nothing about would be a confident wrong answer, so those clusters read **not priced** rather than free, with a readiness state (`no_rate_card`) that says exactly what is missing.
-
-The Cost overview was rebuilt around it. It now opens with **the providers** - what each one costs, its share of the fleet, and which credential prices it, badged *Your rates*, *Ankra defaults* or *Needs rates* - and then enumerates **every cluster**, ranked by cost, with the unpriced ones marked instead of shown as zero. An organisation whose capacity is all private is no longer told to connect a cloud account it already has.
-
-[Cloud cost →](/platform/cloud-cost)
-
-## The overview says what every cluster is
-
-The cluster overview now opens with a **configuration card** for every cluster kind: provider and region, the distribution actually running your API server (k3s, kubeadm, DOKS, GKE, ... - or vcluster for a playground), the Kubernetes version with the kubelet range, the CNI, and the node shape - control planes and workers with each group's instance type and autoscaling bounds. Provider-managed clusters finally show their real version everywhere instead of a placeholder. A playground's card shows what you ordered: the plan and its price of record, the vCPU / memory / disk / pod footprint, the expiry for trials, and the wildcard domain everything you publish resolves under. Cells the platform has no honest data for disappear instead of reading "Unknown". Behind it is one new read, `GET /org/clusters/{cluster_id}/specification`, answering from stored configuration for all seventeen kinds.
-
-## Playground storage says what it is
-
-The playground's create wizard, settings card and live card now say plainly that **storage is local to the playground host and not backed up** - keep anything you cannot afford to lose in your own repositories and registries. The storage quota also got honest: the size a plan sells is now fully yours, with the virtual cluster control plane's own volume and claim reserved on top rather than silently taken out of your budget.
-
-## Connect to Ankra from the Teams welcome card
-
-When the Ankra AI bot is added to Microsoft Teams, its welcome card offers a **Connect to Ankra** button that opens the portal with the claim code already filled in, so linking the workspace is one press. Since that button shipped in August it led to a 404 for everyone, and admins were falling back to reading the code out of the card and typing it in by hand. It now opens the portal as intended; if you are signed out, it takes you through sign-in and back to the same link with the code intact.
-
-The Teams app listing was rewritten alongside it: what the app does and who it is for, that it needs an active Ankra account, links to sign up, get started and reach support, and how to report an AI answer you disagree with. The app package now declares support for shared and private channels as well as standard ones.
-
-[Connecting Microsoft Teams →](/platform/ai-connections#connecting-microsoft-teams)
+<Update label="2026-09-03" tags={["AI"]} rss={{ title: "Rollout verifications that stop paging you" }}>
 
 ## Rollout verifications that stop paging you
 
-After you approve a change in AI chat, Ankra opens a follow-up turn in the same conversation once the rollout settles and verifies it: chart version, health, sync. That turn was being treated as a reply you were waiting on, so every verified rollout sent a **Your Ankra agent run finished** message to Slack or Teams and to the inbox, even when all it had to say was that the change went through. A verification that finds the rollout healthy is now quiet; its report is still in the conversation. A verification that finds a failure, or parks a fix for you to approve, still reaches you personally with the link to the conversation. Completion notifications are reserved for runs answering a message you sent.
+After you approve a change in chat, Ankra opens a follow-up turn once the rollout settles and verifies chart version, health and sync. That turn was treated as a reply you were waiting on, so every verified rollout sent a completion message to Slack or Teams and to the inbox. A verification that finds the rollout healthy is now quiet; one that finds a failure, or parks a fix, still reaches you.
+
+[Notification routing →](/guides/notification-routing)
 
 </Update>
+
+<Update label="2026-09-02" tags={["Security"]} rss={{ title: "A software bill of materials for the fleet" }}>
+
+## A software bill of materials for the fleet
+
+The Security Center gains an SBOM tab: every package the scanner found in every container image, where it runs, and whether a finding names it. When the next CVE lands you search the package and read the workloads, namespaces and clusters running that exact version, without a rescan. Images are keyed by digest and stored once. Generation is opt-in per cluster and off by default.
+
+[Cluster security →](/guides/cluster-security#sbom)
+
+</Update>
+
+<Update label="2026-09-02" tags={["Security"]} rss={{ title: "Security by namespace, workload and pod" }}>
+
+## Security by namespace, workload and pod
+
+A Workloads tab breaks the fleet down the way a platform team owns it: cluster, then namespace, then workload, then pod. Each namespace row carries its scanned workloads and images, the pods running there right now, the actionable findings by severity, the known-exploited count and the last scan. Show pods resolves each workload's owner chain to its live pods. A container the scanner never covered says Not scanned.
+
+[Cluster security →](/guides/cluster-security#workloads)
+
+</Update>
+
+<Update label="2026-09-02" tags={["Cost"]} rss={{ title: "A what-if draft that predicts the bill before you resize" }}>
+
+## A what-if draft that predicts the bill before you resize
+
+Every cluster's cost drill-down carries a what-if draft: the node groups as they run today, with the load balancers beside them, editable in place. Grow a group, shrink one, add a spot group, and the panel prices the draft and shows today's bill, the predicted bill and the change side by side. Pricing comes from the same price book the bill is metered from. Nothing is applied to the cluster.
+
+[What if the node groups changed? →](/platform/cloud-cost#what-if-the-node-groups-changed)
+
+</Update>
+
+<Update label="2026-09-01" tags={["Cost"]} rss={{ title: "Your money, in your currency" }}>
+
+## Your money, in your currency
+
+The organisation sets a default display currency; you can now set your own on top, and every cost figure you see follows - the fleet overview, cluster drill-downs, credentials, workloads and savings. Provider quotes got honest at the same time: UpCloud quotes arrive in US dollars and were being shown with a euro sign. Thirteen currencies are supported, each with a live exchange rate refreshed twice a day.
+
+[Cost settings →](/platform/cloud-cost#settings)
+
+</Update>
+
+<Update label="2026-09-01" tags={["Cost"]} rss={{ title: "A Cost center that answers whose money, and what it runs" }}>
+
+## A Cost center that answers whose money, and what it runs
+
+The Cost page could say what the fleet costs, but not whose account the money is on, or what it is actually running. It now breaks spend down across six tabs: Clusters is the whole fleet in one table, Credentials groups the same money by the account paying for it, and Workloads answers where the money runs with names you recognise, linked through to each application.
+
+[Cloud cost →](/platform/cloud-cost)
+
+</Update>
+
+<Update label="2026-09-01" tags={["Cost"]} rss={{ title: "Cost for the capacity nobody publishes a price for" }}>
+
+## Cost for the capacity nobody publishes a price for
+
+If your clusters run on Proxmox, VMware or hardware you imported yourself, the Cost page had nothing to show you. You can now state what it costs: a rate card is three monthly rates in your own currency - per vCPU, per GB of memory, per GB of storage - set on the credential that provisions the capacity. Proxmox ships with defaults; other private providers read not priced rather than free.
+
+[Cloud cost →](/platform/cloud-cost#private-capacity-rate-cards)
+
+</Update>
+
+<Update label="2026-09-01" tags={["Clusters"]} rss={{ title: "The overview says what every cluster is" }}>
+
+## The overview says what every cluster is
+
+The cluster overview opens with a configuration card for every cluster kind: provider and region, the distribution actually running your API server, the Kubernetes version with the kubelet range, the CNI, and the node shape with each group's instance type and autoscaling bounds. Provider-managed clusters finally show their real version everywhere instead of a placeholder. Cells the platform has no honest data for disappear rather than reading Unknown.
+
+[Cluster nodes →](/platform/cluster-nodes)
+
+</Update>
+
+<Update label="2026-09-01" tags={["Clusters"]} rss={{ title: "Playground storage says what it is" }}>
+
+## Playground storage says what it is
+
+The playground's create wizard, settings card and live card now say plainly that storage is local to the playground host and not backed up - keep anything you cannot afford to lose in your own repositories and registries. The storage quota got honest too: the size a plan sells is now fully yours, with the virtual cluster control plane's own volume reserved on top rather than taken out of your budget.
+
+[Playgrounds →](/guides/cluster-sandbox)
+
+</Update>
+
+<Update label="2026-09-01" tags={["AI"]} rss={{ title: "Connect to Ankra from the Teams welcome card" }}>
+
+## Connect to Ankra from the Teams welcome card
+
+When the Ankra AI bot is added to Microsoft Teams, its welcome card offers a Connect to Ankra button that opens the portal with the claim code already filled in. Since that button shipped in August it led to a 404, and admins were falling back to reading the code out of the card by hand. It now opens the portal as intended, taking you through sign-in and back with the code intact.
+
+[Connecting Microsoft Teams →](/platform/ai-connections#connecting-microsoft-teams)
+
+</Update>
+
 <Update label="August 2026" description="Cluster Mesh across providers, cost evidence and a waste scan, power schedules, audit trails, and the largest CLI release yet">
 
 ## Connect clusters with Cluster Mesh
