@@ -1,0 +1,134 @@
+---
+title: GitLab Integration
+description: Connect a GitLab instance so Ankra AI can review merge requests and answer mentions, and so clusters can sync their configuration through GitOps
+---
+
+<Note>
+GitLab connects with an access token rather than an app: you paste a token, Ankra shows you a webhook URL and secret, and you register the hook in GitLab yourself. GitLab.com and self-managed instances work the same way.
+</Note>
+
+## What a GitLab connection powers
+
+- **[AI code review](/platform/ai-code-review)** on merge requests, and replies when somebody mentions `@ankraai` in a merge request comment.
+- **[GitOps](/concepts/gitops)** for clusters whose repository lives on GitLab: configuration is committed to the repository, and pushes flow back into Ankra.
+
+Both ride the same credential and the same webhook. Every AI capability is off until an organisation admin turns it on.
+
+---
+
+## Prerequisites
+
+You need:
+
+- A GitLab access token. A personal, group, or project access token all work.
+- Permission to add a webhook to each project Ankra should watch, or to the group containing them.
+
+### Token scopes
+
+| Scope | Why |
+|---|---|
+| `read_api` | The minimum Ankra validates the token against, and enough to read merge requests and diffs. |
+| `read_repository` | Read file contents when a review needs more than the diff. |
+| `api` | Required for Ankra to **post** anything: the review comment, mention replies, and GitOps commits are all writes, and `read_api` cannot make them. |
+
+<Warning>
+`read_api` is read-only. A token carrying only `read_api` and `read_repository` connects successfully and reads your merge requests, but every attempt to post a review comment fails. Use `api` unless you deliberately want a read-only connection.
+</Warning>
+
+A group access token scoped to the group that owns your projects is usually the least fiddly choice: one token, one webhook per project, and it survives people leaving.
+
+---
+
+## Connect GitLab
+
+<Steps>
+  <Step title="Open the source-control connections">
+    In Ankra, go to **AI** → **Settings** → **Connections** and find **Source control & AI review** → **GitLab**.
+  </Step>
+  <Step title="Fill in the credential">
+    - **Credential name** - optional, and worth setting when you connect more than one instance.
+    - **Instance URL** - leave empty for `https://gitlab.com`, or give the base URL of your self-managed instance, for example `https://gitlab.my-company.com`.
+    - **Access token** - the token from above.
+
+    Press **Connect**. Ankra validates the token against the instance before storing it, so a rejected token fails here rather than silently later.
+  </Step>
+  <Step title="Copy the webhook URL and secret">
+    The credential now shows a webhook URL of the form `https://platform.ankra.app/webhooks/gitlab/<credential-id>` and a secret.
+
+    <Warning>
+    The secret is shown **once**, when the credential is created or its secret is regenerated. Copy it before you leave the page. If you lose it, regenerate it - you cannot read it back.
+    </Warning>
+  </Step>
+  <Step title="Register the webhook in GitLab">
+    In the GitLab project, go to **Settings** → **Webhooks** → **Add new webhook**:
+
+    - **URL** - the webhook URL you copied.
+    - **Secret token** - the secret you copied.
+    - **Trigger** - tick **Merge request events**, **Comments**, **Push events**, and **Tag push events**.
+
+    Save, then press **Test** → **Merge request events**. A `200` means Ankra accepted the delivery.
+
+    Repeat per project, or add the hook once at group level under **Settings** → **Webhooks** to cover every project in the group.
+  </Step>
+  <Step title="Turn on what you want">
+    A fresh connection does nothing. Switch on **AI review** and **Mention replies** on the credential's row, or on a rule for individual projects. See [AI code review](/platform/ai-code-review) for what each switch does.
+  </Step>
+</Steps>
+
+---
+
+## Which events do what
+
+| GitLab event | What Ankra does with it |
+|---|---|
+| **Merge request events** | Runs the AI review when a merge request is opened or updated. |
+| **Comments** | Answers a comment that mentions `@ankraai`. |
+| **Push events** | Syncs the cluster configuration in the repository (GitOps). |
+| **Tag push events** | Same, for tags. |
+
+Every delivery is authenticated by comparing the `X-Gitlab-Token` header against the credential's stored secret. A delivery with the wrong secret is rejected with `401`; an event kind Ankra does not use is answered `200` so GitLab keeps the hook enabled.
+
+---
+
+## Rotate the webhook secret
+
+**Regenerate secret** on the credential mints a new one and shows it once.
+
+<Warning>
+The old secret stops working immediately. GitLab keeps delivering with it until you update the hook, and those deliveries are rejected, so update the webhook in GitLab straight away.
+</Warning>
+
+---
+
+## Repository paths and subgroups
+
+Repository rules key on the project's full path, lowercased, including every subgroup - `my-group/my-subgroup/my-project`. Up to 20 levels of nesting are supported. The path is what appears in the project's URL after the instance host.
+
+---
+
+## Disconnect
+
+**Disconnect** on the credential's row removes it. AI reviews, mention replies, and GitOps sync through that credential all stop, and the webhook deliveries start being rejected. Remove the hook in GitLab too, so it stops retrying.
+
+---
+
+## Troubleshooting
+
+| Symptom | What to check |
+|---|---|
+| **GitLab rejected the access token** on connect | The token is expired, revoked, or lacks `read_api`. For a self-managed instance, check the instance URL is the base URL with no path. |
+| Webhook test returns `401` | The secret in GitLab does not match the credential's. Regenerate it in Ankra and paste the new one into the hook. |
+| Webhook test returns `200` but no review appears | The delivery arrived and the capability is off. Turn **AI review** on for the credential or for that project, and check the [skip reasons](/platform/ai-code-review#when-a-review-does-not-run). |
+| Reviews stopped after rotating the secret | The hook in GitLab still carries the old secret. Update it. |
+| The review runs but nothing is posted | The token has `read_api` but not `api`, so Ankra can read the merge request and not comment on it. Replace the token with one carrying `api`. |
+| Mentions go unanswered | **Mention replies** is a separate switch from **AI review**, the **Comments** trigger must be ticked on the webhook, and the comment must spell `@ankraai`. |
+| Self-managed instance unreachable | Ankra calls your instance outbound over HTTPS. An instance behind a private network or an allow-list has to permit it. |
+
+---
+
+## Related
+
+- [AI code review](/platform/ai-code-review) - the switches, the review, and the mention lane
+- [GitOps](/concepts/gitops) - how cluster configuration is stored and synced
+- [Git credentials](/platform/credentials/git) - where connected source-control credentials are listed
+- [GitLab CI/CD pipeline](/guides/gitlab-cicd-pipeline) - building and publishing an application from GitLab CI

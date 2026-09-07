@@ -1,0 +1,273 @@
+---
+title: AI Code Review
+description: How Ankra's AI reviews pull requests - connecting GitHub, GitLab, or Bitbucket, what every switch in Source control & AI review does, and what the review posts.
+---
+
+Connect a source-control provider and Ankra's AI reviews your pull requests: it reads the diff, posts a verdict with its findings, pins each finding to the line it is about, and answers when somebody mentions it in a comment.
+
+Everything is configured in one place: **AI** → **Settings** → **Connections** → **Source control & AI review**.
+
+<Info>
+**Nothing runs until you switch it on.** Every capability on a new connection is off. Installing the GitHub App, connecting a GitLab token, or authorising a Bitbucket workspace gives Ankra access, and nothing more: no review is posted, no mention is answered, and no preview is deployed until an organisation admin turns the switch on for that connection or for a single repository.
+</Info>
+
+---
+
+## Connect a provider
+
+Each provider appears as its own card. Connecting one is an organisation **admin** action.
+
+<Tabs>
+  <Tab title="GitHub">
+    Press **Install GitHub App** and pick the organisation or user account, then the repositories Ankra may see. You land back on this page with the installation listed.
+
+    One account can carry several installations, and each is configured separately. See the [GitHub integration](/integrations/github) for the permissions the App requests and how to change which repositories it covers.
+
+    GitHub is the only provider that also offers [PR preview environments](/guides/pr-preview-environments).
+  </Tab>
+  <Tab title="GitLab">
+    Paste an access token, optionally naming a self-managed instance URL. Ankra validates it, then shows the webhook URL and secret to register in GitLab by hand.
+
+    The form asks for `read_api` and `read_repository`, which is what Ankra validates against and enough to *read* your merge requests. Posting the review is a write, so use a token with the `api` scope unless you deliberately want a read-only connection.
+
+    Webhook registration is manual for GitLab and the secret is shown once. The [GitLab integration](/integrations/gitlab) walks through both.
+  </Tab>
+  <Tab title="Bitbucket Cloud">
+    Press **Connect workspace** and authorise the Ankra OAuth consumer against your Bitbucket Cloud workspace. Webhooks are registered for you.
+
+    See the [Bitbucket Cloud integration](/integrations/bitbucket-cloud) for the OAuth scopes and their purpose.
+  </Tab>
+</Tabs>
+
+A connected card shows one row per installation, credential, or workspace. Its one-line summary says which lanes the default row runs and how many repositories deviate from it, so a connection reading **Nothing enabled** is doing exactly that. Rows that do nothing open collapsed; press the row to expand it.
+
+---
+
+## AI mode: Ask or Agent
+
+Every connection carries an **AI mode** that bounds what the AI may do when it is talked to from that repository. It is separate from the capability switches: the switches decide *whether* the AI answers, the mode decides *how far* the answer may go.
+
+| Mode | What the AI may do |
+|---|---|
+| **Ask** (default) | Read-only. It investigates, explains, and can spin up throwaway workspaces or PR demos, but never changes existing infrastructure and never opens a pull request. |
+| **Agent** | It may act. It opens fix pull requests on its own, and the pull request is the review gate. Other destructive changes still ask for confirmation. |
+
+A connection in Agent mode is marked **Can act**. Automatic review events themselves stay read-only whatever the mode: a review comments, and a proposed fix arrives as a separate pull request you review like any other.
+
+---
+
+## The repository table
+
+Each connection expands into one table of every capability, with two kinds of row.
+
+- **All repositories** is the default row. It carries the connection-wide values, and every repository with no rule of its own follows it.
+- **A repository rule** is one row per repository that should differ. Pick the repository (or type `<owner>/<repository>`) and press **Add rule**; the new row starts as a copy of the default row. Removing the rule reverts that repository to the default row.
+
+Every control saves the moment you change it. There is no separate save button on this table.
+
+<Note>
+Rules are keyed by the repository path, lowercased. For GitLab, use the full project path including subgroups, up to 20 levels deep - for example `my-group/my-subgroup/my-project`.
+</Note>
+
+### What each column means
+
+| Column | What it does | Default |
+|---|---|---|
+| **AI review** | Reviews every pull or merge request when it is opened and on every push to it, and posts the findings. | Off |
+| **Review drafts** | Also reviews draft pull requests automatically. When off, a draft is skipped until it is marked ready. | Off |
+| **Auto reviews / PR** | Caps how many *automatic* reviews one pull request receives over its whole life. Blank means no cap. | 5 |
+| **Mention replies** | Lets the AI answer when somebody writes `@ankraai` in a pull request comment. | Off |
+| **PR previews** | Deploys every pull request to a throwaway [preview environment](/guides/pr-preview-environments) with its own URL. GitHub only. | Off |
+| **Review model** | Which model the review runs on: an entry from your organisation's [model catalogue](/platform/ai-provider), or any exact OpenRouter model from the searchable list. A repository row set to **Inherit** follows the default row. | Ankra's default review model |
+
+<Tip>
+The cap and the draft switch bound *automatic* reviews only. Asking for a review in a comment always runs one - see [Talking to the review](#talking-to-the-review) below.
+</Tip>
+
+---
+
+## Review instructions
+
+**Customise review instructions**, at the top of the section, opens your organisation's own review prompt, with one field per connected installation. It is what the reviewer should keep in mind on this installation: which areas to weigh heavily, which conventions to enforce, what language to write in.
+
+```text
+Write review comments in Swedish.
+Pay extra attention to Terraform and RBAC changes.
+Our Helm values must never hardcode an image tag.
+```
+
+- Up to 4,000 characters per installation. The counter turns red past the cap and **Save** stays disabled until you shorten it.
+- The instructions steer what the review focuses on and how it is phrased. They cannot override the platform guardrails or the review format.
+- Every repository on the installation inherits them. An application that overrode its own **Pull request** settings under [Application AI settings](/platform/application-ai) keeps the instructions set there instead, because overriding a lane pins the whole lane.
+- Only organisation admins can change them.
+
+---
+
+## What a review posts
+
+One comment per pull request, updated in place on every re-review, never a stream of new ones. Where a pipeline, a preview, or a promotion is also running, they share that comment as separate sections.
+
+The review section is laid out like this:
+
+```markdown
+## Ankra AI review
+
+**Verdict: comments.**
+
+<two to four sentences on the change as a whole>
+
+### Findings
+
+- **[high] <short title>** (`path/to/file.go:42`)
+  <what is wrong, why it matters, and what to do instead>
+
+---
+_Reviewed commit abc1234. This review is read-only and advisory._
+```
+
+| Verdict | What it means |
+|---|---|
+| **looks good** | The change looks safe. |
+| **no findings** | The review ran and surfaced nothing. |
+| **comments** | Worth reading, but nothing the reviewer calls a probable defect. |
+| **changes requested** | A probable bug or a security issue. |
+| **unavailable** | The model's answer could not be read. Push again or mention Ankra to re-run it. |
+
+Findings carry a severity of **high**, **medium**, or **low**, and a review keeps to the issues that matter - at most eight. A finding that names a line is also posted as a comment pinned to that line, so it is read where the decision is made. Each inline comment carries an invisible fingerprint of its file and title, so re-reviewing a pull request never restates a finding it has already pinned, even if the line has drifted or the wording changed.
+
+### How the review reads a change
+
+- **Machine-written files are dropped before the diff is measured.** Lockfiles, minified bundles, source maps, and generated protobuf never reach the model. Beyond keeping the cost down, this is what stops a large lockfile from crowding the real change out of the review. Set **Ignore paths** per repository under [Application AI settings](/platform/application-ai) to drop more.
+- **Uncertain findings are settled, not guessed.** When a finding rests on something the diff does not show, Ankra reads the file and either restates the finding as a definite defect or drops it. Where that check cannot run, the finding is posted with its uncertainty visible.
+- **A truncated answer says so.** If the model runs out of output budget mid-answer, what arrived is posted under an explicit incomplete-review notice rather than as a finished review that found nothing.
+- **The diff is treated as text, never as instructions.** An instruction planted in a diff or a pull request description asking the reviewer to act, change role, or reveal data is refused.
+
+---
+
+## What the review reads beyond the diff
+
+A diff on its own hides the most valuable class of finding: *you changed this, and the code that depends on it is not in front of you*. The review pulls that code in before it answers, so it can raise the finding instead of leaving it to whoever greps for it later.
+
+### Callers in the same repository
+
+For each declaration the diff changes, Ankra searches the repository for the other places that name appears and reads the best candidates into the prompt, at the reviewed commit. That is what lets a review say "three of this function's five callers are in files this pull request does not touch" - a finding the diff alone cannot support.
+
+### Repositories deployed alongside this one
+
+A pull request can be correct, green, and still break a different repository: it removes a route, and the client that calls it lives elsewhere with its own pipeline that has never heard of this change. Neither side disagrees until the deploy.
+
+So for names this diff **removes**, Ankra searches the repositories your organisation deploys beside this one and shows the review any file that still refers to them. A hit is reported as a possible breaking change, on the line that does the removing.
+
+| | |
+|---|---|
+| **Which repositories** | The ones sharing a cluster with this repository, from your own records: applications Ankra installs on the same cluster, and repositories tagged on that cluster under **Settings** → **AI context repositories**. Nothing to configure if your applications are already installed together. |
+| **What triggers it** | Only removals. An added route or a new field breaks nobody, so an additive change consults nothing and costs nothing. |
+| **Scope** | Up to five related repositories per review. GitHub only, code search being the mechanism. |
+| **What is read** | Whole files at a named commit, quoted into the prompt as untrusted material under review - never as instructions, exactly like the diff. |
+
+<Note>
+The repository set is read from your organisation's own rows, never from the model and never from the text of the pull request. A pull request cannot name a repository to have it read, and a search result pointing outside the set is discarded.
+</Note>
+
+<Warning>
+**Silence here is not an all-clear.** The search is best effort. A rate limit, a failed request, a provider without code search, or an organisation with nothing co-installed all produce **no section at all** rather than one reading "nothing else uses this" - because a review that conflated those would tell you a removal is safe on the strength of a request that failed. Absence of a cross-repository finding is not evidence that nothing is affected.
+</Warning>
+
+### Declaring merge order
+
+Where a removal is genuinely breaking, the risk is often the deploy *sequence* rather than the change, and the review will suggest declaring the order with a line in the pull request description:
+
+```text
+Depends-on: my-org/my-api#1722
+```
+
+Ankra reads the line only when it starts a line, so ordinary prose mentioning "depends on" cannot hold anything. It accepts the short `owner/repository#number` form or a full pull request URL, up to five per pull request. Order is declared rather than inferred on purpose: inferring which side is the producer means guessing whether the change is additive or breaking, a judgement the author has already made, and two halves each waiting for the other is a deadlock.
+
+<Warning>
+**`Depends-on` does nothing yet.** It is evaluated only by merge-when-green, and the capability behind that has no control in the portal, the CLI, or the API - so it is off for every organisation. The line is harmless to add and will start holding merges once that switch ships; until then, sequence the merges yourself. The review may still suggest it.
+</Warning>
+
+---
+
+## Talking to the review
+
+Mention `@ankraai` in a pull request or merge request comment and the AI answers in the thread, with the change as context. This needs **Mention replies** on for that repository.
+
+- **Ask a question.** "@ankraai does this handle the empty case?" gets an answer grounded in the diff, and a plain statement when the diff does not contain the answer.
+- **Ask under an inline comment** and the question is read as being about that line.
+- **Ask for a review.** A mention is a direct request from a human, so it is never filtered by draft state, branch scope, or the review budget. It runs even on a draft and even past the **Auto reviews / PR** cap.
+
+Ankra reacts to your comment as soon as it picks the mention up, so you can tell a slow review from one that never started.
+
+<Note>
+Only `@ankraai` summons the review. It is matched as a whole word, so `@ankraai-bot` and an address like `someone@ankraai.example.com` are ignored.
+</Note>
+
+---
+
+## When a review does not run
+
+A skipped review is normal and costs nothing. These are the reasons:
+
+| Reason | What to change |
+|---|---|
+| **AI review is off** for the repository | Turn the switch on, on the default row or on that repository's rule. |
+| **Draft pull request** | Turn **Review drafts** on, mark the pull request ready, or mention `@ankraai`. |
+| **Target branch out of scope** | The pull-request lane's branch patterns exclude the target branch. Widen them under [Application AI settings](/platform/application-ai). |
+| **Head commit already reviewed** | That exact commit already has a review. Push a new commit. |
+| **Superseded by a newer push** | A later push replaced the head this review was queued for. The newer head is reviewed instead. |
+| **Per-pull-request budget reached** | Raise or clear **Auto reviews / PR**, or mention `@ankraai` to run one anyway. |
+| **Daily budget reached** | The repository's **Max runs per day** is set under [Application AI settings](/platform/application-ai). |
+
+---
+
+## Per-application overrides
+
+The table on this page sets your organisation's defaults. An [application](/concepts/applications) connected to a repository can override them on its own **Ankra AI** panel, which also exposes the settings this page does not: branch patterns, ignore paths, daily budgets, input-character budgets, and the deeper lanes (code review, actions review, org skills review).
+
+The two surfaces read the same stored settings, so they can never disagree. What they differ in is reach: a value you set here goes on steering every repository that has not overridden that specific lane. See [Application AI settings](/platform/application-ai).
+
+---
+
+## Cost
+
+A review is a model completion, billed to your organisation like any other AI usage. Four things keep it bounded, and all four are yours to set:
+
+1. **Every lane is off until you turn it on**, per connection or per repository.
+2. **Auto reviews / PR** caps the reviews one pull request can accumulate.
+3. **Review model** picks what a review costs. The picker shows each model's context window and price.
+4. **Ignore paths** and the input-character budget bound how much of a diff one review reads.
+
+Reviews already spent appear under [AI Usage](/platform/ai-usage).
+
+---
+
+## Permissions
+
+Connecting a provider, disconnecting one, changing any switch, and editing the review instructions all require organisation **admin**. Members see the connections and their current settings, and the controls are disabled with the reason.
+
+---
+
+## Troubleshooting
+
+| Symptom | What to check |
+|---|---|
+| No review appears on a new pull request | Is **AI review** on for that repository - the default row *and* any rule covering it? A rule wins over the default row. Then check the skip reasons above. |
+| The connection card says **Nothing enabled** | Every lane is off on the default row and on every rule. Nothing will run for this installation until one is switched on. |
+| A repository is missing from the add-rule picker | The picker lists what the installation can actually see. For GitHub, add the repository to the App installation; for other providers, type the path by hand. |
+| Reviews run but mentions go unanswered | **Mention replies** is a separate switch from **AI review**, and mentions must spell `@ankraai`. |
+| The review says **Verdict: unavailable** | The model's answer could not be read. Push a new commit or mention `@ankraai` to re-run it. A recurring one usually means the selected review model's output budget is too small; pick a larger model. |
+| The review says it is incomplete | Same cause, caught mid-answer: the model stopped at its output ceiling. Re-run it, and consider a model with a larger output budget. |
+| Findings repeat on every push | They should not: inline findings are fingerprinted and deduped. The summary comment does restate every finding in full by design, so a reader who only opens the conversation tab still sees the whole review. |
+| GitLab reviews stop after a secret rotation | Regenerating the webhook secret invalidates the old one immediately. Update the hook in GitLab with the new secret. |
+
+---
+
+## Related
+
+- [AI Connections](/platform/ai-connections) - every integration the AI communicates through
+- [Application AI settings](/platform/application-ai) - per-repository lanes, branch scope, ignore paths, and budgets
+- [PR preview environments](/guides/pr-preview-environments) - what the **PR previews** switch deploys
+- [GitHub](/integrations/github), [GitLab](/integrations/gitlab), [Bitbucket Cloud](/integrations/bitbucket-cloud) - connecting each provider
+- [AI Skills](/platform/ai-skills) - the conventions the org skills review checks a change against
+- [`ankra application pull-request-reviews`](/reference/cli/application) - read posted reviews from the CLI

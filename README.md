@@ -20,10 +20,13 @@ pnpm run check              # all of the below
 pnpm run check:nav          # every page reachable from docs.json, no dead nav entries
 pnpm run check:frontmatter  # every page has title + description
 pnpm run check:snippets     # code blocks free of corruption patterns, YAML parses, mermaid arrows valid
+pnpm run check:api-paths    # every /api/v1 and /org path stated by hand exists on the cluster router (needs routes.json, see below)
 pnpm run check:links        # Mintlify broken-link checker
 ```
 
 Prose style is linted with [Vale](https://vale.sh) (`vale .`) using the rules in `.vale.ini` - warnings only for now.
+
+`check:api-paths` reads `routes.json`, the cluster repo's route census (every route the real chi router registers; `ankraio/cluster` `docs/route-census.md`). CI fetches it with the `CLUSTER_ROUTES_GITHUB_TOKEN` repo secret (a fine-grained PAT with read-only contents access to `ankraio/cluster`); locally copy it from a cluster checkout with `cp ../cluster/routes.json .`, otherwise the check prints `SKIPPED` and passes. A documented path or method the router does not serve fails the check unless it is listed in `scripts/api-paths-allowlist.json`, a ratchet that only shrinks (`pnpm run check:api-paths -- --update` regenerates it); an endpoint documented ahead of its release is recorded there and removed when it lands.
 
 ## Repository layout
 
