@@ -253,6 +253,80 @@ ankra cluster addons values <addon_name> [flags]
 
 Commands to view agent status, get tokens, and upgrade agents.
 
+## ankra cluster agent ci
+
+The cluster agent runs Ankra Pipelines steps itself, and these settings
+size that: how many steps it runs at once, and the storage class its step
+workspaces are carved from.
+
+Both are stored on the platform, so every install or upgrade command Ankra
+generates for this cluster carries them - unlike a hand-run
+'helm upgrade --set ci_worker_count=...', which the next agent upgrade
+renders away again.
+
+## ankra cluster agent ci get
+
+Show the stored worker count and storage class, the agent version that has
+to honour them, whether that agent currently advertises it can run pipeline
+steps, and how the last write was applied.
+
+An agent that has not yet re-rendered its release reports pipeline steps as
+not advertised even with a non-zero worker count stored: the capability is
+what the agent reported on its last check-in, not what the settings ask for.
+
+```bash
+ankra cluster agent ci get [flags]
+```
+
+**Examples**
+
+```bash
+ankra cluster agent ci get
+  ankra cluster agent ci get --cluster edge-01 -o json
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+
+## ankra cluster agent ci set
+
+Store how many pipeline steps this cluster's agent runs at once, and
+optionally the storage class its step workspaces are carved from.
+
+--workers 0 disables the agent's pipeline-step scheduler; the cluster keeps
+its agent and everything else it does. --storage-class is only sent when you
+pass it, so setting the worker count alone keeps the storage class already
+stored; pass an empty value to fall back to the cluster's default class.
+
+The write always stores the values. Whether they reach the agent now depends
+on the agent: an online agent new enough to accept chart values re-renders
+its release immediately, an older one picks them up at its next upgrade, and
+an offline one when it reconnects. The command says which of the three
+happened.
+
+```bash
+ankra cluster agent ci set [flags]
+```
+
+**Examples**
+
+```bash
+ankra cluster agent ci set --workers 2
+  ankra cluster agent ci set --workers 4 --storage-class proxmox-csi
+  ankra cluster agent ci set --workers 0 --cluster edge-01
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+| `--storage-class` |   | Storage class for pipeline step workspaces; pass empty to use the cluster default (omit the flag to keep the stored value) |
+| `--workers` | `0` | Number of pipeline steps the agent runs at once (0 disables the scheduler) |
+
 ## ankra cluster agent status
 
 Get agent status for the selected cluster
@@ -349,6 +423,19 @@ ankra cluster clone <existing_cluster_file_or_url> <new_cluster_path> [flags]
 | `--copy-missing` | `false` | Copy missing files even for skipped stacks |
 | `--force` | `false` | Force merge even when names conflict |
 | `--stack` | `[]` | Clone only specific stacks by name (can be used multiple times) |
+
+## ankra cluster cordon
+
+Mark a node unschedulable so no new pods land on it. Pods already running
+stay where they are; 'cluster drain' moves them off. 'cluster uncordon' puts
+the node back into service.
+
+Example:
+  ankra cluster cordon worker-3
+
+```bash
+ankra cluster cordon <node>
+```
 
 ## ankra cluster custom-dns-zones
 
@@ -591,6 +678,48 @@ ankra cluster decrypt manifest <manifest_name> [flags]
 |------|---------|-------------|
 | `--cluster` |   | Target cluster (name or ID); defaults to the active selection (cluster mode) |
 | `-f`, `--file` |   | Path to a local cluster YAML (enables file mode) |
+
+## ankra cluster delete
+
+Delete one or more Kubernetes resources from the active cluster.
+
+The kind takes the kubectl spellings - pod, pods, po, deployment, deploy,
+statefulset, sts, configmap, cm, namespace, node, pvc, ... - and a custom
+resource is reachable with --group and --api-version, exactly like
+'cluster get resources' and 'cluster describe'.
+
+A pod owned by a controller (Deployment, StatefulSet, DaemonSet, Job) is
+recreated by that controller, so deleting it is how you restart a single
+replica; 'cluster restart' rolls a whole workload. The delete goes through
+the cluster's Ankra agent: no kubeconfig is needed and the same organisation
+permissions as the portal apply.
+
+Each object reports its own outcome. The command exits 0 when everything was
+deleted, 3 when one of the objects did not exist, and 1 when the cluster
+refused a delete.
+
+Examples:
+  ankra cluster delete pod my-pod -n default
+  ankra cluster delete pods web-0 web-1 -n prod --yes
+  ankra cluster delete pod stuck-pod -n default --grace-period 0
+  ankra cluster delete deployment web -n prod --dry-run
+  ankra cluster delete namespace scratch
+  ankra cluster delete Certificate web-tls -n prod --group cert-manager.io --api-version v1
+
+```bash
+ankra cluster delete <kind> <name> [name...] [flags]
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--api-version` |   | API version for a kind outside the built-in set (e.g. v1, v1beta1) |
+| `--dry-run` | `false` | Report what would be deleted without deleting anything |
+| `--grace-period` | `-1` | Seconds the object gets to shut down cleanly; 0 deletes it immediately, -1 keeps the object's own grace period |
+| `--group` |   | API group for a kind outside the built-in set (e.g. cert-manager.io) |
+| `-n`, `--namespace` |   | Kubernetes namespace (required for namespaced kinds) |
+| `-y`, `--yes` | `false` | Skip the confirmation prompt |
 
 ## ankra cluster deprovision
 
@@ -1033,7 +1162,7 @@ back under exactly the name it had before, and the external-dns Ankra manages
 for it keeps the same --txt-owner-id.
 
 ```bash
-ankra cluster domain <cluster> [flags]
+ankra cluster domain [cluster] [flags]
 ```
 
 **Flags**
@@ -1068,6 +1197,41 @@ ankra cluster draft [flags]
 | `-f`, `--file` |   | Path to the ImportCluster YAML file to stage as drafts |
 | `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
 
+## ankra cluster drain
+
+Cordon a node, then delete every pod scheduled on it so its controller
+reschedules the pod elsewhere. DaemonSet pods are left alone (they would
+come straight back on the same node) and so are the static pods the kubelet
+runs from disk. A pod without a controller is deleted like any other and is
+not recreated - the plan names every pod before anything happens, and
+--dry-run stops after printing it.
+
+Unlike 'kubectl drain', the pods are deleted rather than evicted: the Ankra
+agent has no eviction relay yet, so PodDisruptionBudgets are not consulted
+and a budget at its limit does not hold the drain back. Check the budgets in
+the namespaces you care about ('cluster get resources PodDisruptionBudget
+--group policy') before draining a node that carries a quorum member.
+
+The node stays cordoned afterwards; run 'cluster uncordon' to put it back
+into service.
+
+Examples:
+  ankra cluster drain worker-3
+  ankra cluster drain worker-3 --grace-period 30 --yes
+  ankra cluster drain worker-3 --dry-run
+
+```bash
+ankra cluster drain <node> [flags]
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--dry-run` | `false` | Print the plan without cordoning or deleting anything |
+| `--grace-period` | `-1` | Seconds each pod gets to shut down cleanly; 0 deletes immediately, -1 keeps each pod's own grace period |
+| `-y`, `--yes` | `false` | Skip the confirmation prompt |
+
 ## ankra cluster encrypt
 
 Encrypt sensitive values in manifest or addon configuration files using SOPS.
@@ -1093,11 +1257,14 @@ platform.
 
 Two modes:
   Cluster mode (default): fetch the addon's values from a live cluster,
-    encrypt the key, and push the result back via the partial-stack PATCH
-    endpoint. The owning stack is resolved automatically.
+    encrypt the key together with every key the addon already declares in
+    encrypted_paths (a declared value can still be stored as plaintext until
+    the next GitOps push seals it), and push the result back via the
+    partial-stack PATCH endpoint. The owning stack is resolved automatically.
 
   File mode (-f cluster.yaml): rewrite the local addon values file referenced
-    by the cluster.yaml in place, adding the key to encrypted_paths.
+    by the cluster.yaml in place, adding the key to encrypted_paths. Keys the
+    file already declares are sealed together with --key.
 
 Examples:
   # Cluster mode against the selected cluster
@@ -1163,7 +1330,10 @@ Two modes:
 
   File mode (-f cluster.yaml): rewrite a local cluster.yaml's referenced
     from_file in place, adding the key to encrypted_paths in the file. Used by
-    GitOps workflows where the source of truth is on disk.
+    GitOps workflows where the source of truth is on disk. Every key the file
+    already declares in encrypted_paths is sealed together with --key, so a
+    document decrypted with "ankra cluster decrypt" (which leaves the
+    declaration in place) is sealed whole again.
 
 In cluster mode, --set applies value edits in-memory BEFORE encrypting, so the
 new secret value and its encryption land in a single commit - the plaintext
@@ -1175,6 +1345,12 @@ secret value:
 
 (compared to "manifests upgrade --set" followed by "encrypt manifest", which
 commits the plaintext value first).
+
+In cluster mode every key the manifest already declares in encrypted_paths is
+sealed together with --key. A value declared in the portal or through the API
+is stored as plaintext until the next GitOps push seals it, and a document
+that carries SOPS metadata with plaintext under a declared path is refused by
+the platform, so sealing only the new key would be rejected.
 
 Examples:
   # Cluster mode against the selected cluster
@@ -1554,7 +1730,50 @@ ankra cluster gitops status [cluster_name] [flags]
 
 ## ankra cluster helm
 
-Commands to list and uninstall Helm releases running in the cluster.
+Commands to list, inspect, roll back, upgrade and uninstall Helm releases running in the cluster.
+
+## ankra cluster helm get
+
+Show one Helm release - the chart and revision it is on, when it was
+deployed, the values it was installed with and the chart's notes.
+
+'-o values' prints only the values the release was installed with, as YAML:
+edit that file and hand it back to 'cluster helm upgrade --values'.
+
+Examples:
+  ankra cluster helm get traefik -n traefik
+  ankra cluster helm get traefik -n traefik -o values &gt; traefik-values.yaml
+
+```bash
+ankra cluster helm get <release_name> [flags]
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-n`, `--namespace` |   | Kubernetes namespace (required) |
+| `-o`, `--output` | `table` | Output format: table, json, yaml, values |
+
+## ankra cluster helm history
+
+List a Helm release's revisions, newest first, with the chart and status of
+each - the revision numbers 'cluster helm rollback --revision' takes.
+
+Example:
+  ankra cluster helm history traefik -n traefik
+
+```bash
+ankra cluster helm history <release_name> [flags]
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--limit` | `25` | Number of revisions to show (1-200) |
+| `-n`, `--namespace` |   | Kubernetes namespace (required) |
+| `-o`, `--output` | `table` | Output format: table, json |
 
 ## ankra cluster helm releases
 
@@ -1572,6 +1791,32 @@ ankra cluster helm releases [flags]
 | `-n`, `--namespace` |   | Kubernetes namespace |
 | `-o`, `--output` | `table` | Output format: table, json |
 
+## ankra cluster helm rollback
+
+Roll a Helm release back to one of its earlier revisions, as listed by
+'cluster helm history'. The rollback runs on the cluster's Ankra agent and,
+by default, waits for the rolled-back resources to become ready before
+returning. A release that an Ankra addon manages is refused: change the
+addon's values in the stack instead, so Git stays the source of truth.
+
+Examples:
+  ankra cluster helm rollback traefik -n traefik --revision 3
+  ankra cluster helm rollback traefik -n traefik --revision 3 --wait=false --yes
+
+```bash
+ankra cluster helm rollback <release_name> [flags]
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-n`, `--namespace` |   | Kubernetes namespace (required) |
+| `--revision` | `0` | Revision to roll back to (required, see 'cluster helm history') |
+| `--timeout` | `600` | Seconds to wait for the rollback (1-3600) |
+| `--wait` | `true` | Wait for the rolled-back resources to become ready |
+| `-y`, `--yes` | `false` | Skip the confirmation prompt |
+
 ## ankra cluster helm uninstall
 
 Uninstall a Helm release from the cluster
@@ -1586,6 +1831,39 @@ ankra cluster helm uninstall <release_name> [flags]
 |------|---------|-------------|
 | `-n`, `--namespace` |   | Kubernetes namespace (required) |
 | `--yes` | `false` | Skip the confirmation prompt |
+
+## ankra cluster helm upgrade
+
+Upgrade a Helm release in place: the agent runs 'helm upgrade' with the
+chart reference and the values file you pass. The values file REPLACES the
+release's values wholesale - start from 'cluster helm get &lt;release&gt; -o values'
+so nothing you did not mean to change resets to a chart default. Without
+--version the release stays on the chart version it already runs.
+
+A release that an Ankra addon manages is refused: change the addon in the
+stack instead, so Git stays the source of truth.
+
+Examples:
+  ankra cluster helm get traefik -n traefik -o values &gt; traefik-values.yaml
+  ankra cluster helm upgrade traefik -n traefik --chart traefik/traefik --values traefik-values.yaml
+  ankra cluster helm upgrade traefik -n traefik --chart traefik --repo https://traefik.github.io/charts --version 30.0.0 --values traefik-values.yaml
+
+```bash
+ankra cluster helm upgrade <release_name> [flags]
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--chart` |   | Chart reference (required): repo/name, an OCI reference, or a name with --repo |
+| `-n`, `--namespace` |   | Kubernetes namespace (required) |
+| `--repo` |   | Chart repository URL when --chart is a bare chart name |
+| `--timeout` | `600` | Seconds to wait for the upgrade (1-3600) |
+| `-f`, `--values` |   | Values file that replaces the release's values (required) |
+| `--version` |   | Chart version to upgrade to (default: the version the release already runs) |
+| `--wait` | `true` | Wait for the upgraded resources to become ready |
+| `-y`, `--yes` | `false` | Skip the confirmation prompt |
 
 ## ankra cluster hetzner
 
@@ -2360,6 +2638,53 @@ ankra cluster managed upgrade <cluster_id> [flags]
 ## ankra cluster manifests
 
 Commands to list, view, upgrade, and delete manifests.
+
+## ankra cluster manifests create
+
+Add a NEW manifest to an existing stack, without touching any other member.
+
+Unlike 'ankra cluster apply', which is declarative over the WHOLE cluster and
+prunes anything the file does not mention, this sends only the new manifest.
+Every other stack, addon and manifest is left exactly as it is.
+
+Examples:
+
+  # Add a Secret to the langfuse stack, ordered after its namespace
+  ankra cluster manifests create langfuse-secrets --stack langfuse \
+    --from-file ./secret.yaml --parent name=langfuse-namespace,kind=manifest \
+    --cluster luminarylane
+
+  # Read the manifest from stdin
+  cat secret.yaml | ankra cluster manifests create langfuse-secrets \
+    --stack langfuse --manifest - --cluster luminarylane
+
+  # See what would be sent without applying it
+  ankra cluster manifests create web --stack app --from-file ./web.yaml --dry-run
+
+--from-file / --manifest - accept SOPS-encrypted content: when the file carries
+a top-level sops: metadata mapping, the keys holding ENC[...] ciphertext are
+detected and recorded as encrypted_paths automatically. Use --encrypted-path to
+declare keys explicitly when auto-detection cannot see them.
+
+To change a manifest that already exists, use 'ankra cluster manifests upgrade'.
+
+```bash
+ankra cluster manifests create <manifest_name> [flags]
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--cluster` |   | Target cluster (name or ID); defaults to the active selection |
+| `--dry-run` | `false` | Print the proposed before/after spec without applying changes |
+| `--encrypted-path` | `[]` | Declare a YAML key name that is (or must stay) SOPS-encrypted; merged with auto-detected ENC[...] keys (repeatable) |
+| `--from-file` |   | Path to the manifest YAML file |
+| `--manifest` |   | Use `-` to read the manifest YAML from stdin |
+| `--namespace` |   | Namespace for the manifest |
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+| `--parent` | `[]` | Dependency parent, e.g. --parent name=langfuse-namespace,kind=manifest (kind defaults to manifest; repeatable) |
+| `--stack` |   | Existing stack the manifest joins (required) |
 
 ## ankra cluster manifests delete
 
@@ -3565,6 +3890,57 @@ ankra cluster ovh workers <cluster_id> [flags]
 |------|---------|-------------|
 | `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
 
+## ankra cluster patch
+
+Patch one or more live Kubernetes resources in the active cluster.
+
+This is 'kubectl patch': the document given with --patch (inline, JSON or
+YAML) or --patch-file is sent to the API server as a patch of the chosen
+--type - 'strategic' (the default, the kubectl default too), 'merge' (RFC
+7386 JSON merge patch) or 'json' (RFC 6902 JSON patch, a list of operations).
+A patch changes only the fields it names and does not go through
+server-side apply, so it is the way to correct a field on an object another
+manager owns - a value the API server defaulted on an older chart, a label a
+release left behind - without taking that object over or deleting it.
+
+The kind takes the kubectl spellings - pod, deployment, deploy, service, svc,
+configmap, cm, node, ... - and a custom resource is reachable with --group
+and --api-version, exactly like 'cluster get resources' and 'cluster delete'.
+The patch goes through the cluster's Ankra agent: no kubeconfig is needed and
+the same organisation permissions as the portal apply.
+
+Each object reports its own outcome. The command exits 0 when everything was
+patched, 3 when one of the objects did not exist, and 1 when the cluster
+refused a patch.
+
+Examples:
+  ankra cluster patch deployment web -n prod --patch '&#123;"spec":&#123;"replicas":3&#125;&#125;'
+  ankra cluster patch service redis-headless -n data --type merge \
+    --patch '&#123;"spec":&#123;"ipFamilyPolicy":"SingleStack","ipFamilies":["IPv4"]&#125;&#125;'
+  ankra cluster patch configmap settings -n prod --patch-file settings-patch.yaml --yes
+  ankra cluster patch deployment web -n prod --type json \
+    --patch '[&#123;"op":"remove","path":"/metadata/annotations/deprecated"&#125;]'
+  ankra cluster patch node worker-1 --patch '&#123;"metadata":&#123;"labels":&#123;"tier":"gpu"&#125;&#125;&#125;' --dry-run
+  ankra cluster patch Certificate web-tls -n prod --group cert-manager.io --api-version v1 \
+    --patch '&#123;"spec":&#123;"renewBefore":"720h"&#125;&#125;'
+
+```bash
+ankra cluster patch <kind> <name> [name...] [flags]
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--api-version` |   | API version for a kind outside the built-in set (e.g. v1, v1beta1) |
+| `--dry-run` | `false` | Report what would change without changing anything |
+| `--group` |   | API group for a kind outside the built-in set (e.g. cert-manager.io) |
+| `-n`, `--namespace` |   | Kubernetes namespace (required for namespaced kinds) |
+| `-p`, `--patch` |   | The patch document, inline, as JSON or YAML |
+| `--patch-file` |   | Read the patch document from a JSON or YAML file instead of --patch |
+| `--type` | `strategic` | Patch type: strategic (default), merge (RFC 7386) or json (RFC 6902) |
+| `-y`, `--yes` | `false` | Skip the confirmation prompt |
+
 ## ankra cluster playground
 
 The playground is a real, writable Kubernetes environment Ankra provisions for you - a virtual cluster on Ankra's own infrastructure, with the agent already installed. Every organisation may hold one; it expires after a period of inactivity.
@@ -3585,13 +3961,20 @@ ankra cluster playground create [flags]
 
 ## ankra cluster playground destroy
 
-Tear the organisation's playground down. Teardown runs in the background: poll `ankra cluster playground status <cluster_id>` until the phase reaches removed.
+Tear the organisation's playground down. Everything deployed in it, including its storage, is deleted and cannot be recovered, so the command asks first; pass --yes to skip the prompt in scripts. Teardown runs in the background: poll `ankra cluster playground status <cluster_id>` until the phase reaches removed.
 
 This is also how a refused `ankra org domain set` is cleared. A playground publishes a wildcard DNS record in the organisation's zone, and that record is reconciled rather than written once - deleting it with `ankra org dns delete` only lasts until the provisioner's next pass. Destroying the environment is what removes it for good.
 
 ```bash
-ankra cluster playground destroy <cluster_id>
+ankra cluster playground destroy <cluster_id|name> [flags]
 ```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+| `--yes` | `false` | Skip the confirmation prompt |
 
 ## ankra cluster playground plans
 
@@ -3606,7 +3989,7 @@ ankra cluster playground plans
 Change a paid playground to another paid size in place: only the namespace quota and the monthly price change (the month is billed pro-rata across the change), nothing you deployed is touched. The free trial cannot be resized - order a paid size instead.
 
 ```bash
-ankra cluster playground resize <cluster_id> [flags]
+ankra cluster playground resize <cluster_id|name> [flags]
 ```
 
 **Flags**
@@ -3620,8 +4003,14 @@ ankra cluster playground resize <cluster_id> [flags]
 Show the provisioning phase of a playground
 
 ```bash
-ankra cluster playground status <cluster_id>
+ankra cluster playground status <cluster_id|name> [flags]
 ```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
 
 ## ankra cluster power-schedules
 
@@ -4091,6 +4480,34 @@ ankra cluster reconcile [cluster_name] [flags]
 | Flag | Default | Description |
 |------|---------|-------------|
 | `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+
+## ankra cluster restart
+
+Rolling-restart one or more workloads in the active cluster.
+
+This is 'kubectl rollout restart': the pod template gets a fresh
+kubectl.kubernetes.io/restartedAt annotation, so the controller replaces
+every pod under its own rollout strategy - no downtime for a Deployment with
+more than one replica, one pod at a time for a StatefulSet. Nothing else in
+the spec changes. The kind is deployment, statefulset or daemonset; the
+kubectl short and plural spellings work too.
+
+Examples:
+  ankra cluster restart deployment web -n prod
+  ankra cluster restart sts postgres -n data --yes
+  ankra cluster restart daemonset node-exporter -n monitoring --dry-run
+
+```bash
+ankra cluster restart <kind> <name> [name...] [flags]
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--dry-run` | `false` | Report what would be restarted without changing anything |
+| `-n`, `--namespace` |   | Kubernetes namespace (required) |
+| `-y`, `--yes` | `false` | Skip the confirmation prompt |
 
 ## ankra cluster roll-to
 
@@ -4850,6 +5267,18 @@ ankra cluster top pods [flags]
 | `-n`, `--namespace` |   | Kubernetes namespace |
 | `-o`, `--output` | `table` | Output format: table, json, yaml |
 | `--sort-by` | `name` | Sort by: name, cpu or memory |
+
+## ankra cluster uncordon
+
+Clear the unschedulable mark 'cluster cordon' or 'cluster drain' set, so the
+scheduler can place pods on the node again.
+
+Example:
+  ankra cluster uncordon worker-3
+
+```bash
+ankra cluster uncordon <node>
+```
 
 ## ankra cluster upcloud
 
