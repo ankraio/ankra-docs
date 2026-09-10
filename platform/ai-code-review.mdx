@@ -75,13 +75,13 @@ Rules are keyed by the repository path, lowercased. For GitLab, use the full pro
 |---|---|---|
 | **AI review** | Reviews every pull or merge request when it is opened and on every push to it, and posts the findings. | Off |
 | **Review drafts** | Also reviews draft pull requests automatically. When off, a draft is skipped until it is marked ready. | Off |
-| **Auto reviews / PR** | Caps how many *automatic* reviews one pull request receives over its whole life. Blank means no cap. | 5 |
+| **Auto reviews / PR** | Caps how many reviews one pull request receives over its whole life, requested ones included. Blank or `0` means no cap. See [The two budgets](#the-two-budgets). | 5 |
 | **Mention replies** | Lets the AI answer when somebody writes `@ankraai` in a pull request comment. | Off |
 | **PR previews** | Deploys every pull request to a throwaway [preview environment](/guides/pr-preview-environments) with its own URL. GitHub only. | Off |
 | **Review model** | Which model the review runs on: an entry from your organisation's [model catalogue](/platform/ai-provider), or any exact OpenRouter model from the searchable list. A repository row set to **Inherit** follows the default row. | Ankra's default review model |
 
 <Tip>
-The cap and the draft switch bound *automatic* reviews only. Asking for a review in a comment always runs one - see [Talking to the review](#talking-to-the-review) below.
+The cap and the draft switch gate *automatic* reviews only. Asking for a review in a comment always runs one, though it still counts toward the cap - see [Talking to the review](#talking-to-the-review) below.
 </Tip>
 
 ---
@@ -229,7 +229,7 @@ Mention `@ankraai` in a pull request or merge request comment and the AI answers
 
 - **Ask a question.** "@ankraai does this handle the empty case?" gets an answer grounded in the diff, and a plain statement when the diff does not contain the answer.
 - **Ask under an inline comment** and the question is read as being about that line.
-- **Ask for a review.** A mention is a direct request from a human, so it is never filtered by draft state, branch scope, or the review budget. It runs even on a draft and even past the **Auto reviews / PR** cap.
+- **Ask for a review.** A mention is a direct request from a human, so it is never filtered by draft state, branch scope, or either review budget. It runs even on a draft and even past the **Auto reviews / PR** cap, and it is counted against both budgets. It does not yet update the commit's check run - see [The two budgets](#the-two-budgets).
 
 Ankra reacts to your comment as soon as it picks the mention up, so you can tell a slow review from one that never started.
 
@@ -241,17 +241,41 @@ Only `@ankraai` summons the review. It is matched as a whole word, so `@ankraai-
 
 ## When a review does not run
 
-A skipped review is normal and costs nothing. These are the reasons:
+A skipped review is normal and costs nothing. Ankra decides before any model call, in the order below, and stops at the first reason that applies. On GitHub the reason is written to the **Ankra AI review** check run on that commit: its title reads **Review skipped** followed by the reason, and its summary says what lifts it. The check run is the one place the decision is recorded.
 
-| Reason | What to change |
-|---|---|
-| **AI review is off** for the repository | Turn the switch on, on the default row or on that repository's rule. |
-| **Draft pull request** | Turn **Review drafts** on, mark the pull request ready, or mention `@ankraai`. |
-| **Target branch out of scope** | The pull-request lane's branch patterns exclude the target branch. Widen them under [Application AI settings](/platform/application-ai). |
-| **Head commit already reviewed** | That exact commit already has a review. Push a new commit. |
-| **Superseded by a newer push** | A later push replaced the head this review was queued for. The newer head is reviewed instead. |
-| **Per-pull-request budget reached** | Raise or clear **Auto reviews / PR**, or mention `@ankraai` to run one anyway. |
-| **Daily budget reached** | The repository's **Max runs per day** is set under [Application AI settings](/platform/application-ai). |
+| Check-run title | Why | What to change |
+|---|---|---|
+| **Review skipped - AI review is switched off for this repository** | **AI review** is off on the default row and on any rule covering the repository. | Turn the switch on, on the default row or on that repository's rule. |
+| **Review skipped - draft pull request** | The pull request is a draft and **Review drafts** is off. | Turn **Review drafts** on, mark the pull request ready, or mention `@ankraai`. |
+| **Review skipped - target branch out of scope** | The pull-request lane's branch patterns exclude the target branch. | Widen **Target branches** under [Application AI settings](/platform/application-ai), or mention `@ankraai`. |
+| **Review skipped - head already reviewed** | A review of exactly this commit is already on the pull request. | Push a new commit. Nothing was lost. |
+| **Review skipped - superseded by a newer push** | A later push replaced this commit before its review started. | Nothing. The newest head gets the review. |
+| **Review skipped - daily review budget reached** | The repository has used its **Max runs per day** since midnight UTC, across every pull request. | Raise or clear **Max runs per day** under [Application AI settings](/platform/application-ai), or mention `@ankraai`. |
+| **Review skipped - per-pull-request review budget reached** | This pull request has used its **Auto reviews / PR** allowance over its lifetime. | Raise or clear **Auto reviews / PR** on the repository rules, or mention `@ankraai`. |
+
+A skipped head is not retried. Nothing on Ankra's side re-queues a commit it declined; the next push is a new head, judged afresh against the same switches and counts. So once a pull request is over its budget, every later push to it is skipped until the budget changes.
+
+### The two budgets
+
+Two counters can decline a review, and they are set in different places.
+
+| | **Auto reviews / PR** | **Max runs per day** |
+|---|---|---|
+| Counts | Reviews of one pull request over its whole life, keyed by the pull request number. A re-cut pull request starts at zero. | Reviews of the whole repository since midnight UTC, across every pull request. A brand-new pull request can be declined on its first push. |
+| Default | 5 | No cap |
+| No cap | Blank or `0` | Blank or `0` |
+| Where | The repository rules on this page, per repository or on the default row. Organisation admins only. | The **Pull request review** card under [Application AI settings](/platform/application-ai). |
+| Applies | From the next push. | From the next push. |
+
+The daily budget is checked first, so a repository over both reads **daily review budget reached** on its check run. Both counters include reviews somebody asked for with `@ankraai`: a requested review runs past either budget, and it is still counted against both.
+
+<Warning>
+**A requested review does not yet clear the check run.** Mentioning `@ankraai review` on a head that was skipped for budget runs the full review and updates the review comment and its `Reviewed commit` footer, but the **Ankra AI review** check run on that commit keeps its **Review skipped** conclusion. A merge gate that requires the check run to pass is therefore not cleared by the mention; lift the budget and push a new head instead. A gate that reads the review comment's footer is cleared.
+</Warning>
+
+<Warning>
+**Saving an application override of the Pull request review lane resets the cap to 5.** Overriding that lane on the [application's AI settings](/platform/application-ai) pins the whole lane, and the override does not carry **Auto reviews / PR**, so a cap you cleared on the repository rules stops applying to that repository. After saving the override, re-clear the cap on the repository's rule.
+</Warning>
 
 ---
 
@@ -286,7 +310,7 @@ Connecting a provider, disconnecting one, changing any switch, and editing the r
 
 | Symptom | What to check |
 |---|---|
-| No review appears on a new pull request | Is **AI review** on for that repository - the default row *and* any rule covering it? A rule wins over the default row. Then check the skip reasons above. |
+| No review appears on a new pull request | Is **AI review** on for that repository - the default row *and* any rule covering it? A rule wins over the default row. Then read the **Ankra AI review** check run on the commit: its title names the [skip reason](#when-a-review-does-not-run). |
 | The connection card says **Nothing enabled** | Every lane is off on the default row and on every rule. Nothing will run for this installation until one is switched on. |
 | A repository is missing from the add-rule picker | The picker lists what the installation can actually see. For GitHub, add the repository to the App installation; for other providers, type the path by hand. |
 | Reviews run but mentions go unanswered | **Mention replies** is a separate switch from **AI review**, and mentions must spell `@ankraai`. |
