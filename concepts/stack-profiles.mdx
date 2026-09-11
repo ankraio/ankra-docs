@@ -279,7 +279,8 @@ See [Stack Profile Suggestions](/guides/stack-profile-suggestions) for both side
 - **Save a new version** from an updated source stack, or by publishing an edited draft.
 - **Diff** any two versions to see what changed: `GET /org/stack-profiles/{profile_id}/diff?from_version=1&to_version=2`.
 - **Diff a draft** before publishing it, against the version it was opened from: `GET /org/stack-profiles/drafts/{draft_id}/diff`. The draft is redacted first, so the comparison shows what publishing would actually store rather than your working copy. A draft that will create a brand-new profile has no base, so everything in it reads as added.
-- **Update tracking**: a profile reports `outdated_instantiation_count` and `has_update_available` so you can find deployments that are behind and re-instantiate them on the newer version.
+- **Update tracking**: a profile reports `outdated_instantiation_count` and `has_update_available` so you can find the deployments that are behind.
+- **Update a deployment in place**: updating a tracked deployment replaces the contents of the stack it already runs with the chosen version - the same stack, so Kubernetes performs a rolling update of the workloads and nothing is deployed twice - and records the deployment at the new version, so the counters above follow. The non-secret inputs it was last applied with are carried forward; secret inputs are asked for again. Do **not** instantiate the profile a second time to update a deployment: that produces a *new* stack beside the running one, renamed around the name collision.
 - **Export IaC** for a version to store the template in Git or move it between organisations.
 
 ---
@@ -296,6 +297,44 @@ the update flow pre-filled with the values used last time.
 A stack that is deleted from its cluster drops off the list, as does a draft that is
 discarded, so the tab always reflects what is actually running. The same rows are served by
 `GET /org/stack-profiles/{profile_id}/instantiations`.
+
+### The stack a profile was captured from is not a deployment of it
+
+<Warning>
+Saving a profile **from** a running stack - or publishing a new version from it - snapshots
+that stack's contents. It does not register the stack as a deployment of the profile. The
+Deployments tab is therefore empty right after a capture, the source stack never reports
+itself as behind when you publish a new version, and it cannot be updated through the
+profile. Only stacks created by instantiating the profile are tracked, and there is no way
+to adopt an existing stack into a profile yet.
+</Warning>
+
+This matters most for the platform layer - a CNI, ingress or storage stack - where deleting
+and recreating the stack to get a tracked deployment is not an option.
+
+To move such a stack onto a profile version without deleting it, export the version and
+apply it to the cluster under the stack's own name:
+
+```bash
+# Export the version you want the cluster to run
+ankra stack-profiles export-iac platform-baseline --version 2 --output platform.yaml
+```
+
+Then edit `platform.yaml` before applying it:
+
+- set `metadata.name` to the **target cluster's** name - the export carries the profile's
+  name there, and applying it unchanged imports a new cluster under that name;
+- set the stack's `name` to the stack already running on that cluster.
+
+```bash
+ankra cluster apply -f platform.yaml
+```
+
+That updates the named stack in place, exactly as editing the stack would. Other stacks on
+the cluster are left alone, but any add-on or manifest of *that* stack the document does not
+list is removed - so compare the version against what the stack runs first if it has drifted
+from the profile. The Deployments tab still will not list the stack afterwards: applying IaC
+does not create the tracking record, so the profile keeps reporting no deployment.
 
 ---
 
