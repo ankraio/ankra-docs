@@ -149,7 +149,7 @@ An explicit `network: "none"` on one of the three is still honoured - a pipeline
 
 | Block | Fields |
 |-------|--------|
-| `build` | `dockerfile`, `context`, `platforms`, `build_args` (names only), `provenance`, `sbom`, `cache_to`. `provenance`/`sbom` ask BuildKit to attest the digest it pushes to the CI staging repository - `publish`'s re-tag does not carry those attestations into the real repository yet (below). |
+| `build` | `dockerfile`, `context`, `platforms`, `build_args` (names only), `provenance`, `sbom`, `cache_to`. **`dockerfile` and `context` are both paths from the repository root**, resolved independently of one another - see below. `provenance`/`sbom` ask BuildKit to attest the digest it pushes to the CI staging repository - `publish`'s re-tag does not carry those attestations into the real repository yet (below). |
 | `scan` | `scanners` (`semgrep`, `checkov`, `trivy`) and `fail_on`, a map from scanner to a severity. `fail_on` is **read by the gate**: each scan stage the `gate` stage requires has its `fail_on` folded into the gate's policy, per scanner and tighten-only - it can raise that scanner's floor above the organisation's [`ci_image_gate`](/guides/ankra-pipelines#organisation-ci-settings) and a `gate` stage's own `with:`, and can never lower either, so a pull request head may add scrutiny to its own pipeline but not remove the organisation's. A value that is not that scanner's own severity vocabulary - Checkov's `none`, a Trivy image-gate word such as `app` - carries no floor rather than the loosest one. `with.semgrep_config` names the space-separated Semgrep registry packs to run (for example `"p/default p/docker p/golang"`); undeclared, Semgrep runs its own `--config=auto`. Each tool leg declares its own reports as artifacts, so they travel the vault like any other: a report that never uploaded, or that downloaded and would not parse, revises the step from `success` to `infra_error` / `report_unreadable` rather than letting an unread scan count as a clean one. Reports travel to the organisation's own ready vault, or to the [Ankra-managed default vault](/guides/ankra-pipelines#before-your-first-run) when it has none, so an organisation that never registered a vault still scans and still gates; with no ready vault on either side the step is refused before it runs, as `artifact_store_unavailable` (below). |
 | `gate` | No block of its own beyond `gate.approval_roles`/`gate.require_stages` (above) - a `kind: gate` stage's `with.image_gate` (`app`, `all` or `off`, case-insensitive, the same vocabulary as [`ci_image_gate`](/guides/ankra-pipelines#organisation-ci-settings)) and `with.severity` (`critical`, `high`, `medium` or `low`) may only make the organisation's policy *stricter*, never looser; `with.ignore_unfixed` (excludes a Trivy finding with no published fix) is floored the same way by the organisation's own [`ci_ignore_unfixed`](/guides/ankra-pipelines#organisation-ci-settings), which is `true` by default: an organisation that sets it `false` has every unfixed finding keep blocking, and a stage's `with:` may then only move toward `false` as well. A gate judges the findings the run *persisted*, and a required scanner that recorded none fails it by name rather than passing as clean - so a gate cannot pass at all in an organisation whose scan reports had nowhere to be stored. |
 | `publish` | `with.image` is accepted and validated but not read: the real target is the organisation's own registry, resolved for the run's application and component exactly as `build`'s push target was - never a value a stage can name. It refuses by name unless a `gate` upstream concluded successfully and recorded the same digest `build` pushed, so the whole scan-to-registry chain rests on findings the run managed to persist. |
@@ -159,6 +159,24 @@ An explicit `network: "none"` on one of the three is still honoured - a pipeline
 | `approval` | `roles` (required), `min_approvals`, `timeout`, `message` |
 | `webhook` | `url` (required), `method`, `wait_for_callback`, `timeout` |
 | `external` | `provider` (required), `workflow`, `inputs` |
+
+#### Where a build's paths are resolved from
+
+`context` and `dockerfile` are **two independent paths from the repository root**. `dockerfile` is *not* relative to `context` - the rule `docker build -f` and GitHub's `docker/build-push-action` hold, and the opposite of Docker Compose's `dockerfile:`. So a component in a monorepo names both in full:
+
+```yaml
+- name: "build-backend"
+  kind: "build"
+  build:
+    context: "backend"
+    dockerfile: "backend/Dockerfile"
+```
+
+Declaring `context: "backend"` with `dockerfile: "Dockerfile"` points the build at the repository *root's* `Dockerfile`. If there is none, the step fails with exit status `78` and the message `The Dockerfile Dockerfile is not in the repository at this commit` - which names the path it looked for, and is the quickest way to see that the path was read from the root.
+
+Omitting `dockerfile` entirely reads `Dockerfile` at the repository root - except in a pipeline Ankra generated for an application, where the field is already filled in with the path the application's analysis resolved. Either path may only address files inside the checkout; one that climbs out of it is refused when the definition is validated.
+
+A build step does not read the checkout the run's other stages share: it runs in its own namespace and fetches the commit itself, which is why its paths are repository paths and not paths into the run's workspace.
 
 ### What every step carries
 
