@@ -33,7 +33,7 @@ Reference material for [AWS clusters](/guides/aws-clusters) - the self-managed k
 | `node_groups` | | Array of node group definitions (see [Node groups](#node-groups)) |
 | `distribution` | `k3s` | Kubernetes distribution (`k3s` or `kubeadm`). kubeadm on AWS is Cilium only |
 | `kubernetes_version` | *latest supported* | Kubernetes version (optional) |
-| `cni` | `flannel` (k3s), `cilium` (kubeadm) | CNI plugin. Follows the distribution when omitted; kubeadm clusters always use `cilium` |
+| `cni` | `cilium` | CNI plugin. kubeadm clusters always use `cilium`; k3s clusters may pick `calico` or `flannel`. Only Cilium and Calico can enforce the [IMDS guard](#imds-guard) - on flannel the create result reports `imds_guard: unavailable` |
 | `cni_features` | *all off* | Advanced CNI feature toggles, fixed at creation - the same set as the other self-managed providers, see [Advanced CNI features](/guides/digitalocean-clusters#advanced-cni-features) |
 | `ubuntu_series` | `24.04` | Ubuntu LTS series for every instance. The AMI is resolved per region at create time from Canonical's public SSM parameters |
 | `architecture` | `amd64` | CPU architecture of the AMI and the instance types offered. Only `amd64` is offered in this release |
@@ -88,13 +88,25 @@ Everything Ankra creates carries three tags, and the credential's write permissi
 | Key pair | `ankra-k3s-<cluster>` | Imported from the SSH key credential |
 | Elastic IP | one per cluster | Attached to the bastion |
 | Bastion instance | in `bastion_subnet_id` | IMDSv2 required, hop limit 1 |
-| Control plane and worker instances | in `node_subnet_ids` | No public IP; encrypted gp3 root volume; IMDSv2 required, hop limit 1; provider ID `aws:///<zone>/<instance-id>`; node name = EC2 private DNS name |
+| Control plane instances | in `node_subnet_ids` | No public IP; encrypted gp3 root volume; IMDSv2 required, hop limit 2 (the EBS CSI controller runs on the pod network, guarded by the [IMDS guard](#imds-guard)); provider ID `aws:///<zone>/<instance-id>`; node name = EC2 private DNS name |
+| Worker instances | in `node_subnet_ids` | No public IP; encrypted gp3 root volume; IMDSv2 required, hop limit 1; provider ID `aws:///<zone>/<instance-id>`; node name = EC2 private DNS name |
+| IMDS guard | in the AWS cloud-provider stack | Cluster-wide network policy denying pod egress to `169.254.169.254` except from the EBS CSI controller, rendered for Cilium and Calico; `imds_guard: unavailable` in the create result on flannel |
 | IAM role + instance profile | `ankra-k3s-<cluster>-cp` | Control plane: cloud controller manager and EBS CSI controller |
 | IAM role + instance profile | `ankra-k3s-<cluster>-node` | Workers: kubelet and EBS CSI node |
 | Route table | `bastion_nat` mode only | `0.0.0.0/0` to the bastion, associated with the node subnets |
 | Load balancers, EBS volumes | created by the cloud controller and CSI driver on demand | Tagged with the cluster ID; kept or swept per `retention_policy` |
 
 **Never created, modified or deleted:** your VPC, subnets, internet gateway, NAT gateways, DHCP options set, and any route table Ankra did not create. In `bastion_nat` mode the node subnets' association is moved to the Ankra route table and moved back at teardown; the route tables themselves are untouched.
+
+### IMDS guard
+
+| Instance | IMDSv2 | Hop limit | Why |
+|----------|--------|-----------|-----|
+| Bastion | required | 1 | Nothing on the bastion needs the instance role beyond the host |
+| Workers | required | 1 | Pods on the pod network cannot reach the node role |
+| Control planes | required | 2 | The upstream EBS CSI chart cannot run its controller on the host network, and the controller needs the control-plane role |
+
+The hop limit of 2 on control planes is compensated by the **IMDS guard**: a cluster-wide network policy in the AWS cloud-provider stack that denies pod egress to `169.254.169.254` for every pod except the EBS CSI controller. It is rendered for Cilium and Calico. Flannel has no policy engine, so on a flannel cluster the guard is not installed, the create result reports `imds_guard: unavailable`, and a pod scheduled onto a control-plane node can reach the control-plane instance role - prefer Cilium (the default) or keep the control planes tainted.
 
 ---
 
@@ -159,6 +171,7 @@ The AMI ID is resolved from these public SSM parameters in the target region at 
 | Nodes per node group | 0 to 100 |
 | Architecture | `amd64` only (`arm64` not yet offered) |
 | Distribution on kubeadm | Cilium CNI only |
+| IMDS guard | Cilium and Calico only; `imds_guard: unavailable` on flannel |
 | `bastion_allowed_ips` | At least one CIDR; `0.0.0.0/0` refused |
 | Node public IPs | Never assigned |
 | Node group user data | Cloud-init document, at most 16 KiB (the EC2 limit) |

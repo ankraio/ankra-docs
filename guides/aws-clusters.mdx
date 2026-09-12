@@ -83,7 +83,7 @@ Every object Ankra creates is tagged `ankra.cloud/cluster-id=<id>`, `ankra.cloud
     Instance types load live for the region with vCPUs, memory, architecture and hourly price. Only `amd64` types are offered in this release.
   </Step>
   <Step title="Distribution, CNI and Image">
-    Keep **k3s** (the default) or pick **kubeadm**, which on AWS is Cilium only. k3s clusters can choose a CNI and its [advanced features](/guides/digitalocean-clusters#advanced-cni-features). The Ubuntu series defaults to 24.04 and the root volume is an encrypted gp3 volume whose size you can raise.
+    Keep **k3s** (the default) or pick **kubeadm**, which on AWS is Cilium only. k3s clusters default to Cilium and can pick another CNI and its [advanced features](/guides/digitalocean-clusters#advanced-cni-features); prefer Cilium or Calico, because only they can run the [IMDS guard](#instance-metadata-imds) that keeps pods away from the control-plane instance role. The Ubuntu series defaults to 24.04 and the root volume is an encrypted gp3 volume whose size you can raise.
   </Step>
   <Step title="GitOps, Networking & DNS">
     Optionally connect a GitHub repository for GitOps-driven deployment. Two checkboxes on this step are on by default:
@@ -477,7 +477,7 @@ flowchart TB
 - **Load balancers.** A `Service` of type `LoadBalancer` gets an AWS load balancer from the cloud controller. The Traefik the networking stack installs asks for a Network Load Balancer (`service.beta.kubernetes.io/aws-load-balancer-type: nlb`), and Ankra sets the managed tag on it so the teardown sweep can find it.
 - **Storage.** The EBS CSI driver is installed from its upstream chart at a pinned version, after the cloud controller (it needs the provider ID and topology labels the controller sets). The default StorageClass provisions **encrypted gp3** volumes.
 - **Credentials without keys.** Neither the cloud controller nor the CSI driver holds AWS keys: each uses the instance profile of the node it runs on. The control-plane and worker profiles are distinct, following the upstream policy split, and the platform credential you gave Ankra is never copied into the cluster.
-- **Instance metadata.** Every instance requires IMDSv2 with a hop limit of 1. The cloud controller and CSI driver run on the host network and can reach the instance role; a pod on the bridge network cannot, so a workload does not inherit the node's AWS permissions by accident. A workload that needs AWS access brings its own credentials.
+- **Instance metadata.** Every instance requires IMDSv2. Workers and the bastion use a hop limit of 1, so a pod on the pod network cannot reach the instance role and a workload does not inherit the node's AWS permissions by accident. Control-plane instances use a hop limit of **2**, because the upstream EBS CSI chart cannot run its controller on the host network and that controller needs the control-plane role. The compensating control is the **IMDS guard** shipped with the AWS cloud-provider stack: a cluster-wide network policy, rendered for Cilium and Calico, that denies pod egress to `169.254.169.254` except from the EBS CSI controller. On a flannel cluster there is no policy engine to enforce it - the create result reports `imds_guard: unavailable`, and a pod scheduled onto a control-plane node can reach the control-plane instance role. Prefer Cilium (the default) or keep the control planes tainted. A workload that needs AWS access brings its own credentials either way.
 
 ---
 
@@ -497,6 +497,7 @@ flowchart TB
 | PVC stuck in `Pending` | Check the EBS CSI controller pods; a pod pinned to a zone with no volume there needs a node group in that zone |
 | Cannot SSH to the bastion | Your address is not in `bastion_allowed_ips`, or the security group was edited outside Ankra. Update the list from **Settings → Access** |
 | Nodes lost egress after a bastion resize | Expected in `bastion_nat` mode while the bastion restarts; it recovers when the bastion is back |
+| Create result reports `imds_guard: unavailable` | The cluster runs flannel, which cannot enforce the IMDS guard. Recreate with Cilium or Calico, or keep the control planes tainted - see [Instance metadata](#instance-metadata-imds) |
 
 ### Cloud controller cluster ID and node names
 
@@ -509,7 +510,9 @@ If a node was renamed or re-registered by hand and no longer matches, delete the
 
 ### Instance metadata (IMDS)
 
-Instances are launched with IMDSv2 required and a hop limit of 1. Tools that use IMDSv1 (`curl http://169.254.169.254/latest/...` without a token) fail on the nodes, and any pod on the pod network fails on either version - that is the intended isolation of the instance role. If a workload needs AWS credentials, give it its own (a secret, or a role it assumes with keys you manage); do not raise the hop limit or switch IMDSv1 back on, and note that `ModifyInstanceMetadataOptions` is one of the calls Ankra's credential is allowed to make on its own instances, so Ankra restores the hardening on reconciliation.
+Every instance is launched with IMDSv2 required, so tools that use IMDSv1 (`curl http://169.254.169.254/latest/...` without a token) fail on the nodes. Workers and the bastion have a hop limit of 1, so a pod on the pod network fails on either version - that is the intended isolation of the instance role. Control-plane instances have a hop limit of 2 so the EBS CSI controller, which the upstream chart cannot run on the host network, can use the control-plane role; the **IMDS guard** - a cluster-wide network policy in the AWS cloud-provider stack, rendered for Cilium and Calico - denies every other pod's egress to `169.254.169.254`.
+
+The guard needs a policy engine. On a flannel cluster the create result reports `imds_guard: unavailable`, and any pod scheduled onto a control-plane node can read the control-plane instance role's credentials. Prefer Cilium (the default) or Calico, or keep the control planes tainted so no workload lands there. If a workload needs AWS credentials, give it its own (a secret, or a role it assumes with keys you manage); do not raise the hop limits or switch IMDSv1 back on, and note that `ModifyInstanceMetadataOptions` is one of the calls Ankra's credential is allowed to make on its own instances, so Ankra restores the hardening on reconciliation.
 
 ### AWS service quotas
 
