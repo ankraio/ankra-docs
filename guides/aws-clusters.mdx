@@ -111,15 +111,26 @@ Once the cluster is online, day-2 operations live where they do for every self-m
 
 <CliVersion since="0.17.0" />
 
-Create the credentials first. The AWS credential is the same one EKS uses; the self-managed scope is a third CloudFormation stack, and the [credential page](/platform/credentials/aws#self-managed-clusters) walks through connecting it in the dashboard (or over the API with `GET /api/v1/credentials/aws/onboarding?scope=self_managed` and `POST /api/v1/credentials/aws/role` - see the [credential API](/reference/aws#credential-api)). The CLI lists what is connected:
+Create the credentials first. The AWS credential is the same one EKS uses; the self-managed scope is a third CloudFormation stack, and the [credential page](/platform/credentials/aws#self-managed-clusters) walks through it in the dashboard. From the terminal, `onboarding` prints the external ID, the trust principal, the quick-create link for the `AnkraSelfManagedProvisioning` stack and the `create-role` command to run once the stack shows `CREATE_COMPLETE`:
 
 ```bash
-# AWS credentials the organisation has connected (keys or role, with the role's scope)
+# 1. Print the external ID and the CloudFormation launch link for the self-managed role
+ankra credentials aws onboarding --scope self_managed
+
+# 2. Launch the stack from that link, wait for CREATE_COMPLETE, copy the RoleArn output, then store it
+ankra credentials aws create-role --name my-aws --role-arn <role-arn> --external-id <external-id> \
+  --region eu-north-1 --scope self_managed
+
+# Access keys instead of a role: the secret is asked for on a masked prompt, never passed as a flag
+ankra credentials aws create-keys --name my-aws-keys --access-key-id <access-key-id> --region eu-north-1
+
 ankra credentials aws list
 
 # SSH key credential
 ankra credentials hetzner ssh-key create --name my-ssh-key --generate   # provider-neutral; any SSH key credential works
 ```
+
+The external ID `create-role` stores must be the one `onboarding` printed and the stack was launched with; a role created at the `cost` scope is refused at cluster create.
 
 Then look up what the credential can reach:
 
@@ -174,6 +185,8 @@ ankra cluster aws create \
   --distribution k3s \
   --retention-policy retain
 ```
+
+`--cni` and `--cni-features` pick the CNI and its feature toggles (`kube_proxy_replacement`, `hubble`, `wireguard_encryption` for Cilium, `ebpf_dataplane` for Calico); `--environment` and `--criticality` classify the cluster as on every provider; `--gitops-repository`, `--gitops-credential-name` and `--gitops-branch` wire GitOps at create. The full flag list is in the [CLI reference](/reference/cli/cluster).
 
 ### Via the API
 
@@ -315,23 +328,51 @@ ankra cluster aws control-plane set-instance-type <cluster_id> t3.large   # clus
 
 Restart any node - a control plane node, a worker, or the bastion - as a tracked operation from the **Nodes** section, the CLI or the API. A restart is an EC2 reboot; if the instance does not respond it falls back to a stop and start, which keeps the private IP.
 
-```bash
+<CodeGroup>
+
+```bash CLI
+ankra cluster aws nodes list <cluster_id>
+ankra cluster aws nodes restart <cluster_id> <node_id>
+ankra cluster aws nodes cloud-init-log <cluster_id> <node_id>   # cloud-init status and the tail of its log, over the bastion
+```
+
+```bash cURL
 curl https://platform.ankra.app/api/v1/clusters/aws/<cluster_id>/nodes \
   -H "Authorization: Bearer $ANKRA_API_TOKEN"
 
 curl -X POST https://platform.ankra.app/api/v1/clusters/aws/<cluster_id>/nodes/<node_id>/restart \
   -H "Authorization: Bearer $ANKRA_API_TOKEN"
 
-# cloud-init status and the tail of its log, fetched over the bastion as a tracked operation
 curl -X POST https://platform.ankra.app/api/v1/clusters/aws/<cluster_id>/nodes/<node_id>/cloud-init-log \
   -H "Authorization: Bearer $ANKRA_API_TOKEN"
 ```
 
-See [Restarting a Node](/guides/hetzner-clusters#restarting-a-node) for the response shape and state requirements - identical across providers. The `ankra cluster aws` group carries no `nodes` verb in this release; use the **Nodes** section, the API, or the AI assistant ("restart worker-2 on my-cluster"). Diagnose and repair (an OS-level check over SSH through the bastion, and a repair of the node's k3s or kubelet unit) run from the node's row menu in the **Nodes** section or through the `ssh_diagnose_node` and `ssh_repair_node` [AI tools](/platform/mcp-tools#provisioning--nodes).
+</CodeGroup>
+
+See [Restarting a Node](/guides/hetzner-clusters#restarting-a-node) for the response shape and state requirements - identical across providers. You can also ask the AI assistant ("restart worker-2 on my-cluster"). Diagnose and repair (an OS-level check over SSH through the bastion, and a repair of the node's k3s or kubelet unit) run from the node's row menu in the **Nodes** section or through the `ssh_diagnose_node` and `ssh_repair_node` [AI tools](/platform/mcp-tools#provisioning--nodes).
 
 ### Bastion health and resize
 
-`GET /api/v1/clusters/aws/{cluster_id}/bastion/health` reports the last verdict of the bastion health loop - reachable or not, which hop a failed probe stopped at, and when - and `POST .../bastion/diagnose` probes it now as a tracked operation; both are shown on the **Nodes → Bastion** tab. Resize the bastion from that tab or with `PUT /api/v1/clusters/aws/{cluster_id}/bastion/instance-type` (`{"instance_type": "t3.medium"}`): the instance is stopped, its type changed and started again, keeping its Elastic IP.
+`bastion status` reports the last verdict of the bastion health loop - reachable or not, which hop a failed probe stopped at, and when - without probing anything, so it answers even while the bastion is down; `bastion diagnose` probes it now as a tracked operation. Both are shown on the **Nodes → Bastion** tab.
+
+<CodeGroup>
+
+```bash CLI
+ankra cluster aws bastion status <cluster_id>
+ankra cluster aws bastion diagnose <cluster_id>
+```
+
+```bash cURL
+curl https://platform.ankra.app/api/v1/clusters/aws/<cluster_id>/bastion/health \
+  -H "Authorization: Bearer $ANKRA_API_TOKEN"
+
+curl -X POST https://platform.ankra.app/api/v1/clusters/aws/<cluster_id>/bastion/diagnose \
+  -H "Authorization: Bearer $ANKRA_API_TOKEN"
+```
+
+</CodeGroup>
+
+Resize the bastion from the **Nodes → Bastion** tab or with the API - there is no CLI verb for it on AWS - `PUT /api/v1/clusters/aws/{cluster_id}/bastion/instance-type` with `{"instance_type": "t3.medium"}`: the instance is stopped, its type changed and started again, keeping its Elastic IP.
 
 <Warning>
 In `bastion_nat` mode the bastion is the nodes' default route, so a resize or restart interrupts every node's outbound traffic - image pulls, the Ankra Agent connection, AWS API calls from the cloud controller - until it is back.
