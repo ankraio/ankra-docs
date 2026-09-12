@@ -1,0 +1,279 @@
+---
+title: AWS Reference
+description: Request fields, defaults, catalogs, limits, egress modes, tags, and API endpoints for self-managed Ankra clusters on AWS EC2.
+tag: "Closed Beta"
+---
+
+Reference material for [AWS clusters](/guides/aws-clusters) - the self-managed k3s or kubeadm lane on EC2. Amazon EKS is covered by the [managed Kubernetes reference](/reference/managed-kubernetes).
+
+<Warning>
+**Closed beta.** Self-managed AWS clusters are in closed beta and enabled per organisation on request; until then the `aws` cluster endpoints answer `404` and the commands are not served. [Contact support](/platform/support) to have it turned on for your organisation.
+</Warning>
+
+---
+
+## Cluster Configuration Options
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `name` | *required* | Unique cluster name. Also the suffix of the IAM role names (`ankra-k3s-<name>-cp`, `-node`), truncated to 64 characters |
+| `credential_id` | *required* | AWS credential ID: a keys credential, or a role onboarded with the `provisioning` scope (the one write role for EKS and self-managed clusters) or the EC2-only `self_managed` scope. A `cost` role is refused, and so is a provisioning role whose stack predates the self-managed statements - see [AWS Credentials](/platform/credentials/aws#provisioning) |
+| `ssh_key_credential_id` | *required* | SSH key credential ID. The public key is imported as the cluster's EC2 key pair |
+| `region` | *required* | AWS region, e.g. `eu-north-1` |
+| `vpc_id` | *required* | The VPC to build in. Never modified |
+| `node_subnet_ids` | *required* | One or more private subnets for control plane and worker instances. Spread across availability zones for a multi-AZ cluster |
+| `bastion_subnet_id` | *required* | A public subnet for the bastion - the only instance with a public IP |
+| `egress_mode` | *resolved by preflight* | `existing` or `bastion_nat` - see [Egress modes](#egress-modes) |
+| `bastion_allowed_ips` | *required* | CIDRs allowed to reach the bastion on SSH. At least one; `0.0.0.0/0` is refused |
+| `description` | | Free-text description |
+| `bastion_instance_type` | `t3.small` | Instance type for the bastion. Size it for bandwidth in `bastion_nat` mode |
+| `control_plane_count` | `1` | Number of control plane nodes, 1 to 9. At least 3 when `node_subnet_ids` span more than one availability zone |
+| `control_plane_type` | `t3.medium` | Instance type for control planes |
+| `worker_count` | `1` | Number of worker nodes in the default pool (legacy, use `node_groups` instead) |
+| `worker_type` | `t3.medium` | Instance type for the default pool (legacy, use `node_groups` instead) |
+| `node_groups` | | Array of node group definitions (see [Node groups](#node-groups)) |
+| `distribution` | `kubeadm` | Kubernetes distribution (`k3s` or `kubeadm`). Omitted from an API request it follows the platform default, `kubeadm`, like every other self-managed provider; the portal wizard and the CLI examples on the guide use `k3s`. kubeadm on AWS is Cilium only |
+| `kubernetes_version` | *latest supported* | Kubernetes version (optional) |
+| `etcd_topology` | `stacked` | kubeadm only. `stacked` (etcd on the control planes) or `external` (dedicated etcd instances) |
+| `etcd_node_count` | `3` | kubeadm `external` topology only (3 or 5) |
+| `etcd_type` | `t3.medium` | kubeadm `external` topology only. Instance type for the etcd instances |
+| `cni` | `cilium` | CNI plugin, for both distributions (`cilium`, `calico`, `flannel`). kubeadm requires `cilium`. Only Cilium and Calico can enforce the [IMDS guard](#imds-guard): `flannel` is accepted with a preflight `warning` saying the guard cannot be enforced |
+| `cni_features` | *all off* | Advanced CNI feature toggles, fixed at creation: `kube_proxy_replacement`, `hubble`, `wireguard_encryption` (Cilium), `ebpf_dataplane` (Calico) - see [Advanced CNI features](/guides/digitalocean-clusters#advanced-cni-features) |
+| `k3s_disabled_components` | | k3s only. Built-in components to leave out |
+| `ubuntu_series` | `24.04` | Ubuntu LTS series for every instance. The AMI is resolved per region at create time from Canonical's public SSM parameters; the [images catalog](#catalog-api) lists the series that resolve |
+| `architecture` | `amd64` | CPU architecture of the AMI and the instance types offered. `arm64` is refused with a `422` naming the pending image-catalogue audit |
+| `root_volume_gib` | `40` | Root volume size in GiB, 20 to 2000. Always an encrypted gp3 volume |
+| `external_cloud_provider` | `true` | Must be `true` when present - the AWS cloud controller manager is mandatory |
+| `retention_policy` | `retain` | What teardown does with the EBS volumes the CSI driver provisioned and the load balancers the cloud controller created: `retain` records and keeps them, `delete` sweeps the ones tagged `ankra.cloud/managed=true` for this cluster |
+| `gitops_repository`, `gitops_credential_name` | | Optional GitOps wiring at create |
+| `gitops_branch` | `master` | Branch the GitOps repository is committed to |
+| `include_networking` | `true` | Deploy Traefik (fronted by a Network Load Balancer), cert-manager and a Let's Encrypt ClusterIssuer |
+| `include_dns` | `true` | Give the cluster a delegated subdomain on `ankra.cc` with external-dns wired |
+| `environment`, `criticality` | | Optional classification, as on every cluster |
+
+`POST /api/v1/clusters/aws` answers `{"cluster_id", "name", "kind": "aws", "state": "creating", "operation_id"}`; track the operation to see provisioning progress.
+
+### Node groups
+
+Each entry of `node_groups`:
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `name` | *required* | Node group name |
+| `instance_type` | *required* | EC2 instance type, e.g. `t3.large`, `m6i.xlarge` |
+| `count` | `1` | Number of nodes (0 to 100) |
+| `availability_zone` | | Pin every node of the group to one zone of the node subnets, e.g. `eu-north-1a`. Omitted, each node takes the zone with the fewest instances cluster-wide. Pin a group that runs zonal storage: an EBS volume cannot attach from another zone |
+| `labels` | `{}` | Kubernetes node labels |
+| `taints` | `[]` | Kubernetes node taints |
+| `autoscaling` | *off* | `{"enabled": true, "min_count": n, "max_count": m}` - see [Cluster autoscaling](/guides/cluster-autoscaling) |
+
+---
+
+## Egress modes
+
+Nodes never receive a public IP, so every node subnet must route `0.0.0.0/0` somewhere. Ankra never mixes the two modes on one cluster.
+
+| Mode | Node default route | What Ankra changes in your VPC | Cost | Refused when |
+|------|-------------------|-------------------------------|------|--------------|
+| `existing` | Your NAT gateway, NAT instance or transit path, already on the subnets' route table | Nothing | Your existing path (a NAT gateway bills per hour and per GB) | A node subnet has no `0.0.0.0/0` (or `::/0`) route to such a target |
+| `bastion_nat` | The bastion's network interface (source/destination check off) | One tagged route table with `0.0.0.0/0` to the bastion, associated with the node subnets; the previous association of each subnet is recorded and restored at teardown | The bastion instance and its Elastic IP only | Any node subnet holds an instance Ankra did not create |
+
+Omitted, preflight resolves it: subnets with egress select `existing`; empty subnets without it select `bastion_nat`; subnets without egress that hold foreign instances are refused with a message naming them. An Ankra-created NAT gateway is not offered in this release.
+
+---
+
+## What Ankra creates
+
+Everything Ankra creates carries three tags, and the credential's write permissions are conditioned on them:
+
+| Tag | Value |
+|-----|-------|
+| `ankra.cloud/cluster-id` | The Ankra cluster ID |
+| `ankra.cloud/managed` | `true` |
+| `kubernetes.io/cluster/<cluster-id>` | `owned` - the tag the AWS cloud controller manager and EBS CSI driver key on |
+
+| Created | Name or scope | Notes |
+|---------|---------------|-------|
+| Security group (nodes) | in `vpc_id` | All traffic within the group; SSH and Kubernetes API from the bastion group; load balancer health-check rules added by the cloud controller |
+| Security group (bastion) | in `vpc_id` | SSH from `bastion_allowed_ips` only |
+| Key pair | `ankra-k3s-<cluster>` | Imported from the SSH key credential |
+| Elastic IP | one per cluster | Attached to the bastion |
+| Bastion instance | in `bastion_subnet_id` | IMDSv2 required, hop limit 1 |
+| Control plane instances | in `node_subnet_ids` | No public IP; encrypted gp3 root volume; IMDSv2 required, hop limit 2 (the EBS CSI controller runs on the pod network, guarded by the [IMDS guard](#imds-guard)); provider ID `aws:///<zone>/<instance-id>`; node name = EC2 private DNS name |
+| Worker instances | in `node_subnet_ids` | No public IP; encrypted gp3 root volume; IMDSv2 required, hop limit 1; provider ID `aws:///<zone>/<instance-id>`; node name = EC2 private DNS name |
+| IMDS guard | in the AWS cloud-provider stack | Cluster-wide network policy denying pod egress to `169.254.169.254` except from the EBS CSI controller, rendered for Cilium and Calico; `imds_guard: unavailable` in the create result on flannel |
+| IAM role + instance profile | `ankra-k3s-<cluster>-cp` | Control plane: cloud controller manager and EBS CSI controller |
+| IAM role + instance profile | `ankra-k3s-<cluster>-node` | Workers: kubelet and EBS CSI node |
+| Route table | `bastion_nat` mode only | `0.0.0.0/0` to the bastion, associated with the node subnets |
+| Load balancers, EBS volumes | created by the cloud controller and CSI driver on demand | Tagged with the cluster ID; kept or swept per `retention_policy` |
+
+**Never created, modified or deleted:** your VPC, subnets, internet gateway, NAT gateways, DHCP options set, and any route table Ankra did not create. In `bastion_nat` mode the node subnets' association is moved to the Ankra route table and moved back at teardown; the route tables themselves are untouched.
+
+### IMDS guard
+
+| Instance | IMDSv2 | Hop limit | Why |
+|----------|--------|-----------|-----|
+| Bastion | required | 1 | Nothing on the bastion needs the instance role beyond the host |
+| Workers | required | 1 | Pods on the pod network cannot reach the node role |
+| Control planes | required | 2 | The upstream EBS CSI chart cannot run its controller on the host network, and the controller needs the control-plane role |
+
+The hop limit of 2 on control planes is compensated by the **IMDS guard**: a cluster-wide network policy in the AWS cloud-provider stack that denies pod egress to `169.254.169.254` for every pod except the EBS CSI controller. It is rendered for Cilium and Calico. Flannel has no policy engine, so on a flannel cluster the guard is not installed, the create result reports `imds_guard: unavailable`, and a pod scheduled onto a control-plane node can reach the control-plane instance role - prefer Cilium (the default) or keep the control planes tainted.
+
+---
+
+## Catalogs
+
+Every catalog loads live from your credential - `ankra cluster aws regions`, `vpcs`, `subnets`, `availability-zones`, `instance-types`, `images` and `pricing`, or the endpoints in the [catalog API](#catalog-api). The tables below are orientation, not the offer.
+
+### Regions
+
+| Region | Location |
+|--------|----------|
+| `eu-north-1` | Stockholm |
+| `eu-west-1` | Ireland |
+| `eu-west-2` | London |
+| `eu-central-1` | Frankfurt |
+| `us-east-1` | N. Virginia |
+| `us-east-2` | Ohio |
+| `us-west-2` | Oregon |
+| `ca-central-1` | Canada (Central) |
+| `ap-southeast-1` | Singapore |
+| `ap-southeast-2` | Sydney |
+| `ap-northeast-1` | Tokyo |
+| `ap-south-1` | Mumbai |
+| `sa-east-1` | São Paulo |
+
+Any region your credential can `DescribeRegions` is offered; opt-in regions appear once enabled in your account.
+
+### Instance types
+
+Only `amd64` types are offered. Prices are per region and per hour; `ankra cluster aws pricing` and the wizard show the live figure.
+
+| Type | vCPUs | Memory | Typical use |
+|------|-------|--------|-------------|
+| `t3.small` | 2 | 2 GiB | Bastion |
+| `t3.medium` | 2 | 4 GiB | Control plane on a small cluster |
+| `t3.large` | 2 | 8 GiB | General workers |
+| `m6i.large` | 2 | 8 GiB | Control plane, general workers (non-burstable) |
+| `m6i.xlarge` | 4 | 16 GiB | Larger workloads |
+| `c6i.xlarge` | 4 | 8 GiB | Compute-heavy workers |
+| `r6i.large` | 2 | 16 GiB | Memory-heavy workers, databases |
+
+<Note>
+Burstable `t3` types spend CPU credits under sustained load; use `m6i`/`c6i`/`r6i` for a control plane or workers that run flat out. `ankra cluster aws instance-types` lists what the region offers, with vCPUs, memory, architecture and network performance.
+</Note>
+
+### Images
+
+| `ubuntu_series` | AMI source |
+|-----------------|------------|
+| `24.04` (default) | `/aws/service/canonical/ubuntu/server/24.04/stable/current/amd64/hvm/ebs-gp3/ami-id` |
+| `22.04` | `/aws/service/canonical/ubuntu/server/22.04/stable/current/amd64/hvm/ebs-gp3/ami-id` - only listed when its AMI resolves in the region |
+
+The AMI ID is resolved from these public SSM parameters in the target region at create time, so every cluster boots the current stable image of its series. The images catalog (`ankra cluster aws images`, `GET /api/v1/clusters/aws/images`) answers `ubuntu_series`, `architectures` and `default_series`, and lists only the series whose AMI resolves in that region.
+
+---
+
+## Limits
+
+| Limit | Value |
+|-------|-------|
+| Control plane count | 1 to 9; at least 3 on more than one availability zone, and a multi-AZ cluster cannot scale below 3 |
+| Nodes per node group | 0 to 100 |
+| Architecture | `amd64` only (`arm64` refused with `422` until the image-catalogue audit) |
+| Root volume | 20 to 2000 GiB, encrypted gp3 |
+| Distribution on kubeadm | Cilium CNI only |
+| IMDS guard | Cilium and Calico only; `imds_guard: unavailable` on flannel |
+| `bastion_allowed_ips` | At least one CIDR; `0.0.0.0/0` refused |
+| Node public IPs | Never assigned |
+| Node group user data | Cloud-init document, at most 16 KiB (the EC2 limit) |
+| IAM role and instance profile names | Truncated to 64 characters |
+| Standalone VMs | Not available on AWS in this release |
+| VPC creation | Not available - the VPC and subnets are yours |
+| NAT gateway creation | Not available - create one and use `egress_mode: existing` |
+
+---
+
+## Catalog API
+
+Every catalog takes `credential_id` and `region` as query parameters (`subnets` also takes `vpc_id`), and every answer is three-state: a value Ankra could not read says so rather than reading as empty or zero.
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/v1/clusters/aws/regions` | GET | Regions the credential can reach |
+| `/api/v1/clusters/aws/instance-types` | GET | Instance types in a region: `name`, `vcpus`, `memory_gib`, `architecture`, `category` (`general`, `compute`, `memory`, `storage`, `accelerated`, `hpc`, `other`), `current_generation`, `hourly_price_usd` and `monthly_price_usd` (null when unpriced) |
+| `/api/v1/clusters/aws/vpcs` | GET | VPCs in a region: `id`, `name`, `cidr`, `is_default`, `dhcp_domain_name`, and `dhcp_domain_name_state` - `set`, `empty` or `unknown` (the DHCP options could not be read) |
+| `/api/v1/clusters/aws/subnets` | GET | Subnets of a VPC: `availability_zone`, `map_public_ip_on_launch`, `egress.kind` - `nat_gateway`, `nat_instance`, `internet_gateway`, `transit`, `none` or `unknown` - and `foreign_instance_count`, the instances Ankra did not create (`null` when it could not be counted) |
+| `/api/v1/clusters/aws/availability-zones` | GET | Availability zones of a region |
+| `/api/v1/clusters/aws/images` | GET | `ubuntu_series` whose AMI resolves in the region, `architectures`, and `default_series` |
+| `/api/v1/clusters/aws/pricing` | GET | On-demand `instance_types` prices plus `storage.gp3_gib_month_usd`, with `pricing_complete` and `incomplete_reasons` - a price Ankra could not read is reported as missing, never as `0` |
+| `/api/v1/clusters/aws/{cluster_id}/instance-types` | GET | The instance-type catalog in an existing cluster's own region and credential |
+
+## Cluster API
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/v1/clusters/aws/preflight` | POST | Run every check the create runs, without creating anything. Answers `items` (each `check`, `status` `ok`, `warning` or `error`, `message`), `can_proceed`, and `resolved_egress_mode` (null when it could not be decided). A `warning` is a read Ankra could not perform or a caveat such as flannel not enforcing the IMDS guard |
+| `/api/v1/clusters/aws` | POST | Create a cluster. Answers `cluster_id`, `name`, `kind: "aws"`, `state: "creating"`, `operation_id` |
+| `/api/v1/clusters/aws/{cluster_id}` | DELETE | Deprovision a cluster (volumes and load balancers follow `retention_policy`) |
+| `/api/v1/clusters/aws/{cluster_id}/stop` | POST | Stop every instance; private IPs and root volumes are kept |
+| `/api/v1/clusters/aws/{cluster_id}/start` | POST | Start a stopped cluster (`?scope=all` or `control_plane`) |
+| `/api/v1/clusters/aws/{cluster_id}/access-info` | GET | `bastion_host`, `bastion_port` (22), `bastion_user` and `target_user` (both `ubuntu`), `control_plane_ips` |
+| `/api/v1/clusters/aws/{cluster_id}/quotas` | GET | Answers `404` ("Quota reporting is not available for aws clusters") until the vCPU / Elastic IP report ships |
+| `/api/v1/clusters/aws/{cluster_id}/k8s-version` | GET | Current Kubernetes version and distribution |
+| `/api/v1/clusters/aws/{cluster_id}/upgrade-k8s-version` | POST | Upgrade Kubernetes (`{"target_version": "..."}`) |
+| `/api/v1/clusters/aws/{cluster_id}/worker-count` | GET | Legacy default-pool worker count |
+| `/api/v1/clusters/aws/{cluster_id}/scale-workers` | POST | Legacy default-pool scale (`{"worker_count": n}`) |
+| `/api/v1/clusters/aws/{cluster_id}/ssh-keys` | GET | SSH key credentials attached to the cluster |
+| `/api/v1/clusters/aws/{cluster_id}/ssh-keys` | PUT | Replace the attached SSH key credentials |
+| `/api/v1/clusters/aws/{cluster_id}/ssh-keys/resync` | POST | Rewrite `authorized_keys` on every node now |
+
+## Node Group API Reference
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/v1/clusters/aws/{cluster_id}/node-groups` | GET | List all node groups, with the zones each group's nodes were placed in |
+| `/api/v1/clusters/aws/{cluster_id}/node-groups` | POST | Add a node group |
+| `/api/v1/clusters/aws/{cluster_id}/node-groups/{name}/scale` | PUT | Scale a node group (0 to 100) |
+| `/api/v1/clusters/aws/{cluster_id}/node-groups/{name}/instance-type` | PUT | Change instance type (replaces every node of the group) |
+| `/api/v1/clusters/aws/{cluster_id}/node-groups/{name}/labels` | PUT | Update labels |
+| `/api/v1/clusters/aws/{cluster_id}/node-groups/{name}/taints` | PUT | Update taints |
+| `/api/v1/clusters/aws/{cluster_id}/node-groups/{name}/autoscaling` | GET | Read autoscaling bounds |
+| `/api/v1/clusters/aws/{cluster_id}/node-groups/{name}/autoscaling` | PUT | Set autoscaling bounds |
+| `/api/v1/clusters/aws/{cluster_id}/node-groups/{name}` | DELETE | Delete a node group and its nodes |
+
+## Control Plane API
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/v1/clusters/aws/{cluster_id}/control-plane` | GET | Control plane count and instance type |
+| `/api/v1/clusters/aws/{cluster_id}/control-plane` | PUT | Change the count (1 or 3; a multi-AZ cluster stays at 3) |
+| `/api/v1/clusters/aws/{cluster_id}/control-plane/instance-type` | PUT | Change the control plane instance type (cluster must be stopped) |
+
+## Node Actions API
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/v1/clusters/aws/{cluster_id}/nodes` | GET | List all nodes (control plane, workers, bastion), including soft-deleted entries of a stopped cluster |
+| `/api/v1/clusters/aws/{cluster_id}/nodes/{node_id}` | GET | Get a single node's details |
+| `/api/v1/clusters/aws/{cluster_id}/nodes/{node_id}/restart` | POST | Restart a node (EC2 reboot, falls back to stop and start) |
+| `/api/v1/clusters/aws/{cluster_id}/nodes/{node_id}/cloud-init-log` | POST | Fetch `cloud-init status --long` and the tail of the cloud-init output log over the bastion |
+| `/api/v1/clusters/aws/{cluster_id}/bastion/health` | GET | The last verdict of the bastion health loop |
+| `/api/v1/clusters/aws/{cluster_id}/bastion/diagnose` | POST | Probe the bastion now, as a tracked operation |
+| `/api/v1/clusters/aws/{cluster_id}/bastion/instance-type` | PUT | Resize the bastion (stop, change type, start; the Elastic IP is kept) |
+
+See [Restarting, Diagnosing and Repairing a Node](/guides/aws-clusters#restarting-diagnosing-and-repairing-a-node) and [Bastion health and resize](/guides/aws-clusters#bastion-health-and-resize) for usage examples.
+
+## Credential API
+
+The bearer-token twins of the AWS credential onboarding, for scripts and the CLI. Connecting a credential from the dashboard is documented on [AWS Credentials](/platform/credentials/aws).
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/v1/credentials/aws/onboarding` | GET | `?scope=cost` (default), `provisioning` or `self_managed`: the external ID, the CloudFormation `launch_stack_url`, `template_url` and `trust_principal_arn` for that scope's role. Unknown scopes answer `400` |
+| `/api/v1/credentials/aws/role` | POST | Register an STS role credential (`name`, `role_arn`, `external_id`, `region`, `scope`). The role is assumed first; a `self_managed` scope is also proven against EC2 (a dry-run `DescribeVpcs`) and the Canonical AMI SSM parameters. Unknown scope `400`, name clash `409`, failed connection test `400` |
+| `/api/v1/credentials/aws/keys` | POST | Register an access-keys credential (`name`, `access_key_id`, `secret_access_key`, `region`) |
+
+Creating a cluster needs a keys credential, or a role credential whose scope is `provisioning` (the `AnkraProvisioning` role, which covers EKS and self-managed clusters) or `self_managed` (the EC2-only `AnkraSelfManagedProvisioning` role); a `cost`-scoped role is refused.
+
+The CLI wraps the three: `ankra credentials aws onboarding [--scope cost|provisioning|self_managed]` prints the external ID, trust principal, launch-stack URL and the follow-up command; `ankra credentials aws create-role --name <name> --role-arn <arn> --external-id <id> [--region <region>] [--scope <scope>]` stores the role; `ankra credentials aws create-keys --name <name> --access-key-id <id> [--region <region>]` stores access keys, asking for the secret on a masked prompt (never a flag); `ankra credentials aws list` shows what is connected.
