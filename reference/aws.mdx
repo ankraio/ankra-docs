@@ -25,22 +25,33 @@ Reference material for [AWS clusters](/guides/aws-clusters) - the self-managed k
 | `bastion_subnet_id` | *required* | A public subnet for the bastion - the only instance with a public IP |
 | `egress_mode` | *resolved by preflight* | `existing` or `bastion_nat` - see [Egress modes](#egress-modes) |
 | `bastion_allowed_ips` | *required* | CIDRs allowed to reach the bastion on SSH. At least one; `0.0.0.0/0` is refused |
+| `description` | | Free-text description |
 | `bastion_instance_type` | `t3.small` | Instance type for the bastion. Size it for bandwidth in `bastion_nat` mode |
-| `control_plane_count` | `1` | Number of control plane nodes - odd, 1 or 3; 3 is required when `node_subnet_ids` span more than one availability zone |
-| `control_plane_instance_type` | `t3.medium` | Instance type for control planes |
-| `worker_count` | `1` | Number of worker nodes (legacy, use `node_groups` instead) |
-| `worker_instance_type` | `t3.large` | Instance type for workers (legacy, use `node_groups` instead) |
+| `control_plane_count` | `1` | Number of control plane nodes, 1 to 9. At least 3 when `node_subnet_ids` span more than one availability zone |
+| `control_plane_type` | `t3.medium` | Instance type for control planes |
+| `worker_count` | `1` | Number of worker nodes in the default pool (legacy, use `node_groups` instead) |
+| `worker_type` | `t3.medium` | Instance type for the default pool (legacy, use `node_groups` instead) |
 | `node_groups` | | Array of node group definitions (see [Node groups](#node-groups)) |
-| `distribution` | `k3s` | Kubernetes distribution (`k3s` or `kubeadm`). kubeadm on AWS is Cilium only |
+| `distribution` | `kubeadm` | Kubernetes distribution (`k3s` or `kubeadm`). Omitted from an API request it follows the platform default, `kubeadm`, like every other self-managed provider; the portal wizard and the CLI examples on the guide use `k3s`. kubeadm on AWS is Cilium only |
 | `kubernetes_version` | *latest supported* | Kubernetes version (optional) |
-| `cni` | `cilium` | CNI plugin. kubeadm clusters always use `cilium`; k3s clusters may pick `calico` or `flannel`. Only Cilium and Calico can enforce the [IMDS guard](#imds-guard) - on flannel the create result reports `imds_guard: unavailable` |
-| `cni_features` | *all off* | Advanced CNI feature toggles, fixed at creation - the same set as the other self-managed providers, see [Advanced CNI features](/guides/digitalocean-clusters#advanced-cni-features) |
-| `ubuntu_series` | `24.04` | Ubuntu LTS series for every instance. The AMI is resolved per region at create time from Canonical's public SSM parameters |
-| `architecture` | `amd64` | CPU architecture of the AMI and the instance types offered. Only `amd64` is offered in this release |
-| `root_volume_gib` | `50` | Root volume size in GiB. Always an encrypted gp3 volume |
-| `retention_policy` | `retain` | What teardown does with the EBS volumes the CSI driver provisioned and the load balancers the cloud controller created: `retain` keeps them, `delete` sweeps the ones tagged with the cluster ID |
+| `etcd_topology` | `stacked` | kubeadm only. `stacked` (etcd on the control planes) or `external` (dedicated etcd instances) |
+| `etcd_node_count` | `3` | kubeadm `external` topology only (3 or 5) |
+| `etcd_type` | `t3.medium` | kubeadm `external` topology only. Instance type for the etcd instances |
+| `cni` | `cilium` | CNI plugin, for both distributions (`cilium`, `calico`, `flannel`). kubeadm requires `cilium`. Only Cilium and Calico can enforce the [IMDS guard](#imds-guard): `flannel` is accepted with a preflight `warning` saying the guard cannot be enforced |
+| `cni_features` | *all off* | Advanced CNI feature toggles, fixed at creation: `kube_proxy_replacement`, `hubble`, `wireguard_encryption` (Cilium), `ebpf_dataplane` (Calico) - see [Advanced CNI features](/guides/digitalocean-clusters#advanced-cni-features) |
+| `k3s_disabled_components` | | k3s only. Built-in components to leave out |
+| `ubuntu_series` | `24.04` | Ubuntu LTS series for every instance. The AMI is resolved per region at create time from Canonical's public SSM parameters; the [images catalog](#catalog-api) lists the series that resolve |
+| `architecture` | `amd64` | CPU architecture of the AMI and the instance types offered. `arm64` is refused with a `422` naming the pending image-catalogue audit |
+| `root_volume_gib` | `40` | Root volume size in GiB, 20 to 2000. Always an encrypted gp3 volume |
+| `external_cloud_provider` | `true` | Must be `true` when present - the AWS cloud controller manager is mandatory |
+| `retention_policy` | `retain` | What teardown does with the EBS volumes the CSI driver provisioned and the load balancers the cloud controller created: `retain` records and keeps them, `delete` sweeps the ones tagged `ankra.cloud/managed=true` for this cluster |
+| `gitops_repository`, `gitops_credential_name` | | Optional GitOps wiring at create |
+| `gitops_branch` | `master` | Branch the GitOps repository is committed to |
 | `include_networking` | `true` | Deploy Traefik (fronted by a Network Load Balancer), cert-manager and a Let's Encrypt ClusterIssuer |
 | `include_dns` | `true` | Give the cluster a delegated subdomain on `ankra.cc` with external-dns wired |
+| `environment`, `criticality` | | Optional classification, as on every cluster |
+
+`POST /api/v1/clusters/aws` answers `{"cluster_id", "name", "kind": "aws", "state": "creating", "operation_id"}`; track the operation to see provisioning progress.
 
 ### Node groups
 
@@ -157,9 +168,9 @@ Burstable `t3` types spend CPU credits under sustained load; use `m6i`/`c6i`/`r6
 | `ubuntu_series` | AMI source |
 |-----------------|------------|
 | `24.04` (default) | `/aws/service/canonical/ubuntu/server/24.04/stable/current/amd64/hvm/ebs-gp3/ami-id` |
-| `22.04` | `/aws/service/canonical/ubuntu/server/22.04/stable/current/amd64/hvm/ebs-gp3/ami-id` |
+| `22.04` | `/aws/service/canonical/ubuntu/server/22.04/stable/current/amd64/hvm/ebs-gp3/ami-id` - only listed when its AMI resolves in the region |
 
-The AMI ID is resolved from these public SSM parameters in the target region at create time, so every cluster boots the current stable image of its series. `ankra cluster aws images` shows the series available and the ID each resolves to.
+The AMI ID is resolved from these public SSM parameters in the target region at create time, so every cluster boots the current stable image of its series. The images catalog (`ankra cluster aws images`, `GET /api/v1/clusters/aws/images`) answers `ubuntu_series`, `architectures` and `default_series`, and lists only the series whose AMI resolves in that region.
 
 ---
 
@@ -167,9 +178,10 @@ The AMI ID is resolved from these public SSM parameters in the target region at 
 
 | Limit | Value |
 |-------|-------|
-| Control plane count | Odd - 1 or 3; 3 required on more than one availability zone, and a multi-AZ cluster cannot scale below 3 |
+| Control plane count | 1 to 9; at least 3 on more than one availability zone, and a multi-AZ cluster cannot scale below 3 |
 | Nodes per node group | 0 to 100 |
-| Architecture | `amd64` only (`arm64` not yet offered) |
+| Architecture | `amd64` only (`arm64` refused with `422` until the image-catalogue audit) |
+| Root volume | 20 to 2000 GiB, encrypted gp3 |
 | Distribution on kubeadm | Cilium CNI only |
 | IMDS guard | Cilium and Calico only; `imds_guard: unavailable` on flannel |
 | `bastion_allowed_ips` | At least one CIDR; `0.0.0.0/0` refused |
@@ -184,27 +196,30 @@ The AMI ID is resolved from these public SSM parameters in the target region at 
 
 ## Catalog API
 
+Every catalog takes `credential_id` and `region` as query parameters (`subnets` also takes `vpc_id`), and every answer is three-state: a value Ankra could not read says so rather than reading as empty or zero.
+
 | Endpoint | Method | Description |
 |----------|--------|-------------|
 | `/api/v1/clusters/aws/regions` | GET | Regions the credential can reach |
-| `/api/v1/clusters/aws/instance-types` | GET | Instance types in a region (`credential_id`, `region`), with vCPUs, memory, architecture and price |
-| `/api/v1/clusters/aws/vpcs` | GET | VPCs in a region |
-| `/api/v1/clusters/aws/subnets` | GET | Subnets of a VPC with availability zone, public/private and egress status |
+| `/api/v1/clusters/aws/instance-types` | GET | Instance types in a region: `name`, `vcpus`, `memory_gib`, `architecture`, `category` (`general`, `compute`, `memory`, `storage`, `accelerated`, `hpc`, `other`), `current_generation`, `hourly_price_usd` and `monthly_price_usd` (null when unpriced) |
+| `/api/v1/clusters/aws/vpcs` | GET | VPCs in a region: `id`, `name`, `cidr`, `is_default`, `dhcp_domain_name`, and `dhcp_domain_name_state` - `set`, `empty` or `unknown` (the DHCP options could not be read) |
+| `/api/v1/clusters/aws/subnets` | GET | Subnets of a VPC: `availability_zone`, `map_public_ip_on_launch`, `egress.kind` - `nat_gateway`, `nat_instance`, `internet_gateway`, `transit`, `none` or `unknown` - and `foreign_instance_count`, the instances Ankra did not create (`null` when it could not be counted) |
 | `/api/v1/clusters/aws/availability-zones` | GET | Availability zones of a region |
-| `/api/v1/clusters/aws/images` | GET | Ubuntu series and the AMI each resolves to in a region |
-| `/api/v1/clusters/aws/pricing` | GET | Hourly price of an instance type in a region |
+| `/api/v1/clusters/aws/images` | GET | `ubuntu_series` whose AMI resolves in the region, `architectures`, and `default_series` |
+| `/api/v1/clusters/aws/pricing` | GET | On-demand `instance_types` prices plus `storage.gp3_gib_month_usd`, with `pricing_complete` and `incomplete_reasons` - a price Ankra could not read is reported as missing, never as `0` |
+| `/api/v1/clusters/aws/{cluster_id}/instance-types` | GET | The instance-type catalog in an existing cluster's own region and credential |
 
 ## Cluster API
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
-| `/api/v1/clusters/aws/preflight` | POST | Validate a create request without creating anything - egress resolution, zones, AMI, quotas, `bastion_allowed_ips` |
-| `/api/v1/clusters/aws` | POST | Create a cluster |
+| `/api/v1/clusters/aws/preflight` | POST | Run every check the create runs, without creating anything. Answers `items` (each `check`, `status` `ok`, `warning` or `error`, `message`), `can_proceed`, and `resolved_egress_mode` (null when it could not be decided). A `warning` is a read Ankra could not perform or a caveat such as flannel not enforcing the IMDS guard |
+| `/api/v1/clusters/aws` | POST | Create a cluster. Answers `cluster_id`, `name`, `kind: "aws"`, `state: "creating"`, `operation_id` |
 | `/api/v1/clusters/aws/{cluster_id}` | DELETE | Deprovision a cluster (volumes and load balancers follow `retention_policy`) |
 | `/api/v1/clusters/aws/{cluster_id}/stop` | POST | Stop every instance; private IPs and root volumes are kept |
 | `/api/v1/clusters/aws/{cluster_id}/start` | POST | Start a stopped cluster (`?scope=all` or `control_plane`) |
-| `/api/v1/clusters/aws/{cluster_id}/access-info` | GET | Bastion address and SSH commands |
-| `/api/v1/clusters/aws/{cluster_id}/quotas` | GET | The account quotas the cluster consumes |
+| `/api/v1/clusters/aws/{cluster_id}/access-info` | GET | `bastion_host`, `bastion_port` (22), `bastion_user` and `target_user` (both `ubuntu`), `control_plane_ips` |
+| `/api/v1/clusters/aws/{cluster_id}/quotas` | GET | Answers `404` ("Quota reporting is not available for aws clusters") until the vCPU / Elastic IP report ships |
 | `/api/v1/clusters/aws/{cluster_id}/k8s-version` | GET | Current Kubernetes version and distribution |
 | `/api/v1/clusters/aws/{cluster_id}/upgrade-k8s-version` | POST | Upgrade Kubernetes (`{"target_version": "..."}`) |
 | `/api/v1/clusters/aws/{cluster_id}/worker-count` | GET | Legacy default-pool worker count |
@@ -248,3 +263,15 @@ The AMI ID is resolved from these public SSM parameters in the target region at 
 | `/api/v1/clusters/aws/{cluster_id}/bastion/instance-type` | PUT | Resize the bastion (stop, change type, start; the Elastic IP is kept) |
 
 See [Restarting, Diagnosing and Repairing a Node](/guides/aws-clusters#restarting-diagnosing-and-repairing-a-node) and [Bastion health and resize](/guides/aws-clusters#bastion-health-and-resize) for usage examples.
+
+## Credential API
+
+The bearer-token twins of the AWS credential onboarding, for scripts and the CLI. Connecting a credential from the dashboard is documented on [AWS Credentials](/platform/credentials/aws).
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/v1/credentials/aws/onboarding` | GET | `?scope=cost` (default), `provisioning` or `self_managed`: the external ID, the CloudFormation `launch_stack_url`, `template_url` and `trust_principal_arn` for that scope's role. Unknown scopes answer `400` |
+| `/api/v1/credentials/aws/role` | POST | Register an STS role credential (`name`, `role_arn`, `external_id`, `region`, `scope`). The role is assumed first; a `self_managed` scope is also proven against EC2 (a dry-run `DescribeVpcs`) and the Canonical AMI SSM parameters. Unknown scope `400`, name clash `409`, failed connection test `400` |
+| `/api/v1/credentials/aws/keys` | POST | Register an access-keys credential (`name`, `access_key_id`, `secret_access_key`, `region`) |
+
+Creating a cluster needs a keys credential, or a role credential whose scope is `provisioning` or `self_managed`; a `cost`-scoped role is refused.

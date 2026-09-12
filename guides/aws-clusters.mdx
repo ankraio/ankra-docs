@@ -77,13 +77,17 @@ Every object Ankra creates is tagged `ankra.cloud/cluster-id=<id>`, `ankra.cloud
   <Step title="Configure Nodes">
     Set your cluster topology:
     - **Bastion** - instance type for the SSH bastion (a burstable type such as `t3.small` is enough for an SSH jump host; size it for bandwidth in `bastion_nat` mode)
-    - **Control Plane** - count (1 or 3 - three when the node subnets span more than one availability zone) and instance type
+    - **Control Plane** - count (1 to 9 - at least three when the node subnets span more than one availability zone) and instance type
     - **Workers** - one or more node groups, each with a name, instance type and count
 
     Instance types load live for the region with vCPUs, memory, architecture and hourly price. Only `amd64` types are offered in this release.
   </Step>
   <Step title="Distribution, CNI and Image">
-    Keep **k3s** (the default) or pick **kubeadm**, which on AWS is Cilium only. k3s clusters default to Cilium and can pick another CNI and its [advanced features](/guides/digitalocean-clusters#advanced-cni-features); prefer Cilium or Calico, because only they can run the [IMDS guard](#instance-metadata-imds) that keeps pods away from the control-plane instance role. The Ubuntu series defaults to 24.04 and the root volume is an encrypted gp3 volume whose size you can raise.
+    Keep **k3s** (the wizard's default) or pick **kubeadm**, which on AWS is Cilium only. The CNI defaults to Cilium for both distributions; a k3s cluster can pick Calico or flannel and the [advanced features](/guides/digitalocean-clusters#advanced-cni-features), but only Cilium and Calico can run the [IMDS guard](#instance-metadata-imds) that keeps pods away from the control-plane instance role, so flannel is accepted with a preflight warning. The Ubuntu series defaults to 24.04 and the root volume is an encrypted gp3 volume of 40 GiB whose size you can raise (up to 2000 GiB).
+
+    <Note>
+    The wizard and the CLI examples on this page create k3s clusters. An API request that omits `distribution` follows the platform default, `kubeadm`, like every other self-managed provider - set `"distribution": "k3s"` explicitly when you want k3s from the API.
+    </Note>
   </Step>
   <Step title="GitOps, Networking & DNS">
     Optionally connect a GitHub repository for GitOps-driven deployment. Two checkboxes on this step are on by default:
@@ -105,14 +109,12 @@ Once the cluster is online, day-2 operations live where they do for every self-m
 
 ### Via the CLI
 
-<CliVersion since="0.16.0" />
+<CliVersion since="0.17.0" />
 
-Create the credentials first. The AWS credential is the same one EKS uses; the self-managed scope is a third CloudFormation stack, and the [credential page](/platform/credentials/aws#self-managed-clusters) walks through it. `ankra credentials aws onboarding` prints the external ID and the quick-create link for the stack, and `create-role` stores the resulting role ARN.
+Create the credentials first. The AWS credential is the same one EKS uses; the self-managed scope is a third CloudFormation stack, and the [credential page](/platform/credentials/aws#self-managed-clusters) walks through connecting it in the dashboard (or over the API with `GET /api/v1/credentials/aws/onboarding?scope=self_managed` and `POST /api/v1/credentials/aws/role` - see the [credential API](/reference/aws#credential-api)). The CLI lists what is connected:
 
 ```bash
-# AWS credential: launch the AnkraSelfManagedProvisioning stack, then store the role
-ankra credentials aws onboarding
-ankra credentials aws create-role --name my-aws --role-arn <role-arn> --region eu-north-1
+# AWS credentials the organisation has connected (keys or role, with the role's scope)
 ankra credentials aws list
 
 # SSH key credential
@@ -133,7 +135,7 @@ ankra cluster aws pricing --credential-id <aws-credential-id> --region eu-north-
 
 #### Preflight
 
-`preflight` takes the same flags as `create` and reports before anything is created: whether the VPC and subnets exist and sit in the region, which availability zones the node subnets cover, the resolved egress mode (and why `bastion_nat` is refused, if it is), the AMI resolved for the Ubuntu series and architecture, the vCPU quota for the chosen instance families, the Elastic IP quota, the security-groups-per-interface quota, and whether `bastion_allowed_ips` is valid. Run it until it is clean, then run `create` with the same flags.
+`preflight` takes the same flags as `create` and runs every check the create runs, without creating anything: whether the VPC and subnets exist and sit in the region, which availability zones the node subnets cover, the resolved egress mode (and why `bastion_nat` is refused, if it is), the AMI resolved for the Ubuntu series and architecture, the vCPU quota for the chosen instance families, the Elastic IP quota, the security-groups-per-interface quota, and whether `bastion_allowed_ips` is valid. Every item is three-state - `ok`, `warning` (a read Ankra could not perform, or a caveat such as flannel not enforcing the IMDS guard) or `error` - and the result carries `can_proceed` and `resolved_egress_mode`, the mode the create will run under. Run it until there are no errors, then run `create` with the same flags.
 
 ```bash
 ankra cluster aws preflight \
@@ -147,9 +149,9 @@ ankra cluster aws preflight \
   --egress-mode existing \
   --bastion-allowed-ips 203.0.113.10/32 \
   --control-plane-count 3 \
-  --control-plane-instance-type t3.medium \
+  --control-plane-type t3.medium \
   --worker-count 3 \
-  --worker-instance-type t3.large
+  --worker-type t3.large
 ```
 
 #### Create
@@ -166,9 +168,9 @@ ankra cluster aws create \
   --egress-mode existing \
   --bastion-allowed-ips 203.0.113.10/32 \
   --control-plane-count 3 \
-  --control-plane-instance-type t3.medium \
+  --control-plane-type t3.medium \
   --worker-count 3 \
-  --worker-instance-type t3.large \
+  --worker-type t3.large \
   --distribution k3s \
   --retention-policy retain
 ```
@@ -197,7 +199,7 @@ curl -X POST https://platform.ankra.app/api/v1/clusters/aws/preflight \
   }'
 ```
 
-Then create:
+Then create. The response is `{"cluster_id", "name", "kind": "aws", "state": "creating", "operation_id"}`; the operation tracks provisioning.
 
 ```bash
 curl -X POST https://platform.ankra.app/api/v1/clusters/aws \
@@ -214,13 +216,13 @@ curl -X POST https://platform.ankra.app/api/v1/clusters/aws \
     "egress_mode": "existing",
     "bastion_allowed_ips": ["203.0.113.10/32"],
     "control_plane_count": 3,
-    "control_plane_instance_type": "t3.medium",
+    "control_plane_type": "t3.medium",
     "node_groups": [
       {"name": "default", "instance_type": "t3.large", "count": 3}
     ],
     "distribution": "k3s",
     "ubuntu_series": "24.04",
-    "root_volume_gib": 50,
+    "root_volume_gib": 40,
     "retention_policy": "retain"
   }'
 ```
@@ -231,7 +233,7 @@ Every request field, the defaults, the catalogs and the limits are in the [AWS R
 
 ## Accessing the Cluster
 
-The bastion is the only instance with a public address, and its security group admits SSH only from `bastion_allowed_ips`. The nodes admit SSH and the Kubernetes API from the bastion's security group, and everything from each other. **Settings → Access** shows copy-pasteable commands with the addresses filled in:
+The bastion is the only instance with a public address, and its security group admits SSH only from `bastion_allowed_ips`. The nodes admit SSH and the Kubernetes API from the bastion's security group, and everything from each other. **Settings → Access** shows copy-pasteable commands with the addresses filled in, and `ankra cluster aws access-info <cluster_id>` (`GET /api/v1/clusters/aws/{cluster_id}/access-info`) answers `bastion_host`, `bastion_port` (22), `bastion_user` and `target_user` (both `ubuntu`) and the control plane IPs:
 
 ```bash
 # SSH to a control plane node through the bastion
@@ -313,26 +315,23 @@ ankra cluster aws control-plane set-instance-type <cluster_id> t3.large   # clus
 
 Restart any node - a control plane node, a worker, or the bastion - as a tracked operation from the **Nodes** section, the CLI or the API. A restart is an EC2 reboot; if the instance does not respond it falls back to a stop and start, which keeps the private IP.
 
-<CodeGroup>
+```bash
+curl https://platform.ankra.app/api/v1/clusters/aws/<cluster_id>/nodes \
+  -H "Authorization: Bearer $ANKRA_API_TOKEN"
 
-```bash CLI
-ankra cluster aws nodes list <cluster_id>
-ankra cluster aws nodes restart <cluster_id> <node_id>
-ankra cluster aws nodes cloud-init-log <cluster_id> <node_id>
-```
-
-```bash cURL
 curl -X POST https://platform.ankra.app/api/v1/clusters/aws/<cluster_id>/nodes/<node_id>/restart \
+  -H "Authorization: Bearer $ANKRA_API_TOKEN"
+
+# cloud-init status and the tail of its log, fetched over the bastion as a tracked operation
+curl -X POST https://platform.ankra.app/api/v1/clusters/aws/<cluster_id>/nodes/<node_id>/cloud-init-log \
   -H "Authorization: Bearer $ANKRA_API_TOKEN"
 ```
 
-</CodeGroup>
-
-See [Restarting a Node](/guides/hetzner-clusters#restarting-a-node) for the response shape and state requirements - identical across providers. Diagnose and repair (an OS-level check over SSH through the bastion, and a repair of the node's k3s or kubelet unit) run from the node's row menu in the **Nodes** section or through the `ssh_diagnose_node` and `ssh_repair_node` [AI tools](/platform/mcp-tools#provisioning--nodes).
+See [Restarting a Node](/guides/hetzner-clusters#restarting-a-node) for the response shape and state requirements - identical across providers. The `ankra cluster aws` group carries no `nodes` verb in this release; use the **Nodes** section, the API, or the AI assistant ("restart worker-2 on my-cluster"). Diagnose and repair (an OS-level check over SSH through the bastion, and a repair of the node's k3s or kubelet unit) run from the node's row menu in the **Nodes** section or through the `ssh_diagnose_node` and `ssh_repair_node` [AI tools](/platform/mcp-tools#provisioning--nodes).
 
 ### Bastion health and resize
 
-`ankra cluster aws bastion status <cluster_id>` reports the last verdict of the bastion health loop - reachable or not, which hop a failed probe stopped at, and when. Resize the bastion from the **Nodes → Bastion** tab or with `ankra cluster aws bastion resize <cluster_id> t3.medium` (`PUT /api/v1/clusters/aws/{cluster_id}/bastion/instance-type`): the instance is stopped, its type changed and started again, keeping its Elastic IP.
+`GET /api/v1/clusters/aws/{cluster_id}/bastion/health` reports the last verdict of the bastion health loop - reachable or not, which hop a failed probe stopped at, and when - and `POST .../bastion/diagnose` probes it now as a tracked operation; both are shown on the **Nodes → Bastion** tab. Resize the bastion from that tab or with `PUT /api/v1/clusters/aws/{cluster_id}/bastion/instance-type` (`{"instance_type": "t3.medium"}`): the instance is stopped, its type changed and started again, keeping its Elastic IP.
 
 <Warning>
 In `bastion_nat` mode the bastion is the nodes' default route, so a resize or restart interrupts every node's outbound traffic - image pulls, the Ankra Agent connection, AWS API calls from the cloud controller - until it is back.
@@ -402,8 +401,8 @@ This action is irreversible. All data on the nodes' root volumes is permanently 
 
 What happens to the volumes the EBS CSI driver provisioned and the load balancers the cloud controller created follows the cluster's `retention_policy`, chosen at create:
 
-- **`retain`** (the default) keeps them. EBS volumes and Network Load Balancers stay in your account and keep billing; they are tagged with the cluster ID so they are easy to find in the EC2 and load balancing consoles.
-- **`delete`** sweeps them: every volume and load balancer carrying this cluster's `ankra.cloud/managed=true` and cluster-ID tags is deleted along with the rest of the infrastructure. Nothing without those tags is touched.
+- **`retain`** (the default) records and keeps them. EBS volumes and Network Load Balancers stay in your account and keep billing; the teardown result lists their provider IDs, and they are tagged with the cluster ID so they are easy to find in the EC2 and load balancing consoles.
+- **`delete`** sweeps them: a volume or load balancer is deleted only when it carries this cluster's `ankra.cloud/managed=true` tag **and** the policy is `delete`. Nothing without the tag is touched, whatever the policy.
 
 <CodeGroup>
 
@@ -516,7 +515,7 @@ The guard needs a policy engine. On a flannel cluster the create result reports 
 
 ### AWS service quotas
 
-Preflight checks the quotas that most often block a create, but a quota can still be consumed between preflight and create. If provisioning fails with a quota error, check in the [Service Quotas console](https://console.aws.amazon.com/servicequotas/) for the region:
+Preflight checks the quotas that most often block a create, but a quota can still be consumed between preflight and create, and the per-cluster quota report (`GET /api/v1/clusters/aws/{cluster_id}/quotas`) answers `404` - "Quota reporting is not available for aws clusters" - until it ships. If provisioning fails with a quota error, check in the [Service Quotas console](https://console.aws.amazon.com/servicequotas/) for the region:
 
 - Running On-Demand instances (vCPU) for the instance family
 - Elastic IPs per region
