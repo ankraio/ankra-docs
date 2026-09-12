@@ -238,6 +238,27 @@ The first four are preconditions, not preferences, and the failure modes differ:
 
     `--wait` follows the run to its conclusion and exits non-zero on anything but `success`. Every stage runs for real: `checkout` clones the commit, `test` runs your script, `build` produces a digest in a rootless BuildKit pod, `scan` runs Trivy, Semgrep and Checkov against it, `gate` judges what they found, and `publish` re-tags the digest `gate` approved to `sha-<7>` in your real repository - nothing is published that was not scanned and gated first. Because `--wait` already blocked until the run concluded, the `logs --step checkout --follow` command above is reading `checkout`'s log back after the fact, not watching it live - from the CLI's next release that reads the step's complete, archived output; today it reads only whatever a fresh connection to the live relay happens to catch from an already-finished step, which for a step this far in the past is usually nothing. `--follow` earns its name against a step that is still running, which is the case whenever you check on a pipeline without also passing `--wait`. On GitHub the commit carries an `Ankra pipeline` check with a step table and a Cancel button, and on a pull request the same run populates the `pipeline` section of Ankra's one status comment; the portal's **CI/CD** tab shows the same run with a timeline and an in-app log viewer, and **Settings → Pipelines** lists the repository you connected in step one.
   </Step>
+  <Step title="Wait on a run a push or pull request started">
+    Most runs are not dispatched by you: the push or pull request webhook starts them, so a CI job that has to wait for the result holds no run id. `ankra pipeline get` selects the run by what the job does know instead - `--head-sha` (the full sha), `--branch` and `--trigger` narrow it, and `--latest` takes the newest match (on its own, the pipeline's newest run). Several matches without `--latest` are refused and listed, exit `2`; no match is exit `3`.
+
+    <CliVersion since="0.16.0" command="pipeline get --wait" note="Until then, poll the pipeline list command with the same head sha and read its status and outcome fields." />
+
+    ```bash
+    ankra pipeline get --head-sha "$(git rev-parse HEAD)" --trigger pull_request --latest --wait --timeout 45m
+    ```
+
+    `--wait` blocks until the run concludes, then prints its final detail, exactly as `pipeline run --wait` does. The webhook can land a moment after the job asks, so under `--wait` or `--watch` a selection that matches nothing yet waits for the run to appear, up to `--timeout` or ten minutes when none is set. `--timeout` takes a duration and bounds `pipeline run --wait` and `pipeline rerun --wait` the same way. On GitHub Actions, a `pull_request` job's checkout is a merge commit rather than the head the run was started for, so pass `${{ github.event.pull_request.head.sha }}` there instead of `git rev-parse HEAD`.
+
+    To react while the run moves instead of only when it ends, `--watch` prints each run and step state change until it concludes:
+
+    ```bash
+    ankra pipeline get <run-id> --watch -o json
+    ```
+
+    With `-o json` that is one JSON object per line: `event` (`run` or `step`), `observed_at`, `pipeline_run_id`, `run_number`, `step_key`, `status`, `previous_status` (`null` the first time a run or step is seen), `outcome`, and the whole `run` or `step` object. The first lines are the full current state, and the run's conclusion is always the last line.
+
+    With `--wait` or `--watch` the exit code is the verdict: `0` when the run succeeded, `1` when it concluded any other way or the platform could not be read, and `5` when `--timeout` ran out. A plain `get` still exits `0` whatever the outcome; add `--exit-code` to a single read to branch on it without waiting - `0` or `1` for a concluded run, `5` while it has not concluded yet.
+  </Step>
 </Steps>
 
 That loop - webhook, trigger decision, plan, dispatch, a real checkout, your steps, a check run, the portal - is what the rest of this page documents in depth: the mechanics behind it, why CI belongs in your cluster at all, exactly which stage kinds execute today, what a pull request can and cannot change, and the limits every run is held to.
