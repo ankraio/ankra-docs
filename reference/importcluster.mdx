@@ -224,7 +224,7 @@ Raw Kubernetes YAML resources.
 
 | Field | Required | Description |
 |-------|----------|-------------|
-| `name` | yes | Manifest name, unique within the cluster |
+| `name` | yes | Manifest name, unique within the cluster. The name is the manifest's identity: renaming it is a delete of the old manifest plus a create of the new one, see the warning below |
 | `from_file` | one of | Repo-relative path to the YAML file (forward slashes, resolved from the manifest's location) |
 | `manifest` / `manifest_base64` | one of | Inline content (the CLI accepts plain YAML under `manifest:` and encodes it) |
 | `parents` | no | [Dependency edges](#parents) - deploy only after these succeed |
@@ -235,6 +235,14 @@ Raw Kubernetes YAML resources.
 | `agents_md` | no | Inline markdown of operational learnings for this manifest - see [AGENTS.md](/platform/agents-md). Documentation-only - never triggers a redeploy |
 | `agents_md_from_file` | no | Repo-relative path to an AGENTS.md file to read the content from instead of inlining it |
 | `dependencies_override` | no | Advanced: override computed dependency ordering |
+
+<Warning>
+**Renaming a manifest deletes its resources.** Ankra identifies a manifest by its `name`, not by its content. When a stack is applied (with `ankra cluster apply`, a GitOps sync, or an edit in the portal) and a manifest name is no longer present, Ankra removes that manifest and runs the equivalent of `kubectl delete` on every object in its stored YAML. A manifest that appears under a new name is applied as a new manifest, and nothing orders that apply against the delete of the old one.
+
+For a manifest that holds a `Namespace`, this deletes the namespace and every PersistentVolumeClaim in it. For a manifest that holds PVCs, the delete removes the PVCs the new manifest has just applied. With a StorageClass whose `reclaimPolicy` is `Delete` (the default for most CSI drivers, including AWS EBS gp3), the underlying volumes are destroyed as well.
+
+Keep the names of manifests that own namespaces or stateful resources fixed. If you must rename one, move its data first, or make sure the PersistentVolumes behind it use `reclaimPolicy: Retain`. See [Kubernetes Storage](/platform/kubernetes-storage#reclaim-policies).
+</Warning>
 
 ## `spec.stacks[].addons[]`
 
@@ -307,6 +315,8 @@ parents:
 ```
 
 `kind` must be `manifest` or `addon`, and the parent must be defined somewhere in the same file. Namespace manifests must be parents of everything deployed into that namespace.
+
+Parents reference the other resource by `name`. Because a rename is a delete plus a create (see the [manifests](#spec-stacks-manifests) warning), renaming a parent also means updating every `parents` entry that points at it in the same change.
 
 <Warning>
 The shorthand `- manifest: <name>` does **not** work. It parses to an empty parent and the
