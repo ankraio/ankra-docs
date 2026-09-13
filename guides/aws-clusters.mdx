@@ -1,13 +1,13 @@
 ---
 title: AWS Clusters
-description: Create, manage, and scale self-managed k3s or kubeadm clusters on EC2 instances inside a VPC you own, with Ankra.
+description: Create, manage, and scale self-managed k3s or kubeadm clusters on EC2 instances, in a VPC Ankra creates or one you already own, with Ankra.
 icon: "aws"
 tag: "Closed Beta"
 ---
 
 import { CliVersion } from "/snippets/cli-version.jsx";
 
-Ankra provisions self-managed Kubernetes clusters on [Amazon EC2](https://aws.amazon.com/ec2/): a bastion in a public subnet, control plane and worker instances in private subnets you already own, k3s or kubeadm installed over SSH, and the AWS cloud controller manager and EBS CSI driver wired to per-cluster instance profiles. You keep the VPC; Ankra owns only what it creates inside it.
+Ankra provisions self-managed Kubernetes clusters on [Amazon EC2](https://aws.amazon.com/ec2/): a VPC with public and private subnets across one or three availability zones, NAT egress, a bastion in a public subnet, control plane and worker instances in the private subnets, k3s or kubeadm installed over SSH, and the AWS cloud controller manager and EBS CSI driver wired to per-cluster instance profiles. Ankra creates the network by default, as it does on every other self-managed provider; an account with an established network can adopt an existing VPC instead, and Ankra then owns only what it creates inside it.
 
 <Warning>
 **Closed beta.** Self-managed AWS clusters are in closed beta. The workflow is stable but the surface may still change, and it is enabled per organisation on request - until it is, AWS offers only [Amazon EKS](/guides/eks-clusters) in the create wizard and the `aws` cluster commands and endpoints are not served. [Contact support](/platform/support) to have it turned on for your organisation.
@@ -28,29 +28,48 @@ This is the self-managed lane. If you want AWS to run the control plane, use [Am
   </Card>
 </CardGroup>
 
-### A VPC and subnets you own
+Nothing else needs to exist in the account beforehand: by default Ankra creates the network the cluster runs in. Only an [adopted VPC](#adopting-an-existing-vpc) asks you to prepare subnets first.
 
-Ankra does not create a VPC in this release. Before you start, the target region needs:
+### The network Ankra creates
+
+Leave `vpc_id` out of the request (the wizard's **Create a new VPC (recommended)**) and Ankra lays out, in the region you chose:
+
+| Ankra creates | Detail |
+|---|---|
+| **A VPC** | From `network_ip_range` (default `10.0.0.0/16`, any `/16` to `/20`), with DNS support and DNS hostnames enabled. |
+| **Availability zones** | One zone when `control_plane_count` is below 3, three otherwise, picked from the region's available zones in name order - or the `availability_zones` you name. More than one zone needs at least three control planes, so etcd keeps quorum when a zone is lost. |
+| **Subnets** | Per zone, one private `/20` for the nodes and one public `/24`. Nodes never receive a public IP; the bastion lives in the public subnet of the first zone. |
+| **Internet gateway and route tables** | One internet gateway, a public route table with `0.0.0.0/0` on it, and one private route table per zone carrying that zone's egress route. |
+| **Egress** | By `egress_mode` - a NAT gateway per zone (the default) or the bastion as NAT; see [Egress modes](#egress-modes). |
+
+Preflight reports the plan before anything is built: `network_ownership: created`, `resolved_availability_zones`, whether the CIDR holds a `/20` and a `/24` per zone, whether every zone exists and is available, the three-control-plane rule, and the VPC, NAT gateway and Elastic IP quotas. Teardown deletes all of it - route tables, subnets, gateways, NAT gateways with their Elastic IPs, the VPC - by the tags Ankra set, in reverse order.
+
+### Adopting an existing VPC
+
+An account with an established network passes `vpc_id` (the wizard's **Use an existing VPC**) and Ankra builds inside it instead. The target region then needs:
 
 | You provide | Requirements |
 |---|---|
 | **A VPC** | Any VPC in the region. Its DHCP options set, internet gateway and existing route tables are read, never changed. |
-| **One or more node subnets** | Private subnets for the control plane and workers. Nodes never receive a public IP. Spread the subnets across availability zones for a multi-AZ cluster - Ankra places control planes one per zone and balances each node group across them. |
-| **One bastion subnet** | A public subnet (a route to the internet gateway, and public IP assignment allowed) for the bastion. The bastion is the only instance Ankra gives a public address. |
-| **Egress for the node subnets** | Nodes pull images, reach the Ankra platform and talk to AWS APIs, so their subnets need a default route somewhere. Choose one of the two egress modes below. |
+| **One or more node subnets** (`node_subnet_ids`) | Private subnets for the control plane and workers. Spread them across availability zones for a multi-AZ cluster - Ankra places control planes one per zone and balances each node group across them. |
+| **One bastion subnet** (`bastion_subnet_id`) | A public subnet (a route to the internet gateway, and public IP assignment allowed) for the bastion. |
+| **Egress for the node subnets** | Nodes pull images, reach the Ankra platform and talk to AWS APIs, so their subnets need a default route somewhere - `existing` or `bastion_nat` below. |
+
+`network_ip_range`, `availability_zones` and `nat_gateway_single_zone` are refused alongside `vpc_id`; `node_subnet_ids` and `bastion_subnet_id` are refused without it. In an adopted VPC Ankra never creates, modifies or deletes your VPC, subnets, internet gateway, NAT gateways, DHCP options or existing route tables.
 
 ### Egress modes
 
-Nodes have no public IP, so every node subnet must route `0.0.0.0/0` through something. The `egress_mode` field on the create request decides what, and Ankra never mixes the two on one cluster:
+Nodes have no public IP, so every private subnet must route `0.0.0.0/0` through something. The `egress_mode` field on the create request decides what, and Ankra never mixes modes on one cluster:
 
-- **`existing`** - your node subnets already route the default to a NAT gateway, a NAT instance or a transit path. Ankra checks the route and changes nothing. The bastion is then an SSH jump host only, and no node traffic passes through it. **Cost:** whatever you already pay for that path - AWS bills a NAT gateway per hour and per GB processed (see [VPC pricing](https://aws.amazon.com/vpc/pricing/)), and it is shared with everything else in the subnet.
-- **`bastion_nat`** - the bastion becomes the NAT instance, as it is on Hetzner and DigitalOcean: source/destination checking is switched off and it forwards node traffic to the internet gateway. Because a default route has to point at the bastion's network interface, Ankra creates **one** tagged route table in your VPC with `0.0.0.0/0` to the bastion and associates the node subnets with it, recording each subnet's previous association so teardown restores it exactly. **Cost:** the bastion instance and its Elastic IP, nothing else - no NAT gateway. The trade is that node egress is capped by the bastion's network performance, shares its fate (a bastion resize interrupts it), and the bastion must stay running.
+- **`nat_gateway`** (created VPC only, the default there) - an Ankra-created NAT gateway with its own Elastic IP in every zone, each zone's private route table pointing at its own gateway, so egress survives a zone outage. `nat_gateway_single_zone: true` creates one gateway in the first zone that every private subnet routes through - cheaper, one egress failure domain. **Cost:** about USD 32 per month per NAT gateway plus per-GB data processing (see [VPC pricing](https://aws.amazon.com/vpc/pricing/)); a three-zone cluster runs three gateways unless you collapse them to one. The bastion is an SSH jump host only.
+- **`bastion_nat`** (either network) - the bastion becomes the NAT instance, as it is on Hetzner and DigitalOcean: source/destination checking is switched off and it forwards node traffic to the internet gateway. In a created VPC the private route tables point their default route at the bastion; in an adopted VPC Ankra creates **one** tagged route table with `0.0.0.0/0` to the bastion and associates the node subnets with it, recording each subnet's previous association so teardown restores it exactly. **Cost:** the bastion instance and its Elastic IP, nothing else - the cheapest option. The trade is that node egress is capped by the bastion's network performance, shares its fate (a bastion resize interrupts it), and the bastion must stay running.
+- **`existing`** (adopted VPC only) - your node subnets already route the default to a NAT gateway, a NAT instance or a transit path. Ankra checks the route and changes nothing. **Cost:** whatever you already pay for that path, shared with everything else in the subnet.
 
-An omitted `egress_mode` is resolved by preflight: subnets that already have egress select `existing`; empty subnets without it select `bastion_nat`; subnets without egress that hold instances Ankra did not create are refused with a message naming them. `bastion_nat` is **always refused** when any node subnet carries a foreign instance, because re-pointing that subnet's default route would hijack its egress. Create the NAT gateway yourself and use `existing` in that case.
+An omitted `egress_mode` resolves to `nat_gateway` for a created VPC. For an adopted VPC preflight resolves it: subnets that already have egress select `existing`; empty subnets without it select `bastion_nat`; subnets without egress that hold instances Ankra did not create are refused with a message naming them. `bastion_nat` is **always refused** in an adopted VPC when any node subnet carries a foreign instance, because re-pointing that subnet's default route would hijack its egress. Create the NAT gateway yourself and use `existing` in that case.
 
 ### What Ankra creates, and what it never touches
 
-Every object Ankra creates is tagged `ankra.cloud/cluster-id=<id>`, `ankra.cloud/managed=true` and `kubernetes.io/cluster/<id>=owned`, and the credential's write permissions are scoped to those tags. Ankra creates, in your account: two security groups (nodes, bastion), an imported key pair, one Elastic IP, the bastion instance, the node instances with their network interfaces and encrypted gp3 root volumes, two IAM roles with instance profiles (`ankra-k3s-<cluster>-cp` and `ankra-k3s-<cluster>-node`), and in `bastion_nat` mode one route table. It never creates, modifies or deletes your VPC, subnets, internet gateway, NAT gateways, DHCP options or existing route tables. The full list, with tags and IAM scoping, is in the [AWS Reference](/reference/aws#what-ankra-creates).
+Every object Ankra creates is tagged `ankra.cloud/cluster-id=<id>`, `ankra.cloud/managed=true` and `kubernetes.io/cluster/<id>=owned`, and the credential's write permissions are scoped to those tags. In both modes Ankra creates two security groups (nodes, bastion), an imported key pair, one Elastic IP for the bastion, the bastion instance, the node instances with their network interfaces and encrypted gp3 root volumes, and two IAM roles with instance profiles (`ankra-k3s-<cluster>-cp` and `ankra-k3s-<cluster>-node`). In a created VPC it also owns the VPC, subnets, internet gateway, route tables, NAT gateways and their Elastic IPs; in an adopted VPC it adds at most one route table (`bastion_nat` mode) and never touches your VPC, subnets, internet gateway, NAT gateways, DHCP options or existing route tables. The full list, with tags and IAM scoping, is in the [AWS Reference](/reference/aws#what-ankra-creates).
 
 ---
 
@@ -69,15 +88,15 @@ Every object Ankra creates is tagged `ankra.cloud/cluster-id=<id>`, `ankra.cloud
     Pick an AWS credential with the provisioning or self-managed scope and an SSH key credential. A read-only (cost) credential, or a provisioning role whose stack predates the self-managed statements, is listed but refused at preflight with the missing permission named. You can create either credential from the wizard.
   </Step>
   <Step title="Choose Region and Network">
-    Select a region - the list loads live from your credential. Then pick the **VPC**, one or more **node subnets** and the **bastion subnet**; the wizard shows each subnet's availability zone and whether it has a public or private route, and offers only public subnets for the bastion.
+    Select a region - the list loads live from your credential. **Create a new VPC (recommended)** is selected: keep the network range (`10.0.0.0/16`) or set your own `/16` to `/20`, and optionally name the availability zones - otherwise preflight picks one zone for a single control plane and three for a three-node control plane. Switch to **Use an existing VPC** to pick the **VPC**, one or more **node subnets** and the **bastion subnet** instead; the wizard shows each subnet's availability zone and whether it has a public or private route, and offers only public subnets for the bastion.
   </Step>
   <Step title="Egress and Bastion Access">
-    Choose the **egress mode** (or leave it on *Detect*, which lets preflight resolve it), and enter the **allowed IPs** that may reach the bastion on port 22 - at least one CIDR, and `0.0.0.0/0` is refused. Your current public address is offered as a starting point.
+    For a new VPC choose **NAT gateway** (the default - one per zone, or tick **single NAT gateway** to share one) or **bastion as NAT** (cheapest); for an existing VPC choose **existing**, **bastion as NAT**, or leave it on *Detect* and let preflight resolve it. Then enter the **allowed IPs** that may reach the bastion on port 22 - at least one CIDR, and `0.0.0.0/0` is refused. Your current public address is offered as a starting point.
   </Step>
   <Step title="Configure Nodes">
     Set your cluster topology:
     - **Bastion** - instance type for the SSH bastion (a burstable type such as `t3.small` is enough for an SSH jump host; size it for bandwidth in `bastion_nat` mode)
-    - **Control Plane** - count (1 to 9 - at least three when the node subnets span more than one availability zone) and instance type
+    - **Control Plane** - count (1 to 9 - at least three when the cluster spans more than one availability zone, and three is what makes a new VPC three-zone) and instance type
     - **Workers** - one or more node groups, each with a name, instance type and count
 
     Instance types load live for the region with vCPUs, memory, architecture and hourly price. Only `amd64` types are offered in this release.
@@ -95,7 +114,7 @@ Every object Ankra creates is tagged `ankra.cloud/cluster-id=<id>`, `ankra.cloud
     - **Include Public DNS** - gives the cluster its own delegated subdomain on `ankra.cc` and installs external-dns with its credentials already wired, so an ingress hostname under that subdomain gets its DNS record and TLS certificate automatically.
   </Step>
   <Step title="Preflight, Create & Track Progress">
-    The wizard runs the [preflight](#preflight) before it submits and shows what it found - resolved egress mode, availability zones, the AMI it will use, and the vCPU, Elastic IP and security-group quotas it checked. Click **Create** to start provisioning. A live progress view tracks IAM roles and instance profiles, security groups, key pair, Elastic IP, bastion, route table (in `bastion_nat` mode), node instances, Kubernetes installation, cloud controller and CSI driver, and Ankra Agent setup. The cluster appears **offline** until provisioning completes, then transitions to **online**.
+    The wizard runs the [preflight](#preflight) before it submits and shows what it found - network ownership, the availability zones it resolved, the egress mode, the AMI it will use, and the vCPU, VPC, NAT gateway, Elastic IP and security-group quotas it checked. Click **Create** to start provisioning. A live progress view tracks IAM roles and instance profiles, **Prepare VPC, Subnets & Routing**, NAT gateways (in `nat_gateway` mode), security groups, key pair, Elastic IP, bastion, route table (`bastion_nat` in an adopted VPC), node instances, Kubernetes installation, cloud controller and CSI driver, and Ankra Agent setup. The cluster appears **offline** until provisioning completes, then transitions to **online**.
   </Step>
 </Steps>
 
@@ -133,13 +152,13 @@ ankra credentials hetzner ssh-key create --name my-ssh-key --generate   # provid
 
 The external ID `create-role` stores must be the one `onboarding` printed and the stack was launched with; a role created at the `cost` scope is refused at cluster create.
 
-Then look up what the credential can reach:
+Then look up what the credential can reach (`vpcs` and `subnets` matter only when you adopt a VPC):
 
 ```bash
 ankra cluster aws regions --credential-id <aws-credential-id>
+ankra cluster aws availability-zones --credential-id <aws-credential-id> --region eu-north-1
 ankra cluster aws vpcs --credential-id <aws-credential-id> --region eu-north-1
 ankra cluster aws subnets --credential-id <aws-credential-id> --region eu-north-1 --vpc-id <vpc-id>
-ankra cluster aws availability-zones --credential-id <aws-credential-id> --region eu-north-1
 ankra cluster aws instance-types --credential-id <aws-credential-id> --region eu-north-1
 ankra cluster aws images --credential-id <aws-credential-id> --region eu-north-1
 ankra cluster aws pricing --credential-id <aws-credential-id> --region eu-north-1 --instance-type t3.large
@@ -147,7 +166,9 @@ ankra cluster aws pricing --credential-id <aws-credential-id> --region eu-north-
 
 #### Preflight
 
-`preflight` takes the same flags as `create` and runs every check the create runs, without creating anything: whether the VPC and subnets exist and sit in the region, which availability zones the node subnets cover, the resolved egress mode (and why `bastion_nat` is refused, if it is), the AMI resolved for the Ubuntu series and architecture, the vCPU quota for the chosen instance families, the Elastic IP quota, the security-groups-per-interface quota, and whether `bastion_allowed_ips` is valid. Every item is three-state - `ok`, `warning` (a read Ankra could not perform, or a caveat such as flannel not enforcing the IMDS guard) or `error` - and the result carries `can_proceed` and `resolved_egress_mode`, the mode the create will run under. Run it until there are no errors, then run `create` with the same flags.
+`preflight` takes the same flags as `create` and runs every check the create runs, without creating anything. For a created network: whether `network_ip_range` holds a private `/20` and a public `/24` per zone, whether every zone exists and is available in the region, the three-control-plane rule for more than one zone, and the VPC (`L-F678F1CE`), NAT gateway (`L-FE5A380F`) and Elastic IP quotas. For an adopted VPC: whether the VPC and subnets exist and sit in the region, which zones the node subnets cover, and the resolved egress mode (and why `bastion_nat` is refused, if it is). For both: the AMI resolved for the Ubuntu series and architecture, the vCPU quota for the chosen instance families, the security-groups-per-interface quota, and whether `bastion_allowed_ips` is valid. The result names `network_ownership` (`created` or `adopted`) and `resolved_availability_zones`. Every item is three-state - `ok`, `warning` (a read Ankra could not perform, or a caveat such as flannel not enforcing the IMDS guard) or `error` - and the result carries `can_proceed` and `resolved_egress_mode`, the mode the create will run under. Run it until there are no errors, then run `create` with the same flags.
+
+Only `--name`, `--credential-id`, `--ssh-key-credential-id`, `--region` and `--bastion-allowed-ips` are required; without `--vpc-id` Ankra creates the network. Three control planes make it a three-zone VPC with a NAT gateway per zone:
 
 ```bash
 ankra cluster aws preflight \
@@ -155,10 +176,6 @@ ankra cluster aws preflight \
   --credential-id <aws-credential-id> \
   --ssh-key-credential-id <ssh-key-credential-id> \
   --region eu-north-1 \
-  --vpc-id <vpc-id> \
-  --node-subnet-ids <subnet-a>,<subnet-b>,<subnet-c> \
-  --bastion-subnet-id <public-subnet> \
-  --egress-mode existing \
   --bastion-allowed-ips 203.0.113.10/32 \
   --control-plane-count 3 \
   --control-plane-type t3.medium \
@@ -174,10 +191,6 @@ ankra cluster aws create \
   --credential-id <aws-credential-id> \
   --ssh-key-credential-id <ssh-key-credential-id> \
   --region eu-north-1 \
-  --vpc-id <vpc-id> \
-  --node-subnet-ids <subnet-a>,<subnet-b>,<subnet-c> \
-  --bastion-subnet-id <public-subnet> \
-  --egress-mode existing \
   --bastion-allowed-ips 203.0.113.10/32 \
   --control-plane-count 3 \
   --control-plane-type t3.medium \
@@ -187,11 +200,46 @@ ankra cluster aws create \
   --retention-policy retain
 ```
 
+The created-network flags are `--network-ip-range` (default `10.0.0.0/16`), `--availability-zones` (comma-separated, in the order the spread walks them), `--egress-mode nat_gateway|bastion_nat` and `--nat-gateway-single-zone`. A single-zone development cluster on the cheapest egress:
+
+```bash
+ankra cluster aws create \
+  --name dev-cluster \
+  --credential-id <aws-credential-id> \
+  --ssh-key-credential-id <ssh-key-credential-id> \
+  --region eu-north-1 \
+  --bastion-allowed-ips 203.0.113.10/32 \
+  --egress-mode bastion_nat \
+  --control-plane-count 1 \
+  --worker-count 2 \
+  --distribution k3s
+```
+
+#### Adopting an existing VPC from the CLI
+
+Pass `--vpc-id` with the subnets, and `--egress-mode existing|bastion_nat` (or leave it for preflight to detect); the created-network flags are refused alongside it:
+
+```bash
+ankra cluster aws create \
+  --name my-cluster \
+  --credential-id <aws-credential-id> \
+  --ssh-key-credential-id <ssh-key-credential-id> \
+  --region eu-north-1 \
+  --vpc-id <vpc-id> \
+  --node-subnet-ids <subnet-a>,<subnet-b>,<subnet-c> \
+  --bastion-subnet-id <public-subnet> \
+  --egress-mode existing \
+  --bastion-allowed-ips 203.0.113.10/32 \
+  --control-plane-count 3 \
+  --worker-count 3 \
+  --distribution k3s
+```
+
 `--cni` and `--cni-features` pick the CNI and its feature toggles (`kube_proxy_replacement`, `hubble`, `wireguard_encryption` for Cilium, `ebpf_dataplane` for Calico); `--environment` and `--criticality` classify the cluster as on every provider; `--gitops-repository`, `--gitops-credential-name` and `--gitops-branch` wire GitOps at create. The full flag list is in the [CLI reference](/reference/cli/cluster).
 
 ### Via the API
 
-Preflight first - the endpoint takes the same body as create and answers with findings instead of a cluster:
+Preflight first - the endpoint takes the same body as create and answers with findings instead of a cluster. Without `vpc_id` the request describes a created network (`network_ownership: created` in the result, with the `resolved_availability_zones`):
 
 ```bash
 curl -X POST https://platform.ankra.app/api/v1/clusters/aws/preflight \
@@ -202,9 +250,6 @@ curl -X POST https://platform.ankra.app/api/v1/clusters/aws/preflight \
     "credential_id": "<aws-credential-id>",
     "ssh_key_credential_id": "<ssh-key-credential-id>",
     "region": "eu-north-1",
-    "vpc_id": "<vpc-id>",
-    "node_subnet_ids": ["<subnet-a>", "<subnet-b>", "<subnet-c>"],
-    "bastion_subnet_id": "<public-subnet>",
     "bastion_allowed_ips": ["203.0.113.10/32"],
     "control_plane_count": 3,
     "node_groups": [
@@ -224,10 +269,10 @@ curl -X POST https://platform.ankra.app/api/v1/clusters/aws \
     "credential_id": "<aws-credential-id>",
     "ssh_key_credential_id": "<ssh-key-credential-id>",
     "region": "eu-north-1",
-    "vpc_id": "<vpc-id>",
-    "node_subnet_ids": ["<subnet-a>", "<subnet-b>", "<subnet-c>"],
-    "bastion_subnet_id": "<public-subnet>",
-    "egress_mode": "existing",
+    "network_ip_range": "10.0.0.0/16",
+    "availability_zones": ["eu-north-1a", "eu-north-1b", "eu-north-1c"],
+    "egress_mode": "nat_gateway",
+    "nat_gateway_single_zone": false,
     "bastion_allowed_ips": ["203.0.113.10/32"],
     "control_plane_count": 3,
     "control_plane_type": "t3.medium",
@@ -238,6 +283,32 @@ curl -X POST https://platform.ankra.app/api/v1/clusters/aws \
     "ubuntu_series": "24.04",
     "root_volume_gib": 40,
     "retention_policy": "retain"
+  }'
+```
+
+#### Adopting an existing VPC from the API
+
+Name the VPC and its subnets instead; `network_ip_range`, `availability_zones` and `nat_gateway_single_zone` are refused with `422` alongside `vpc_id`, and `egress_mode` is `existing` or `bastion_nat`:
+
+```bash
+curl -X POST https://platform.ankra.app/api/v1/clusters/aws \
+  -H "Authorization: Bearer $ANKRA_API_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "my-cluster",
+    "credential_id": "<aws-credential-id>",
+    "ssh_key_credential_id": "<ssh-key-credential-id>",
+    "region": "eu-north-1",
+    "vpc_id": "<vpc-id>",
+    "node_subnet_ids": ["<subnet-a>", "<subnet-b>", "<subnet-c>"],
+    "bastion_subnet_id": "<public-subnet>",
+    "egress_mode": "existing",
+    "bastion_allowed_ips": ["203.0.113.10/32"],
+    "control_plane_count": 3,
+    "node_groups": [
+      {"name": "default", "instance_type": "t3.large", "count": 3}
+    ],
+    "distribution": "k3s"
   }'
 ```
 
@@ -429,13 +500,13 @@ curl -X POST "https://platform.ankra.app/api/v1/clusters/aws/<cluster_id>/start?
 
 </CodeGroup>
 
-While stopped you pay for EBS storage (root volumes and any volumes the CSI driver provisioned), the Elastic IP, and any load balancers the cloud controller created - not for compute. Ankra records each instance's private IP at create and verifies it after every start; a difference is reported as drift rather than silently accepted. Stop and start also run on a timetable with [power schedules](/platform/cluster-power-schedules), and a stopped cluster is where control plane instance type changes are applied.
+While stopped you pay for EBS storage (root volumes and any volumes the CSI driver provisioned), the bastion's Elastic IP, any load balancers the cloud controller created, and - in a created VPC - the network itself: a stop keeps the VPC and its NAT gateways, which keep billing by the hour, so a cluster parked for weeks on `nat_gateway` egress is cheaper to deprovision. Compute is not billed. Ankra records each instance's private IP at create and verifies it after every start; a difference is reported as drift rather than silently accepted. Stop and start also run on a timetable with [power schedules](/platform/cluster-power-schedules), and a stopped cluster is where control plane instance type changes are applied.
 
 ---
 
 ## Deprovisioning
 
-Deprovisioning terminates the instances, releases the Elastic IP, deletes the security groups, key pair and per-cluster IAM roles, and - in `bastion_nat` mode - restores each node subnet's previous route table association before deleting the route table Ankra created. Your VPC, subnets, gateways and DHCP options are untouched. The cluster is removed from Ankra.
+Deprovisioning terminates the instances, releases the bastion's Elastic IP, and deletes the security groups, key pair and per-cluster IAM roles. In a created VPC it then removes the network in reverse order - NAT gateways with their Elastic IPs, route tables, subnets, the internet gateway, the VPC - every object found by the tags Ankra set. In an adopted VPC it restores each node subnet's previous route table association before deleting the one route table it created (`bastion_nat` mode), and your VPC, subnets, gateways and DHCP options are untouched. The cluster is removed from Ankra.
 
 <Warning>
 This action is irreversible. All data on the nodes' root volumes is permanently deleted.
@@ -465,10 +536,14 @@ The same sweep applies to a cluster that was stopped earlier: the volumes and lo
 
 ## Architecture
 
-An AWS cluster provisions the following infrastructure in your VPC:
+An AWS cluster provisions the following infrastructure - the first four rows only when Ankra creates the network:
 
 | Component | Description |
 |-----------|-------------|
+| **VPC** | Created from `network_ip_range` with DNS support and hostnames, and an internet gateway |
+| **Subnets** | Per availability zone (one or three), a private `/20` for the nodes and a public `/24` for the bastion and the NAT gateway |
+| **Route tables** | One public table with `0.0.0.0/0` on the internet gateway, and one private table per zone carrying that zone's egress route |
+| **NAT gateways** | `nat_gateway` mode: one per zone with its own Elastic IP, or one for all zones with `nat_gateway_single_zone` |
 | **Security groups** | One for the nodes (all traffic within the group, SSH and Kubernetes API from the bastion group, load balancer health checks added by the cloud controller) and one for the bastion (SSH from `bastion_allowed_ips` only) |
 | **Key pair** | Your SSH key credential's public key, imported as `ankra-k3s-<cluster>` |
 | **Elastic IP** | One, attached to the bastion - the cluster's only public address |
@@ -476,7 +551,7 @@ An AWS cluster provisions the following infrastructure in your VPC:
 | **Control plane(s)** | EC2 instances in the node subnets, no public IP, one per availability zone on a multi-AZ cluster |
 | **Worker(s)** | EC2 instances in the node subnets, no public IP, organised in [node groups](#node-groups) |
 | **IAM roles and instance profiles** | `ankra-k3s-<cluster>-cp` (cloud controller manager and EBS CSI controller) and `ankra-k3s-<cluster>-node` (kubelet and CSI node) |
-| **Route table** | `bastion_nat` mode only: one route table with `0.0.0.0/0` to the bastion, associated with the node subnets |
+| **Route table (adopted VPC)** | `bastion_nat` mode only: one route table with `0.0.0.0/0` to the bastion, associated with your node subnets |
 | **Cloud provider stack** | The AWS cloud controller manager and the EBS CSI driver, deployed after the Ankra Agent |
 
 ```mermaid
@@ -484,17 +559,17 @@ flowchart TB
     Internet((Internet))
     Platform[Ankra Platform]
 
-    subgraph VPC [Your VPC - never modified by Ankra]
-        subgraph Public [Public subnet - yours]
+    subgraph VPC [VPC - created by Ankra, or adopted and never modified]
+        subgraph Public [Public subnets - one per zone]
             Bastion[Bastion<br/>Elastic IP + private IP]
         end
-        subgraph Private [Private subnets - yours, across availability zones]
+        subgraph Private [Private subnets - one per zone]
             CP[Control plane instances<br/>private IP only]
             Workers[Worker instances<br/>private IP only]
             Agent[Ankra Agent<br/>runs in the cluster]
         end
-        IGW[Internet gateway - yours]
-        NAT[NAT gateway - yours, existing mode<br/>or the bastion, bastion_nat mode]
+        IGW[Internet gateway]
+        NAT[NAT gateway per zone - nat_gateway mode<br/>the bastion - bastion_nat mode<br/>your own path - existing mode]
     end
 
     NLB[Network Load Balancer<br/>created by the AWS cloud controller]
@@ -529,10 +604,14 @@ flowchart TB
 | Issue | Solution |
 |-------|----------|
 | Preflight refuses the credential | The credential is read-only (cost scope), or its provisioning stack predates the self-managed statements. Add a [provisioning credential](/platform/credentials/aws#provisioning), or update the existing stack to the published template |
-| Preflight refuses `bastion_nat` | A node subnet holds an instance Ankra did not create. Move it, pick an empty subnet, or create a NAT gateway and use `existing` |
-| Preflight reports no egress and refuses `existing` | The node subnets' route table has no `0.0.0.0/0` route to a NAT gateway, NAT instance or transit path. Add one, or use empty subnets with `bastion_nat` |
+| Preflight's `cidr` item is an error | `network_ip_range` does not hold a private `/20` and a public `/24` per zone - a `/20` VPC fits one zone only. Widen the range (up to `/16`) or use fewer zones |
+| Preflight refuses the zones | A named zone does not exist or is not available in the region, or more than one zone was given with fewer than three control planes. Check `ankra cluster aws availability-zones`; set `control_plane_count` to 3 |
+| Preflight reports the VPC or NAT gateway quota | The account is at its VPCs-per-region (`L-F678F1CE`) or NAT-gateways-per-zone (`L-FE5A380F`) limit. Request an increase, deprovision unused clusters, or use `bastion_nat` / `nat_gateway_single_zone` to need fewer gateways |
+| Preflight refuses `bastion_nat` (adopted VPC) | A node subnet holds an instance Ankra did not create. Move it, pick an empty subnet, or create a NAT gateway and use `existing` |
+| Preflight reports no egress and refuses `existing` (adopted VPC) | The node subnets' route table has no `0.0.0.0/0` route to a NAT gateway, NAT instance or transit path. Add one, or use empty subnets with `bastion_nat` |
+| `node_subnet_ids` or `network_ip_range` refused with `422` | The subnet fields belong to an adopted VPC and the network fields to a created one - a request carries `vpc_id` with subnets, or neither |
 | `bastion_allowed_ips` refused | The list is empty or contains `0.0.0.0/0`. Give it at least one CIDR |
-| Cluster stuck in provisioning | Check the vCPU quota for the instance family, the Elastic IP quota, and that the bastion subnet is public (route to the internet gateway) |
+| Cluster stuck in provisioning | Check the vCPU quota for the instance family, the Elastic IP and NAT gateway quotas, and - for an adopted VPC - that the bastion subnet is public (route to the internet gateway) |
 | Nodes stay `NotReady` with the `node.cloudprovider.kubernetes.io/uninitialized` taint | The cloud controller cannot match the node - see [cluster ID and node names](#cloud-controller-cluster-id-and-node-names) below |
 | `LoadBalancer` Service stuck in `Pending` | Check the cloud controller pods in `kube-system`; on a fresh account the first load balancer also creates the Elastic Load Balancing service-linked role, which the credential allows |
 | PVC stuck in `Pending` | Check the EBS CSI controller pods; a pod pinned to a zone with no volume there needs a node group in that zone |
@@ -560,7 +639,9 @@ The guard needs a policy engine. On a flannel cluster the create result reports 
 Preflight checks the quotas that most often block a create, but a quota can still be consumed between preflight and create, and the per-cluster quota report (`GET /api/v1/clusters/aws/{cluster_id}/quotas`) answers `404` - "Quota reporting is not available for aws clusters" - until it ships. If provisioning fails with a quota error, check in the [Service Quotas console](https://console.aws.amazon.com/servicequotas/) for the region:
 
 - Running On-Demand instances (vCPU) for the instance family
-- Elastic IPs per region
+- VPCs per region (`L-F678F1CE`) - a created network uses one
+- NAT gateways per availability zone (`L-FE5A380F`) - `nat_gateway` egress uses one per zone, or one in total with `nat_gateway_single_zone`
+- Elastic IPs per region - one for the bastion plus one per NAT gateway
 - Security groups per network interface, and rules per security group
 - Network Load Balancers per region
 
