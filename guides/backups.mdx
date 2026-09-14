@@ -206,6 +206,51 @@ For a vault **Ankra provisioned**, you can ask for the cloud side to be cleaned 
 
 The teardown runs as a background job: the vault disappears from the list immediately and the bucket is removed shortly after. Each of its steps is written to be repeatable - a bucket already gone, a service already deleted and keys already removed all count as done - but nothing retries it automatically today. If the teardown fails, the provider resources stay and have to be removed in the provider console.
 
+## Protect a stack
+
+<Warning>
+**Closed beta**, like the rest of this page. The `backup` block needs the **backups** feature enabled for the organisation.
+</Warning>
+
+A vault is where restore points land; a stack's `backup` block is what puts them there. Add it to the stack in your cluster file and apply:
+
+```yaml
+stacks:
+  - name: platform
+    backup:
+      enabled: true
+      vault: offsite          # the vault name from `ankra backup vaults list`
+      schedule: daily         # or hourly, weekly, or a cron expression
+      retention:
+        daily: 7
+        weekly: 4
+        monthly: 6
+      selection:
+        databases: true                    # the default
+        persistent_volume_claims:
+          - grafana/grafana-storage        # named volumes only
+    addons: [...]
+```
+
+```bash
+ankra cluster apply -f cluster.yaml
+```
+
+Ankra materialises the policy itself: a Velero `Schedule` selecting the volumes you named, a CloudNativePG `ScheduledBackup` and object store per Postgres cluster, and a schedule entry inside each Percona cluster. You do not write those, and they never appear as stack resources - they are derived from the block every time the stack renders. See the [`backup` field reference](/reference/importcluster#spec-stacks-backup) for every field.
+
+Three behaviours worth knowing before you rely on it:
+
+- **Databases are in by default; volumes are not.** Protecting a stack does not start copying every claim in its namespaces. Name the volumes you want in `selection.persistent_volume_claims` - the stack's **Backups** tab lists the asset names.
+- **An omitted block preserves protection.** A cluster file that does not mention `backup` leaves the stored policy alone, so an older CLI or a partial file cannot unprotect a stack. Removing protection is an explicit `enabled: false`, and the apply warns about what stops being covered.
+- **Protecting a CloudNativePG cluster restarts its instances once.** Ankra adds the barman-cloud WAL archiver to the `Cluster`, and CloudNativePG reconciles that by rolling the instances one at a time - a brief primary failover. The apply says so before it happens.
+
+Per-add-on overrides ride the add-on's settings, for the case where one add-on in a protected stack should be captured differently (or not at all):
+
+```bash
+ankra cluster addons settings get cnpg-cluster
+ankra cluster addons settings set cnpg-cluster --backup-enabled=false
+```
+
 ## Permissions
 
 | Permission | Allows |

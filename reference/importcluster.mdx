@@ -182,6 +182,59 @@ Each stack groups related manifests, add-ons, and applications.
 | `manifests` | no | List of [manifest entries](#spec-stacks-manifests) or `- include: <path>` directives |
 | `addons` | no | List of [add-on entries](#spec-stacks-addons) or `- include: <path>` directives |
 | `applications` | no | List of [application entries](#spec-stacks-applications) |
+| `backup` | no | The stack's [backup policy](#spec-stacks-backup) - `Closed Beta` |
+
+### `spec.stacks[].backup`
+
+<Warning>
+**Closed beta.** The `backup` block requires the **backups** feature to be enabled for your organisation. While it is off, a block in the file is rejected with `Backups are not enabled for this organisation.` See [Backup Vaults](/guides/backups#not-enabled-yet).
+</Warning>
+
+Protecting a stack is one block. Ankra turns it into scheduled restore points in the [backup vault](/guides/backups) you name - a Velero `Schedule` for the volumes you selected, a CloudNativePG `ScheduledBackup` and object store for each Postgres cluster, and a schedule entry inside each Percona cluster.
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `enabled` | no | `true` protects the stack; `false` removes protection. Default `false` |
+| `vault` | when enabled | Name or id of the [backup vault](/guides/backups) restore points are written to |
+| `schedule` | no | `hourly`, `daily`, `weekly`, or a five-field cron expression. Default `daily` |
+| `retention.hourly` / `.daily` / `.weekly` / `.monthly` / `.yearly` | no | How many restore points of each calendar period to keep. `0` (the default) disables that tier |
+| `retention.minimum_count` | no | Keep at least this many restore points however the tiers fall out |
+| `retention.minimum_age` | no | A Go duration (`24h`, `720h`). Nothing younger than this is expired |
+| `selection.databases` | no | Whether the stack's database clusters are captured. Default `true` |
+| `selection.persistent_volume_claims` | no | Names of the volume data assets to capture. **Default empty** |
+| `selection.confirm_exclude_databases` | when excluding | Required acknowledgement when `selection.databases` is `false` |
+
+```yaml
+stacks:
+  - name: platform
+    backup:
+      enabled: true
+      vault: offsite
+      schedule: daily
+      retention:
+        daily: 7
+        weekly: 4
+        monthly: 6
+        minimum_count: 3
+        minimum_age: 24h
+      selection:
+        databases: true
+        persistent_volume_claims:
+          - grafana/grafana-storage
+    addons: [...]
+```
+
+<Note>
+**Protecting a stack does not sweep every volume in it.** Databases are captured by default, because a restore point without the database contents is the one nobody forgives. Volumes are captured only when you name them in `selection.persistent_volume_claims`, because a stack's namespaces routinely hold caches, scratch space and metrics storage that nobody wants copied to object storage every night. Use the stack's data inventory (the **Backups** tab, or `ankra cluster stacks data-inventory`) to see the asset names.
+</Note>
+
+<Warning>
+**Excluding databases needs an acknowledgement.** Setting `selection.databases: false` requires `selection.confirm_exclude_databases: true` in the same block, and the stack then carries a standing warning: its restore points bring back volumes and configuration, but no database contents. The acknowledgement covers the write that carried it - a later edit that keeps databases excluded has to say so again.
+</Warning>
+
+**An omitted block never removes protection.** A file that does not mention `backup` leaves the stored policy exactly as it was. That is deliberate: `ankra cluster apply` replaces a stack with what the file says, and an older CLI or a hand-written file that simply did not know about the block would otherwise unprotect the stack in silence. Removing protection is `backup: {enabled: false}` - something a person typed. When an apply does narrow protection, the result carries a warning naming what is no longer covered.
+
+The objects that implement the policy are **never stored as stack members**. They are derived from this block every time the stack renders, so no apply, clone or profile capture can leave a stack with a schedule that no longer matches its policy - or remove the schedule while leaving the block.
 
 ### Deploy waves
 
