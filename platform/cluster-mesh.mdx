@@ -57,7 +57,7 @@ One case `make-ready` cannot serve: a cluster whose network identity was allocat
 
 These are properties of a mesh, not of a cluster, so they can only fail once you try to put two particular clusters together.
 
-- **No overlapping ranges.** Both the pod CIDR and the service CIDR of every member must be disjoint from every other member's. Clusters created while the overlay feature is on draw disjoint ranges from your organisation's pools automatically; readiness names any conflict before you join. Two clusters that were both prepared with `make-ready` from an identity-less state run the same kubeadm default ranges, so they can each mesh with pool-ranged members but not with each other.
+- **No overlapping pod ranges.** The pod CIDR of every member must be disjoint from every other member's: a mesh routes pod traffic between members by pod address. Service ranges may overlap - a ClusterIP is resolved inside the cluster that owns it and never crosses to a peer - so the kubeadm default service range every day-2 cluster runs is fine. Clusters created while the overlay feature is on draw disjoint pod ranges from your organisation's pools automatically, and the platform keeps pod ranges unique across the organisation. Two clusters built before the overlay both run the kubeadm default pod range, so `make-ready` on the second one is refused by name until you ask it to move that cluster onto a fresh range with `--pod-cidr auto` (see [make-ready](#make-an-existing-cluster-mesh-capable)).
 - **Unique Cilium cluster ids.** Every member holds a different one, which caps a mesh at **255 members**.
 - **A routable path per pair.** Connecting two apiservers is not enough. Ankra resolves each pair to one address family and refuses pairs with no route (see [How members connect](#how-members-connect)). In short: two clusters in *different* provider accounts must **both** be on the WireGuard overlay, and a Proxmox EVPN cluster meshes only with clusters on the same Proxmox credential.
 - **Each member publishes an apiserver address.** A member publishes one once the platform has recorded its nodes, so this is not checked before a join (it would refuse a cluster that is minutes from ready). It is checked afterwards, and a member nobody can reach is reported rather than left silently unconnected.
@@ -127,13 +127,37 @@ ankra cluster mesh make-ready <cluster-id>
 ankra cluster mesh make-ready <cluster-id> --site-public-ip <address>
 ```
 
-`make-ready` allocates the cluster's Cilium identity and an overlay range, keeps the pod and service ranges the cluster already runs, and sets its nodes converging onto the overlay: each node joins the WireGuard mesh, the node IP and API server address switch to overlay addresses, and Cilium re-renders with the identity.
+`make-ready` allocates the cluster's Cilium identity and an overlay range, keeps the pod and service ranges the cluster already runs, and sets its nodes converging onto the overlay: each node installs WireGuard and joins the mesh through its own update job (on UpCloud that job now joins a node born before the overlay, not only one created on it), the node IP switches to the overlay address, and Cilium re-renders with the identity. A cluster's status view carries an `overlay_nodes` item while nodes are still joining, naming how many are left.
 
 <Warning>
 Zero disruption is not possible: switching node IPs restarts each kubelet once. Plan it like a rolling node operation. Everything else stays: workloads, data, and the addresses your Services expose.
 </Warning>
 
-`make-ready` refuses, with the reason, clusters it cannot serve: providers not yet wired to the overlay, non-kubeadm distributions, non-Cilium CNIs, and Proxmox clusters without a site address. Two clusters that were both created identity-less run the same default pod range; they can each mesh with pool-ranged members, and `readiness` names the overlap if you try to mesh them with each other.
+### Move a cluster onto a fresh pod range
+
+Two clusters built before the overlay both run the kubeadm default pod range, and pod ranges must be disjoint across a mesh, so the platform keeps them unique per organisation: `make-ready` on the second such cluster is refused by name. Ask it to renumber instead (UpCloud clusters only for now):
+
+```bash
+ankra cluster mesh make-ready <cluster-id> --pod-cidr auto      # first free range from your organisation's pod pool
+ankra cluster mesh make-ready <cluster-id> --pod-cidr 10.216.128.0/18
+```
+
+The new range is recorded on the identity and stamped onto every node. Each control plane then converges the range's three carriers in place (the kubeadm configuration, the controller-manager's `--cluster-cidr`, kube-proxy's `clusterCIDR`), and every node moves onto the range by leaving and re-registering - drained, its Node object deleted, its kubelet restarted - one node at a time, never two out at once, after which its Cilium agent is restarted and any pod still holding an old-range address is rescheduled. A node whose range lags the definition reads as `network=pod_cidr_drift` until its update job has moved it.
+
+<Warning>
+A renumber drains and re-registers every node of the cluster once. Run it on the cluster that can best afford the rolling disruption, and keep the first cluster of a mesh on the range it has: only the clusters that collide with it need to move.
+</Warning>
+
+`make-ready` refuses, with the reason, clusters it cannot serve: providers not yet wired to the overlay, non-kubeadm distributions, non-Cilium CNIs, Proxmox clusters without a site address, and a default pod range another cluster of the organisation already recorded (pass `--pod-cidr auto`).
+
+### The whole path in one command
+
+`ankra cluster mesh up` runs the path above for a set of clusters: it reads their readiness, runs `make-ready` on every cluster that only lacks its identity or the overlay, joins every cluster that is ready, creates the mesh when none of that name exists, and keeps passing until every member reports `ready` or `--wait` runs out. It changes nothing with `--plan`, and it never renumbers a pod range unless you pass `--renumber-pods`, in which case every colliding cluster after the first in your argument order moves.
+
+```bash
+ankra cluster mesh up my-mesh <cluster-a> <cluster-b> <cluster-c> --plan
+ankra cluster mesh up my-mesh <cluster-a> <cluster-b> <cluster-c> --renumber-pods
+```
 
 ## How members connect
 
@@ -205,5 +229,8 @@ A mesh with members cannot be deleted out from under them. Remove the members fi
 
 - **A member sits in `configuring`**: the agent has not yet confirmed the trust root or a verify has not run; check the cluster is online and its operations list for the mesh resource. The reconciler retries every five minutes, and re-dispatches the trust-root job itself for a member whose agent has not confirmed it within fifteen minutes. A cluster created with networking off can never leave `configuring` - readiness refuses it under `cilium_stack` before the join, and the fix is a cluster created with networking on.
 - **A member goes `degraded`**: it verified fewer peers than expected. Check the peer cluster's health first, then the site path (UDP forward, site address) if the pair crosses sites.
-- **A readiness check is marked not remediable**: for the provider, the distribution and the CNI that is final, and a new cluster is the only fix. For the identity and the node network, `make-ready` is the fix and readiness marks them remediable.
+- **A readiness check is marked not remediable**: for the provider, the distribution and the CNI that is final, and a new cluster is the only fix. For the identity and the node network, `make-ready` is the fix and readiness marks them remediable; for a pod range that overlaps a member's, `make-ready --pod-cidr auto` is (UpCloud).
+- **`make-ready` says the pod range is already recorded by another cluster**: another cluster of the organisation was prepared from the same kubeadm default first. Pass `--pod-cidr auto` to move this one onto a fresh range, at the cost of every node leaving and re-registering once.
+- **A member's status view shows `overlay_nodes` not ready**: some nodes have not joined the WireGuard overlay yet. Their update jobs put them on it - retry a failed one from the cluster's operations, or run `make-ready` again to set them converging.
+- **A node reads `network=pod_cidr_drift`**: it still runs the old pod range after a renumber; its update job moves it, one node at a time. `POD_CIDR_CP_PENDING` in the job's output means a control plane has not converged the range yet - the node retries once they have.
 - **LoadBalancer Services on a meshed UpCloud cluster**: node addressing changes on the overlay; see the [UpCloud guide](/guides/upcloud-clusters) for the current behaviour of provider load balancers on meshed clusters.
