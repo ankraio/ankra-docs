@@ -491,7 +491,38 @@ Every failed step carries an error class, and the class decides whose failure it
 - **Cancel.** `ankra pipeline cancel <run>`, `POST …/pipeline-runs/{run_id}/cancel`, or the **Cancel** button on the check run while the run is live. A run that is cancelled concludes with outcome `cancelled`.
 - **Re-run.** `ankra pipeline rerun <run>` (add `--failed-only` to re-run only the steps that did not succeed and whatever depends on them), `POST …/pipeline-runs/{run_id}/rerun`, or GitHub's own **Re-run** button on the check. A re-run is a new run with `rerun_of_run_id` pointing at the old one; the old run's outcome stays the record of what happened. It re-plans from the **original run's own definition**, not from whatever the pipeline has become since, so re-running a month-old run reproduces it rather than quietly executing a different pipeline.
 
-A run's outcome is one of `success`, `failure`, `cancelled`, `timed_out`, `skipped` or `infra_error`, and its status is `queued`, `running` or `concluded`; `ankra pipeline get <run>` shows both, with the per-step table.
+### Status is the lifecycle, outcome is the verdict
+
+A run and each of its steps carry two fields, and only one of them says how the work ended. `status` is where the work is in its life; `outcome` is how it finished, and it is `null` until `status` is `concluded`. This is the same split as GitHub Actions' `status` / `conclusion`: a monitor that filters steps on `status == "failure"` matches nothing, because every finished step is `concluded` - read `outcome` for the verdict.
+
+| Field | On a run | On a step |
+|-------|----------|-----------|
+| `status` | `queued` (created, no step has started), `running` (work in flight), `concluded` (finished; always carries an outcome) | `blocked` (waiting on its dependencies), `pending` (dependencies satisfied, not yet claimed by a worker), `running` (claimed and started), `concluded` (finished; always carries an outcome) |
+| `outcome` | `null` until `concluded`, then one of the values below | `null` until `concluded`, then one of the same values |
+
+The outcome vocabulary is one set for runs and steps alike:
+
+| `outcome` | Meaning |
+|-----------|---------|
+| `success` | The work did what was asked |
+| `failure` | Your own work failed - a non-zero exit, a refused definition, a gate that blocked. The error class says which |
+| `cancelled` | Stopped on purpose - `ankra pipeline cancel`, the API, or the check run's **Cancel** button |
+| `timed_out` | The work exceeded its `timeout` |
+| `skipped` | The work never ran: a dependency did not succeed, an `if:` excluded it, or - for a run - the trigger's branch, tag or path filter excluded every stage |
+| `infra_error` | Ankra failed, not your work - a retried `agent_infra` or `worker_lost` that failed twice, a `step_stranded`, a `report_unreadable` |
+
+A run's outcome folds its steps' outcomes: `success` when every step succeeded or was skipped, otherwise the worst of what its steps reported. `ankra pipeline get <run>` prints the outcome in place of the status once there is one, with a glyph per state - `✓ success`, `✗ failure` / `timed_out` / `infra_error`, `⊘ cancelled`, `○ skipped`, and `⟳` only for a run or step that has not concluded (`○` for a blocked step) - and `-o json` carries both fields verbatim.
+
+A run also records the protected authority it executed under, as `authority_state` (the `Authority:` line in `ankra pipeline get`):
+
+| `authority_state` | Meaning |
+|-------------------|---------|
+| `approved` | The run executes the authority its head declares: the default-branch definition either declares no protected section, or an administrator approved exactly what it declares, and the head changes nothing |
+| `unapproved` | A run of the default branch whose definition changed protected authority no administrator has approved yet. It executes under the last approved authority - or under none, when nothing was ever approved - until one does |
+| `changed_on_head` | A run of a head that is not the default branch (a pull request, another branch) whose definition declares different authority. It executes under the default branch's; the head's change is ignored and surfaced on the check run and the pull request comment |
+| `null` | The planner never resolved authority for this run: it is still `queued`, it concluded `skipped` because the trigger filter excluded every stage before planning ever ran, or it was planned before authority tracking existed. `null` means "not recorded", never "no authority" |
+
+`authority_hash` and `authority_definition_id` sit beside it and are `null` in the same cases. See [Logic is open, authority is closed](#logic-is-open-authority-is-closed) for what each state means for the run's protected sections.
 
 ## Limits and defaults
 
