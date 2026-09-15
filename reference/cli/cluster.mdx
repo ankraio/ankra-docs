@@ -121,7 +121,7 @@ ankra cluster addons list [addon name] [flags]
 
 ## ankra cluster addons settings
 
-Get settings for an addon
+Read and write an addon's settings
 
 ```bash
 ankra cluster addons settings <addon_name> [flags]
@@ -132,6 +132,61 @@ ankra cluster addons settings <addon_name> [flags]
 | Flag | Default | Description |
 |------|---------|-------------|
 | `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+
+## ankra cluster addons settings get
+
+Get settings for an addon
+
+```bash
+ankra cluster addons settings get <addon_name> [flags]
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+
+## ankra cluster addons settings set
+
+Change one or more settings on an addon without resending the rest.
+
+Each flag is applied to the addon's stored settings; anything you do not pass
+is left as it is. To replace the whole document instead, use
+'ankra cluster addons update &lt;addon&gt; -f settings.json'.
+
+Backup settings (closed beta) override the add-on's stack backup policy for
+this add-on only - use them for the one add-on in a protected stack that
+should be captured differently:
+
+  ankra cluster addons settings set cnpg-cluster --backup-enabled=true --backup-consistency=transactional
+  ankra cluster addons settings set redis-cache --backup-enabled=false
+  ankra cluster addons settings set cnpg-cluster --backup-schedule=hourly --backup-retention-daily=14
+
+```bash
+ankra cluster addons settings set <addon_name> [flags]
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--auto-prune` | `true` | Delete resources the addon no longer declares |
+| `--automated` | `true` | Sync the addon automatically when its definition changes |
+| `--backup-consistency` |   | How the capture is taken: transactional, application, crash or logical |
+| `--backup-enabled` | `false` | Capture this addon's data assets under the stack's backup policy |
+| `--backup-retention-daily` | `0` | Daily restore points to keep for this addon |
+| `--backup-retention-hourly` | `0` | Hourly restore points to keep for this addon |
+| `--backup-retention-minimum-age` |   | Never expire a restore point younger than this (e.g. 24h) |
+| `--backup-retention-minimum-count` | `0` | Keep at least this many restore points for this addon |
+| `--backup-retention-monthly` | `0` | Monthly restore points to keep for this addon |
+| `--backup-retention-weekly` | `0` | Weekly restore points to keep for this addon |
+| `--backup-retention-yearly` | `0` | Yearly restore points to keep for this addon |
+| `--backup-schedule` |   | Override the stack's schedule for this addon: hourly, daily, weekly, or a cron expression |
+| `--cluster` |   | Target cluster (name or ID); defaults to the active selection |
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+| `--revision-history-limit` | `10` | How many previous releases to keep |
+| `--self-heal` | `true` | Re-apply the addon when the live state drifts |
 
 ## ankra cluster addons uninstall
 
@@ -383,6 +438,561 @@ ankra cluster apply [flags]
 | `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
 | `--timeout` | `10m0s` | Maximum time to wait when --wait is set |
 | `--wait` | `false` | Wait for the configuration write to be applied and report its result. Add-on deploys are dispatched afterwards and are NOT covered by this flag - watch them with 'ankra cluster operations list' |
+
+## ankra cluster aws
+
+Manage the lifecycle of self-managed Kubernetes clusters Ankra builds on EC2.
+
+These are k3s (or kubeadm) clusters on plain EC2 instances, not EKS. By
+default Ankra creates the whole network for the cluster (VPC, subnets,
+internet gateway, route tables, NAT) and removes it with the cluster; pass
+--vpc-id to build inside a VPC you already own instead. For an EKS control
+plane use 'ankra cluster managed'.
+
+## ankra cluster aws access-info
+
+Show the bastion and control plane IPs plus ready-to-use SSH jump and Kubernetes API port-forward commands.
+
+```bash
+ankra cluster aws access-info <cluster_id|name> [flags]
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+
+## ankra cluster aws availability-zones
+
+List the availability zones of a region
+
+```bash
+ankra cluster aws availability-zones [flags]
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--credential-id` |   | AWS credential ID (required) |
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+| `--region` |   | AWS region, e.g. eu-north-1 (required) |
+
+## ankra cluster aws bastion
+
+Inspect and diagnose the cluster's single bastion/gateway node.
+Find its node ID with 'nodes list'.
+
+## ankra cluster aws bastion diagnose
+
+Dispatch the provider's read-only bastion diagnose job and wait for its
+report: sshd configuration, failed-login volume, disk, failed units, journal
+errors, listening ports, and pending security updates. Nothing on the host is
+changed. The platform waits up to two minutes for the job; a slower run hands
+back the operation id to poll with 'cluster operations list'.
+
+```bash
+ankra cluster aws bastion diagnose <cluster_id|name> [flags]
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+| `--timeout` | `3m0s` | Maximum time to wait for the diagnosis report |
+
+## ankra cluster aws bastion status
+
+Report the verdict the platform's bastion health loop last recorded for the
+cluster's bastion/gateway: whether it is reachable, which hop a failed probe
+stopped at, and when it was last checked. Nothing is probed by this command,
+so it answers even while the bastion is unreachable - use 'bastion diagnose'
+to SSH in and collect a fresh report.
+
+```bash
+ankra cluster aws bastion status <cluster_id|name> [flags]
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+
+## ankra cluster aws control-plane
+
+Inspect and change the control plane configuration. Only 1 or 3 controllers
+are allowed (etcd needs an odd number of voting members for quorum).
+
+The controller count can only be changed while the cluster is stopped, and
+applies the next time the cluster is started.
+
+The instance type can also be changed on a running cluster that has three
+controllers: they are then resized one at a time, keeping the Kubernetes API
+up. With a single controller it still needs a stopped cluster, because
+resizing the only controller takes the API down while it reboots.
+
+Run "control-plane get" to see which of the two is available right now.
+
+## ankra cluster aws control-plane get
+
+Show the current control plane configuration
+
+```bash
+ankra cluster aws control-plane get <cluster_id|name> [flags]
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+
+## ankra cluster aws control-plane set-count
+
+Change the controller count (1 or 3)
+
+```bash
+ankra cluster aws control-plane set-count <cluster_id|name> <count> [flags]
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+
+## ankra cluster aws control-plane set-instance-type
+
+Change the instance type of every controller in a AWS cluster.
+
+The instance type is stored as given; it is not checked against AWS's catalog.
+A name that does not exist is rejected by AWS itself, which on a stopped
+cluster is at the next start - after this command has already reported
+success.
+
+List the instance types that do exist with:
+  ankra cluster aws instance-types
+
+```bash
+ankra cluster aws control-plane set-instance-type <cluster_id|name> <instance_type> [flags]
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+
+## ankra cluster aws create
+
+Create an Ankra-managed k3s or kubeadm cluster on EC2 instances.
+
+By default Ankra creates the whole network: a VPC from --network-ip-range
+(default 10.0.0.0/16) with a public bastion subnet and private node subnets
+in each of --availability-zones (default: one zone, or three when the
+control plane has 3 or more nodes), an internet gateway, route tables and
+the nodes' egress - 'nat_gateway' (the default; one NAT gateway per zone, or
+one in total with --nat-gateway-single-zone) or 'bastion_nat' (the bastion is
+the nodes' NAT, the cheapest option). The created network is Ankra's and is
+deleted with the cluster.
+
+Pass --vpc-id to build inside a VPC you already own instead: Ankra adopts
+the VPC, --node-subnet-ids and --bastion-subnet-id and never creates or
+deletes networking there. Egress is then detected from the node subnets'
+route tables unless --egress-mode pins it: 'existing' uses the NAT gateway
+or internet gateway the subnets already route through, 'bastion_nat' makes
+the bastion the NAT. --network-ip-range, --availability-zones and
+--nat-gateway-single-zone do not apply to an adopted VPC.
+
+In both modes Ankra owns the instances, security groups, the generated SSH
+key and the bastion. Run 'preflight' first to check the region, the network
+(ownership, zones, CIDR or the adopted subnets), instance-type availability
+and the resolved egress mode.
+
+Examples:
+  # Ankra creates the network (default)
+  ankra cluster aws create --name prod --credential-id &lt;id&gt; \
+    --ssh-key-credential-id &lt;id&gt; --region eu-north-1 \
+    --bastion-allowed-ips 203.0.113.0/24
+
+  # ... spanning three zones with a single NAT gateway
+  ankra cluster aws create --name prod --credential-id &lt;id&gt; \
+    --ssh-key-credential-id &lt;id&gt; --region eu-north-1 \
+    --bastion-allowed-ips 203.0.113.0/24 --control-plane-count 3 \
+    --availability-zones eu-north-1a,eu-north-1b,eu-north-1c \
+    --nat-gateway-single-zone
+
+  # Build inside a VPC you already own
+  ankra cluster aws create --name prod --credential-id &lt;id&gt; \
+    --ssh-key-credential-id &lt;id&gt; --region eu-north-1 --vpc-id vpc-0abc \
+    --node-subnet-ids subnet-0aaa,subnet-0bbb --bastion-subnet-id subnet-0ccc \
+    --bastion-allowed-ips 203.0.113.0/24
+
+```bash
+ankra cluster aws create [flags]
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--architecture` |   | Node CPU architecture (server default: amd64; arm64 is refused until its image catalogue is audited) |
+| `--availability-zones` | `[]` | Created network only: zones the subnets are created in, comma-separated (server default: 1 zone, or 3 when --control-plane-count is 3 or more) |
+| `--bastion-allowed-ips` | `[]` | CIDRs allowed to reach the bastion over SSH, comma-separated (server default: 0.0.0.0/0 - open to everyone, key-only and rate-limited on the host; name your own CIDRs to restrict it) |
+| `--bastion-instance-type` |   | Bastion instance type (server default: t3.small) |
+| `--bastion-subnet-id` |   | Adopted VPC only: public subnet the bastion is placed in (required with --vpc-id) |
+| `--cni` |   | CNI plugin: cilium, calico or flannel (server default: cilium; kubeadm requires cilium; immutable after create) |
+| `--cni-features` | `[]` | CNI features to switch on, comma-separated: kube_proxy_replacement, hubble, wireguard_encryption, ebpf_dataplane (default: all off) |
+| `--control-plane-count` | `0` | Control plane node count, 1-9; at least 3 when the network spans more than one zone, and 3 or more makes a created network default to three zones (server default: 1) |
+| `--control-plane-type` |   | Control plane instance type (server default: t3.medium) |
+| `--credential-id` |   | AWS credential ID - an access key pair or an assumable role (required) |
+| `--criticality` |   | Cluster criticality label (server default) |
+| `--description` |   | Cluster description |
+| `--distribution` |   | Kubernetes distribution: k3s or kubeadm (server default: kubeadm) |
+| `--egress-mode` |   | How the nodes reach the internet: 'nat_gateway' (created network only; default for one), 'bastion_nat' (either; the bastion is the NAT) or 'existing' (adopted VPC only; the subnets' own NAT or internet gateway, and the default there, detected from their route tables) |
+| `--environment` |   | Cluster environment label, e.g. production or development (server default) |
+| `--etcd-node-count` | `0` | External etcd node count, 3 or 5 (server default: 3) |
+| `--etcd-topology` |   | etcd topology: stacked or external (server default: stacked) |
+| `--etcd-type` |   | External etcd instance type (server default: t3.medium) |
+| `--gitops-branch` |   | GitOps branch (server default: master) |
+| `--gitops-credential-name` |   | GitOps GitHub credential name; when set with --gitops-repository, the generated stack is committed to Git |
+| `--gitops-repository` |   | GitOps repository (owner/repo) the generated stack is committed to |
+| `--include-dns` | `true` | Give the cluster its own subdomain under ankra.cc and install external-dns, so an ingress hostname under that subdomain gets its DNS record and TLS certificate with no manual setup. Scope: external-dns only manages the generated subdomain - ingress hosts on your own domains are ignored, and their DNS records stay yours to create (default on; pass --include-dns=false to skip) |
+| `--include-networking` | `true` | Provision the networking stack (default on; pass --include-networking=false to skip) |
+| `--k3s-disabled-components` | `[]` | k3s packaged components to disable, comma-separated (e.g. traefik,servicelb) |
+| `--kubernetes-version` |   | Pin a Kubernetes version (default: latest supported) |
+| `--name` |   | Cluster name (required) |
+| `--nat-gateway-single-zone` | `false` | Created network only: with --egress-mode nat_gateway, place one NAT gateway in the first zone instead of one per zone (cheaper, not zone-redundant) |
+| `--network-ip-range` |   | Created network only: CIDR of the VPC Ankra creates (server default: 10.0.0.0/16) |
+| `--node-subnet-ids` | `[]` | Adopted VPC only: subnets the control plane and workers are spread across, comma-separated (required with --vpc-id) |
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+| `--region` |   | AWS region, e.g. eu-north-1 (required) |
+| `--retention-policy` |   | Teardown policy for EBS volumes and load balancers: retain or delete (server default: retain) |
+| `--root-volume-gib` | `0` | Encrypted gp3 root volume size in GiB per instance, 20-2000 (server default: 40) |
+| `--ssh-key-credential-id` |   | SSH key credential ID (required) |
+| `--ubuntu-series` |   | Ubuntu series for the node AMI, e.g. 24.04 (server default: 24.04; see 'images') |
+| `--vpc-id` |   | Adopt an existing VPC instead of letting Ankra create the network; needs --node-subnet-ids and --bastion-subnet-id |
+| `--worker-count` | `0` | Default-pool worker count (server default: 1) |
+| `--worker-type` |   | Worker instance type (server default: t3.medium) |
+
+## ankra cluster aws deprovision
+
+Permanently delete an AWS cluster and the provider resources Ankra created
+for it: the instances, security groups, bastion and generated SSH key, and -
+when Ankra created the network - the VPC, subnets, internet gateway, NAT
+gateways, route tables and elastic IPs. An adopted VPC and its subnets are
+never touched. EBS volumes and load balancers follow the cluster's
+retention_policy: 'retain' keeps them, 'delete' sweeps the tagged orphans.
+
+```bash
+ankra cluster aws deprovision <cluster_id|name> [flags]
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--force` | `false` | Force teardown: also delete the cluster's CSI storage volumes and load balancers (destroys persisted data), and tolerate unreachable infrastructure - the agent's dependency chain is skipped so the EC2 teardown runs even when the cluster can no longer be reached |
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+| `--yes` | `false` | Skip the confirmation prompt |
+
+## ankra cluster aws images
+
+List the Ubuntu series and CPU architectures a create may ask for with
+--ubuntu-series and --architecture. The platform resolves the actual AMI at
+build time, so there is no AMI id to pick.
+
+```bash
+ankra cluster aws images [flags]
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--credential-id` |   | AWS credential ID (required) |
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+| `--region` |   | AWS region, e.g. eu-north-1 (required) |
+
+## ankra cluster aws instance-types
+
+List EC2 instance types available in a region
+
+```bash
+ankra cluster aws instance-types [flags]
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--credential-id` |   | AWS credential ID (required) |
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+| `--region` |   | AWS region, e.g. eu-north-1 (required) |
+
+## ankra cluster aws k8s-version
+
+Get current Kubernetes version for an AWS cluster
+
+```bash
+ankra cluster aws k8s-version <cluster_id|name> [flags]
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+
+## ankra cluster aws nodes
+
+Inspect every server Ankra manages for the cluster (control plane, workers,
+and bastion or gateway). Soft-deleted entries from a stopped cluster are
+included so the saved topology is visible before re-provisioning.
+
+## ankra cluster aws nodes cloud-init-log
+
+Fetch 'cloud-init status --long' and the tail of
+/var/log/cloud-init-output.log from the node over the platform's bastion SSH
+lane, as a tracked read-only operation. This is the debug surface for
+node-group user-data: it shows whether the first-boot document ran and what
+it printed, without needing the cluster's SSH key. Repeated calls attach to
+an in-flight fetch instead of dispatching duplicates. Find node ids with
+'nodes list'.
+
+```bash
+ankra cluster aws nodes cloud-init-log <cluster_id|name> <node_id> [flags]
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+
+## ankra cluster aws nodes get
+
+Show full spec and metadata for a single node
+
+```bash
+ankra cluster aws nodes get <cluster_id|name> <node_id> [flags]
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+
+## ankra cluster aws nodes list
+
+List all nodes for the cluster
+
+```bash
+ankra cluster aws nodes list <cluster_id|name> [flags]
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+
+## ankra cluster aws nodes restart
+
+Schedule a native reboot (falling back to a power cycle) of the node as a
+tracked operation. The node must be in the 'up' state and have no restart
+already in flight. Workloads on the node are briefly unavailable while it
+reboots. Works for any node returned by 'nodes list', including the
+bastion/gateway.
+
+```bash
+ankra cluster aws nodes restart <cluster_id|name> <node_id> [flags]
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+
+## ankra cluster aws preflight
+
+Run the AWS create preflight: credential and region reachability, the
+network (a free CIDR and the zones for a created network; VPC and subnet
+membership and bastion subnet routing for an adopted one), instance-type
+and AMI availability, and what the server resolved - the network ownership
+(created or adopted), the availability zones the network will span, and
+the egress mode when --egress-mode is left unset.
+
+Takes the same flags as 'create'.
+
+```bash
+ankra cluster aws preflight [flags]
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--architecture` |   | Node CPU architecture (server default: amd64; arm64 is refused until its image catalogue is audited) |
+| `--availability-zones` | `[]` | Created network only: zones the subnets are created in, comma-separated (server default: 1 zone, or 3 when --control-plane-count is 3 or more) |
+| `--bastion-allowed-ips` | `[]` | CIDRs allowed to reach the bastion over SSH, comma-separated (server default: 0.0.0.0/0 - open to everyone, key-only and rate-limited on the host; name your own CIDRs to restrict it) |
+| `--bastion-instance-type` |   | Bastion instance type (server default: t3.small) |
+| `--bastion-subnet-id` |   | Adopted VPC only: public subnet the bastion is placed in (required with --vpc-id) |
+| `--cni` |   | CNI plugin: cilium, calico or flannel (server default: cilium; kubeadm requires cilium; immutable after create) |
+| `--cni-features` | `[]` | CNI features to switch on, comma-separated: kube_proxy_replacement, hubble, wireguard_encryption, ebpf_dataplane (default: all off) |
+| `--control-plane-count` | `0` | Control plane node count, 1-9; at least 3 when the network spans more than one zone, and 3 or more makes a created network default to three zones (server default: 1) |
+| `--control-plane-type` |   | Control plane instance type (server default: t3.medium) |
+| `--credential-id` |   | AWS credential ID - an access key pair or an assumable role (required) |
+| `--criticality` |   | Cluster criticality label (server default) |
+| `--description` |   | Cluster description |
+| `--distribution` |   | Kubernetes distribution: k3s or kubeadm (server default: kubeadm) |
+| `--egress-mode` |   | How the nodes reach the internet: 'nat_gateway' (created network only; default for one), 'bastion_nat' (either; the bastion is the NAT) or 'existing' (adopted VPC only; the subnets' own NAT or internet gateway, and the default there, detected from their route tables) |
+| `--environment` |   | Cluster environment label, e.g. production or development (server default) |
+| `--etcd-node-count` | `0` | External etcd node count, 3 or 5 (server default: 3) |
+| `--etcd-topology` |   | etcd topology: stacked or external (server default: stacked) |
+| `--etcd-type` |   | External etcd instance type (server default: t3.medium) |
+| `--gitops-branch` |   | GitOps branch (server default: master) |
+| `--gitops-credential-name` |   | GitOps GitHub credential name; when set with --gitops-repository, the generated stack is committed to Git |
+| `--gitops-repository` |   | GitOps repository (owner/repo) the generated stack is committed to |
+| `--include-dns` | `true` | Give the cluster its own subdomain under ankra.cc and install external-dns, so an ingress hostname under that subdomain gets its DNS record and TLS certificate with no manual setup. Scope: external-dns only manages the generated subdomain - ingress hosts on your own domains are ignored, and their DNS records stay yours to create (default on; pass --include-dns=false to skip) |
+| `--include-networking` | `true` | Provision the networking stack (default on; pass --include-networking=false to skip) |
+| `--k3s-disabled-components` | `[]` | k3s packaged components to disable, comma-separated (e.g. traefik,servicelb) |
+| `--kubernetes-version` |   | Pin a Kubernetes version (default: latest supported) |
+| `--name` |   | Cluster name (required) |
+| `--nat-gateway-single-zone` | `false` | Created network only: with --egress-mode nat_gateway, place one NAT gateway in the first zone instead of one per zone (cheaper, not zone-redundant) |
+| `--network-ip-range` |   | Created network only: CIDR of the VPC Ankra creates (server default: 10.0.0.0/16) |
+| `--node-subnet-ids` | `[]` | Adopted VPC only: subnets the control plane and workers are spread across, comma-separated (required with --vpc-id) |
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+| `--region` |   | AWS region, e.g. eu-north-1 (required) |
+| `--retention-policy` |   | Teardown policy for EBS volumes and load balancers: retain or delete (server default: retain) |
+| `--root-volume-gib` | `0` | Encrypted gp3 root volume size in GiB per instance, 20-2000 (server default: 40) |
+| `--ssh-key-credential-id` |   | SSH key credential ID (required) |
+| `--ubuntu-series` |   | Ubuntu series for the node AMI, e.g. 24.04 (server default: 24.04; see 'images') |
+| `--vpc-id` |   | Adopt an existing VPC instead of letting Ankra create the network; needs --node-subnet-ids and --bastion-subnet-id |
+| `--worker-count` | `0` | Default-pool worker count (server default: 1) |
+| `--worker-type` |   | Worker instance type (server default: t3.medium) |
+
+## ankra cluster aws pricing
+
+Show the on-demand prices a cluster in a region is estimated from
+
+```bash
+ankra cluster aws pricing [flags]
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--credential-id` |   | AWS credential ID (required) |
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+| `--region` |   | AWS region, e.g. eu-north-1 (required) |
+
+## ankra cluster aws regions
+
+List AWS regions available to a credential
+
+```bash
+ankra cluster aws regions [flags]
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--credential-id` |   | AWS credential ID (required) |
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+
+## ankra cluster aws start
+
+Re-provision a stopped AWS cluster. Use --scope control_plane to bring up only the control plane.
+
+```bash
+ankra cluster aws start <cluster_id|name> [flags]
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+| `--scope` | `all` | Provisioning scope: 'all' or 'control_plane' |
+
+## ankra cluster aws stop
+
+Stop an AWS cluster by terminating its EC2 instances while preserving its configuration so it can be re-provisioned later.
+
+```bash
+ankra cluster aws stop <cluster_id|name> [flags]
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--force` | `false` | Force stop: cancel every in-flight operation and block new operations for 60 seconds while the stop lands, and also delete the cluster's tagged EBS volumes and load balancers even when retention_policy is retain (destroys persisted data) |
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+
+## ankra cluster aws subnets
+
+List the subnets of a VPC with their availability zone, how their route
+table reaches the internet (egress: internet_gateway, nat_gateway,
+nat_instance, transit, none or unknown) and how many instances Ankra did
+not create already live in them. Nodes go in private subnets (egress via a
+NAT gateway, or via the bastion with --egress-mode bastion_nat, which is
+refused when a node subnet carries foreign instances); the bastion needs a
+public one (internet_gateway).
+
+```bash
+ankra cluster aws subnets [flags]
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--credential-id` |   | AWS credential ID (required) |
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+| `--region` |   | AWS region, e.g. eu-north-1 (required) |
+| `--vpc-id` |   | VPC to list the subnets of (required) |
+
+## ankra cluster aws vpcs
+
+List the VPCs of a region with their CIDR and DHCP domain name. The DHCP
+domain column is the domain the VPC's DHCP option set hands to instances;
+"(none)" means the option set names no domain and "?" means it could not be
+read, which is not the same thing.
+
+```bash
+ankra cluster aws vpcs [flags]
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--credential-id` |   | AWS credential ID (required) |
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+| `--region` |   | AWS region, e.g. eu-north-1 (required) |
+
+## ankra cluster aws workers
+
+Get current worker count for an AWS cluster
+
+```bash
+ankra cluster aws workers <cluster_id|name> [flags]
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
 
 ## ankra cluster clear
 
@@ -728,7 +1338,7 @@ Tear down a managed cluster: everything it runs on is released.
 Whether the cluster survives as a record depends on its kind, and the two
 outcomes are very different:
 
-  - cloud clusters (hetzner, ovh, upcloud, digitalocean, scaleway, proxmox, morpheus)
+  - cloud clusters (hetzner, ovh, upcloud, digitalocean, scaleway, aws, proxmox, morpheus)
     go to the provider-specific endpoint, which DELETES the cluster. The
     record does not survive, "ankra cluster provision" cannot bring it back,
     and the cluster id, its stacks and anything referencing them are gone.
@@ -755,7 +1365,7 @@ ankra cluster deprovision [cluster_name] [flags]
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--force` | `false` | Force deprovision even if cluster is in an unexpected state; on UpCloud, Hetzner, OVH and DigitalOcean also deletes leftover CSI storage volumes and load balancers |
+| `--force` | `false` | Force deprovision even if cluster is in an unexpected state; on UpCloud, Hetzner, OVH, DigitalOcean and AWS also deletes leftover CSI storage volumes and load balancers |
 | `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
 | `--yes` | `false` | Skip the confirmation prompt |
 
@@ -2857,6 +3467,8 @@ ankra cluster mesh list
 
 Turn an existing cluster mesh-capable, day-2: allocate its Cilium identity and overlay range, stamp the overlay onto its stored definitions, and set its resources converging so every node joins the platform WireGuard overlay. The node-IP switch restarts kubelets once; nothing is deleted or recreated.
 
+Two clusters prepared from the kubeadm default share one pod range and cannot mesh with each other. --pod-cidr auto moves this cluster onto a fresh range from the organisation's pool when its range collides with another cluster's (a CIDR records that range instead); every node is drained and re-registered once, one at a time. UpCloud clusters only.
+
 Proxmox clusters need --site-public-ip: the address other sites dial this cluster's site gateway on.
 
 ```bash
@@ -2867,13 +3479,14 @@ ankra cluster mesh make-ready <cluster_id|name> [flags]
 
 | Flag | Default | Description |
 |------|---------|-------------|
+| `--pod-cidr` |   | Renumber the pod range: 'auto' draws a fresh range from the organisation's pool when the current one collides with another cluster's, a CIDR records that range (upcloud only; every node re-registers once) |
 | `--site-public-ip` |   | Public address other sites dial this cluster's site gateway on (proxmox clusters only) |
 
 ## ankra cluster mesh readiness
 
 Check whether the given clusters could form one mesh. Each cluster is reported ready or not, with the failing checks spelled out.
 
-Some failures cannot be fixed on a running cluster: the Cilium identity and the overlay network mode are set when the cluster is created, so a cluster without them has to be rebuilt to mesh.
+A missing Cilium identity, a node network no other cluster can reach, and (on UpCloud) a pod range that overlaps another member's are fixed in place by `ankra cluster mesh make-ready`; the cloud, the distribution and the container network are settled when the cluster is created, so a cluster failing those has to be rebuilt to mesh. `ankra cluster mesh up` runs the whole path for a set of clusters.
 
 ```bash
 ankra cluster mesh readiness <cluster_id|name> [cluster_id|name...]
@@ -2886,6 +3499,27 @@ Show one cluster mesh and its members
 ```bash
 ankra cluster mesh show <mesh_id>
 ```
+
+## ankra cluster mesh up
+
+Bring a set of clusters into one mesh from wherever they are: read their readiness, run make-ready on every cluster that only lacks its network identity or the overlay, join every cluster that is ready, and keep going until each member reports ready or --wait runs out. The mesh is created when no mesh of that name exists.
+
+Two clusters prepared from the kubeadm default share one pod range and cannot mesh with each other; --renumber-pods lets `up` move every colliding cluster after the first onto a fresh range from the organisation's pool. That drains and re-registers each of their nodes once, so it is never done without the flag.
+
+--plan prints what a pass would do and changes nothing. Re-running is safe: members are skipped and a make-ready re-arms a cluster whose nodes did not converge.
+
+```bash
+ankra cluster mesh up <mesh_name|mesh_id> <cluster_id|name> [cluster_id|name...] [flags]
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--interval` | `30s` | Pause between passes |
+| `--plan` | `false` | Print what one pass would do and change nothing |
+| `--renumber-pods` | `false` | Move every colliding cluster after the first onto a fresh pod range from the organisation's pool (drains and re-registers each of its nodes once) |
+| `--wait` | `45m0s` | How long to keep passing over the clusters and waiting for members to report ready (0 runs one pass) |
 
 ## ankra cluster metrics
 
@@ -3301,8 +3935,8 @@ ankra cluster move edge-01 --organisation acme-prod
 
 List, add, scale, upgrade, and delete node groups on a cloud cluster.
 
-The cloud provider (Hetzner, OVH, UpCloud, DigitalOcean, Scaleway, Proxmox VE, or HPE
-Morpheus) is detected automatically from the cluster.
+The cloud provider (Hetzner, OVH, UpCloud, DigitalOcean, Scaleway, AWS, Proxmox VE, or
+HPE Morpheus) is detected automatically from the cluster.
 
 ## ankra cluster node-group add
 
@@ -4021,7 +4655,7 @@ fire once at a chosen time or repeatedly on a cron expression, so a
 development cluster can park itself outside working hours.
 
 Power schedules are available for self-managed Hetzner, OVHcloud, UpCloud,
-DigitalOcean, Scaleway, Proxmox VE, and HPE Morpheus clusters - the same
+DigitalOcean, Scaleway, AWS (EC2), Proxmox VE, and HPE Morpheus clusters - the same
 clusters that support manual stop and start. A scheduled stop behaves
 exactly like stopping the cluster yourself: the provider VMs are
 terminated and only the cluster's configuration is preserved for the next
@@ -4117,7 +4751,7 @@ Provision a managed cluster that is not running.
 
 This works for a cluster that was created but never built, and for an imported
 cluster that was deprovisioned. It cannot rebuild a deprovisioned cloud cluster
-(hetzner, ovh, upcloud, digitalocean, scaleway, proxmox, morpheus): that deprovision
+(hetzner, ovh, upcloud, digitalocean, scaleway, aws, proxmox, morpheus): that deprovision
 deleted the record, so there is nothing left to provision - create a new
 cluster instead.
 
@@ -4534,8 +5168,8 @@ ankra cluster roll-to [flags]
 
 Scale the number of default-pool worker nodes up or down for a cloud cluster.
 
-The cloud provider (Hetzner, OVH, UpCloud, DigitalOcean, Scaleway, Proxmox VE, or HPE
-Morpheus) is detected automatically from the cluster, so you do not need to
+The cloud provider (Hetzner, OVH, UpCloud, DigitalOcean, Scaleway, AWS, Proxmox VE, or
+HPE Morpheus) is detected automatically from the cluster, so you do not need to
 remember which provider it runs on. To scale a named node group instead, use
 'ankra cluster node-group scale'.
 
@@ -4974,8 +5608,8 @@ ankra cluster sops-config
 Get, set, and re-sync the SSH key credentials authorised to access a cloud
 cluster's nodes.
 
-The cloud provider (Hetzner, OVH, UpCloud, DigitalOcean, Scaleway, Proxmox VE, or HPE
-Morpheus) is detected automatically from the cluster.
+The cloud provider (Hetzner, OVH, UpCloud, DigitalOcean, Scaleway, AWS, Proxmox VE, or
+HPE Morpheus) is detected automatically from the cluster.
 
 ## ankra cluster ssh-keys get
 
@@ -5053,6 +5687,35 @@ ankra cluster stacks clone <stack_name> --to <target_cluster> [flags]
 | `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
 | `-t`, `--to` |   | Target cluster name or ID (required) |
 
+## ankra cluster stacks data
+
+The stack's data inventory: standalone persistent volume claims and database custom resources with their claims folded in, each with the engine that would capture it and the consistency that engine can promise.
+
+## ankra cluster stacks data list
+
+List what a stack holds that a backup would have to carry.
+
+Each asset says which engine would capture it and what consistency that engine
+can promise: an engine either produces a consistent artifact or it declares
+itself crash-consistent, and there is no third answer.
+
+The live read of the database operators can come back unavailable - no relay,
+or an offline agent - in which case the command says so rather than presenting
+a partial inventory as the whole truth.
+
+Example:
+  ankra cluster stacks data list shop
+
+```bash
+ankra cluster stacks data list <stack> [flags]
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+
 ## ankra cluster stacks delete
 
 Delete a stack
@@ -5095,6 +5758,44 @@ ankra cluster stacks list [stack name] [flags]
 |------|---------|-------------|
 | `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
 
+## ankra cluster stacks protect
+
+Turn on protection for a stack.
+
+Protection is a property of the stack, not a separate object: the command
+writes a backup block onto the stack's definition, and the platform converges
+on it by installing the backup data plane on the cluster. Until that plane
+exists the command reports the backup stack as "installing" rather than
+claiming the stack is protected.
+
+--vault is required; a protected stack with nowhere to write to is not
+protected. --schedule takes hourly, daily, weekly, or a five-field cron
+expression. --retention takes the buckets to keep, as key=value pairs.
+
+Examples:
+  ankra cluster stacks protect shop --vault production-backups
+  ankra cluster stacks protect shop --vault production-backups --schedule daily --retention daily=7,weekly=4,monthly=6
+  ankra cluster stacks protect shop --vault production-backups --include-pvc shop/data --backup-now --wait
+
+```bash
+ankra cluster stacks protect <stack> [flags]
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--backup-now` | `false` | Take the first restore point immediately instead of waiting for the schedule |
+| `--confirm-exclude-databases` | `false` | Acknowledge that --exclude-databases means no database contents are carried |
+| `--exclude-databases` | `false` | Leave this stack's database contents out of the capture |
+| `--include-pvc` | `[]` | Persistent volume claim to carry, as namespace/name (repeatable). Volumes are carried only where named |
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+| `--retention` |   | Restore points to keep, as key=value pairs: hourly, daily, weekly, monthly, yearly, minimum-count, minimum-age (for example daily=7,weekly=4,monthly=6) |
+| `--schedule` |   | hourly, daily, weekly, or a five-field cron expression |
+| `--timeout` | `2h0m0s` | Maximum time to wait when --wait is set |
+| `--vault` |   | Backup vault the restore points are written to (name or id, required) |
+| `--wait` | `false` | Wait for the operation to finish and report success or failure (default: submit and return immediately) |
+
 ## ankra cluster stacks rename
 
 Rename a stack
@@ -5102,6 +5803,176 @@ Rename a stack
 ```bash
 ankra cluster stacks rename <old_name> <new_name>
 ```
+
+## ankra cluster stacks restore-points
+
+A restore point is an immutable copy of a stack's data in a backup vault, self-describing enough to be read without the cluster it came from. Backing up creates one; restoring applies one.
+
+## ankra cluster stacks restore-points create
+
+Take a restore point of a stack now.
+
+The capture is dispatched by the platform, so the command answers with the
+restore point in 'creating' and the run that will seal it. With --wait it
+follows that run to completion and prints the sealed restore point.
+
+The vault is resolved in order: --vault, then the stack's own backup policy,
+then the organisation's single ready vault. With more than one ready vault and
+nothing naming which, the platform refuses rather than choosing for you.
+
+Examples:
+  ankra cluster stacks restore-points create shop
+  ankra cluster stacks restore-points create shop --vault production-backups --wait
+  ankra cluster stacks restore-points create shop --include-pvc shop/data --note "before the 3.2 upgrade"
+
+```bash
+ankra cluster stacks restore-points create <stack> [flags]
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--confirm-exclude-databases` | `false` | Acknowledge that --exclude-databases means no database contents are carried |
+| `--exclude-databases` | `false` | Leave this stack's database contents out of the capture |
+| `--include-pvc` | `[]` | Persistent volume claim to carry, as namespace/name (repeatable). Volumes are carried only where named |
+| `--note` |   | Why this restore point was taken |
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+| `--timeout` | `2h0m0s` | Maximum time to wait when --wait is set |
+| `--vault` |   | Backup vault to write to (name or id; default: the stack's own, then the organisation's single ready vault) |
+| `--wait` | `false` | Wait for the operation to finish and report success or failure (default: submit and return immediately) |
+
+## ankra cluster stacks restore-points delete
+
+Delete a restore point.
+
+The row goes either way, so a restore point whose cluster was destroyed is
+never undeletable; the objects in the bucket are swept by an execution on the
+source cluster, and when no sweep could be dispatched the command says why the
+objects were left behind rather than understating the storage bill.
+
+A restore point a backup, restore or clone is currently using is refused, and
+so is one that is still being taken.
+
+The id may be an unambiguous prefix of the one the listing printed, resolved
+against the stack's 200 most recent restore points, so it is checked for
+ambiguity only within that window; the full id is what addresses an older
+restore point with certainty.
+
+```bash
+ankra cluster stacks restore-points delete <stack> <restore-point-id> [flags]
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+| `--yes` | `false` | Skip the confirmation prompt |
+
+## ankra cluster stacks restore-points get
+
+Describe one restore point: the manifest it carries, every asset in it, everything it does not carry, and the run that produced it. The id may be an unambiguous prefix of the one the listing printed, resolved against the stack's 200 most recent restore points, so it is checked for ambiguity only within that window - the full id is what addresses an older restore point with certainty.
+
+```bash
+ankra cluster stacks restore-points get <stack> <restore-point-id> [flags]
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+
+## ankra cluster stacks restore-points list
+
+List the restore points taken of a stack, newest first.
+
+The listing carries what each restore point does NOT contain as well as what
+it does: a backup listing that showed sizes and hid omissions would be exactly
+the silence this is here to remove.
+
+Examples:
+  ankra cluster stacks restore-points list shop
+  ankra cluster stacks restore-points list shop --status complete
+  ankra cluster stacks restore-points list shop --trigger scheduled --limit 10
+
+```bash
+ankra cluster stacks restore-points list <stack> [flags]
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--cursor` |   | Continue from a previous page's cursor |
+| `--limit` | `0` | Page size (server default, maximum 200) |
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+| `--status` | `[]` | Only restore points in these statuses (creating, complete, failed, expiring, expired, deleted) |
+| `--trigger` | `[]` | Only restore points with these triggers (manual, scheduled, clone, migrate, pre_restore, verification) |
+| `--vault` |   | Only restore points in this backup vault (name or id) |
+
+## ankra cluster stacks restore-points restore
+
+Restore a restore point over the stack it was taken from.
+
+This destroys before it replaces. Typing the stack's own name is what gates
+it - the sequence the platform will follow is printed from its answer, once
+the restore has been accepted and before any of its steps run:
+
+  1. Scale down the workloads that own the data.
+  2. Remove the volumes the restore point replaces.
+  3. Restore the restore point's assets onto the cluster.
+  4. Scale the workloads back up over the restored data.
+
+Confirmation is the typed stack name, not y/N; --yes skips it for
+scripts. A restore point carrying a CloudNativePG or Percona database is
+refused with the platform's own reason - the ordinary restore path would
+report success over unchanged data, which is worse than refusing.
+
+A stack whose data has changed since the restore point was taken is refused
+unless --force. An inventory whose live database scan did not run counts as
+drift, because "we could not read it" is not "it is unchanged".
+
+The id may be an unambiguous prefix of the one the listing printed, resolved
+against the stack's 200 most recent restore points, so it is checked for
+ambiguity only within that window; the full id is what addresses an older
+restore point with certainty.
+
+```bash
+ankra cluster stacks restore-points restore <stack> <restore-point-id> [flags]
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--force` | `false` | Restore even though the stack's data has changed since the restore point was taken |
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+| `--timeout` | `2h0m0s` | Maximum time to wait when --wait is set |
+| `--wait` | `false` | Wait for the operation to finish and report success or failure (default: submit and return immediately) |
+| `--yes` | `false` | Skip the typed stack-name confirmation |
+
+## ankra cluster stacks unprotect
+
+Turn off protection for a stack.
+
+Every restore point already taken is kept and stays restorable: removing
+protection is a decision about the future, not about the past. The scheduled
+backups and the rendered object stores disappear on the next render.
+
+Confirmation is typing the stack's own name, not y/N; --yes skips it.
+
+```bash
+ankra cluster stacks unprotect <stack> [flags]
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+| `--yes` | `false` | Skip the typed stack-name confirmation |
 
 ## ankra cluster stacks variables
 
@@ -5609,8 +6480,8 @@ ankra cluster upcloud zones <cluster_id|name> [flags]
 
 Upgrade the Kubernetes version on all nodes in a cloud cluster.
 
-The cloud provider (Hetzner, OVH, UpCloud, DigitalOcean, Scaleway, Proxmox VE, or HPE
-Morpheus) is detected automatically from the cluster, so you do not need to
+The cloud provider (Hetzner, OVH, UpCloud, DigitalOcean, Scaleway, AWS, Proxmox VE, or
+HPE Morpheus) is detected automatically from the cluster, so you do not need to
 remember which provider it runs on. Both kubeadm and k3s clusters are
 supported; list the available target versions with
 'ankra cluster kubeadm-versions' or 'ankra cluster k3s-versions'.

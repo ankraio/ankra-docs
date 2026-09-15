@@ -229,7 +229,10 @@ A failed build carries an error_class saying whose failure it was. build_failed
 is the repository's - the recipe did not build - and is the one worth reading
 the error_message for. clone_auth and recipe_missing are the application's
 configuration. push_failed, timeout and capacity are Ankra's, and are already
-visible to Ankra without anyone reporting them.
+visible to Ankra without anyone reporting them. build_unknown is Ankra's too,
+but not visible the same way: the build ran and failed in a way the builder
+could not classify, and its error_message - the end of the build's output - is
+the only copy of that output, so include it when reporting the failure.
 
 ```bash
 ankra application build get <application-id> <build-id> [flags]
@@ -1162,6 +1165,43 @@ ankra application pipeline cancel <application-id> <run> [flags]
 |------|---------|-------------|
 | `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
 
+## ankra application pipeline convert
+
+Convert an application that still builds from a GitHub Actions workflow onto
+Ankra Pipelines, with one call.
+
+Ankra reads the workflow, converts it to a .ankra/pipeline.yaml, stores that as
+the application's pipeline definition of record and builds the next push
+through it. It switches the generated workflow off on GitHub so the two never
+build the same commit twice, and opens a pull request that commits the pipeline
+file and removes Ankra's generated workflow file. A workflow the repository
+wrote itself is never touched. Nothing about building waits on the pull
+request merging.
+
+--keep-workflows leaves the generated workflow file in the repository (it stays
+switched off). Calling again while the pull request is still open answers the
+same conversion; an application already on Ankra Pipelines is refused with
+nothing to convert.
+
+```bash
+ankra application pipeline convert <application-id> [flags]
+```
+
+**Examples**
+
+```bash
+ankra application pipeline convert <application-id>
+  ankra application pipeline convert <application-id> --keep-workflows
+  ankra application pipeline convert <application-id> -o json
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--keep-workflows` | `false` | Leave Ankra's generated workflow file in the repository instead of removing it in the pull request |
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+
 ## ankra application pipeline definition
 
 Manage the application pipeline's definition of record
@@ -1222,6 +1262,45 @@ with --exit-code, when the run has not concluded yet. Without --wait, --watch
 or --exit-code the command exits 0 whatever the run's outcome, as it always
 has.
 
+Status and outcome (-o json): 'status' is the lifecycle, never the verdict.
+A run's status is queued, running or concluded; a step's is blocked (waiting
+on its dependencies), pending (ready, not yet claimed), running or concluded.
+How the work ended is the separate 'outcome' field, which is null until the
+status is concluded and then always one of: success, failure (the work
+itself failed), cancelled, timed_out, skipped (it never ran - a dependency
+did not succeed, a condition or the trigger filter excluded it) or
+infra_error (Ankra failed, not the work). The same two fields with the same
+vocabulary sit on the run and on each step, mirroring GitHub Actions'
+status/conclusion split - so a monitor that filters on status finds every
+finished run under concluded, and must read outcome for whether it passed.
+The human-readable Status line and STATUS column print the outcome once
+there is one and the status until then, with a glyph that says which:
+✓ success, ✗ failure / timed_out / infra_error, ⊘ cancelled, ○ skipped, and
+⟳ only for a run or step that has not concluded (○ for a blocked step).
+
+Superseded runs: a run cancelled because a NEWER run took its concurrency
+group reads 'superseded' rather than 'cancelled', and 'pipeline get' names
+the run that took its place under the Status line. Nobody stopped that run,
+and the run worth looking at is the newer one. In -o json the fields are
+'error_class' ("superseded"), 'superseded_by_run_id' and
+'superseded_by_run_number'; 'outcome' stays "cancelled", so a script
+filtering on outcome alone still finds these runs and must read the class to
+tell them from a run somebody cancelled.
+
+Authority (-o json 'authority_state', the Authority line): the protected
+authority the run executed under. 'approved' - the default branch's
+definition declares no protected section, or an administrator approved
+exactly what it declares, and the head changes nothing. 'unapproved' - a run
+of the default branch whose definition changed authority no administrator
+has approved yet; it executes under the last approved authority, or under
+none when nothing was ever approved. 'changed_on_head' - a run of another
+branch or a pull request whose definition declares different authority; it
+executes under the default branch's, and the head's change is ignored and
+reported. null - the planner never resolved authority for this run: it is
+still queued, it concluded skipped because its trigger filter excluded every
+stage before planning, or it was planned before authority was recorded.
+null is "not recorded", never "no authority".
+
 ```bash
 ankra application pipeline get <application-id> [run] [flags]
 ```
@@ -1252,10 +1331,12 @@ ankra application pipeline list <application-id> [flags]
 
 | Flag | Default | Description |
 |------|---------|-------------|
+| `--all` | `false` | With --latest-per-branch, include branches with no run in the last 14 days |
 | `--branch` |   | Filter by trigger branch |
 | `--cursor` |   | Page cursor from a previous listing's next_cursor |
 | `--head-sha` |   | Filter by the exact full commit sha |
-| `--limit` | `0` | Maximum number of runs to return (server default 50, max 100) |
+| `--latest-per-branch` | `false` | List one row per branch with the newest run on each, the table 'ankra pipeline branches' prints |
+| `--limit` | `0` | Maximum number of runs to return (server default 50, max 100); with --latest-per-branch, the number of branches (server default 20) |
 | `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
 | `--status` |   | Filter by run status: queued, running, or concluded |
 | `--trigger` |   | Filter by trigger: push, pull_request, tag, schedule, manual, api, agent, or rerun |
@@ -1309,7 +1390,7 @@ ankra application pipeline run <application-id> [flags]
 | `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
 | `--reason` |   | Human note recorded on the run |
 | `--ref` |   | Git reference to run at (defaults to the repository's default branch) |
-| `--sha` |   | Full commit sha to run (defaults to the working directory's HEAD) |
+| `--sha` |   | Full commit sha to run (defaults to HEAD of a checkout of this pipeline's repository, else the tip of --ref) |
 | `--spec-file` |   | Run this pipeline definition instead of the stored one (requires pipelines.manage) |
 | `--timeout` | `0s` | Give up waiting after this long and exit 5, e.g. 45m (default: wait until the run concludes) |
 | `--wait` | `false` | Wait for the run to conclude before returning |

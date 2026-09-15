@@ -81,6 +81,52 @@ ankra pipeline artifacts download <artifact-id> [flags]
 | `--out` |   | Local file to write the artifact to (default: the artifact id, in the current directory) |
 | `--repository` |   | Pipeline repository id to act on (mutually exclusive with --application) |
 
+## ankra pipeline branches
+
+List a pipeline's branches, one row per ref, with the newest run on each.
+
+The repository's default branch leads the listing; everything else follows by
+most recent activity. Each row carries the latest run on the ref, the outcome
+of the run concluded before it (PREVIOUS), how many runs the ref has ever had,
+and how many of those a newer commit superseded - a run cancelled because
+something newer took its concurrency group, which is history rather than a
+failure to look at.
+
+Branches with no run in the last fourteen days are hidden; --all shows them.
+The count of what was hidden is printed after the table.
+
+STATUS is the latest run's lifecycle - queued, running or concluded - and
+OUTCOME its verdict, which is empty until the run concludes. 'ankra pipeline
+get --help' documents both fields.
+
+```bash
+ankra pipeline branches [flags]
+```
+
+**Examples**
+
+```bash
+# Where does every branch of the application you are standing in stand
+  ankra pipeline branches
+
+  # Include the branches nothing has run on for a fortnight
+  ankra pipeline branches --application orders-api --all
+
+  # The branch whose latest run did not succeed, for a script
+  ankra pipeline branches --application orders-api -o json | jq '.branches[] | select(.latest_run.outcome != "success")'
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--all` | `false` | Include branches with no run in the last 14 days, which are hidden by default |
+| `--application` |   | Application name or id whose pipeline to act on |
+| `--cursor` |   | Page cursor from a previous listing's next_cursor |
+| `--limit` | `0` | Maximum number of branches to return (server default 20, max 100) |
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+| `--repository` |   | Pipeline repository id to act on (mutually exclusive with --application) |
+
 ## ankra pipeline cancel
 
 Cancel a pipeline run that has not concluded
@@ -150,9 +196,16 @@ around but never grant itself ("logic is open, authority is closed").
 These two commands address one stored definition directly by its own id,
 unlike 'pipeline definition get|put' which read and write the definition of
 record for a repository or application. There is no lookup or listing route
-for a definition's id: find one from a pull request's status comment, or from
-the "authority_definition_id" field 'ankra pipeline get' prints on a run
-whose authority changed.
+for a definition's id. The one to approve is the repository's current
+default-branch definition: 'ankra pipeline get &lt;run&gt;' prints its approve
+command on a run that is not approved ("approve_definition_id" in -o json),
+and a pull request's status comment names it too. The run's
+"authority_definition_id" is the definition its trusted authority came from:
+useful to inspect with 'get', but not the one to approve - it is normally
+already approved, and 'approve' refuses it.
+
+An approval applies to runs planned after it; a run keeps the authority it
+was planned under.
 
 ## ankra pipeline definitions approve
 
@@ -264,6 +317,15 @@ there is one and the status until then, with a glyph that says which:
 ✓ success, ✗ failure / timed_out / infra_error, ⊘ cancelled, ○ skipped, and
 ⟳ only for a run or step that has not concluded (○ for a blocked step).
 
+Superseded runs: a run cancelled because a NEWER run took its concurrency
+group reads 'superseded' rather than 'cancelled', and 'pipeline get' names
+the run that took its place under the Status line. Nobody stopped that run,
+and the run worth looking at is the newer one. In -o json the fields are
+'error_class' ("superseded"), 'superseded_by_run_id' and
+'superseded_by_run_number'; 'outcome' stays "cancelled", so a script
+filtering on outcome alone still finds these runs and must read the class to
+tell them from a run somebody cancelled.
+
 Authority (-o json 'authority_state', the Authority line): the protected
 authority the run executed under. 'approved' - the default branch's
 definition declares no protected section, or an administrator approved
@@ -319,8 +381,15 @@ List a pipeline's runs, newest first.
 on how it ended: every finished run is concluded, and its verdict is the
 separate 'outcome' field (success, failure, cancelled, timed_out, skipped or
 infra_error), which the STATUS column prints in place of the status once
-there is one. 'ankra pipeline get --help' documents both fields and the
-run's 'authority_state'.
+there is one - except for a run a newer run superseded, which reads
+'superseded' rather than 'cancelled'. 'ankra pipeline get --help' documents
+both fields, supersession and the run's 'authority_state'.
+
+--latest-per-branch answers the other question a listing is usually opened
+for: not the last N runs of everything, but the newest run of each branch.
+It prints the same table as 'ankra pipeline branches' - see that command's
+help - and cannot be combined with the run filters, which narrow runs rather
+than refs.
 
 ```bash
 ankra pipeline list [flags]
@@ -330,11 +399,13 @@ ankra pipeline list [flags]
 
 | Flag | Default | Description |
 |------|---------|-------------|
+| `--all` | `false` | With --latest-per-branch, include branches with no run in the last 14 days |
 | `--application` |   | Application name or id whose pipeline to act on |
 | `--branch` |   | Filter by trigger branch |
 | `--cursor` |   | Page cursor from a previous listing's next_cursor |
 | `--head-sha` |   | Filter by the exact full commit sha |
-| `--limit` | `0` | Maximum number of runs to return (server default 50, max 100) |
+| `--latest-per-branch` | `false` | List one row per branch with the newest run on each, the table 'ankra pipeline branches' prints |
+| `--limit` | `0` | Maximum number of runs to return (server default 50, max 100); with --latest-per-branch, the number of branches (server default 20) |
 | `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
 | `--repository` |   | Pipeline repository id to act on (mutually exclusive with --application) |
 | `--status` |   | Filter by run status: queued, running, or concluded |
@@ -521,12 +592,22 @@ ankra pipeline rerun <run> [flags]
 
 Dispatch a manual run of a pipeline's stored definition.
 
-A run is always dispatched at one named commit: resolving a ref to a commit
-belongs to the trigger lane (push/PR/tag webhooks), so a dispatch never runs
-against whatever commit the platform happens to have stored last. Inside a Git
-checkout the commit is read from HEAD, and --application is read from the
-repository the checkout points at, so 'ankra pipeline run' on its own runs
-what you are looking at. Outside a checkout, name them with --sha and --application.
+A run executes one commit, and Ankra checks it against the repository's own
+host before anything is queued: a --sha that is not reachable from --ref (or
+the repository's default branch) on that repository is refused.
+
+Without --sha, the commit is:
+
+  - the working directory's HEAD, when the checkout is the repository the
+    pipeline builds and --ref is not given. --application is read from the
+    checkout too, so 'ankra pipeline run' on its own runs what you are
+    looking at;
+  - otherwise the tip of --ref, or of the default branch, which Ankra reads
+    from the repository's host when it dispatches.
+
+A checkout of any other repository never supplies the commit, so
+'ankra pipeline run --application other-app' from the wrong directory runs
+other-app's default branch, not your local HEAD.
 
 ```bash
 ankra pipeline run [flags]
@@ -542,7 +623,7 @@ ankra pipeline run [flags]
 | `--reason` |   | Human note recorded on the run |
 | `--ref` |   | Git reference to run at (defaults to the repository's default branch) |
 | `--repository` |   | Pipeline repository id to act on (mutually exclusive with --application) |
-| `--sha` |   | Full commit sha to run (defaults to the working directory's HEAD) |
+| `--sha` |   | Full commit sha to run (defaults to HEAD of a checkout of this pipeline's repository, else the tip of --ref) |
 | `--spec-file` |   | Run this pipeline definition instead of the stored one (requires pipelines.manage) |
 | `--timeout` | `0s` | Give up waiting after this long and exit 5, e.g. 45m (default: wait until the run concludes) |
 | `--wait` | `false` | Wait for the run to conclude before returning |
