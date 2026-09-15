@@ -286,6 +286,24 @@ flowchart LR
 
 Deploying the result follows straight from what `publish` just did: an Ankra Application deploys the `sha-<7>` image `publish` tagged into your real repository, exactly as it would deploy an image your own CI published. A pull request gets its own preview from the same pipeline, before `publish` ever runs (`publish` fires only on `push`, per the example above) - the application's preview deploys the digest `build` produced for that head, by digest, never a mutable tag, and GitLab and Bitbucket Cloud pull requests now get previews the same way GitHub ones always could. The [generated GitHub Actions workflow](#bring-your-own-ci-github-actions) still works and is still what an application with no pipeline connected uses; nothing forces you off it.
 
+### Newest commit wins
+
+A `concurrency.group` decides which runs serialise. `cancel_in_progress` decides what happens when a newer one arrives: with it, the new commit supersedes the run it replaces; without it, the new run waits for the older one to finish - and on a group that varies per branch, that is a branch queueing behind itself while the older commit's run keeps your step slots.
+
+```yaml
+concurrency:
+  group: "${{ ankra.repository }}-${{ ankra.ref }}"
+  cancel_in_progress: true
+```
+
+Every pipeline Ankra generates ships exactly that. A definition you wrote keeps whatever it says - Ankra never flips the flag for you, because that would cancel runs your own file says should finish. What Ankra does instead is tell you:
+
+- `ankra pipeline validate` (and `ankra application pipeline validate`) reports `pipeline_concurrency_queues_behind:` at severity `advice`, naming the group and the one line that changes it. Advice never blocks a run and never fails the command.
+- A queued run whose `Waiting:` line names an older run of the *same* branch or pull request that will not be superseded carries the same recommendation. A holder on another branch does not - that is the group serialising across branches, which is what a group is for.
+- A pipeline [converted from a GitHub Actions workflow](/guides/migrate-from-github-actions) keeps the workflow's own queue-behind behaviour, with a conversion note recommending the flag for a per-branch group on a `pull_request` trigger.
+
+Superseding is a soft stop, not a failure. The older run concludes as cancelled and is shown as **Superseded** in grey rather than red, the commit status it leaves on GitHub, GitLab or Bitbucket is neutral rather than a failed check, and no failure notification is raised for it - attention follows the newest run of the branch.
+
 ## What a pull request gets
 
 A connected pull request carries one comment, not several: a run, its preview and Ankra AI's own review each write into that comment's own `pipeline`, `preview` and `review` sections in place rather than posting separately - see [One status comment per pull request](/changelog#one-status-comment-per-pull-request). The pipeline section is the run's own state, plus the authority sentence whenever the run executed under anything but the plainly approved definition; the preview section is the throwaway environment deployed from the run's own digest; the review section is Ankra AI's verdict on the diff.
