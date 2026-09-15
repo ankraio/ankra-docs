@@ -51,6 +51,48 @@ manifest` directly against your cluster - first-class debuggability.
 | Multi-source applications | Yes | Not yet (single-source only) |
 | ApplicationSet | Yes | Not used |
 
+## Applying an update
+
+Installing or updating an add-on on the native engine runs
+`helm upgrade --install`, and the step does not succeed until the release is
+healthy. Two waits sit behind that, and both matter when an update cannot
+converge on its own.
+
+Helm waits first. The agent passes `--rollback-on-failure --cleanup-on-fail`,
+which makes Helm wait for the release's resources to become ready and roll the
+release back if they do not, whether or not `--wait` is passed. The budget is
+the add-on's `helm_wait_timeout_seconds` setting, 600 seconds by default. The
+automatic rollback then starts a fresh wait with the same budget, so a failing
+update can occupy twice the configured timeout before the step reports.
+
+The agent waits second, watching the rendered resources after Helm returns. If
+that wait expires, the agent rolls the release back to its previous revision -
+or uninstalls it, when the update was the add-on's first install.
+
+Two add-on settings switch both behaviours off: `rollback_on_failure: false`
+and `keep_failed_resources_for_debug: true`. With either set, Helm applies the
+release and returns without waiting and nothing is rolled back. The agent still
+watches the rollout and still reports a timeout if the resources never become
+healthy, but the release keeps the new revision.
+
+<Warning>
+An update whose resources cannot become ready without a further action from you
+will not stick under the default settings. The common case is a DaemonSet with
+`updateStrategy: OnDelete`: its Pods keep the old spec until something deletes
+them, so the release never reaches ready, Helm times out and rolls back, and the
+add-on is left on its previous values.
+
+Apply such a change either by deleting the affected Pods while the wait is still
+running, or by setting `rollback_on_failure: false` on the add-on for that
+update and deleting the Pods afterwards. In the second case the step still
+reports a rollout timeout, but the new revision stays applied.
+</Warning>
+
+If the agent stops while a rollback is running, the release can be left in
+`pending-rollback`, which blocks every later Helm operation on it. Clearing that
+by hand is not necessary: the next update of the add-on recovers the release
+before retrying, and so does the reconcile sweep below.
+
 ## Reconcile loop
 
 The native engine runs a periodic reconcile sweep on the agent. The platform
