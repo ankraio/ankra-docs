@@ -126,6 +126,25 @@ This replaces the **image build**, not the whole generated pipeline. That workfl
 
 ---
 
+## The application workspace
+
+An application opens as a workspace: a context sidebar beside the main one, in the order the work happens, with one page per section at `/organisation/applications/<application-id>/<section>`. A link to an older `?tab=` address redirects to its section.
+
+| Section | What it shows |
+| --- | --- |
+| **Overview** | Where the application is right now: the setup journey, the environments it is live in, and the latest run. |
+| **Pipelines** | Run history as one lane per run, with skipped and cancelled runs grouped on their own. Stages fold into phases decided by each stage's kind, so a long pipeline reads as a handful of things you can name; a kind the grouping does not know yet sits under *Other steps*. A run opens as its own sheet - logs, the failed step and its exit code, the artifact and the commit - with the suggested fix separate from the rerun. |
+| **Deployments** | One installation per row: the cluster and its environment label, the owning add-on or stack, the version it serves, health and the reported address. A version that differs between installations is shown as a difference, not called drift. A field the read does not carry reads *unknown*, never zero, and the installation sheet links to the owning add-on for namespace, pods, events and logs rather than pretending to show them. |
+| **Previews** | What the CLI and API call demos. One card per preview with its branch or commit, component, image, expiry, access (browser URL, in-cluster only, URL not live, or not reachable yet) and the staging cluster, plus the launch dialog and the environment template. See [Preview demos](#preview-demos). |
+| **Security** | Eight views over the application's scan reports, ranked by exploitability. See [Security scanning](#security-scanning). |
+| **Environment** | The secret keys the application reads, each with three independent states: stored (*Set*, *No value*, *Value missing*), consumed (*Manifests* or *Not referenced*) and its deployment state. Only a stored key the manifests reference inherits the application-wide apply answer; a key nothing references reads *Stored only*, a key with no value *Nothing to apply*, a lost value *Cannot apply*. Values are never displayed - the API has no route that returns one. Ordinary, non-secret variables are not available for applications yet. |
+| **Source & config** | The files Ankra wrote: the file tree, the editor, pending changes per file and in total, and the commit message with **Push to PR**. The editor says whether it is showing the setup branch or the generated set, and why the branch is not showing when it is not. |
+| **Settings** | The repository, branch and component paths setup ran against (read-only), delivery per environment, the [image registry](#using-your-own-registry), publishing the application as an add-on, running setup again, and delete last. |
+
+The sidebar carries two badges: **Security** shows the CISA-listed finding count once the KEV catalog has synced, and never before; **Environment** shows the declared keys still without a value.
+
+The Applications list has two ways in: **All applications**, or **Needs attention** - a failed setup, an unmerged setup pull request, a failed deploy or a degraded one. Setup in progress, deploying, parked, resting, and a runtime Ankra could not read are not attention.
+
 ## What Ankra tracks
 
 For each application you see:
@@ -225,7 +244,7 @@ Running Harbor yourself? [Harbor as your application registry](/guides/harbor-re
 
 Every application gets a registry robot account of its own: a push+pull robot named `robot$<project>+app-<application-id>` on the project it publishes to, stored as the platform-managed registry credential `ankra-harbor-app-<application-id>` and written into the repository's Actions secrets as the login the build workflow uses. Nothing else shares that login, so a leaked repository secret is rotated or revoked for that one application, and a deleted application takes its robot with it.
 
-- **On your organisation's Ankra registry** the robot is minted automatically when the application is set up, and again whenever the application is reconciled. Applications onboarded before robots existed get one the first time **Fix automatically** runs on the CI/CD tab, or when you create it from **Settings** → **Image registry**.
+- **On your organisation's Ankra registry** the robot is minted automatically when the application is set up, and again whenever the application is reconciled. Applications onboarded before robots existed get one the first time **Fix automatically** runs in the **Pipelines** section, or when you create it from **Settings** → **Image registry**.
 - **On a registry you operate**, Ankra mints one only with a credential that may: set `admin_credential_name` to a registry credential with project administrator rights on the declared project (in Harbor, a project admin user, or a robot granted the robot-account permissions). Without it Ankra never touches your robots; publish readiness names the field.
 
 The robot is shown - name, registry, when it was created and last rotated - under **Settings** → **Image registry**, where you can create, rotate or revoke it. Rotating refreshes the secret and rewrites the repository's Actions secrets; the previous secret stops working the moment the registry answers. Revoking deletes the robot from the registry and drops its credential, leaving the repository's secrets holding a login that no longer works.
@@ -254,20 +273,34 @@ The same is available on the API at `/api/v1/org/applications/{application_id}/r
 
 ### Security scanning
 
-Applications include code and container security insights, so vulnerabilities surface alongside the build rather than in a separate tool. On a monorepo, the image tags and the scanned image reference follow the component you select; code and IaC findings cover the whole repository, because that is where those scanners run. Pair this with [AI Insights](/platform/ai-insights) for proactive analysis.
+Applications include code and container security insights, so vulnerabilities surface alongside the build rather than in a separate tool. The **Security** section reads the way the [Security Center](/guides/cluster-security) reads a fleet finding - risk first, ranked by exploitability - in eight views:
+
+| View | What it shows |
+| --- | --- |
+| **Overview** | Risk score, vulnerabilities, known exploited, last scan and scanners reporting, then *First to review*: the CISA-listed finding when the catalog is synced, the highest-severity one otherwise. An unscanned image reads **Not assessed** on every tile, never `0 / 10`; a pipeline configured but not yet built reads **Waiting**; a report older than two hours is marked stale. |
+| **CVEs & findings** | Every finding, ranked by [exploitability](/guides/cluster-security#exploitation-intelligence-cisa-kev-and-epss): CISA KEV listing first, then EPSS, then severity, then CVSS, with highest severity as the alternative order. A **Known exploited** filter narrows to CISA-listed findings, and a banner leads the table when any finding is listed. |
+| **KEV** | One card per CISA-listed finding: date added, due date (overdue marked), ransomware use, EPSS, the fix, CISA's required action, and where it runs. |
+| **SBOM** | The package inventory of the selected image version - package and PURL, version, type, licence and tier, the CVEs on that version and the workloads it runs in - and the versions list with one row per pushed tag, its bill of materials, its findings and the CycloneDX and CSV downloads. Only versions with a bill of materials are selectable; nothing borrows another image's inventory. |
+| **Compliance** | Not available for applications yet; points at the organisation Security Center. |
+| **Coverage** | Which scanner reported - Trivy, Semgrep, Checkov, bill of materials - and how fresh: fresh, stale after two hours, pending (configured, no build since), not configured, or unknown when the read failed. |
+| **Code** and **Infrastructure** | The Semgrep and Checkov findings; a row opens with the file, lines, rule, category and the rule reference. Waiting for a first scan and zero findings are distinct states. |
+
+Every finding row opens a sheet with severity, CVSS, EPSS (as `EPSS 94% · top 1%`), the CISA KEV entry - date added, due date, ransomware use and required action - the fix, and a link to the platform's own [advisory page](/guides/cluster-security#advisory-pages) for the CVE. Exploitability reads **Unknown** until the KEV catalog has synced; absent is never read as not exploited.
+
+On a monorepo, the image tags and the scanned image reference follow the component you select; code and IaC findings cover the whole repository, because that is where those scanners run. Pair this with [AI Insights](/platform/ai-insights) for proactive analysis.
 
 ---
 
 ## Preview demos
 
-Before you merge, you can spin up a **throwaway demo** of a pull request or branch build to see it running. Each demo is deployed into its own isolated namespace (`ankra-demo-pr-<n>` or `ankra-demo-br-<branch>`) on the organisation's **staging cluster**, PodSecurity-hardened and quota-bounded, and is automatically torn down when its TTL expires - so it can never affect existing workloads.
+Before you merge, you can spin up a **throwaway demo** of a pull request or branch build to see it running. In the portal these live in the application's **Previews** section, which calls each one a preview; the CLI and API keep the `demo` name. Each demo is deployed into its own isolated namespace (`ankra-demo-pr-<n>` or `ankra-demo-br-<branch>`) on the organisation's **staging cluster**, PodSecurity-hardened and quota-bounded, and is automatically torn down when its TTL expires - so it can never affect existing workloads.
 
 <Steps>
   <Step title="Configure a staging cluster">
     An admin sets the organisation's staging cluster under **AI** → **Settings** → **Workspaces**. Optionally set a **demo base domain** (with an ingress class and TLS secret) there too - this is what gives demos a public URL.
   </Step>
   <Step title="Deploy a demo">
-    Deploy a branch or PR demo from the application's **Demos** tab, from the CLI, or by asking the AI assistant. The demo pulls the image tag the PR/branch build pushed.
+    Deploy a branch or PR demo from the application's **Previews** section, from the CLI, or by asking the AI assistant. The demo pulls the image tag the PR/branch build pushed.
   </Step>
   <Step title="Open the preview">
     When a public host is available, Ankra returns a **preview URL** you can open directly. Otherwise the demo stays reachable in-cluster (service DNS + a `kubectl port-forward` command).
@@ -361,7 +394,7 @@ A demo deploys **every component** of the application by default. A single-app a
 
 <Tabs>
   <Tab title="Portal">
-    Open the application's **Demos** tab, pick a branch or enter a pull request number, and deploy. The tab shows active demos, the preview URL, and the remaining TTL. Each demo links to its own detail page - live provisioning progress read from the staging cluster, the namespace's bill of materials with manifests (grouped per component), Kubernetes events, and pod logs, plus the preview URL or port-forward command to reach it. On a monorepo the launch dialog lists every component with its own build status and tag, lets you include or exclude each, and marks the **web entry** — the component that owns the demo URL.
+    Open the application's **Previews** section, choose **Launch preview**, pick a branch or enter a pull request number, and deploy. The dialog groups what to preview, its lifetime and environment, and the staging cluster, and lists the branch, image, lifetime, template, resources, cleanup and access in a summary before the launch button; a missing image or an offline staging agent is an explicit blocker. The section shows one card per active preview with its branch or commit, component, image, expiry, access and cluster. Each preview links to its own detail page - live provisioning progress read from the staging cluster, the namespace's bill of materials with manifests (grouped per component), Kubernetes events, and pod logs, plus the preview URL or port-forward command to reach it. On a monorepo the launch dialog lists every component with its own build status and tag, lets you include or exclude each, and marks the **web entry** — the component that owns the demo URL.
   </Tab>
   <Tab title="CLI">
     ```bash
@@ -433,7 +466,7 @@ Existing demos and single-app applications are unaffected: a demo recorded befor
 
 Most real applications need configuration to boot — a database name, an API key, an SMTP host. Demos support both **per-application defaults** and **per-launch overrides**, so any codebase can run as a demo without changes:
 
-- **Defaults** live behind the gear button on the **Demos** tab (*Demo settings*). Every demo of the application inherits them — manual launches, CLI/MCP deploys, and the automatic PR previews.
+- **Defaults** are the application's **environment template**, under **Previews** (*Preview settings*), which separates the disposable dependencies each preview gets from the shared services it points at and labels every generated value with the dependency it comes from. Every demo of the application inherits them — manual launches, CLI/MCP deploys, and the automatic PR previews.
 - **Overrides** are set per launch in the *Environment & database* section of the launch dialog (or via the `env` argument of `deploy_pr_demo`). Overrides win by name.
 
 Values marked **secret** are stored as Ankra secret slots, held in the platform secret store — the plaintext never persists and is mounted into the demo as a Kubernetes Secret at deploy time.
