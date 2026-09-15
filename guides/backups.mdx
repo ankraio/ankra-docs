@@ -1,17 +1,17 @@
 ---
-title: Backup Vaults
-description: Register an S3-compatible bucket as a backup vault so your clusters have somewhere to write restore points, verify its credentials, and manage vaults from the dashboard or the CLI.
+title: Backups and Restore Points
+description: Register an S3-compatible bucket as a backup vault, protect a stack on a schedule, take and inspect restore points, restore a stack in place, and follow the runs that move the data.
 tag: "Closed Beta"
 ---
 
 import { CliVersion } from "/snippets/cli-version.jsx";
 
 <Note>
-A **backup vault** is an object-storage bucket your organisation owns that Ankra writes cluster backups to. Vaults are the foundation of Ankra's backup-first data model: every stack backup policy and every restore point lands in a vault, and cloning a stack *with its data* restores from one.
+A **backup vault** is an object-storage bucket your organisation owns that Ankra writes cluster backups to, and a **restore point** is one immutable copy of a stack's data inside it. Register a vault once, protect a stack, and every backup, restore and clone is a verb over the restore points that land there.
 </Note>
 
 <Warning>
-**Closed beta.** Backups are in closed beta. The workflow is stable but the surface may still change, and the **backups** feature is enabled per organisation on request. Until it is enabled for yours, the **Backups** page under organisation settings explains that it is not enabled yet, and every `ankra backup vaults` command (and the underlying API) answers `Backups are not enabled for this organisation.` See [Not enabled yet?](#not-enabled-yet) below, and [contact support](/platform/support) to have it turned on for your organisation.
+**Closed beta.** Backups are in closed beta. The workflow is stable but the surface may still change, and the **backups** feature is enabled per organisation on request. Until it is enabled for yours, the **Backups** page under organisation settings explains that it is not enabled yet, and every `ankra backup` and `ankra cluster stacks protect` / `restore-points` command (and the underlying API) answers `Backups are not enabled for this organisation.` See [Not enabled yet?](#not-enabled-yet) below, and [contact support](/platform/support) to have it turned on for your organisation.
 </Warning>
 
 ## Why a vault first
@@ -209,40 +209,89 @@ The teardown runs as a background job: the vault disappears from the list immedi
 ## Protect a stack
 
 <Warning>
-**Closed beta**, like the rest of this page. The `backup` block needs the **backups** feature enabled for the organisation.
+**Closed beta**, like the rest of this page. Protection needs the **backups** feature enabled for the organisation.
 </Warning>
 
-A vault is where restore points land; a stack's `backup` block is what puts them there. Add it to the stack in your cluster file and apply:
+A vault is where restore points land; a stack's backup policy is what puts them there. Protection is a property of the stack, not a separate object: it is stored as the stack's own `backup` block, and the platform converges on it by installing the [backup data plane](/concepts/backup-vaults#the-backup-data-plane) on the cluster.
 
-```yaml
-stacks:
-  - name: platform
-    backup:
-      enabled: true
-      vault: offsite          # the vault name from `ankra backup vaults list`
-      schedule: daily         # or hourly, weekly, or a cron expression
-      retention:
-        daily: 7
-        weekly: 4
-        monthly: 6
-      selection:
-        databases: true                    # the default
-        persistent_volume_claims:
-          - grafana/grafana-storage        # named volumes only
-    addons: [...]
-```
+Look at what a backup would have to carry first:
+
+<CliVersion since="0.17.0" command="cluster stacks protect" note="The restore-point verbs ship in v0.17.0; v0.16.1 has the vault commands only." />
 
 ```bash
-ankra cluster apply -f cluster.yaml
+ankra cluster stacks data list shop
 ```
 
-Ankra materialises the policy itself: a Velero `Schedule` selecting the volumes you named, a CloudNativePG `ScheduledBackup` and object store per Postgres cluster, and a schedule entry inside each Percona cluster. You do not write those, and they never appear as stack resources - they are derived from the block every time the stack renders. See the [`backup` field reference](/reference/importcluster#spec-stacks-backup) for every field.
+That lists the stack's data assets - standalone persistent volume claims, and the databases an operator runs - under the names the selection uses.
+
+<Tabs>
+  <Tab title="CLI">
+    ```bash
+    ankra cluster stacks protect shop \
+      --vault production-backups \
+      --schedule daily \
+      --retention daily=7,weekly=4,monthly=6 \
+      --include-pvc shop/data \
+      --backup-now --wait
+    ```
+
+    The command prints the policy it stored and then `Backup stack: installing` until the data plane is actually on the cluster, so nothing is called protected while the Velero that would do the protecting is still arriving. A capture started before then waits rather than failing.
+
+    A policy that cannot work is refused with every field-level reason at once, so a bad schedule and a bad retention are fixed in one edit:
+
+    ```
+    The backup policy is not valid.
+      - backup.schedule: 'evry day' is neither a five-field cron expression nor one of hourly, daily, weekly.
+    ```
+  </Tab>
+  <Tab title="Cluster file">
+    The same policy in your cluster file, applied with `ankra cluster apply -f cluster.yaml`:
+
+    ```yaml
+    stacks:
+      - name: shop
+        backup:
+          enabled: true
+          vault: production-backups
+          schedule: daily
+          retention:
+            hourly: 0
+            daily: 7
+            weekly: 4
+            monthly: 6
+            yearly: 0
+            minimum_count: 3
+            minimum_age: 24h
+          selection:
+            databases: true
+            persistent_volume_claims:
+              - shop/data
+            confirm_exclude_databases: false
+    ```
+
+    Every field, with its default, is in the [`backup` block reference](/reference/importcluster#spec-stacks-backup).
+  </Tab>
+</Tabs>
+
+What `protect` takes:
+
+| Flag | Meaning |
+|------|---------|
+| `--vault` | **Required.** The vault restore points are written to, by name or id. A protected stack with nowhere to write to is not protected |
+| `--schedule` | `hourly`, `daily`, `weekly`, or a five-field cron expression. Default `daily` |
+| `--retention` | `key=value` pairs from `hourly`, `daily`, `weekly`, `monthly`, `yearly`, `minimum-count`, `minimum-age` |
+| `--include-pvc` | Repeatable, `namespace/name`. Volumes are captured only where named |
+| `--exclude-databases` | Leave the stack's databases out. Needs `--confirm-exclude-databases` beside it |
+| `--backup-now` | Take the first restore point immediately instead of waiting for the schedule |
+| `--wait` | Follow the first capture's run until the restore point is sealed |
+
+Ankra materialises the policy itself: a Velero `Schedule` selecting the volumes you named, a CloudNativePG `ScheduledBackup` and object store per Postgres cluster, and a schedule entry inside each Percona cluster. You do not write those, and they never appear as stack resources - they are derived from the policy every time the stack renders.
 
 Three behaviours worth knowing before you rely on it:
 
-- **Databases are in by default; volumes are not.** Protecting a stack does not start copying every claim in its namespaces. Name the volumes you want in `selection.persistent_volume_claims` - the stack's **Backups** tab lists the asset names.
-- **An omitted block preserves protection.** A cluster file that does not mention `backup` leaves the stored policy alone, so an older CLI or a partial file cannot unprotect a stack. Removing protection is an explicit `enabled: false`, and the apply warns about what stops being covered.
-- **Protecting a CloudNativePG cluster restarts its instances once.** Ankra adds the barman-cloud WAL archiver to the `Cluster`, and CloudNativePG reconciles that by rolling the instances one at a time - a brief primary failover. The apply says so before it happens.
+- **Databases are in by default; volumes are not.** Protecting a stack does not start copying every claim in its namespaces. Name the volumes you want with `--include-pvc` or `selection.persistent_volume_claims`. Excluding databases from a stack that runs them needs an explicit acknowledgement, and leaves the stack carrying a standing warning.
+- **An omitted block preserves protection.** A cluster file that does not mention `backup` leaves the stored policy alone, so an older CLI or a partial file cannot unprotect a stack. Removing protection is an explicit `enabled: false` or `ankra cluster stacks unprotect`, and the write warns about what stops being covered.
+- **Protecting a CloudNativePG cluster restarts its instances once.** Ankra adds the barman-cloud archiver to the `Cluster`, and CloudNativePG reconciles that by rolling the instances one at a time - a brief primary failover.
 
 Per-add-on overrides ride the add-on's settings, for the case where one add-on in a protected stack should be captured differently (or not at all):
 
@@ -251,23 +300,134 @@ ankra cluster addons settings get cnpg-cluster
 ankra cluster addons settings set cnpg-cluster --backup-enabled=false
 ```
 
+## Take a restore point now
+
+```bash
+ankra cluster stacks restore-points create shop --note "before the 3.2 upgrade" --wait
+```
+
+The capture is dispatched by the platform, so without `--wait` the command answers with the restore point in `creating` and the run that will seal it. `--wait` follows that run and prints the sealed restore point.
+
+The vault is resolved in order: `--vault`, then the stack's own policy, then the organisation's single ready vault. With more than one ready vault and nothing naming which, the request is refused rather than chosen for.
+
+The selection resolves the same way - the request's own `--include-pvc` / `--exclude-databases`, then the stack's stored selection, then the default of databases in and volumes only where named. A request that carried no selection never widens to everything.
+
+## See what a restore point holds
+
+```bash
+ankra cluster stacks restore-points list shop                      # newest first
+ankra cluster stacks restore-points list shop --status complete
+ankra cluster stacks restore-points list shop --trigger scheduled --limit 10
+ankra cluster stacks restore-points get shop 0b2f                  # an unambiguous id prefix is enough
+ankra backup restore-points list --cluster production              # across every cluster
+```
+
+`get` adds the manifest, every asset in it, and the run that produced it. `list` pages with `--cursor`; `--vault` narrows to one vault, and `ankra backup restore-points list` takes `--cluster` and `--stack`.
+
+<Warning>
+**Read the `Not carried` list before you rely on a restore point.** Every listing and every detail read prints it, next to what the restore point does contain - a volume outside the selection, a data engine no adapter covers, an external service that lives outside the cluster - each with the reason and the remedy. An omission nobody read is the same as an omission nobody was told about.
+</Warning>
+
+An id prefix is resolved against the stack's 200 most recent restore points, so it is checked for ambiguity only within that window. The full id is what addresses an older restore point with certainty.
+
+## Restore a stack in place
+
+<Warning>
+**This destroys before it replaces.** The restore removes the stack's current volumes before it writes the restore point's. Confirmation is typing the stack's own name, not `y/N`.
+</Warning>
+
+```bash
+ankra cluster stacks restore-points restore shop 0b2f --wait
+```
+
+The platform accepts the restore and answers with the sequence it will follow, which the command prints before any of it runs:
+
+1. Scale down the workloads in the stack that own the data being restored.
+2. Remove the volumes the restore point replaces, so the restored data is not written beside the old data.
+3. Restore the restore point's assets onto the cluster through the backup data plane.
+4. Scale the workloads back up over the restored data.
+
+`--yes` skips the typed confirmation for scripts. `--force` is needed when the stack's data has changed since the restore point was taken: the refusal compares the restore point's assets against the stack's current inventory, and **an inventory whose live database scan did not run counts as drift**, because "we could not read it" is not "it is unchanged".
+
+<Warning>
+**CloudNativePG and Percona databases cannot be restored in place yet.** A restore point carrying one is refused with `Restoring this restore point in place is not supported yet: it carries a database this platform cannot yet recreate in place.` The ordinary restore path would report success over unchanged data, which is worse than refusing - see [Restoring in place](/concepts/backup-vaults#restoring-in-place). Volumes captured by Velero and databases captured as logical dumps, including every `ankra migrate` import, restore in place today.
+</Warning>
+
+A restore is also refused against a cluster that is offline or stopped - the sequence destroys before it replaces, so it must not start against a cluster nobody can reach - and against a restore point that is not `complete`.
+
+## Unprotect a stack
+
+```bash
+ankra cluster stacks unprotect shop
+```
+
+Confirmation is the typed stack name again; `--yes` skips it. Turning protection off stops future backups and removes the rendered schedules on the next render. **Every restore point already taken is kept and stays restorable** - removing protection is a decision about the future, not about the past. The `ankra-backup` system stack is not removed either, because those restore points are restored through it.
+
+## Follow a run
+
+Every capture, restore and clone is a run, and a run has a step for each thing it does.
+
+```bash
+ankra runs list --kind backup --cluster production
+ankra runs list --status failed
+ankra runs get <run-id>            # the plan, and every attempt of every step
+ankra runs cancel <run-id>
+ankra runs retry <run-id>          # opens a NEW run from the step that failed
+```
+
+`retry` answers with the new run, not the old one: the failed row will never move again. `list` takes `--stack`, `--cursor` and `--limit`, and every command supports `-o json|yaml`.
+
+## Backup posture
+
+Posture is the answer to "is this data protected, and if not, why", rendered wherever someone could lose data: a **Protected** / **Unprotected** / **Protection unknown** pill on stack headers, stack cards and the Stack Builder, a backup posture card on the cluster overview, a fleet widget on the organisation dashboard, and a **Protect your stateful stacks** milestone on the setup checklist once the organisation runs something stateful.
+
+| State | What it means | What to do |
+|-------|---------------|-----------|
+| **Protected** | An enabled policy naming a vault that is ready | Nothing. Check the restore points are actually landing |
+| **Unprotected** | No policy; or the vault it names is missing, provisioning or in error; or databases are excluded from a stack that runs them; or the stack holds no data at all | The reason says which. A stack with no data assets is unprotected but not a finding |
+| **Unknown** | The `backup` block did not decode, the vault lookup could not be answered, or the cluster's inventory has not landed | Check the cluster is online and reporting; an unknown is never reported as unprotected |
+
+An organisation with no vault at all gets a call to action rather than a report that everything is exposed, and a posture that has not loaded renders nothing rather than flashing a verdict it does not have.
+
+## Troubleshooting
+
+| What you see | Cause | Remedy |
+|--------------|-------|--------|
+| `Backups are not enabled for this organisation.` | The closed-beta feature is off for the organisation the CLI is acting on | Check `ankra org current` first, then [contact support](/platform/support). See [Not enabled yet?](#not-enabled-yet) |
+| `This backup vault has not verified; re-verify it before taking a restore point.` | The vault's last credential check failed or never ran | `ankra backup vaults verify <name>`, and [When verification fails](#when-verification-fails) for what the excerpt means |
+| `This organisation has more than one ready backup vault; name the one to write to.` | The request named no vault, the stack has no policy, and there is more than one candidate | Pass `--vault <name>`, or protect the stack so its policy names one |
+| `This organisation has no ready backup vault to write a restore point to.` | No vault is `ready` | Register or provision one, above |
+| `This selection covers none of the stack's data, so the restore point would carry nothing.` | The selection excluded everything the stack holds | `ankra cluster stacks data list <stack>` to see the asset names, then widen the selection |
+| `This stack's data has changed since the restore point was taken` | Drift between the restore point and the live inventory, **or** an inventory whose database scan did not run | Take a fresh restore point, or restore with `--force` if the drift is expected |
+| `Restoring this restore point in place is not supported yet` | The restore point carries a CloudNativePG or Percona database | Not yet available. The capture is still good and the databases are still in the vault |
+| `Only a complete restore point can be restored.` | The restore point is `creating` or `failed` | `ankra runs get <run-id>` on the run that was sealing it |
+| `This cluster is not online, so its data cannot be restored right now.` | The target cluster is stopped or its agent is not connected | Bring the cluster back, then retry |
+| `A backup, restore or clone is using this restore point` | A delete raced a run that is reading the restore point | Wait for the run to finish, or `ankra runs cancel <run-id>` |
+| `Backup stack: installing` never becomes `ready` | The cluster's agent is too old to run the backup jobs, or a resource name the backup stack needs is already taken by a user-authored resource | Upgrade the [cluster agent](/concepts/cluster-agent); rename the colliding resource. `ankra runs list --cluster <name>` shows steps that never got claimed |
+| `Its objects were left in the bucket: ...` after a delete | No sweep could be dispatched - the source cluster is gone, the vault is gone, or the agent does not carry the object-delete job | The restore point row is removed either way. Remove the objects from the bucket yourself so you stop paying for them, or upgrade the agent and let the retention sweep take them |
+
+<Note>
+Diagnose all of this with the Ankra CLI, not `kubectl`. The backup data plane is a stack Ankra owns and reconciles, so a change made against the cluster directly is reverted on the next render.
+</Note>
+
 ## Permissions
 
 | Permission | Allows |
 |-----------|--------|
-| `backups.read` | Seeing vaults, policies and restore points |
-| `backups.operate` | Verifying a vault; creating restore points, running restores and data clones |
-| `backups.manage` | Creating and deleting vaults; setting backup policies |
+| `backups.read` | Seeing vaults, policies, restore points, runs and posture |
+| `backups.operate` | Verifying a vault; taking restore points and running restores |
+| `backups.manage` | Creating and deleting vaults; protecting and unprotecting stacks; deleting restore points |
 
-Organisation admins hold all three. A member with only `backups.read` sees the vault list read-only; the page says so and names the permission an admin has to grant for adding, verifying or deleting a vault.
+Organisation admins hold all three. A member with only `backups.read` sees the vault list read-only; the page says so and names the permission an admin has to grant for adding, verifying or deleting a vault. Both gates - the organisation's **backups** feature and the permission - are checked in that order, so an organisation without the feature answers the same way whatever the caller may do.
 
 ## Not enabled yet?
 
 Backups are in closed beta, switched on per organisation. While the feature is dark:
 
-- The **Backups** settings page renders an explanation instead of the vault list.
-- `ankra backup vaults …` exits non-zero with `Backups are not enabled for this organisation.` followed by what to do about it. A real permission refusal on the same commands keeps its own wording, so the two are never confused.
-- The API answers `403` with that same text on every vault route, browser and token alike - a personal access token cannot reach the lane in an organisation where it is dark.
+- The **Backups** settings page renders an explanation instead of the vault list, and no protection pill, posture card or fleet widget appears anywhere.
+- `ankra backup …`, `ankra cluster stacks protect|unprotect|restore-points|data …` exit non-zero with `Backups are not enabled for this organisation.` followed by what to do about it. A real permission refusal on the same commands keeps its own wording, so the two are never confused.
+- The API answers `403` with that same text on every backups route, browser and token alike - a personal access token cannot reach the lane in an organisation where it is dark.
+- A `backup` block in a cluster file is rejected on apply with the same sentence.
 
 Two things to check before asking for it to be enabled:
 
@@ -276,13 +436,33 @@ Two things to check before asking for it to be enabled:
 
 Then [contact support](/platform/support) to have the **backups** feature enabled for the organisation.
 
+## Command reference
+
+The generated CLI reference carries every flag and default of these families:
+
+| Family | Reference |
+|--------|-----------|
+| `ankra backup vaults`, `ankra backup restore-points` | [ankra backup](/reference/cli/backup) |
+| `ankra cluster stacks data`, `protect`, `unprotect`, `restore-points` | [ankra cluster](/reference/cli/cluster) |
+| `ankra runs` | [CLI command reference](/reference/cli/index) |
+
+<Note>
+The reference is regenerated from the CLI source on each release, so the restore-point families appear there from **v0.17.0**. Until then `ankra <command> --help` is the authority on a flag.
+</Note>
+
 ## Next steps
 
 <CardGroup cols={2}>
   <Card title="Backup vault concepts" icon="vault" href="/concepts/backup-vaults">
-    How vaults, policies and restore points fit together.
+    How vaults, policies, restore points, runs and posture fit together.
+  </Card>
+  <Card title="The backup block" icon="code" href="/reference/importcluster#spec-stacks-backup">
+    Every field and default of a stack's backup policy, in the cluster file.
   </Card>
   <Card title="Clone stacks between clusters" icon="copy" href="/guides/clone-stack">
     Clone a stack's configuration today - data follows via restore points.
+  </Card>
+  <Card title="Move a Docker deployment in" icon="docker" href="/guides/migrate-from-docker">
+    `ankra migrate` carries databases through the same vault.
   </Card>
 </CardGroup>

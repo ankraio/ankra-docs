@@ -1,6 +1,6 @@
 ---
 title: Backup Vaults
-description: How backup vaults, stack backup policies and restore points fit together, and why Ankra copies data between clusters by restoring from a backup.
+description: How backup vaults, stack backup policies, restore points, runs and backup posture fit together, and why Ankra copies data between clusters by restoring from a backup.
 tag: "Closed Beta"
 ---
 
@@ -12,13 +12,15 @@ tag: "Closed Beta"
 A backup vault is an organisation-level record of an S3-compatible bucket you own, plus the credentials to reach it. Everything Ankra backs up is written there; nothing passes through the platform.
 </Note>
 
-## The three objects
+## The five objects
 
 | Object | Scope | What it is |
 |--------|-------|-----------|
 | **Backup vault** | Organisation | A bucket + credentials, verified by Ankra before use. One organisation can have several - a production vault and a staging vault, or one per region. |
-| **Backup policy** | Stack | "Protect this stack": a vault, a schedule and a retention. Applies to every data asset the stack's inventory finds - persistent volumes, and databases run by an operator such as CloudNativePG or Percona. |
-| **Restore point** | Stack | One captured backup: when it was taken, what triggered it (manual, scheduled, or a clone), the engines involved, its size, and when it expires. |
+| **Backup policy** | Stack | "Protect this stack": a vault, a schedule and a retention. Stored as the stack's own `backup` block, not as a separate object. |
+| **Restore point** | Stack | One captured backup: when it was taken, what triggered it, the assets in it, what it could **not** carry, its size, and its status. |
+| **Run** | Organisation | The unit of work that takes, restores or clones a restore point, with a step for each thing it does. Every capture answers with the run that will seal it. |
+| **Backup posture** | Stack, cluster, fleet | The answer to "is this data protected, and if not, why" - `protected`, `unprotected` or `unknown`. |
 
 ## Where the data flows
 
@@ -27,23 +29,52 @@ source cluster  ──write──▶  vault bucket  ◀──read──  target 
       (agent)                 (your S3)                 (agent)
 ```
 
-The source cluster's agent writes backups straight to the bucket. A target cluster - another Ankra cluster, a UAT environment, or a laptop running k3d - reads them back over HTTPS. The platform orchestrates and records; it never holds a byte of your data, which is why a vault must be reachable from the clusters themselves and not just from Ankra.
+The source cluster's agent writes backups straight to the bucket. A target cluster - another Ankra cluster, or a UAT environment - reads them back over HTTPS. The platform orchestrates and records; it never holds a byte of your data, which is why a vault must be reachable from the clusters themselves and not just from Ankra.
 
 ## Why backup-first
 
-Copying a database live between two clusters needs a network path between them, a consistent snapshot, and a way to replay changes - and it produces nothing durable. Restoring from a backup needs only the bucket, produces a disaster-recovery copy as a side effect, and is how every database operator already models its own recovery. Ankra therefore recommends a backup policy on every stateful stack, and treats "clone with data" as *take a fresh restore point, then restore it on the target*.
+Copying a database live between two clusters needs a network path between them, a consistent snapshot, and a way to replay changes - and it produces nothing durable. Restoring from a backup needs only the bucket, produces a disaster-recovery copy as a side effect, and is how every database operator already models its own recovery. Ankra therefore recommends a backup policy on every stateful stack.
 
 ## Engines
 
-The engine that captures an asset decides how consistent its restore point is:
+The engine that captures an asset decides how consistent its restore point is, and every engine records its honest answer in the restore point rather than an aspiration.
 
-| Engine | Handles | Consistency |
-|--------|---------|-------------|
-| Volume snapshot / filesystem backup | Any persistent volume (Redis, Prometheus, anything on a PVC) | Crash-consistent - the workload's own replay (WAL, AOF) finishes the job on restore |
-| CloudNativePG | PostgreSQL clusters run by the CNPG operator, including TimescaleDB on CNPG | Transactional, with point-in-time recovery |
-| Percona | MySQL clusters run by the Percona operators | Consistent (XtraBackup) |
+| Engine | Handles | Consistency | Restore in place |
+|--------|---------|-------------|------------------|
+| Velero | Any persistent volume (Redis, Prometheus, anything on a PVC) | **Crash-consistent.** The workload's own replay (WAL, AOF) finishes the job on restore | Supported |
+| Logical dump | PostgreSQL and MySQL captured as a dump, including every `ankra migrate` import | Transactional per dump | Supported |
+| CloudNativePG | PostgreSQL clusters run by the CNPG operator, captured through the barman-cloud plugin | Transactional, with point-in-time recovery | **Not yet** - see below |
+| Percona | MySQL clusters run by the Percona operators, captured through the operator's own backup | Transactional (XtraBackup) | **Not yet** - see below |
 
 A volume owned by a database operator is backed up by that operator's engine, never twice.
+
+**Volumes are captured two different ways, and which one you get is measured, not assumed.** Where the platform has observed the cluster's CSI driver and that driver can take a volume snapshot, Velero moves the data through a snapshot. Where it has observed that the driver cannot - Hetzner's CSI is the case to know about - or where it has not observed the cluster's storage at all, Velero falls back to file-system backup: slower, universally available, and honest. A cluster the platform has never seen is never assumed to support snapshots, because a render that assumed it would silently produce nothing. The restore point records which it was.
+
+## What a restore point carries
+
+A restore point is self-describing: a schema-versioned manifest naming every asset in it, the source cluster and its Kubernetes version, the sizes, and the list of what the capture could **not** take.
+
+**That last list is a first-class field, not a footnote.** Every engine reports what it left behind and why, and every listing and detail read carries it - in the CLI, in the API and in the dashboard. A volume outside the selection, a data engine no adapter covers, an external managed service that lives outside the cluster: each appears with a reason and a remedy. Silence about un-carried data is the one failure mode that turns a backup product into a liability, so a backup listing that showed sizes and hid omissions would defeat the point of having one.
+
+## Restoring in place
+
+Restoring a restore point over the stack it came from destroys before it replaces: the workloads that own the data are scaled down, the volumes the restore point replaces are removed, the assets are restored, and the workloads are scaled back up. That sequence is printed before any of it runs, and typing the stack's own name is what starts it.
+
+<Warning>
+**A restore point carrying a CloudNativePG or Percona database cannot be restored in place yet, and Ankra refuses rather than pretending.** Velero's update policy patches an object's metadata, so a bound claim keeps the volume it was already bound to and the data on disk is never replaced; CloudNativePG's bootstrap runs once, at cluster creation, and an existing cluster ignores it. Running the ordinary path anyway would report success over unchanged data, which is worse than refusing. Those databases are still captured, and still restorable into a new cluster once that lane ships.
+</Warning>
+
+## Backup posture
+
+Posture is the same verdict rendered on the stack, the cluster and the fleet, and it has three states rather than two:
+
+| State | Means |
+|-------|-------|
+| **Protected** | The stack has an enabled policy naming a vault that is ready. |
+| **Unprotected** | No policy, or a policy whose vault is missing or not ready, or one that excludes databases from a stack that runs them, or a stack that holds no data at all. The reason is always given. |
+| **Unknown** | The platform could not tell: the stack's `backup` block did not decode, the vault lookup could not be answered, or the cluster's inventory has not landed. |
+
+There is deliberately no boolean beside this. "We could not tell" is a different answer from "this is not protected", and collapsing the two is how a cluster nobody can read gets reported as a cluster with nothing to protect.
 
 ## Two ways a vault comes to exist
 
@@ -53,19 +84,29 @@ Provisioning runs as a platform job: the vault is recorded in `provisioning` the
 
 ## Credentials
 
-Vault credentials live in Ankra's secret store from the moment you submit them. They are never returned by the API, the dashboard or the CLI, never written into a cluster's stack definitions, and never included in exports. Inside a cluster, the backup tooling reads them from a Secret the platform manages. Deleting a vault removes Ankra's record and credentials; the bucket and its objects are untouched unless you explicitly ask for the provider resources to be destroyed with it, which Ankra only offers for a vault it provisioned itself.
+Vault credentials live in Ankra's secret store from the moment you submit them. They are never returned by the API, the dashboard or the CLI, never written into a cluster's stack definitions, and never included in exports. Inside a cluster, the backup tooling reads them from a Secret the platform manages.
+
+The vault also holds one **repository password**, minted when the vault is created, which encrypts the volume data in the bucket. Every cluster pointed at that vault is given the same one. A per-cluster password would make a restore point readable only from the cluster that wrote it, which would make restoring into a second cluster impossible - so a vault without a stored repository password is refused rather than allowed to fall back.
+
+Deleting a vault removes Ankra's record and credentials; the bucket and its objects are untouched unless you explicitly ask for the provider resources to be destroyed with it, which Ankra only offers for a vault it provisioned itself.
+
+## The backup data plane
+
+Protecting the first stack on a cluster installs `ankra-backup`, a system stack Ankra owns and keeps current: Velero and its node agent, a CSI snapshot controller where the driver supports one, and the CloudNativePG barman-cloud plugin where the cluster runs that operator. It is installed the same way on every kind of cluster - one Ankra provisioned, one you imported, a managed-Kubernetes cluster, a playground - because a backup product that only protects the clusters the platform built is not a backup product.
+
+You do not author it, and you should not edit it. Unprotecting the last stack never removes it either: the restore points already taken are restored *through* it, so tearing it out would make them unrestorable.
 
 ## Permissions
 
-`backups.read` sees vaults, policies and restore points; `backups.operate` verifies a vault, takes restore points and runs restores and clones; `backups.manage` creates and deletes vaults and sets policies. Organisation admins hold all three, and cross-organisation data clones are refused regardless of permissions.
+`backups.read` sees vaults, policies, restore points, runs and posture; `backups.operate` verifies a vault, takes restore points and runs restores; `backups.manage` creates and deletes vaults, sets policies and deletes restore points. Organisation admins hold all three, and cross-organisation data restores are refused regardless of permissions.
 
 ## Related
 
 <CardGroup cols={2}>
-  <Card title="Register a backup vault" icon="vault" href="/guides/backups">
-    Dashboard and CLI walkthrough, with provider-specific endpoint notes.
+  <Card title="Protect a stack and restore it" icon="vault" href="/guides/backups">
+    Vaults, protection, restore points, restore in place, runs and troubleshooting.
   </Card>
-  <Card title="Stacks" icon="layers" href="/concepts/stacks">
-    The unit a backup policy protects.
+  <Card title="The backup block" icon="code" href="/reference/importcluster#spec-stacks-backup">
+    Every field and default of a stack's backup policy.
   </Card>
 </CardGroup>
