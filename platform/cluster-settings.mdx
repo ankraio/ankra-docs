@@ -436,18 +436,30 @@ You can reconnect a disconnected cluster by importing it again with a new token.
 
 Release the compute for a self-managed cloud cluster while keeping the cluster registered in Ankra. The cluster moves to a **stopped** state.
 
-**What happens:**
+**What happens on Hetzner, OVHcloud, UpCloud and DigitalOcean (k3s clusters):**
 
-- All virtual machines are terminated at the provider
-- Provider-specific networking may also be removed; Scaleway preserves the network resources needed for restart
-- The cluster record, credentials, stacks, and configuration history are preserved in Ankra
-- Data stored only on the terminated virtual machines is not preserved
+- Ankra first captures the cluster's state - an encrypted snapshot of etcd - and uploads it to your backup vault (or to the Ankra-managed default vault when you have registered none; the object is ciphertext only, and the key stays in Ankra's secret store)
+- Only once the snapshot is stored are the virtual machines terminated at the provider
+- Cloud block volumes behind PersistentVolumes are never deleted by a stop
+- The cluster record, credentials, stacks and configuration history are preserved in Ankra
+- The capture runs as a **Cluster State Snapshot** operation; if it fails, the cluster stays running and nothing is torn down
+
+Untick **Preserve cluster state** in the dialog (or pass `preserve_state=false` on the API and `--preserve-state=false` on the CLI) to tear the cluster down without a snapshot. Everything stored in the cluster itself - Secrets, ConfigMaps, custom resources and the bindings between claims and volumes - is then lost, and only what Ankra deploys from its own configuration comes back. A stop with **Force** never captures.
+
+**What happens on Scaleway and AWS:**
+
+- The servers are powered off and kept with their volumes, so etcd and the cluster's state survive on their own
+- Retained storage, gateways and addresses remain billable while stopped
+
+**What happens on Proxmox VE and HPE Morpheus:**
+
+- All virtual machines are terminated at the provider and data stored only on them is not preserved; the state snapshot is not yet available for these providers
 
 **Starting again:**
 
-Use **Start cluster** to re-provision the saved topology. You can restore the entire cluster or start only the control plane first. Ankra creates fresh virtual machines, installs Kubernetes, and reconciles the configured stacks and addons.
+Use **Start cluster** to re-provision the saved topology. You can restore the entire cluster or start only the control plane first. Ankra creates fresh virtual machines with new IPs and installs Kubernetes. Where a state snapshot was captured, the first control plane resets etcd from it instead of bootstrapping an empty cluster, then clears the Node and volume-attachment records of the machines that no longer exist: your Secrets, ConfigMaps, custom resources and persistent volume claims come back, and StatefulSets reattach their existing cloud disks. Untick **Restore the cluster state captured at stop** (API `restore_state=false`, CLI `--restore-state=false`) to start fresh instead.
 
-The cluster gets fresh infrastructure with new servers and IPs. Previously running workloads are not preserved unless their data lives outside the terminated virtual machines, but stacks and addons configured in Ankra are redeployed automatically.
+Stacks and addons configured in Ankra are reconciled either way. A snapshot that was never restored is kept for 90 days; a restored one is kept for 7 more days and then swept.
 
 Stop and Start can also run automatically on a timetable - see [Power Schedules](/platform/cluster-power-schedules).
 
@@ -456,6 +468,10 @@ Both actions are also available from the cluster's **⋯** menu, on the cluster 
 <Note>
 Stop and Start are available for self-managed Hetzner, OVHcloud, UpCloud, DigitalOcean, Scaleway, AWS EC2, Proxmox VE, and HPE Morpheus clusters. An AWS cluster stops its instances rather than terminating them, so it keeps its private IPs and root volumes and starts again without a rebuild - see [AWS clusters](/guides/aws-clusters#stopping-and-starting-a-cluster).
 </Note>
+
+<Tip>
+You no longer need to stop a cluster to add control planes: growing from 1 to 3 (or 3 to 5 on Proxmox VE) happens live, and a cluster with three controllers changes its instance type live too. Reducing the count still applies at the next start - see [Control plane](/platform/cluster-nodes#control-plane).
+</Tip>
 
 ### Terminate Cluster
 
