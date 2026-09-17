@@ -158,14 +158,14 @@ For each declaration the diff changes, Ankra searches the repository for the oth
 
 A pull request can be correct, green, and still break a different repository: it removes a route, and the client that calls it lives elsewhere with its own pipeline that has never heard of this change. Neither side disagrees until the deploy.
 
-So for names this diff **removes**, Ankra searches the repositories your organisation deploys beside this one and shows the review any file that still refers to them. A hit is reported as a possible breaking change, on the line that does the removing.
+So for names this diff **removes**, and for contracts it **changes**, Ankra searches the repositories your organisation relates to this one and shows the review any file that still refers to them. A removal is reported as a possible breaking change on the line that does the removing; a changed contract is reported only where the file shows a real dependency on what changed.
 
 | | |
 |---|---|
 | **Which repositories** | Three sources, combined. Two need no configuration at all: applications Ankra installs on the same cluster, and repositories tagged on that cluster under **Settings** → **AI context repositories**. The third you state yourself - see [Relating two repositories directly](#relating-two-repositories-directly) below. |
-| **What triggers it** | Only removals. An added route or a new field breaks nobody, so an additive change consults nothing and costs nothing. |
+| **What triggers it** | A **removal**: a route path, a serialised field name or a constant's quoted value that a removed line carried and no added line carries. A **changed contract**: a serialised field whose declaration line changed while its name survived (a type, a nullability, an `omitempty`), or an exported declaration whose line changed (a function gaining a parameter, a version constant moving). An added route or a new field breaks nobody, so an additive change consults nothing and costs nothing, and a line that merely moved or was re-indented is not a change. Removals are searched first, up to four terms per review. |
 | **Scope** | Up to five related repositories per review. GitHub only, code search being the mechanism. |
-| **What is read** | Whole files at a named commit, quoted into the prompt as untrusted material under review - never as instructions, exactly like the diff. |
+| **What is read** | Whole files at a named commit of the repository's **default branch**, quoted into the prompt as untrusted material under review - never as instructions, exactly like the diff. Code search indexes default branches only, so this pass alone cannot see a fix that is still on a branch; that is what [the other half of the change](#the-other-half-of-the-change) below is for. When the repository has an open companion pull request, the same file is read on that branch too, and the review is told whether the name survives there. |
 
 <Note>
 The repository set is read from your organisation's own rows, never from the model and never from the text of the pull request. A pull request cannot name a repository to have it read, and a search result pointing outside the set is discarded.
@@ -174,6 +174,26 @@ The repository set is read from your organisation's own rows, never from the mod
 <Warning>
 **Silence here is not an all-clear.** The search is best effort. A rate limit, a failed request, a provider without code search, or an organisation with nothing co-installed all produce **no section at all** rather than one reading "nothing else uses this" - because a review that conflated those would tell you a removal is safe on the strength of a request that failed. Absence of a cross-repository finding is not evidence that nothing is affected.
 </Warning>
+
+### The other half of the change
+
+A cross-repository change is almost never one pull request. The API removes a route in one repository and the client stops calling it in another, and the second half sits on a branch until the first has landed. Code search cannot see that branch, so on its own the pass above would say "the client still calls this" about a repository whose fix is already open.
+
+So the review also reads the **companion pull requests** of the one under review, and shows each as it stands on its own branch:
+
+| | |
+|---|---|
+| **Declared** | A line in this pull request's description reading `Depends-on: owner/repository#number` (or the full pull request URL). It is the same line [merge order](#declaring-merge-order) is declared with, read with the same grammar, so the review and the merge hold can never disagree about what it names. |
+| **Linked** | A pull request in a related repository whose description or a comment links this one. GitHub records the link on this pull request's timeline, and the review reads it from there - so pasting the other half's URL into the description is enough. |
+| **What is shown** | Up to three companions: state (open, merged, or closed without merging), whether it is a draft, its head commit, its base branch, and its diff, bounded, as untrusted material like everything else in the prompt. A companion closed without merging is shown by state alone, because it changes nothing. |
+| **Which repositories** | Only the reviewed repository itself and the related set above. A declaration or a link naming any other repository is not read: a pull request may choose which pull request in the set the review looks at, never widen the set. |
+| **On the companion's branch** | Where the pass above found a file on a related repository's default branch, and that repository has an open companion, the review reads the same file at the companion's head and states what it found: the file still mentions the name, no longer mentions it, or no longer exists there. That verdict is computed, not inferred. |
+
+The review uses this to say which side has to merge first, and to stop asking you to confirm what the platform can read. A mention reply (`@ankraai`) sees the same companions, so "the other half is in that pull request" is checked rather than taken on your word.
+
+<Note>
+A companion absent from the review is not evidence that none exists. Only declared lines and links GitHub recorded are read, up to three, and a companion that could not be read is left out rather than shown as unchanged.
+</Note>
 
 ### Relating two repositories directly
 
@@ -225,13 +245,15 @@ Over [MCP](/platform/mcp-tools) the three are `list_related_repositories`, `rela
 
 ### Declaring merge order
 
-Where a removal is genuinely breaking, the risk is often the deploy *sequence* rather than the change, and the review will suggest declaring the order with a line in the pull request description:
+Where a removal or a contract change is genuinely breaking, the risk is often the deploy *sequence* rather than the change, and the review will suggest declaring the order with a line in the pull request description:
 
 ```text
 Depends-on: my-org/my-api#1722
 ```
 
 Ankra reads the line only when it starts a line, so ordinary prose mentioning "depends on" cannot hold anything. It accepts the short `owner/repository#number` form or a full pull request URL, up to five per pull request. Order is declared rather than inferred on purpose: inferring which side is the producer means guessing whether the change is additive or breaking, a judgement the author has already made, and two halves each waiting for the other is a deadlock.
+
+The line does two things. The review reads it on every turn and shows the declared pull request as [the other half of the change](#the-other-half-of-the-change), so the finding that suggested it is answered by the next review rather than by you. And merge-when-green holds this merge until the declared pull request has merged.
 
 <Warning>
 **The merge hold needs Merge when green on the binding.** It is a per-installation switch, off by default, and the portal renders no control for it yet - see [Merge when green](/integrations/github#merge-when-green). With it off, the line holds nothing and you sequence the merges yourself; the review may still suggest it.
