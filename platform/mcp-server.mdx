@@ -171,11 +171,22 @@ The [MCP Tool Reference](/platform/mcp-tools) lists every available tool with th
 
 ## How Calls Behave
 
-MCP is stateless: each `tools/call` is one request with nothing parked between calls. Three consequences follow, and the server's `instructions` field repeats them to the model on `initialize`.
+MCP is stateless: each `tools/call` is one request with nothing parked between calls. Three consequences follow, and the server's `instructions` field repeats them to the model on `server/discover` and `initialize`.
 
 - **Every call has a 55-second deadline.** A call that outruns it answers `isError` with a timeout. A mutating call that had already started is not undone by that timeout, so read the target's state before repeating a write.
 - **Writes that start platform work do not wait for it.** Tools such as `apply_stack_changes`, `upgrade_cluster` or `update_node_group` answer at once with an `operation_id` (or a `live_status_hint` naming the id to poll). Call `wait_for_execution` with that id to block for up to 50 seconds and receive the settled execution, or `timed_out: true` with the last observed step summary; call it again to keep waiting. `get_execution_details` reads the same document without waiting.
 - **Confirmation cards do not exist over MCP.** A tool that raises a confirmation card in the Ankra chat executes directly here when the token holds `mcp:write`: the token scope is the approval. `apply_stack_changes` applies the stack draft the token last edited, so keep one client per token while editing a draft and pass `stack_name` on every apply.
+
+## Protocol Compatibility
+
+The endpoint implements the current Model Context Protocol revision, **2026-07-28**, and still serves clients on the earlier initialize-based revisions (2025-11-25, 2025-06-18, 2025-03-26 and 2024-11-05) at the same URL. Ankra tells the two apart on every request, so there is nothing to configure on either side.
+
+- **Current-revision clients** carry the protocol version and their capabilities in each request's `_meta`, with the matching `MCP-Protocol-Version` and `Mcp-Method` headers, and `Mcp-Name` on `tools/call`. `server/discover` returns the supported versions, capabilities and instructions; every result carries `resultType` and the server identity; `tools/list` includes a five-minute `ttlMs` hint scoped to the caller. There is no `initialize`, no `ping` and no session.
+- **Earlier clients** open with `initialize` as before. Ankra echoes a revision it knows, offers 2025-11-25 for one it does not, and answers `ping`, `tools/list` and `tools/call` exactly as it did.
+
+A required header that is missing, or one that disagrees with the request body, is refused with HTTP 400 and JSON-RPC error `-32020`. A revision Ankra does not serve is refused with `-32022`, and the error's `data.supported` lists the revisions it does.
+
+The same move applies in the other direction: the MCP client behind the [AI assistant's registered tool servers](/platform/ai-assistant) opens every server with `server/discover`, falls back to the `initialize` handshake for a server that still needs it (remembering that verdict for an hour), and mirrors parameters a server marks `x-mcp-header` into `Mcp-Param-*` headers.
 
 ## Troubleshooting
 
@@ -202,6 +213,10 @@ The requested tool changes state and is outside the read surface. Use a write-sc
 ### A tool reports a rate limit
 
 Wait one minute and retry. If normal usage regularly reaches the limit, ask your Ankra administrator to review the MCP rate limits.
+
+### 400 Header mismatch or Unsupported protocol version
+
+A client on the current protocol revision sent a request whose `MCP-Protocol-Version`, `Mcp-Method` or `Mcp-Name` header is missing or does not match the request body (JSON-RPC error `-32020`), or named a revision Ankra does not serve (`-32022`, with the supported revisions in the error's `data.supported`). Update the client, or let it retry with a revision from that list.
 
 ## Related
 
