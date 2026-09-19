@@ -208,12 +208,32 @@ ankra cluster managed node-pool delete <cluster_id> pool-b --provider doks
 curl -X PATCH https://platform.ankra.app/org/clusters/managed/doks/<cluster_id>/node-pools/workers \
   -H "Authorization: Bearer $ANKRA_API_TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"autoscaling": {"enabled": true, "min_count": 2, "max_count": 10}}'
+  -d '{"autoscaling_enabled": true, "autoscaling_min": 2, "autoscaling_max": 10}'
 ```
 
 </CodeGroup>
 
-The CLI scales node pools to a fixed count on any provider. Autoscaling bounds (available on every provider except UKS, which UpCloud does not support) are set from the portal or the `PATCH` endpoint above. AKS pool names are lowercase alphanumeric and at most 12 characters.
+The CLI scales node pools to a fixed count on any provider. Autoscaling bounds (available on every provider except UKS, where Ankra does not manage autoscaling; see [externally managed node pools](#externally-managed-node-pools)) are set from the portal or the `PATCH` endpoint above. AKS pool names are lowercase alphanumeric and at most 12 characters.
+
+### Externally managed node pools
+
+Ankra never changes a managed pool's node count on its own. There is no drift correction on node counts and no scheduled job that writes them, and a Kubernetes upgrade only sets the version. The count changes only when someone scales the pool, sends a `PATCH` with a `count`, or replaces the pool with a different size (which recreates it at the count Ankra has stored).
+
+When something outside Ankra owns a pool's count, such as a cluster autoscaler you run yourself on a provider where Ankra does not manage autoscaling, mark the pool as externally managed so those explicit writes are refused too:
+
+```bash
+curl -X PATCH https://platform.ankra.app/org/clusters/managed/uks/<cluster_id>/node-pools/autoscaled \
+  -H "Authorization: Bearer $ANKRA_API_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"externally_managed": true}'
+```
+
+`externally_managed` is sent on its own, not combined with other pool fields, and setting it makes no call to the provider. While it is set:
+
+- Scale, a `count` update, delete and size replacement on that pool are refused with `Node pool is externally managed; clear externally_managed before changing it through Ankra`. This covers the portal, the CLI, the API and Ankra AI, which has no way to clear the flag itself.
+- The pool listing returns `externally_managed: true` and an `observed_count` read live from the provider. `count` stays the last value Ankra wrote, and Ankra never copies the observed count over it.
+
+Send `{"externally_managed": false}` to hand the pool back. A pool created directly at the provider after the cluster was imported is not in Ankra's definition at all, so Ankra cannot change it either way.
 
 ### Kubernetes upgrades
 
