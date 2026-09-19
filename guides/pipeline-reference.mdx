@@ -185,6 +185,35 @@ A build step does not read the checkout the run's other stages share: it runs in
 
 A step's container mounts the run's workspace at `/workspace` and runs with these variables set: `ANKRA_RUN_ID`, `ANKRA_STEP_ID`, `ANKRA_STEP_KEY`, `ANKRA_STEP_KIND`, `ANKRA_ORGANISATION_ID`, `ANKRA_CLUSTER_ID`, `ANKRA_REPOSITORY_ID`, `ANKRA_APPLICATION_ID`, `ANKRA_HEAD_SHA`, `ANKRA_REF`, `ANKRA_IS_FORK` and `ANKRA_WORKSPACE`. `ANKRA_OUTPUT` names a file on a memory-backed volume: append `key=value` lines to it (at most 64 KiB) and they are recorded as the step's outputs when the script exits, whether it succeeded or not. A declared secret or credential the step may read is delivered as a file under `/run/agent-secrets`, named after the binding: the agent reveals it once, at step start, by calling back with its own session token, so the value never rides in the payload the platform sent or in a log line. The directory is mounted only when the step has at least one file binding, so a step with none has no `/run/agent-secrets` to list rather than an empty one. A `secrets` binding sourced `app_env_secret`, `org_variable` or `registry` resolves; `from: credential` validates but is not deliverable yet. A `credentials` binding sourced `git` or `registry` resolves; `cloud` and `object_storage` are refused by name until the run has its own scoped identity.
 
+### A registry login in a step
+
+A binding sourced `registry` is delivered as a Docker `config.json` - `auths` keyed on the registry's host, carrying the username and password Ankra resolved - rather than as a bare token. `from: registry` naming no `key` is the organisation's own Ankra registry, logged in as the organisation's CI robot, which pushes and pulls across the whole organisation project; a `key` names another connected registry instead. `ankra application publish-readiness` prints the host and project the organisation's registry resolves to.
+
+The file is named after the binding like any other, so it lands at `/run/agent-secrets/<name>` and not at a path a container tool searches by default. `DOCKER_CONFIG` is reserved - along with `PATH`, `HOME`, `TMPDIR`, `BUILDKIT_HOST` and the other variables that decide what a step actually executes - so a pipeline cannot point a tool at the directory with `env`, and declaring one of them refuses the step rather than being overwritten silently. Every tool that reads a Docker config has to be given the path explicitly: `helm --registry-config`, `oras --registry-config`, `crane --docker-config`, `skopeo --authfile`.
+
+That is the whole of publishing a Helm chart to the organisation's registry from a pipeline, which `build` and `publish` do not cover - those stages carry an image digest, not a chart:
+
+```yaml
+secrets:
+  - name: registry_login
+    from: registry
+
+stages:
+  - name: publish-chart
+    image: alpine/helm:3.16.3
+    network: egress-https
+    secrets: ["registry_login"]
+    run: |
+      helm package charts/myapp --destination /tmp
+      helm push /tmp/myapp-*.tgz \
+        "oci://registry.ankra.cloud/org-${ANKRA_ORGANISATION_ID}" \
+        --registry-config /run/agent-secrets/registry_login
+```
+
+The image is named on the stage because a pipeline's `defaults.image` is its build toolchain and ships no `helm`, and the tier is named because a `run` stage defaults to `network: none` - without it the push fails on a connection timeout rather than on the login. A registry on a private address needs its range in [`ci_egress_allowed_cidrs`](/guides/ankra-pipelines#organisation-ci-settings) as well.
+
+`secrets` is a protected section, so the binding a run receives is the one on the **default branch's approved definition**. A pull request that adds the declaration plans its logic from its own head sha but its authority from the default branch, so that first run reaches the stage with no login and the push fails to authenticate. Merge the declaration, then push the chart.
+
 ## Expressions
 
 Any string field may embed expressions between `${{` and `}}`; the text inside is [CEL](https://cel.dev). Evaluation is deterministic and performs no I/O: everything an expression can reach arrives in its context, and `hashFiles` is served by the agent, which has the workspace.
