@@ -40,7 +40,7 @@ A pipeline mistakenly committed under `.ankra/manifests/` is refused by the mani
 | `kind` | string | required | `Pipeline` |
 | `metadata.name` | string | required | The pipeline's name |
 | `on` | block | none | The triggers - see [Triggers](#triggers). A pipeline that declares none is still runnable by API dispatch. |
-| `concurrency.group` | string | none | Runs sharing a group serialise: a new run waits queued behind the group's holder. Expressions are allowed, for example `"${{ ankra.repository }}-${{ ankra.ref }}"`. |
+| `concurrency.group` | string | none | Runs sharing a group serialise: a new run waits queued behind the group's holder. Expressions are allowed, for example `"${{ ankra.repository.provider }}:${{ ankra.repository.owner }}/${{ ankra.repository.name }}-${{ ankra.ref }}"`. |
 | `concurrency.cancel_in_progress` | flag | `false` | With a group, an in-flight run of the same group is superseded and cancelled when a new one arrives. Leave it off and the new run waits instead - on a per-branch group that means the branch queues behind itself, which the validator points out as advice; see [Newest commit wins](/guides/ankra-pipelines#newest-commit-wins). Set without a group it does nothing, and the validator warns. |
 | `workspace.size` | quantity | none | The per-run volume every stage shares, for example `"10Gi"` |
 | `workspace.access` | `rwo` or `rwx` | `rwo` | `rwo` keeps every step of the run on the node the volume bound to. `rwx` needs a StorageClass that serves it named on the claim; nothing names one today, so an `rwx` workspace is refused at dispatch rather than left waiting for a claim that never binds. |
@@ -86,7 +86,7 @@ Every stage has a `name` (lower-case letters, digits, dashes and underscores, st
 |------|--------------|-------|
 | `checkout` | Materialises the repository at the run's ref into the workspace, reading `with.fetch_depth` (default `1`, `0` for full history), `with.submodules` (`false`, `true` or `recursive`) and `with.lfs` | Executes end to end: a pinned public git image, a shallow fetch of the exact commit with a fallback to its ref, `lfs: true` refused by name rather than silently checking out pointer files. A pull request from a fork clones the fork's own head anonymously, reading the head repository the trigger recorded on the run; refused, rather than guessed, only on the rare delivery whose fork head repository could not be established at all. |
 | `run` | Executes `run` (a script, under `/bin/sh -eu`) in an image the organisation's policy allows; `uses` is refused at validation until the step library ships (below) | Executes end to end |
-| `build` | Builds a container image by digest in a rootless BuildKit pod in `ankra-ci-build` | Executes end to end: resolves its own builder, source and push target at dispatch (a bare repository, or a component with no resolvable registry, gets a named refusal instead of a guess) and pushes by digest to the organisation's CI staging repository; a fork run's build has no push target, so it builds and discards. When the CI cluster cannot build - its agent runs no pipeline steps, or its node runtime confines the rootless builder ([`build_runtime_confined`](/guides/ankra-pipelines#when-something-fails)) - and the organisation set [`ci_build_fallback: platform_builders`](/guides/ankra-pipelines#organisation-ci-settings) and has the platform-builders lane enabled (closed beta, enabled per organisation by Ankra on request; `platform_builds_enabled` reads whether it is), the step runs on Ankra's own platform-builders lane instead, with the same downstream `scan`/`gate`/`publish`. Without the lane the step is refused as `build_fallback_none`, whatever the setting says. The build pod names no seccomp or AppArmor profile and no setting renders it `Unconfined`; on a confining node the fallback is the supported route, not a workaround. |
+| `build` | Builds a container image by digest in a rootless BuildKit pod in `ankra-ci-build` | Executes end to end: resolves its own builder, source and push target at dispatch (a bare repository, or a component with no resolvable registry, gets a named refusal instead of a guess) and pushes by digest to the organisation's CI staging repository; a fork run's build has no push target, so it builds and discards. When the CI cluster cannot build - its agent runs no pipeline steps, or its node runtime confines the rootless builder ([`build_runtime_confined`](/guides/ankra-pipelines#when-something-fails)) - and the organisation set [`ci_build_fallback: platform_builders`](/guides/ankra-pipelines#organisation-ci-settings) and holds the platform builds grant (`platform_builds_enabled`; Ankra makes it per organisation on request), the step runs on [Ankra platform builders](/guides/ankra-pipelines#ankra-platform-builders) instead, with the same downstream `scan`/`gate`/`publish`. Without the grant the step is refused as `build_fallback_none`, whatever the setting says. The build pod names no seccomp or AppArmor profile and no setting renders it `Unconfined`; on a confining node the fallback is the supported route, not a workaround. |
 | `scan` | Runs the scanners over the source and the built image | Executes end to end: one step per declared scanner - Trivy, Semgrep, Checkov - each a pinned public image, writing the reports `gate` and the application's Security tab both read. The filesystem legs honour the stage's `working_directory`, so a monorepo component scans its own tree |
 | `gate` | Evaluates persisted findings against organisation policy | Executes end to end: judges the run's own persisted findings against [`ci_image_gate`](/guides/ankra-pipelines#organisation-ci-settings), which the stage's own `with:` may only tighten and each required `scan` stage's own `fail_on` tightens further per scanner (below); a declared scanner that recorded nothing fails the gate by name. It records the digest it judged on its own step outputs |
 | `publish` | Re-tags an approved image digest in the registry | Executes end to end: re-tags the exact digest `gate` approved as `sha-<7>` in the application's real repository; refuses by name when its run has no successful `gate` step, when the build's digest is not the one the gate recorded judging (or the gate recorded none), or - in a monorepo - when its own stage name matches neither the bare nor the component-suffixed convention, so it cannot tell which component's build it is publishing |
@@ -184,6 +184,35 @@ A build step does not read the checkout the run's other stages share: it runs in
 ### What every step carries
 
 A step's container mounts the run's workspace at `/workspace` and runs with these variables set: `ANKRA_RUN_ID`, `ANKRA_STEP_ID`, `ANKRA_STEP_KEY`, `ANKRA_STEP_KIND`, `ANKRA_ORGANISATION_ID`, `ANKRA_CLUSTER_ID`, `ANKRA_REPOSITORY_ID`, `ANKRA_APPLICATION_ID`, `ANKRA_HEAD_SHA`, `ANKRA_REF`, `ANKRA_IS_FORK` and `ANKRA_WORKSPACE`. `ANKRA_OUTPUT` names a file on a memory-backed volume: append `key=value` lines to it (at most 64 KiB) and they are recorded as the step's outputs when the script exits, whether it succeeded or not. A declared secret or credential the step may read is delivered as a file under `/run/agent-secrets`, named after the binding: the agent reveals it once, at step start, by calling back with its own session token, so the value never rides in the payload the platform sent or in a log line. The directory is mounted only when the step has at least one file binding, so a step with none has no `/run/agent-secrets` to list rather than an empty one. A `secrets` binding sourced `app_env_secret`, `org_variable` or `registry` resolves; `from: credential` validates but is not deliverable yet. A `credentials` binding sourced `git` or `registry` resolves; `cloud` and `object_storage` are refused by name until the run has its own scoped identity.
+
+### A registry login in a step
+
+A binding sourced `registry` is delivered as a Docker `config.json` - `auths` keyed on the registry's host, carrying the username and password Ankra resolved - rather than as a bare token. `from: registry` naming no `key` is the organisation's own Ankra registry, logged in as the organisation's CI robot, which pushes and pulls across the whole organisation project; a `key` names another connected registry instead. `ankra application publish-readiness` prints the host and project the organisation's registry resolves to.
+
+The file is named after the binding like any other, so it lands at `/run/agent-secrets/<name>` and not at a path a container tool searches by default. `DOCKER_CONFIG` is reserved - along with `PATH`, `HOME`, `TMPDIR`, `BUILDKIT_HOST` and the other variables that decide what a step actually executes - so a pipeline cannot point a tool at the directory with `env`, and declaring one of them refuses the step rather than being overwritten silently. Every tool that reads a Docker config has to be given the path explicitly: `helm --registry-config`, `oras --registry-config`, `crane --docker-config`, `skopeo --authfile`.
+
+That is the whole of publishing a Helm chart to the organisation's registry from a pipeline, which `build` and `publish` do not cover - those stages carry an image digest, not a chart:
+
+```yaml
+secrets:
+  - name: registry_login
+    from: registry
+
+stages:
+  - name: publish-chart
+    image: alpine/helm:3.16.3
+    network: egress-https
+    secrets: ["registry_login"]
+    run: |
+      helm package charts/myapp --destination /tmp
+      helm push /tmp/myapp-*.tgz \
+        "oci://registry.ankra.cloud/org-${ANKRA_ORGANISATION_ID}" \
+        --registry-config /run/agent-secrets/registry_login
+```
+
+The image is named on the stage because a pipeline's `defaults.image` is its build toolchain and ships no `helm`, and the tier is named because a `run` stage defaults to `network: none` - without it the push fails on a connection timeout rather than on the login. A registry on a private address needs its range in [`ci_egress_allowed_cidrs`](/guides/ankra-pipelines#organisation-ci-settings) as well.
+
+`secrets` is a protected section, so the binding a run receives is the one on the **default branch's approved definition**. A pull request that adds the declaration plans its logic from its own head sha but its authority from the default branch, so that first run reaches the stage with no login and the push fails to authenticate. Merge the declaration, then push the chart.
 
 ## Expressions
 

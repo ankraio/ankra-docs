@@ -180,6 +180,69 @@ ankra application auto-deploy set <application-id> --enabled
 | `--enabled` | `false` | Deploy builds observed on the tracked branch without asking (required) |
 | `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
 
+## ankra application backup
+
+Back up one of an application's deployments now.
+
+The capture is dispatched by the platform, so the command answers with the
+restore point in 'creating' and the run that will seal it. With --wait it
+follows that run to completion.
+
+The deployment is named by the cluster it runs on; Ankra resolves which stack
+that is, and the restore point it takes is the same artifact
+'ankra cluster stacks restore-points list' shows for that stack.
+
+```bash
+ankra application backup <application-id> [flags]
+```
+
+**Examples**
+
+```bash
+ankra application backup shop --cluster production
+  ankra application backup shop --cluster production --note "before the 3.2 migration" --wait
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--cluster` |   | Cluster the deployment runs on (name or id, required) |
+| `--note` |   | Why this backup was taken, recorded on the audit row and the run |
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+| `--timeout` | `2h0m0s` | Maximum time to wait when --wait is set |
+| `--vault` |   | Backup vault to write to (name or id; the deployment's own backup policy, then the organisation's only ready vault, when omitted) |
+| `--wait` | `false` | Wait for the operation to finish and report success or failure (default: submit and return immediately) |
+
+## ankra application backups
+
+Show an application's backup protection, deployment by deployment.
+
+One row per cluster the application is deployed to: whether that deployment
+carries a database, whether its data is protected, when it was last backed up
+and when it is next scheduled.
+
+The verdict has three values and none of them is a boolean: 'unknown' means
+Ankra could not establish whether this deployment is protected, which is not
+the same answer as 'unprotected'.
+
+```bash
+ankra application backups <application-id> [flags]
+```
+
+**Examples**
+
+```bash
+ankra application backups shop
+  ankra application backups shop -o json
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+
 ## ankra application branch-files
 
 List the tracked files on the setup branch
@@ -1279,13 +1342,16 @@ there is one and the status until then, with a glyph that says which:
 ⟳ only for a run or step that has not concluded (○ for a blocked step).
 
 Superseded runs: a run cancelled because a NEWER run took its concurrency
-group reads 'superseded' rather than 'cancelled', and 'pipeline get' names
-the run that took its place under the Status line. Nobody stopped that run,
-and the run worth looking at is the newer one. In -o json the fields are
-'error_class' ("superseded"), 'superseded_by_run_id' and
-'superseded_by_run_number'; 'outcome' stays "cancelled", so a script
-filtering on outcome alone still finds these runs and must read the class to
-tell them from a run somebody cancelled.
+group reads 'superseded' rather than 'cancelled' - on the Status line, in
+the STATUS column, on the last line of --watch and in the conclusion --wait
+reports - and 'pipeline get' names the run that took its place. Nobody
+stopped that run, and the run worth looking at is the newer one. Only the
+word differs: --wait, --watch and --exit-code exit 1 for a superseded run as
+for any cancelled one. In -o json the fields are 'error_class'
+("superseded"), 'superseded_by_run_id' and 'superseded_by_run_number';
+'outcome' stays "cancelled", so a script filtering on outcome alone still
+finds these runs and must read the class to tell them from a run somebody
+cancelled.
 
 Authority (-o json 'authority_state', the Authority line): the protected
 authority the run executed under. 'approved' - the default branch's
@@ -1353,9 +1419,9 @@ ankra application pipeline logs <application-id> <run> [flags]
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--follow` | `false` | Wait for the step to start if it has not, then keep streaming, reconnecting through transient stream faults, until it concludes |
+| `--follow` | `false` | Wait for the step to start if it has not, then keep streaming, reconnecting through transient stream faults, until it concludes; for a step on Ankra's platform builders, which has no live stream, wait for it to conclude and print its archived log |
 | `--replay` | `false` | Also show the output a running step produced before this command connected (a concluded step's log is always shown whole) |
-| `--step` |   | Step key to follow (required when the run has more than one step) |
+| `--step` |   | Step key to follow (required when the run has more than one step), or the id of one attempt of it as 'ankra pipeline get' prints for a retried step |
 
 ## ankra application pipeline rerun
 
@@ -1479,6 +1545,8 @@ ankra application pipeline validate <application-id> [file] [flags]
 | Flag | Default | Description |
 |------|---------|-------------|
 | `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+| `--ref` |   | Read the definition from this git reference in the current checkout (for example origin/my-branch) instead of the working tree |
+| `--spec-file` |   | Validate this definition file, the same as passing it as the argument |
 
 ## ankra application platform
 
@@ -1494,6 +1562,47 @@ ankra application platform <application-id> [flags]
 |------|---------|-------------|
 | `--cluster` |   | Target cluster ID (required) |
 | `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+
+## ankra application protect
+
+Protecting a deployment writes its whole backup policy: the vault, the
+schedule, the retention and which volumes are carried. Running it again
+replaces the policy that is there, so restate --schedule, --retention and
+--include-pvc when they must survive; anything omitted takes the default,
+not the previous value.
+
+Turn scheduled backups on for one of an application's deployments.
+
+The deployment is named by the cluster it runs on; Ankra resolves which stack
+that is. Without --vault the organisation's single verified backup vault is
+used, and an organisation with more than one is refused rather than chosen
+for - where a restore point lives is not a decision to make on somebody's
+behalf.
+
+```bash
+ankra application protect <application-id> [flags]
+```
+
+**Examples**
+
+```bash
+ankra application protect shop --cluster production
+  ankra application protect shop --cluster production --vault production-backups --backup-now
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--backup-now` | `false` | Take the first restore point immediately instead of waiting for the schedule |
+| `--cluster` |   | Cluster the deployment runs on (name or id, required) |
+| `--confirm-exclude-databases` | `false` | Acknowledge that --exclude-databases means no database contents are carried |
+| `--exclude-databases` | `false` | Leave this stack's database contents out of the capture |
+| `--include-pvc` | `[]` | Persistent volume claim to carry, as namespace/name (repeatable). Volumes are carried only where named |
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+| `--retention` |   | Restore points to keep, as key=value pairs: hourly, daily, weekly, monthly, yearly, minimum-count, minimum-age (for example daily=7,weekly=4,monthly=6); the platform default when omitted |
+| `--schedule` |   | hourly, daily, weekly, or a five-field cron expression (daily when omitted) |
+| `--vault` |   | Backup vault the restore points are written to (name or id; the organisation's only ready vault when omitted, refused when it has several) |
 
 ## ankra application publish-addon
 

@@ -17,14 +17,19 @@ SOPS (Secrets OPerationS) encryption allows you to securely store sensitive valu
 
 ```mermaid
 flowchart LR
-    Editor[Stack Editor] -->|Encrypt with AGE public key| Git[Git Repo]
-    Git -->|Decrypt with AGE private key| Cluster[Cluster]
+    Editor[Stack Builder or CLI] -->|Value as entered| Ankra[Ankra control plane]
+    Ankra -->|Sealed with the AGE public key on every push| Git[Git Repo]
+    Git -->|Decrypted by the agent in your cluster| Cluster[Cluster]
 ```
 
-1. **In the Stack Builder**: You enter secrets in plaintext
-2. **On Save**: Ankra encrypts marked fields with your organisation's AGE public key
-3. **In Git**: Encrypted values appear as `ENC[AES256_GCM,...]` - safe to commit
-4. **On Deploy**: ArgoCD's helm-secrets plugin decrypts values using the private key
+1. **In the Stack Builder**: You enter the value in plaintext and list its key under **Encrypted Keys (SOPS)**
+2. **In Ankra**: The control plane stores the value as you entered it, together with the list of keys to seal. Listing a key does not encrypt the value inside Ankra
+3. **On every push to Git**: Ankra seals the listed keys with your organisation's AGE public key, so your repository only ever receives `ENC[AES256_GCM,...]` for them
+4. **On Deploy**: The Ankra agent decrypts inside your cluster - directly with `sops` on the native engine, or through ArgoCD's helm-secrets plugin on the ArgoCD engine (see [Deployment Engines](/concepts/deployment-engines))
+
+<Note>
+Because sealing happens at the push, the Stack Builder shows the value you typed, not ciphertext, including after you save and reopen it. That is expected. What protects the value is that it is never written to Git unsealed: a push that cannot seal a listed key is refused instead of committed. To confirm a value is sealed, look at the file in your Git repository.
+</Note>
 
 ---
 
@@ -46,7 +51,7 @@ Setting up SOPS encryption is a single step. Once initialized, encryption is ena
 That's it. After initialization:
 
 - **Encryption is enabled** by default - fields you mark as encrypted will be protected immediately.
-- **Cluster decryption is automatic** - any cluster with ArgoCD installed receives the decryption key automatically. There is nothing to configure per-cluster.
+- **Cluster decryption is automatic** - on the native engine the agent requests the key from Ankra when it deploys a sealed value, and on the ArgoCD engine Ankra installs the key into the cluster for helm-secrets. There is nothing to configure per-cluster.
 
 The AGE public key is displayed on the Encryption settings page. You can copy it for use with external SOPS tools if needed.
 
@@ -63,7 +68,7 @@ When editing a manifest or add-on values in the Stack Builder:
 1. Look for the **Encrypted Keys (SOPS)** section
 2. Add key names that should be encrypted (e.g., `password`, `apiKey`, `token`)
 3. Enter the plaintext value as normal
-4. On save, Ankra encrypts those specific keys
+4. Save. Ankra seals those specific keys every time it writes the file to your Git repository
 
 <Tip>
 Only the specified keys are encrypted. Other values remain in plaintext for easy review and debugging.
@@ -376,21 +381,25 @@ For more CLI commands, see the [Ankra CLI documentation](/reference/cli/cluster#
 
 ## How Decryption Works
 
-When SOPS is initialized for your organisation, Ankra automatically configures decryption on clusters that have ArgoCD:
+Your organisation's AGE private key is kept in Ankra's secret store. How a cluster uses it depends on the [deployment engine](/concepts/deployment-engines) of the add-on or manifest being deployed.
+
+### Native engine
+
+The Ankra agent decrypts sealed values itself. When a deploy reaches a sealed file, the agent requests the organisation's private key from Ankra, runs `sops --decrypt` inside your cluster, and hands the result to Helm or applies the manifest. Nothing is installed in the cluster beforehand and there is no per-cluster setup. This is the default engine for clusters created since May 2026.
+
+### ArgoCD engine
+
+On clusters that use ArgoCD, Ankra configures ArgoCD to decrypt during Helm template rendering:
 
 1. **Deploys the AGE private key** as a Kubernetes Secret in the ArgoCD namespace
 2. **Configures helm-secrets plugin** on the ArgoCD repo-server
 3. **Sets up automatic decryption** during Helm template rendering
-
-### What Gets Deployed
 
 | Component | Namespace | Purpose |
 |-----------|-----------|---------|
 | `ankra-sops-age-key` Secret | `argocd` | Stores the AGE private key |
 | helm-secrets plugin | ArgoCD repo-server | Enables SOPS decryption in Helm |
 | SOPS binary | ArgoCD repo-server | Performs the actual decryption |
-
-### ArgoCD Integration
 
 The helm-secrets plugin is automatically configured with:
 
@@ -406,25 +415,30 @@ The helm-secrets plugin is automatically configured with:
 <AccordionGroup>
   <Accordion title="Deployment Fails with Decryption Error">
     1. Verify SOPS is initialized at the organisation level (**Organisation Settings** → **Encryption**)
-    2. Confirm the cluster has ArgoCD installed and that the repo-server has restarted
-    3. Ensure the content was encrypted with the current organisation key (not a rotated key)
+    2. Ensure the content was encrypted with the current organisation key (compare `sops.age.recipient` in the file with the public key on the Encryption settings page)
+    3. On the ArgoCD engine only, confirm the cluster has ArgoCD installed and that the repo-server has restarted:
 
     ```bash
     # Check ArgoCD repo-server logs
     kubectl logs -n argocd -l app.kubernetes.io/component=repo-server | grep -i sops
     ```
+
+    On the native engine the failing step's own message in the deployment view names the file and the reason.
   </Accordion>
   <Accordion title="Cluster Not Decrypting Encrypted Values">
-    The cluster needs ArgoCD to decrypt SOPS values. If ArgoCD is not installed:
+    On the native engine the agent decrypts on its own and needs nothing installed in the cluster, so check the first entry above instead.
+
+    An add-on that uses the ArgoCD engine needs ArgoCD to decrypt. If ArgoCD is not installed:
 
     1. Create a Stack with the ArgoCD add-on
     2. Deploy and wait for ArgoCD to become ready
     3. The SOPS decryption key will be deployed automatically
   </Accordion>
   <Accordion title="Values Not Being Encrypted">
-    1. Check that the key name matches exactly (case-sensitive)
-    2. Verify SOPS is initialized at the organisation level
-    3. Ensure the key is added to the **Encrypted Keys** list before saving
+    1. Look in your Git repository, not in the Stack Builder. The Stack Builder always shows the value you entered; sealing happens when Ankra writes the file to Git
+    2. Check that the key name matches exactly (case-sensitive)
+    3. Verify SOPS is initialized at the organisation level
+    4. Ensure the key is added to the **Encrypted Keys** list before saving
 
     Name a top-level key directly, or use dot notation to locate a nested one. Either way the entry names a key, and every key of that name in the document is sealed - see [What an Entry Actually Matches](#what-an-entry-actually-matches).
   </Accordion>
@@ -446,13 +460,6 @@ The helm-secrets plugin is automatically configured with:
   </Accordion>
   <Accordion title="A Sealed File Came Back as Plaintext After an API Update">
     An update sent over the API with `encrypted_paths: []` clears the stored declaration, and the next platform write renders the file as plain content over the sealed copy. Restore the declaration (declare the keys again, or re-encrypt with `ankra cluster encrypt`) and rotate any value that reached the repository in plaintext. On updates, omit the key to keep the stored declaration - see [An Empty or Absent Declaration](#an-empty-or-absent-declaration).
-  </Accordion>
-  <Accordion title="Key Rotation Stuck">
-    If you initiated key rotation but can't complete it:
-
-    1. **Cancel the rotation** if you haven't re-encrypted content yet
-    2. If content is already re-encrypted, verify by checking the `sops.age.recipient` field matches the new public key
-    3. Click **Confirm Rotation** to finalize
   </Accordion>
 </AccordionGroup>
 
@@ -490,11 +497,11 @@ SOPS encryption is enabled by default after initialization. If you need to tempo
 1. Go to **Organisation Settings** → **Encryption**
 2. Toggle **SOPS Encryption** off
 
-When disabled, fields marked for encryption will be saved in plaintext. Re-enable at any time to resume encryption. This does not affect clusters' ability to decrypt already-encrypted values.
+While it is off, Ankra does not write a file with listed keys to Git unsealed: a push of that file is refused until encryption is re-enabled. Re-enable at any time to resume encryption. This does not affect clusters' ability to decrypt already-encrypted values.
 
 ### Per-Cluster Decryption Toggle
 
-Ankra automatically deploys the SOPS decryption key to every cluster that has ArgoCD. If you need to manage this manually for a specific cluster:
+On the ArgoCD engine, Ankra automatically deploys the SOPS decryption key to every cluster that has ArgoCD. If you need to manage this manually for a specific cluster:
 
 1. Go to your cluster → **Settings** → **Encryption**
 2. Toggle **Enable SOPS Decryption** on or off
@@ -505,30 +512,9 @@ Disabling cluster decryption will cause deployments with encrypted values to fai
 
 ### Key Rotation
 
-Periodically rotating encryption keys is a security best practice. Consider rotating keys quarterly or after team member departures.
+Key rotation is not available as a self-service control in the portal or the CLI today.
 
-<Steps>
-  <Step title="Go to Encryption Settings">
-    Navigate to **Organisation Settings** → **Encryption**.
-  </Step>
-  <Step title="Click Rotate Keys">
-    This generates a new AGE key pair while preserving the old one temporarily.
-  </Step>
-  <Step title="Re-encrypt Existing Content">
-    Before confirming, you must re-encrypt all existing SOPS-encrypted content in your Git repositories with the new public key.
-  </Step>
-  <Step title="Confirm Rotation">
-    Once all content is re-encrypted, click **Confirm Rotation** to finalize. The old private key is then securely deleted.
-  </Step>
-</Steps>
-
-<Warning>
-**Critical**: You must re-encrypt all content before confirming rotation. Failing to do so will result in decryption failures for content encrypted with the old key.
-</Warning>
-
-#### Cancelling Key Rotation
-
-If you need to abort a rotation in progress, click **Cancel Rotation**. The new key pair is discarded and the existing key remains active.
+Rotating the organisation key is more than generating a new pair: every file already sealed in your Git repositories has to be re-encrypted with the new public key before the old private key is retired, or those files can no longer be decrypted at deploy time.
 
 ---
 
