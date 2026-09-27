@@ -222,7 +222,7 @@ A `credentials` binding sourced `git` is delivered as one line of JSON - not as 
 {"provider":"github","instance_url":"","username":"x-access-token","token":"<token>","expires_at":"<RFC 3339 time>"}
 ```
 
-`token` is a short-lived token for the run's own repository: a GitHub App installation token when an installation covers it, otherwise the stored credential the binding's `name` points at. `username` is the one the provider expects beside it (`x-access-token` on GitHub). `instance_url` is empty for a provider's public host and names a self-hosted instance otherwise. The file lands at `/run/agent-secrets/<as>`, or at `/run/agent-secrets/<name>` when the binding has no `as`. It is written once, at step start, and is not refreshed.
+The keys are exactly these five, lower case and unnested, and the file holds that one compact line with no trailing newline. `provider` is the repository's provider: `github`, `gitlab` or `bitbucket_cloud`. `token` is a short-lived token for the run's own repository: a GitHub App installation token when an installation covers it, otherwise the stored credential the binding's `name` points at. `username` is the one the provider expects beside it (`x-access-token` on GitHub). `instance_url` is empty for a provider's public host and names a self-hosted instance otherwise. `expires_at` is a UTC RFC 3339 time for a minted token and empty for a stored credential, so a script should not depend on it. The file lands at `/run/agent-secrets/<as>`, or at `/run/agent-secrets/<name>` when the binding has no `as`, and the step's own user can read it. It is written once, at step start, and is not refreshed.
 
 Git reads none of that by itself. Pointing `git-credential-store` at the file (`credential.helper 'store --file /run/agent-secrets/<as>'`) does not work: the store helper reads `https://user:token@host` lines, finds none, and git falls back to prompting, which a step cannot answer. The fetch exits 128 with `could not read Username for 'https://github.com': terminal prompts disabled`. Give git a helper that reads the JSON instead, and pass it on the command line: it then applies to that one command, and nothing is written under a `HOME` on the step's read-only root filesystem.
 
@@ -255,13 +255,16 @@ stages:
       [ -n "$token" ] || exit 0
       printf 'username=%s\npassword=%s\n' "${username:-x-access-token}" "$token"
       EOF
-      git -c credential.helper= -c credential.helper='!sh /tmp/git-credential-ankra' \
+      git -c safe.directory=/workspace \
+        -c credential.helper= -c credential.helper='!sh /tmp/git-credential-ankra' \
         -C /workspace fetch --no-tags origin main
 ```
 
-The empty `credential.helper=` clears any helper the image configures, and the host check keeps the token from being offered to any other host git asks about - a submodule URL, say. Replace `github.com` with your provider's host for a self-hosted instance. The image only needs `sh`, `cat`, `git`, `grep` and `cut`, and has to be inside the organisation's image policy. The tier is named because a `run` stage defaults to `network: none`, where the fetch fails on the connection rather than on the login - and git exits 128 for both, so check the tier first.
+`safe.directory` comes first because git refuses the workspace without it. Every step runs as an unprivileged user (uid 65532) while the workspace's mount directory belongs to root, so git stops with `detected dubious ownership in repository at '/workspace'` and exits 128 before it reaches the network or the helper. That applies to every git command in the stage, including read-only ones: a `git rev-parse origin/main` or `git log` without it fails the same way, which reads like a missing ref. The `checkout` stage trusts the directory for itself, and that setting is not carried to later stages either.
 
-The `checkout` stage's own credential helper is not available to later stages, on purpose. It is configured under a `HOME` on that step's own `/tmp`, which no other step mounts, so a later step cannot inherit it or rewrite it for a checkout that runs after it. What later steps do share is the workspace, whose `origin` remote is the plain clone URL with no credential in it. A step that fetches from `origin` again needs its own `credentials` binding and a helper like the one above.
+The empty `credential.helper=` clears any helper the image configures, and the host check keeps the token from being offered to any other host git asks about - a submodule URL, say. Replace `github.com` with your provider's host for a self-hosted instance. The image only needs `sh`, `cat`, `git`, `grep` and `cut`, and has to be inside the organisation's image policy. The tier is named because a `run` stage defaults to `network: none`, where the fetch fails on the connection rather than on the login. Git exits 128 for an untrusted workspace, a blocked connection and a missing login alike, so check them in that order.
+
+The `checkout` stage's own credential helper is not available to later stages, on purpose. It is configured under a `HOME` on that step's own `/tmp`, which no other step mounts, so a later step cannot inherit it or rewrite it for a checkout that runs after it. What later steps do share is the workspace, whose `origin` remote is the plain clone URL with no credential in it. A step that fetches from `origin` again needs its own `credentials` binding, `safe.directory`, and a helper like the one above.
 
 `credentials` is protected like `secrets`: a pull request run receives the block on the default branch's approved definition, not the one on its own head.
 
