@@ -214,6 +214,57 @@ The image is named on the stage because a pipeline's `defaults.image` is its bui
 
 `secrets` is a protected section, so the binding a run receives is the one on the **default branch's approved definition**. A pull request that adds the declaration plans its logic from its own head sha but its authority from the default branch, so that first run reaches the stage with no login and the push fails to authenticate. Merge the declaration, then push the chart.
 
+### A git credential in a step
+
+A `credentials` binding sourced `git` is delivered as one line of JSON - not as a bare token, and not as a `git-credentials` line:
+
+```json
+{"provider":"github","instance_url":"","username":"x-access-token","token":"<token>","expires_at":"<RFC 3339 time>"}
+```
+
+`token` is a short-lived token for the run's own repository: a GitHub App installation token when an installation covers it, otherwise the stored credential the binding's `name` points at. `username` is the one the provider expects beside it (`x-access-token` on GitHub). `instance_url` is empty for a provider's public host and names a self-hosted instance otherwise. The file lands at `/run/agent-secrets/<as>`, or at `/run/agent-secrets/<name>` when the binding has no `as`. It is written once, at step start, and is not refreshed.
+
+Git reads none of that by itself. Pointing `git-credential-store` at the file (`credential.helper 'store --file /run/agent-secrets/<as>'`) does not work: the store helper reads `https://user:token@host` lines, finds none, and git falls back to prompting, which a step cannot answer. The fetch exits 128 with `could not read Username for 'https://github.com': terminal prompts disabled`. Give git a helper that reads the JSON instead, and pass it on the command line: it then applies to that one command, and nothing is written under a `HOME` on the step's read-only root filesystem.
+
+```yaml
+credentials:
+  - name: github-app-myorg
+    from: git
+    as: repo_git
+
+stages:
+  - name: checkout
+    kind: checkout
+  - name: compare-with-main
+    kind: run
+    image: alpine/git:2.54.0
+    network: egress-https
+    needs: ["checkout"]
+    run: |
+      cat > /tmp/git-credential-ankra <<'EOF'
+      [ "$1" = get ] || exit 0
+      host=""
+      while IFS='=' read -r key value; do
+        [ -z "$key" ] && break
+        [ "$key" = host ] && host="$value"
+      done
+      [ "$host" = github.com ] || exit 0
+      file=/run/agent-secrets/repo_git
+      token=$(grep -o '"token": *"[^"]*"' "$file" | cut -d'"' -f4)
+      username=$(grep -o '"username": *"[^"]*"' "$file" | cut -d'"' -f4)
+      [ -n "$token" ] || exit 0
+      printf 'username=%s\npassword=%s\n' "${username:-x-access-token}" "$token"
+      EOF
+      git -c credential.helper= -c credential.helper='!sh /tmp/git-credential-ankra' \
+        -C /workspace fetch --no-tags origin main
+```
+
+The empty `credential.helper=` clears any helper the image configures, and the host check keeps the token from being offered to any other host git asks about - a submodule URL, say. Replace `github.com` with your provider's host for a self-hosted instance. The image only needs `sh`, `cat`, `git`, `grep` and `cut`, and has to be inside the organisation's image policy. The tier is named because a `run` stage defaults to `network: none`, where the fetch fails on the connection rather than on the login - and git exits 128 for both, so check the tier first.
+
+The `checkout` stage's own credential helper is not available to later stages, on purpose. It is configured under a `HOME` on that step's own `/tmp`, which no other step mounts, so a later step cannot inherit it or rewrite it for a checkout that runs after it. What later steps do share is the workspace, whose `origin` remote is the plain clone URL with no credential in it. A step that fetches from `origin` again needs its own `credentials` binding and a helper like the one above.
+
+`credentials` is protected like `secrets`: a pull request run receives the block on the default branch's approved definition, not the one on its own head.
+
 ## Expressions
 
 Any string field may embed expressions between `${{` and `}}`; the text inside is [CEL](https://cel.dev). Evaluation is deterministic and performs no I/O: everything an expression can reach arrives in its context, and `hashFiles` is served by the agent, which has the workspace.
