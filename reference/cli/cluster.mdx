@@ -308,6 +308,50 @@ ankra cluster addons values <addon_name> [flags]
 
 Commands to view agent status, get tokens, and upgrade agents.
 
+## ankra cluster agent auto-upgrade
+
+The platform rolls new agent releases out to every online agent automatically,
+as soon as the cluster has no write execution running. Disabling that here
+fences this cluster's agent off from the rollout - for a freeze window or a
+migration night - and enabling it puts the agent back in. Either way
+'ankra cluster agent upgrade' still applies the latest release on demand,
+and 'ankra cluster agent status' shows the current setting.
+
+**Examples**
+
+```bash
+ankra cluster agent auto-upgrade disable --cluster prod
+  ankra cluster agent auto-upgrade enable --cluster prod
+```
+
+## ankra cluster agent auto-upgrade disable
+
+Fence the cluster agent off from the automatic fleet rollout
+
+```bash
+ankra cluster agent auto-upgrade disable [flags]
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+
+## ankra cluster agent auto-upgrade enable
+
+Put the cluster agent back into the automatic fleet rollout
+
+```bash
+ankra cluster agent auto-upgrade enable [flags]
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+
 ## ankra cluster agent ci
 
 The cluster agent runs Ankra Pipelines steps itself, and these settings
@@ -685,7 +729,10 @@ for it: the instances, security groups, bastion and generated SSH key, and -
 when Ankra created the network - the VPC, subnets, internet gateway, NAT
 gateways, route tables and elastic IPs. An adopted VPC and its subnets are
 never touched. EBS volumes and load balancers follow the cluster's
-retention_policy: 'retain' keeps them, 'delete' sweeps the tagged orphans.
+retention_policy: 'retain' keeps them (forced or not, for the volumes),
+'delete' sweeps them. A 'delete' cluster's persistent volumes are named
+first and deleted only when you accept that: answer the prompt on a
+terminal, or pass --accept-volume-data-loss (--yes does not imply it).
 
 ```bash
 ankra cluster aws deprovision <cluster_id|name> [flags]
@@ -695,7 +742,8 @@ ankra cluster aws deprovision <cluster_id|name> [flags]
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--force` | `false` | Force teardown: also delete the cluster's CSI storage volumes and load balancers (destroys persisted data), and tolerate unreachable infrastructure - the agent's dependency chain is skipped so the EC2 teardown runs even when the cluster can no longer be reached |
+| `--accept-volume-data-loss` | `false` | Accept that deprovisioning deletes the cluster's persistent volumes (the cloud volumes its CSI driver provisioned) and the data on them, forced or not. Required when the cluster has such volumes, or Ankra cannot list them, and you are not answering the prompt on a terminal; --yes does not imply it. A cluster whose retention_policy is retain (AWS, Scaleway) keeps its volumes and needs no acknowledgement |
+| `--force` | `false` | Force teardown: also delete the cluster's load balancers even when retention_policy is retain, and tolerate unreachable infrastructure - the agent's dependency chain is skipped so the EC2 teardown runs even when the cluster can no longer be reached. It never deletes the persistent volumes of a retain cluster; a delete cluster's volumes need --accept-volume-data-loss, forced or not |
 | `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
 | `--yes` | `false` | Skip the confirmation prompt |
 
@@ -936,7 +984,7 @@ ankra cluster aws stop <cluster_id|name> [flags]
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--force` | `false` | Force stop: cancel every in-flight operation and block new operations for 60 seconds while the stop lands, and also delete the cluster's tagged EBS volumes and load balancers even when retention_policy is retain (destroys persisted data) |
+| `--force` | `false` | Force stop: cancel every in-flight operation and block new operations for 60 seconds while the stop lands, and also delete the cluster's tagged load balancers even when retention_policy is retain. The cluster's EBS volumes are kept: only a deprovision deletes them |
 | `--mode` |   | How the stop leaves the VMs: 'delete_resources' (default) terminates them (capturing the cluster state first where supported); 'pause' powers the servers off and keeps them with their disks, so etcd, local data and node identities survive and start powers them back on - compute and storage keep billing while paused. Pause is available for k3s clusters on Hetzner, UpCloud and DigitalOcean (a stop on AWS and Scaleway always pauses), cannot be combined with --force, and takes no --preserve-state. |
 | `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
 | `--preserve-state` |   | Cluster state across the stop: omit to let Ankra capture an encrypted etcd snapshot whenever the provider and distribution support it (the VMs are terminated only once it is stored, and the next start restores it); 'true' to require the capture (a stop whose state cannot be captured is refused); 'false' to tear down without it (everything stored in the cluster itself is lost; cloud block volumes are kept). --force never captures. |
@@ -1383,7 +1431,14 @@ outcomes are very different:
 This is a teardown, not a power-off:
 
   - all cloud resources are released (servers, networks, SSH keys);
-  - every stack resource on the cluster is uninstalled.
+  - every stack resource on the cluster is uninstalled;
+  - on hetzner, ovh, upcloud, digitalocean, scaleway and aws the cluster's
+    persistent volumes (the cloud volumes its CSI driver provisioned) are
+    deleted with it, and the data on them. The command names them first and
+    deletes them only when you accept that: answer the prompt on a terminal,
+    or pass --accept-volume-data-loss (--yes does not imply it). A cluster
+    whose retention_policy is retain (aws, scaleway) keeps its volumes, which
+    keep billing in your cloud account.
 
 To power a cluster off and back on while keeping its state, use the provider's
 stop/start commands (for example "ankra hetzner cluster stop" and
@@ -1399,9 +1454,10 @@ ankra cluster deprovision [cluster_name] [flags]
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--force` | `false` | Force deprovision even if cluster is in an unexpected state; on UpCloud, Hetzner, OVH, DigitalOcean and AWS also deletes leftover CSI storage volumes and load balancers; on Proxmox finishes the teardown when the host or jumphost is unreachable, leaving the VMs behind |
+| `--accept-volume-data-loss` | `false` | Accept that deprovisioning deletes the cluster's persistent volumes (the cloud volumes its CSI driver provisioned) and the data on them, forced or not. Required when the cluster has such volumes, or Ankra cannot list them, and you are not answering the prompt on a terminal; --yes does not imply it. A cluster whose retention_policy is retain (AWS, Scaleway) keeps its volumes and needs no acknowledgement |
+| `--force` | `false` | Force deprovision even if cluster is in an unexpected state; on UpCloud, Hetzner, OVH, DigitalOcean and AWS also deletes leftover load balancers (the persistent volumes are deleted forced or not, and only with --accept-volume-data-loss or a yes at the prompt); on Proxmox finishes the teardown when the host or jumphost is unreachable, leaving the VMs behind |
 | `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
-| `--yes` | `false` | Skip the confirmation prompt |
+| `--yes` | `false` | Skip the confirmation prompt (not the persistent volume acknowledgement) |
 
 ## ankra cluster describe
 
@@ -1749,7 +1805,7 @@ ankra cluster digitalocean stop <cluster_id|name> [flags]
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--force` | `false` | Force stop: cancel every in-flight operation and block new operations for 60 seconds while the stop lands, and also delete the cluster's block storage volumes and load balancers (destroys persisted data; they otherwise keep billing while stopped) |
+| `--force` | `false` | Force stop: cancel every in-flight operation and block new operations for 60 seconds while the stop lands, and also delete the cluster's load balancers. The cluster's block storage volumes are kept and keep billing while stopped: only a deprovision deletes them |
 | `--mode` |   | How the stop leaves the VMs: 'delete_resources' (default) terminates them (capturing the cluster state first where supported); 'pause' powers the servers off and keeps them with their disks, so etcd, local data and node identities survive and start powers them back on - compute and storage keep billing while paused. Pause is available for k3s clusters on Hetzner, UpCloud and DigitalOcean (a stop on AWS and Scaleway always pauses), cannot be combined with --force, and takes no --preserve-state. |
 | `--preserve-state` |   | Cluster state across the stop: omit to let Ankra capture an encrypted etcd snapshot whenever the provider and distribution support it (the VMs are terminated only once it is stored, and the next start restores it); 'true' to require the capture (a stop whose state cannot be captured is refused); 'false' to tear down without it (everything stored in the cluster itself is lost; cloud block volumes are kept). --force never captures. |
 
@@ -2829,7 +2885,7 @@ ankra cluster hetzner stop <cluster_id|name> [flags]
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--force` | `false` | Force stop: cancel every in-flight operation and block new operations for 60 seconds while the stop lands, and also delete the cluster's CSI volumes and load balancers (destroys persisted data; they otherwise keep billing while stopped) |
+| `--force` | `false` | Force stop: cancel every in-flight operation and block new operations for 60 seconds while the stop lands, and also delete the cluster's load balancers. The cluster's CSI volumes are kept and keep billing while stopped: only a deprovision deletes them |
 | `--mode` |   | How the stop leaves the VMs: 'delete_resources' (default) terminates them (capturing the cluster state first where supported); 'pause' powers the servers off and keeps them with their disks, so etcd, local data and node identities survive and start powers them back on - compute and storage keep billing while paused. Pause is available for k3s clusters on Hetzner, UpCloud and DigitalOcean (a stop on AWS and Scaleway always pauses), cannot be combined with --force, and takes no --preserve-state. |
 | `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
 | `--preserve-state` |   | Cluster state across the stop: omit to let Ankra capture an encrypted etcd snapshot whenever the provider and distribution support it (the VMs are terminated only once it is stored, and the next start restores it); 'true' to require the capture (a stop whose state cannot be captured is refused); 'false' to tear down without it (everything stored in the cluster itself is lost; cloud block volumes are kept). --force never captures. |
@@ -4561,7 +4617,7 @@ ankra cluster ovh stop <cluster_id|name> [flags]
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--force` | `false` | Force stop: cancel every in-flight operation and block new operations for 60 seconds while the stop lands, and also delete the cluster's Cinder volumes and load balancers (destroys persisted data; they otherwise keep billing while stopped) |
+| `--force` | `false` | Force stop: cancel every in-flight operation and block new operations for 60 seconds while the stop lands, and also delete the cluster's load balancers. The cluster's Cinder volumes are kept and keep billing while stopped: only a deprovision deletes them |
 | `--mode` |   | How the stop leaves the VMs: 'delete_resources' (default) terminates them (capturing the cluster state first where supported); 'pause' powers the servers off and keeps them with their disks, so etcd, local data and node identities survive and start powers them back on - compute and storage keep billing while paused. Pause is available for k3s clusters on Hetzner, UpCloud and DigitalOcean (a stop on AWS and Scaleway always pauses), cannot be combined with --force, and takes no --preserve-state. |
 | `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
 | `--preserve-state` |   | Cluster state across the stop: omit to let Ankra capture an encrypted etcd snapshot whenever the provider and distribution support it (the VMs are terminated only once it is stored, and the next start restores it); 'true' to require the capture (a stop whose state cannot be captured is refused); 'false' to tear down without it (everything stored in the cluster itself is lost; cloud block volumes are kept). --force never captures. |
@@ -4715,7 +4771,18 @@ like stopping the cluster yourself: on Hetzner, OVHcloud, UpCloud and
 DigitalOcean the cluster's state is captured first (an encrypted etcd
 snapshot the next start restores) unless --preserve-state=false; elsewhere
 the provider VMs are terminated and only the configuration is preserved.
---stop-mode scale_to_zero removes only the workers instead; --stop-mode pause powers the servers off and keeps them.
+--stop-mode scale_to_zero deletes only the worker servers instead, and creates
+new ones at the next start: the control plane and etcd, cloud volumes and
+addresses are kept (and keep billing), and data on the workers' own disks is
+lost at every stop. On a cluster whose volumes keep data there, the schedule
+needs --accept-node-local-data-loss (or a yes at the prompt).
+--stop-mode pause powers the servers off and keeps them.
+
+--stop-mode pause keeps the cluster's state but saves no compute cost on
+Hetzner, DigitalOcean or UpCloud (Developer and General Purpose plans):
+they bill a powered-off server at its full price. To save money there, use
+scale_to_zero or delete_resources. On AWS and Scaleway a powered-off server
+stops billing compute; its disks and IPs keep billing.
 
 Examples:
   # Park a development cluster on weekday evenings, back before morning
@@ -4739,13 +4806,14 @@ ankra cluster power-schedules create [flags]
 
 | Flag | Default | Description |
 |------|---------|-------------|
+| `--accept-node-local-data-loss` | `false` | For scale_to_zero stop schedules: accept that volumes keeping data on a worker's own disk (local-path, hostPath, local PVs) are emptied at every stop. Required when the cluster has such volumes and you are not answering the prompt interactively |
 | `--action` |   | What the schedule does when it fires: stop or start (required) |
 | `--at` |   | Fire once at this RFC 3339 time, e.g. 2026-01-02T19:00:00Z (mutually exclusive with --cron) |
 | `--cron` |   | Fire repeatedly per this 5-field cron expression, e.g. '0 19 * * 1-5' (mutually exclusive with --at) |
 | `--enabled` | `true` | Whether the schedule is armed; --enabled=false creates or leaves it paused |
 | `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
 | `--preserve-state` |   | For delete_resources stop schedules: omit to capture the cluster's state (an encrypted etcd snapshot the next start restores) whenever the provider and distribution support it; 'false' to tear down without it; 'true' to state the default explicitly. On update, omitting it keeps the schedule's current choice |
-| `--stop-mode` |   | How a stop schedule stops the cluster: delete_resources (default on create; terminates the VMs), scale_to_zero (removes only the workers, keeps the control plane) or pause (powers every server off and keeps it with its disks; k3s on Hetzner, UpCloud and DigitalOcean, and what a stop always does on AWS and Scaleway). On update, omitting it keeps the schedule's current mode |
+| `--stop-mode` |   | How a stop schedule stops the cluster: delete_resources (default on create; terminates the VMs), scale_to_zero (deletes the worker servers at every stop and creates new ones at start: data on their own disks is lost; the control plane and etcd, cloud volumes and addresses are kept and keep billing) or pause (powers every server off and keeps it with its disks; k3s on Hetzner, UpCloud and DigitalOcean, and what a stop always does on AWS and Scaleway). pause saves no compute cost on Hetzner, DigitalOcean or UpCloud, which bill a powered-off server in full; use scale_to_zero or delete_resources to save. On update, omitting it keeps the schedule's current mode |
 | `--timezone` |   | IANA timezone the cron expression is evaluated in, e.g. Europe/Stockholm (default UTC) |
 
 ## ankra cluster power-schedules delete
@@ -4799,13 +4867,14 @@ ankra cluster power-schedules update <schedule_id> [flags]
 
 | Flag | Default | Description |
 |------|---------|-------------|
+| `--accept-node-local-data-loss` | `false` | For scale_to_zero stop schedules: accept that volumes keeping data on a worker's own disk (local-path, hostPath, local PVs) are emptied at every stop. Required when the cluster has such volumes and you are not answering the prompt interactively |
 | `--action` |   | What the schedule does when it fires: stop or start (required) |
 | `--at` |   | Fire once at this RFC 3339 time, e.g. 2026-01-02T19:00:00Z (mutually exclusive with --cron) |
 | `--cron` |   | Fire repeatedly per this 5-field cron expression, e.g. '0 19 * * 1-5' (mutually exclusive with --at) |
 | `--enabled` | `true` | Whether the schedule is armed; --enabled=false creates or leaves it paused |
 | `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
 | `--preserve-state` |   | For delete_resources stop schedules: omit to capture the cluster's state (an encrypted etcd snapshot the next start restores) whenever the provider and distribution support it; 'false' to tear down without it; 'true' to state the default explicitly. On update, omitting it keeps the schedule's current choice |
-| `--stop-mode` |   | How a stop schedule stops the cluster: delete_resources (default on create; terminates the VMs), scale_to_zero (removes only the workers, keeps the control plane) or pause (powers every server off and keeps it with its disks; k3s on Hetzner, UpCloud and DigitalOcean, and what a stop always does on AWS and Scaleway). On update, omitting it keeps the schedule's current mode |
+| `--stop-mode` |   | How a stop schedule stops the cluster: delete_resources (default on create; terminates the VMs), scale_to_zero (deletes the worker servers at every stop and creates new ones at start: data on their own disks is lost; the control plane and etcd, cloud volumes and addresses are kept and keep billing) or pause (powers every server off and keeps it with its disks; k3s on Hetzner, UpCloud and DigitalOcean, and what a stop always does on AWS and Scaleway). pause saves no compute cost on Hetzner, DigitalOcean or UpCloud, which bill a powered-off server in full; use scale_to_zero or delete_resources to save. On update, omitting it keeps the schedule's current mode |
 | `--timezone` |   | IANA timezone the cron expression is evaluated in, e.g. Europe/Stockholm (default UTC) |
 
 ## ankra cluster provision
@@ -5396,7 +5465,10 @@ ankra cluster scaleway create [flags]
 
 Permanently delete a Scaleway cluster and the provider resources Ankra
 created for it. Volumes and load balancers follow the cluster's
-retention_policy: 'retain' keeps them, 'delete' sweeps the tagged orphans.
+retention_policy: 'retain' keeps them, 'delete' sweeps them. A 'delete'
+cluster's persistent volumes are named first and deleted only when you
+accept that: answer the prompt on a terminal, or pass
+--accept-volume-data-loss (--yes does not imply it).
 
 ```bash
 ankra cluster scaleway deprovision <cluster_id|name> [flags]
@@ -5406,6 +5478,7 @@ ankra cluster scaleway deprovision <cluster_id|name> [flags]
 
 | Flag | Default | Description |
 |------|---------|-------------|
+| `--accept-volume-data-loss` | `false` | Accept that deprovisioning deletes the cluster's persistent volumes (the cloud volumes its CSI driver provisioned) and the data on them, forced or not. Required when the cluster has such volumes, or Ankra cannot list them, and you are not answering the prompt on a terminal; --yes does not imply it. A cluster whose retention_policy is retain (AWS, Scaleway) keeps its volumes and needs no acknowledgement |
 | `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
 | `--yes` | `false` | Skip the confirmation prompt |
 
@@ -5631,7 +5704,7 @@ ankra cluster scaleway stop <cluster_id|name> [flags]
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--force` | `false` | Force stop: cancel every in-flight operation and block new operations for 60 seconds while the stop lands, and also delete the cluster's tagged volumes and load balancers even when retention_policy is retain (destroys persisted data) |
+| `--force` | `false` | Force stop: cancel every in-flight operation and block new operations for 60 seconds while the stop lands, and also delete the cluster's tagged load balancers even when retention_policy is retain. The cluster's volumes are kept: only a deprovision deletes them |
 | `--mode` |   | How the stop leaves the VMs: 'delete_resources' (default) terminates them (capturing the cluster state first where supported); 'pause' powers the servers off and keeps them with their disks, so etcd, local data and node identities survive and start powers them back on - compute and storage keep billing while paused. Pause is available for k3s clusters on Hetzner, UpCloud and DigitalOcean (a stop on AWS and Scaleway always pauses), cannot be combined with --force, and takes no --preserve-state. |
 | `--preserve-state` |   | Cluster state across the stop: omit to let Ankra capture an encrypted etcd snapshot whenever the provider and distribution support it (the VMs are terminated only once it is stored, and the next start restores it); 'true' to require the capture (a stop whose state cannot be captured is refused); 'false' to tear down without it (everything stored in the cluster itself is lost; cloud block volumes are kept). --force never captures. |
 
@@ -6554,7 +6627,7 @@ ankra cluster upcloud start <cluster_id|name> [flags]
 
 Stop an UpCloud cluster's compute while keeping its configuration so it can be started again later.
 
---force also deletes the cluster's CSI storage volumes and load balancers, which otherwise keep billing while the cluster is stopped - the persisted data is lost.
+--force also deletes the cluster's load balancers. The CSI storage volumes are kept, forced or not, and keep billing while the cluster is stopped; deprovision the cluster to delete them.
 
 ```bash
 ankra cluster upcloud stop <cluster_id|name> [flags]
@@ -6564,7 +6637,7 @@ ankra cluster upcloud stop <cluster_id|name> [flags]
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--force` | `false` | Force stop: cancel every in-flight operation and block new operations for 60 seconds while the stop lands, and also delete the cluster's CSI storage volumes and load balancers (destroys persisted data; they otherwise keep billing while stopped) |
+| `--force` | `false` | Force stop: cancel every in-flight operation and block new operations for 60 seconds while the stop lands, and also delete the cluster's load balancers. The cluster's CSI storage volumes are kept and keep billing while stopped: only a deprovision deletes them |
 | `--mode` |   | How the stop leaves the VMs: 'delete_resources' (default) terminates them (capturing the cluster state first where supported); 'pause' powers the servers off and keeps them with their disks, so etcd, local data and node identities survive and start powers them back on - compute and storage keep billing while paused. Pause is available for k3s clusters on Hetzner, UpCloud and DigitalOcean (a stop on AWS and Scaleway always pauses), cannot be combined with --force, and takes no --preserve-state. |
 | `--preserve-state` |   | Cluster state across the stop: omit to let Ankra capture an encrypted etcd snapshot whenever the provider and distribution support it (the VMs are terminated only once it is stored, and the next start restores it); 'true' to require the capture (a stop whose state cannot be captured is refused); 'false' to tear down without it (everything stored in the cluster itself is lost; cloud block volumes are kept). --force never captures. |
 
