@@ -73,11 +73,12 @@ Most changes are the smallest. Without a cheap tier a one-line fix has to become
 | Entry | Something a user can now do that they could not before | Its own `<Update>`: `##` headline, 80 words, one link. |
 | Launch | A subsystem arriving - Ankra Pipelines, the Cost center | Its own `<Update>`, same 80 words, pointing at a guide that carries the depth. |
 
-A week's small changes collect into one entry. A roll-up has no `##` headline - it is a bucket, not a change, and it is addressed by its label:
+A week's small changes collect into one entry. A roll-up has no `##` headline - it is a bucket, not a change, and it is addressed by its label. Leave a blank line between its lines, or Mintlify runs them together into one paragraph:
 
 ```mdx
 <Update label="2026-09-05" tags={["Fixes"]} description="Also shipped this week" rss={{ title: "Also shipped this week" }}>
 **Clusters** - the overview now says what every cluster is. [→](/platform/clusters)
+
 **Playground** - storage rows say what they are. [→](/platform/playground)
 </Update>
 ```
