@@ -19,10 +19,13 @@ Reference material for [DigitalOcean clusters](/guides/digitalocean-clusters).
 | `bastion_size` | `s-1vcpu-1gb` | Droplet size for the bastion host |
 | `control_plane_count` | `1` | Number of control plane nodes (1 or 3) |
 | `control_plane_size` | `s-2vcpu-4gb` | Droplet size for control planes |
-| `node_groups` | | Array of node group definitions |
+| `worker_count` | `1` | Number of worker nodes (legacy, use `node_groups` instead) |
+| `worker_size` | `s-2vcpu-4gb` | Droplet size for workers (legacy, use `node_groups` instead) |
+| `node_groups` | | Array of node group definitions; `node_groups` wins when `worker_count` is also given |
 | `distribution` | `kubeadm` | Kubernetes distribution (`kubeadm` or `k3s`) |
 | `kubernetes_version` | *latest stable* | Kubernetes version (optional) |
 | `cni` | `cilium` (kubeadm), `flannel` (k3s) | CNI plugin. Follows the distribution when omitted; kubeadm clusters always use `cilium` |
+| `cni_features` | *all off* | CNI feature toggles, fixed at creation. See [Choices fixed at create time](/guides/operate-ankra-managed-clusters#choices-fixed-at-create-time) |
 | `etcd_topology` | `stacked` | kubeadm only. `stacked` or `external` (dedicated etcd droplets) |
 | `etcd_node_count` | `3` | kubeadm `external` topology only (3 or 5) |
 | `etcd_size` | `s-2vcpu-4gb` | kubeadm `external` topology only. Droplet size for etcd nodes |
@@ -76,4 +79,48 @@ Available regions and sizes depend on your account. Use `ankra cluster digitaloc
 | `/api/v1/clusters/digitalocean/{id}/nodes/{node_id}/restart` | POST | Restart a node (native reboot, falls back to power cycle) |
 | `/api/v1/clusters/digitalocean/{id}/bastion/instance-type` | PUT | Resize the bastion instance type |
 
-See [Restarting a Node](/guides/digitalocean-clusters#restarting-a-node) and [Resizing the Bastion or Gateway](/guides/digitalocean-clusters#resizing-the-bastion-or-gateway) for usage examples and response shapes.
+See [Restart a node](/guides/operate-ankra-managed-clusters#restart-a-node) and [Bastion](/guides/operate-ankra-managed-clusters#bastion) for usage.
+
+---
+
+## Architecture
+
+| Component | Description |
+|-----------|-------------|
+| **VPC** | Private network for inter-node communication |
+| **NAT Gateway** | VPC NAT gateway providing outbound internet access for the private node Droplets |
+| **Cloud Firewalls** | Two tag-scoped firewalls providing defence in depth; on clusters created before private-Droplet support they are the only ingress boundary |
+| **Bastion Host** | Jump host Ankra uses to provision and manage nodes - the only Droplet reachable on SSH from the internet |
+| **Control Plane(s)** | Kubernetes control plane Droplets |
+| **Worker(s)** | Kubernetes worker Droplets organised in [node groups](/guides/operate-ankra-managed-clusters#node-groups) |
+| **etcd Node(s)** | Dedicated etcd Droplets, only for kubeadm clusters with an `external` [etcd topology](/guides/operate-ankra-managed-clusters#choices-fixed-at-create-time) |
+| **SSH Keys** | Deployed to all Droplets for access |
+| **Cloud Provider Stack** | DigitalOcean CCM and CSI for load balancers and block storage |
+
+```mermaid
+flowchart TB
+    Internet((Internet))
+    Platform[Ankra Platform]
+
+    subgraph VPC [DigitalOcean VPC + tag-scoped cloud firewalls]
+        Bastion[Bastion droplet<br/>public + private IP]
+        CP[Control plane droplets<br/>private IP only]
+        Workers[Worker droplets<br/>private IP only]
+        NAT[VPC NAT gateway<br/>VPC default route]
+        Agent[Ankra Agent<br/>runs in the cluster]
+    end
+
+    LB[DigitalOcean Load Balancers<br/>created by the DO CCM]
+
+    Platform -->|SSH port 22| Bastion
+    Bastion -->|SSH jump over VPC| CP
+    Bastion -->|SSH jump over VPC| Workers
+    Agent -->|outbound only - NATS| Platform
+    CP -->|egress| NAT
+    Workers -->|egress| NAT
+    NAT --> Internet
+    Internet --> LB
+    LB --> Workers
+```
+
+Cluster nodes are private Droplets with no public IP; the bastion is the only Droplet with a public address. Outbound traffic from the nodes (image pulls, package downloads, the Ankra Agent connection) leaves through the VPC NAT gateway. Inter-node and jump traffic stays on the VPC. Ankra deploys the **digitalocean-cloud-provider** stack (CCM and CSI) after the Ankra Agent is installed, backed by your API credential.
