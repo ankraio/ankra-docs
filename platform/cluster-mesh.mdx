@@ -1,9 +1,15 @@
 ---
 title: Cluster Mesh
 description: Connect Kubernetes clusters with Cilium ClusterMesh over the Ankra WireGuard overlay
+tag: "Closed Beta"
 ---
 
 import { YouTube } from "/snippets/youtube.jsx";
+import { CliVersion } from "/snippets/cli-version.jsx";
+
+<Warning>
+**Closed beta.** Cluster Mesh is in closed beta. The workflow is stable but the surface may still change, and it is enabled per organisation on request, together with the WireGuard overlay it runs on - until it is, every mesh route answers 404 and no mesh surface appears. [Contact support](/platform/support) to have it turned on for your organisation.
+</Warning>
 
 <Note>
 Cluster Mesh connects two or more of your clusters into one Cilium ClusterMesh: pods reach pods across clusters, and a global service resolves to healthy backends wherever they run, across providers, accounts and sites, over an encrypted WireGuard overlay the platform manages end to end.
@@ -29,22 +35,22 @@ Mesh requirements fall into three groups, and the group a requirement is in tell
 
 ### Settled when the cluster is built
 
-These three are baked into a cluster and no operation changes them. A cluster that fails any of them can only mesh if you rebuild it.
+These four are baked into a cluster and no operation changes them. A cluster that fails any of them can only mesh if you rebuild it.
 
 | Requirement | Accepted today | Why |
 | --- | --- | --- |
 | **Provider** | UpCloud, Proxmox | The clouds wired to the platform WireGuard overlay. |
 | **Distribution** | kubeadm | Only kubeadm renders the mesh identity into the control plane. |
 | **CNI** | Cilium | ClusterMesh is a Cilium feature. |
-| **Networking** | Created with networking on (the default) | The cloud-provider lane is what renders the mesh into the cluster's Cilium release. A cluster created with `--include-networking=false` has no Cilium release the platform manages, so the mesh values have nowhere to land. |
+| **Networking** | Created with networking on (the default) | The platform's networking stack is what renders the mesh into the cluster's Cilium release. A cluster created with `--include-networking=false` has no Cilium release the platform manages, so the mesh values have nowhere to land. |
 
 Readiness reports the provider and distribution under its `platform` check, the CNI under `cni`, and the managed Cilium release under `cilium_stack`, each marked not remediable.
 
 ### Fixable on a running cluster
 
-A cluster that clears the three above is *mesh-capable*, which is not the same as ready. Two more things must be true, and both can be arranged in place with [make-ready](#make-an-existing-cluster-mesh-capable):
+A cluster that clears the four above is *mesh-capable*, which is not the same as ready. Two more things must be true, and both can be arranged in place with [make-ready](#make-an-existing-cluster-mesh-capable):
 
-- **A Cilium cluster identity.** An id in the range 1 to 255, and a name unique across the mesh. Clusters created while your organisation's `network_overlay` feature was on already have one. Anything older gets one allocated day-2 by `make-ready`.
+- **A Cilium cluster identity.** An id in the range 1 to 255, and a name unique across the mesh. Clusters created while the WireGuard overlay was enabled for your organisation already have one. Anything older gets one allocated day-2 by `make-ready`.
 - **A routable node network.** A mesh forwards pod traffic to remote node addresses, so nodes on a per-cluster private network nothing else reaches can never carry it. One of three networks qualifies: the platform WireGuard overlay (`--network-mode wireguard_mesh`), Proxmox's EVPN network, or a tailnet the nodes advertise.
 
 `make-ready` itself needs the cluster to be **online**. A cluster still provisioning would race its own create jobs, and one mid-update could interleave with the update in flight, so wait for it to settle. Proxmox clusters additionally need `--site-public-ip` (see [Proxmox sites](#proxmox-and-on-prem-sites)).
@@ -57,7 +63,7 @@ One case `make-ready` cannot serve: a cluster whose network identity was allocat
 
 These are properties of a mesh, not of a cluster, so they can only fail once you try to put two particular clusters together.
 
-- **No overlapping pod ranges.** The pod CIDR of every member must be disjoint from every other member's: a mesh routes pod traffic between members by pod address. Service ranges may overlap - a ClusterIP is resolved inside the cluster that owns it and never crosses to a peer - so the kubeadm default service range every day-2 cluster runs is fine. Clusters created while the overlay feature is on draw disjoint pod ranges from your organisation's pools automatically, and the platform keeps pod ranges unique across the organisation. Two clusters built before the overlay both run the kubeadm default pod range, so `make-ready` on the second one is refused by name, and moving a running cluster onto a fresh range is disabled for now (see [Moving a cluster onto a fresh pod range](#moving-a-cluster-onto-a-fresh-pod-range)) - so that pair cannot mesh with each other yet.
+- **No overlapping pod ranges.** The pod CIDR of every member must be disjoint from every other member's: a mesh routes pod traffic between members by pod address. Service ranges may overlap - a ClusterIP is resolved inside the cluster that owns it and never crosses to a peer - so the kubeadm default service range every day-2 cluster runs is fine. Clusters created while the overlay is enabled draw disjoint pod ranges from your organisation's pools automatically, and the platform keeps pod ranges unique across the organisation. Two clusters built before the overlay both run the kubeadm default pod range, so `make-ready` on the second one is refused by name, and moving a running cluster onto a fresh range is disabled for now (see [Moving a cluster onto a fresh pod range](#moving-a-cluster-onto-a-fresh-pod-range)) - so that pair cannot mesh with each other yet.
 - **Unique Cilium cluster ids.** Every member holds a different one, which caps a mesh at **255 members**.
 - **A routable path per pair.** Connecting two apiservers is not enough. Ankra resolves each pair to one address family and refuses pairs with no route (see [How members connect](#how-members-connect)). In short: two clusters in *different* provider accounts must **both** be on the WireGuard overlay, and a Proxmox EVPN cluster meshes only with clusters on the same Proxmox credential.
 - **Each member publishes an apiserver address.** A member publishes one once the platform has recorded its nodes, so this is not checked before a join (it would refuse a cluster that is minutes from ready). It is checked afterwards, and a member nobody can reach is reported rather than left silently unconnected.
@@ -65,7 +71,7 @@ These are properties of a mesh, not of a cluster, so they can only fail once you
 
 ### On the platform side
 
-- **The feature flags.** The `network_overlay` and `cluster_mesh` features must be enabled for your organisation. `cluster_mesh` is a child of `network_overlay`, so it is never on for an organisation whose clusters cannot join the overlay. While it is dark, every mesh route answers 404 and no mesh surface appears.
+- **Enablement.** Cluster Mesh and the WireGuard overlay must both be enabled for your organisation (see the closed-beta note above); the mesh is never on for an organisation whose clusters cannot join the overlay. Until then, every mesh route answers 404 and no mesh surface appears.
 - **Permissions.** Reading meshes and running readiness needs `clusters.read`; creating a mesh, joining, leaving and `make-ready` need `clusters.write`. Both are checked at *organisation* scope, because admitting a cluster changes the configuration every other member runs with.
 - **A fixed NodePort.** Every member publishes its `clustermesh-apiserver` on NodePort **32379**, the same across the fleet so a peer needs only an address to dial one. Keep it free, and let it through any firewall between members.
 - **MTU is pinned to 1420** on mesh members, matching the overlay. Cilium's VXLAN rides inside the overlay's WireGuard frame, and a member configured above that black-holes pod traffic *between* clusters while everything inside each cluster keeps working.
@@ -74,9 +80,11 @@ These are properties of a mesh, not of a cluster, so they can only fail once you
 
 ### Where the Cluster Mesh section appears
 
-A cluster's sidebar carries a **Cluster Mesh** entry when the organisation's `cluster_mesh` feature is on **and** that cluster can actually use it: it is already a mesh member, or it is *eligible*, meaning it can join now or after a `make-ready`. A cluster that fails one of the settled-at-build requirements has no entry, because nothing you could do from that page would change the answer. The organisation-level **Cluster Meshes** page lists every mesh regardless and stays reachable from the main menu.
+A cluster's sidebar carries a **Cluster Mesh** entry when Cluster Mesh is enabled for the organisation **and** that cluster can actually use it: it is already a mesh member, or it is *eligible*, meaning it can join now or after a `make-ready`. A cluster that fails one of the settled-at-build requirements has no entry, because nothing you could do from that page would change the answer. The organisation-level **Cluster Meshes** page lists every mesh regardless and stays reachable from the main menu.
 
 Eligibility is exactly what readiness reports, so the API and the CLI answer the same question the sidebar does:
+
+<CliVersion since="0.14.0" />
 
 ```bash
 ankra cluster mesh readiness <cluster-id>
@@ -136,12 +144,14 @@ Zero disruption is not possible: switching node IPs restarts each kubelet once. 
 ### Moving a cluster onto a fresh pod range
 
 <Warning>
-Moving a running cluster onto a different pod range is **disabled**. `make-ready` refuses it: kube-controller-manager exits at start while any node still holds a range outside `--cluster-cidr`, so the move takes the cluster's controllers down instead of renumbering it. Two clusters that both run the kubeadm default pod range cannot mesh with each other until the move is redesigned.
+Moving a running cluster onto a different pod range is **disabled**. `make-ready` refuses it: kube-controller-manager exits at start while any node still holds a range outside `--cluster-cidr`, so the move takes the cluster's controllers down instead of renumbering it. Two clusters that both run the kubeadm default pod range cannot mesh with each other yet.
 </Warning>
 
 Two clusters built before the overlay both run the kubeadm default pod range, and pod ranges must be disjoint across a mesh, so the platform keeps them unique per organisation: `make-ready` on the second such cluster is refused by name, and there is no renumber to fall back on for now.
 
 The one range `--pod-cidr` still accepts is the kubeadm default `10.244.0.0/16`, which puts a cluster an earlier renumber moved off it back onto the range its nodes run:
+
+<CliVersion since="0.17.0" command="cluster mesh make-ready --pod-cidr" />
 
 ```bash
 ankra cluster mesh make-ready <cluster-id> --pod-cidr 10.244.0.0/16
@@ -154,6 +164,8 @@ That records the range on the identity and stamps it onto every node, and each c
 ### The whole path in one command
 
 `ankra cluster mesh up` runs the path above for a set of clusters: it reads their readiness, runs `make-ready` on every cluster that only lacks its identity or the overlay, joins every cluster that is ready, creates the mesh when none of that name exists, and keeps passing until every member reports `ready` or `--wait` runs out. It changes nothing with `--plan`.
+
+<CliVersion since="0.17.0" command="cluster mesh up" />
 
 ```bash
 ankra cluster mesh up my-mesh <cluster-a> <cluster-b> <cluster-c> --plan
@@ -233,7 +245,7 @@ A mesh with members cannot be deleted out from under them. Remove the members fi
 - **A member sits in `configuring`**: the agent has not yet confirmed the trust root or a verify has not run; check the cluster is online and its operations list for the mesh resource. The reconciler retries every five minutes, and re-dispatches the trust-root job itself for a member whose agent has not confirmed it within fifteen minutes. A cluster created with networking off can never leave `configuring` - readiness refuses it under `cilium_stack` before the join, and the fix is a cluster created with networking on.
 - **A member goes `degraded`**: it verified fewer peers than expected. Check the peer cluster's health first, then the site path (UDP forward, site address) if the pair crosses sites.
 - **A readiness check is marked not remediable**: for the provider, the distribution and the CNI that is final, and a new cluster is the only fix. For the identity and the node network, `make-ready` is the fix and readiness marks them remediable. A pod range that overlaps a member's is not remediable either while moving a running cluster onto a fresh range is disabled.
-- **`make-ready` says the pod range is already recorded by another cluster**: another cluster of the organisation was prepared from the same kubeadm default first. Moving this one onto a fresh range is disabled for now, so the two cannot mesh with each other until that move is redesigned.
+- **`make-ready` says the pod range is already recorded by another cluster**: another cluster of the organisation was prepared from the same kubeadm default first. Moving this one onto a fresh range is disabled for now, so the two cannot mesh with each other yet.
 - **A member's status view shows `overlay_nodes` not ready**: some nodes have not joined the WireGuard overlay yet. Their update jobs put them on it - retry a failed one from the cluster's operations, or run `make-ready` again to set them converging.
-- **A node reads `network=pod_cidr_drift`**: the range recorded for the cluster and the range the node runs differ. While the move is disabled the update lane converges a control plane's carriers onto the range the nodes already run and refuses to move a node off the range it holds, naming the node and its range in the job's output. `POD_CIDR_CP_PENDING` there means a control plane has not converged the range yet.
+- **A node reads `network=pod_cidr_drift`**: the range recorded for the cluster and the range the node runs differ. While the move is disabled, the node's update job converges a control plane's pod-range settings onto the range the nodes already run and refuses to move a node off the range it holds, naming the node and its range in the job's output. The output also says when a control plane has not converged the range yet.
 - **LoadBalancer Services on a meshed UpCloud cluster**: node addressing changes on the overlay; see the [UpCloud guide](/guides/upcloud-clusters) for the current behaviour of provider load balancers on meshed clusters.

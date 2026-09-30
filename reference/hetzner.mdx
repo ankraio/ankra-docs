@@ -26,7 +26,8 @@ Reference material for [Hetzner clusters](/guides/hetzner-clusters): every confi
 | `node_groups` | | Array of node group definitions (see [Node Groups](/guides/hetzner-clusters#node-groups)) |
 | `distribution` | `kubeadm` | Kubernetes distribution (`kubeadm` or `k3s`) |
 | `kubernetes_version` | *latest* | Kubernetes version (optional) |
-| `include_ingress` | `false` | Deploy the ingress stack (ingress-nginx + cert-manager + Let's Encrypt) |
+| `include_networking` | `true` | Deploy the networking stack: Traefik, cert-manager and a `letsencrypt-prod` Let's Encrypt ClusterIssuer |
+| `include_dns` | `true` | Give the cluster a delegated subdomain on `ankra.cc` with external-dns wired |
 | `gitops_credential_name` | | GitHub credential name for GitOps integration |
 | `gitops_repository` | | GitHub repository for GitOps (e.g., `org/repo`) |
 | `gitops_branch` | `master` | Branch for GitOps pushes |
@@ -254,44 +255,33 @@ The CSI driver creates Hetzner Cloud Volumes when you create PersistentVolumeCla
 
 ---
 
-## Ingress Stack (Optional)
+## Networking Stack
 
-When `include_ingress` is enabled during cluster creation, Ankra deploys an ingress stack alongside the hcloud stack. The ingress stack includes:
+With `include_networking` on (the default), Ankra deploys a `networking` stack alongside the hcloud stack. It includes:
 
-1. **[ingress-nginx](https://kubernetes.github.io/ingress-nginx/)** - NGINX-based Ingress controller with a Hetzner Cloud Load Balancer
+1. **[Traefik](https://traefik.io/)** - the Ingress controller (ingress class `traefik`, the cluster default) behind a Hetzner Cloud Load Balancer
 2. **[cert-manager](https://cert-manager.io/)** - automated TLS certificate management
-3. **Let's Encrypt ClusterIssuer** - a `letsencrypt-prod` ClusterIssuer configured for HTTP-01 validation
+3. **Let's Encrypt ClusterIssuer** - a `letsencrypt-prod` ClusterIssuer configured for HTTP-01 validation through Traefik
 
-### Ingress Configuration
+With `include_dns` on (the default), the cluster also gets a delegated subdomain on `ankra.cc` and external-dns publishes Ingress hostnames into it.
 
-The ingress-nginx controller is pre-configured with Hetzner Load Balancer annotations:
+### Load Balancer Configuration
 
-```yaml
-controller:
-  replicaCount: 2
-  service:
-    annotations:
-      load-balancer.hetzner.cloud/location: "<your-cluster-location>"
-      load-balancer.hetzner.cloud/use-private-ip: "true"
-  podDisruptionBudget:
-    enabled: true
-    minAvailable: 1
-```
-
-cert-manager is deployed with CRDs enabled and 2 replicas:
+Traefik's Service carries Hetzner Load Balancer annotations, and the balancer forwards over the private network with PROXY protocol so the client address reaches your workloads:
 
 ```yaml
-crds:
-  enabled: true
-replicaCount: 2
-podDisruptionBudget:
-  enabled: true
-  minAvailable: 1
+service:
+  annotations:
+    load-balancer.hetzner.cloud/location: "<your-cluster-location>"
+    load-balancer.hetzner.cloud/use-private-ip: "true"
+    load-balancer.hetzner.cloud/uses-proxyprotocol: "true"
 ```
+
+Traefik and cert-manager each run two replicas with a PodDisruptionBudget of one. These values are applied when the cluster is created; later changes you make to them are kept.
 
 ### Using Ingress with TLS
 
-Once the ingress stack is deployed, create Ingress resources with automatic TLS:
+Once the networking stack is deployed, create Ingress resources with automatic TLS:
 
 ```yaml
 apiVersion: networking.k8s.io/v1
@@ -301,7 +291,7 @@ metadata:
   annotations:
     cert-manager.io/cluster-issuer: letsencrypt-prod
 spec:
-  ingressClassName: nginx
+  ingressClassName: traefik
   tls:
     - hosts:
         - app.example.com
@@ -320,5 +310,5 @@ spec:
 ```
 
 <Tip>
-Point your DNS record for `app.example.com` to the Hetzner Load Balancer IP (created automatically by ingress-nginx). cert-manager will handle the Let's Encrypt certificate issuance and renewal.
+Point your DNS record for `app.example.com` to the Hetzner Load Balancer IP that Traefik's Service creates, or use a hostname under the cluster's `ankra.cc` subdomain and let external-dns publish it. cert-manager handles the Let's Encrypt certificate issuance and renewal.
 </Tip>
