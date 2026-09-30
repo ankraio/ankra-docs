@@ -1,10 +1,10 @@
 ---
 title: Bitbucket Cloud Integration
-description: Connect Bitbucket Cloud workspaces for AI code review on pull requests and for GitOps configuration management
+description: Connect Bitbucket Cloud workspaces for GitOps configuration management, Ankra Pipelines, and AI code review on pull requests
 ---
 
 <Note>
-The Bitbucket Cloud integration enables GitOps workflows for Ankra clusters using OAuth-authenticated workspace access, and lets Ankra AI review pull requests in the workspace.
+The Bitbucket Cloud integration connects Bitbucket Cloud workspaces to Ankra over OAuth. Ankra stores cluster configuration in your repositories, runs [Ankra Pipelines](/guides/ankra-pipelines) on their pushes and pull requests, and lets Ankra AI review pull requests in the workspace.
 </Note>
 
 ## Overview
@@ -13,9 +13,10 @@ Connecting Bitbucket Cloud to Ankra enables:
 
 - **Configuration Storage:** Store Helm values and manifests in your workspace repositories
 - **Version Control:** Track all infrastructure changes with Git history
-- **GitOps Workflows:** Sync changes between Ankra and your repository through `repo:push` webhooks
+- **GitOps Workflows:** Sync changes between Ankra and your repository through webhooks Ankra registers for you
 - **Audit Trail:** Full history of who changed what and when
 - **Collaboration:** Use pull requests and code review for infrastructure changes
+- **[Ankra Pipelines](/guides/ankra-pipelines):** Runs on pushes, tags and pull requests
 - **[AI code review](/platform/ai-code-review):** Reviews on pull requests and replies to `@ankraai` mentions - see [Ankra AI on pull requests](#ankra-ai-on-pull-requests)
 
 ---
@@ -26,14 +27,28 @@ You need:
 
 - A Bitbucket Cloud workspace you own or are an admin of.
 - Permission to authorise OAuth consumers for that workspace.
+- The `credentials.write` permission in Ankra to connect or reconnect an organisation credential. Connecting your own personal account needs no extra permission.
 
 Ankra requests the following OAuth scopes:
 
-- `account` - read account metadata for the connected user.
-- `repository` - read access to repositories visible to your account.
-- `repository:write` - push commits with stack configuration.
-- `repository:admin` - register and rotate the per-credential webhook.
-- `webhook` - receive `repo:push` events for GitOps sync.
+- `account` - read your account and list the workspaces it belongs to.
+- `repository` - read the repositories your account can see, their files and their branches.
+- `repository:write` - push the commits that store stack configuration.
+- `repository:admin` - add webhooks to a repository, which Bitbucket requires alongside `webhook`.
+- `pullrequest` - read pull requests and comment on them for AI code review and mention replies, and subscribe webhooks to pull request events.
+- `webhook` - register, update and remove the repository webhooks that deliver pushes and pull request events to Ankra.
+
+### Granting the pull request permission
+
+Bitbucket gives a token the permissions of the OAuth consumer it was issued through, not the scopes the authorisation request lists. The Ankra OAuth consumer therefore needs Bitbucket's **Pull requests: Read** permission, and a credential connected before the consumer carried it gains the `pullrequest` scope only when it is reconnected.
+
+Until a credential is reconnected, the webhooks it registers subscribe `repo:push` alone. GitOps sync, push pipelines and tag pipelines keep working, while AI review, `@ankraai` mention replies and pull request pipelines receive nothing from its repositories.
+
+To grant it, press **Reconnect** on the organisation credential's page, next to **Sync Repositories**. A personal connection shows **Reconnect** under **Profile → General → Bitbucket Cloud Connection** only while it is broken; one that still works is renewed by **Disconnect** followed by **Connect Bitbucket**. Ankra then re-subscribes the credential's webhooks to the pull request events on their next check - within five minutes for a repository a cluster syncs from, within an hour for one hooked only for AI review or pipelines. No webhook needs editing by hand.
+
+<Note>
+If Bitbucket's consent screen lists no access to pull requests, the consumer does not carry the permission yet and a reconnect grants nothing new. [Contact support](/platform/support).
+</Note>
 
 ---
 
@@ -47,12 +62,20 @@ Ankra requests the following OAuth scopes:
     Select **Bitbucket Cloud** from the source-control providers and click **Continue to Bitbucket**.
   </Step>
   <Step title="Authorise the Ankra OAuth consumer">
-    Bitbucket will redirect you to the consent screen. Review the requested scopes and click **Grant access**.
+    Bitbucket will redirect you to the consent screen. Review the requested access and click **Grant access**. Finish in the same browser, signed in to Ankra as the user who started the connection: Ankra refuses a connection completed by anyone else, or in a browser with no Ankra session, with `state_session_mismatch`.
   </Step>
-  <Step title="Verify the credential appears">
-    You will land back in Ankra with the new Bitbucket Cloud credential listed. The repository scraper job runs immediately and the credential's repository list populates within a minute.
+  <Step title="Verify the credential">
+    You land on the new credential's page, with a banner confirming the connection. The repository sync starts straight away: it lists every workspace your Bitbucket account belongs to, and **Workspaces & Repositories** fills within a minute. **Sync Repositories** runs it again.
   </Step>
 </Steps>
+
+**Connect workspace** on the Bitbucket card under **AI → Settings → Connections → Source control & AI review** starts the same flow.
+
+### Connecting your personal account
+
+Each member can also link their own Bitbucket Cloud account for traceable commits, under **Profile → General → Bitbucket Cloud Connection → Connect Bitbucket**. A personal credential gets its own repository sync and appears in the GitOps credential picker beside the organisation's credentials, marked as personal.
+
+An organisation credential and a personal credential connected by the same Bitbucket account share a name. A cluster records its credential by name and the organisation credential takes precedence, so the picker shows such a personal credential as **Uses the organisation credential** and does not let you select it.
 
 ---
 
@@ -62,23 +85,40 @@ Ankra requests the following OAuth scopes:
   <Step title="Open the cluster's GitOps settings">
     Navigate to the cluster, click **Settings → GitOps**.
   </Step>
-  <Step title="Pick Bitbucket Cloud">
-    Use the provider switcher to select **Bitbucket Cloud**, then choose the credential and the repository to attach.
+  <Step title="Select the credential">
+    The credential picker lists the organisation's GitHub and Bitbucket Cloud credentials together, each with its provider icon and scope. Pick the Bitbucket Cloud credential.
   </Step>
-  <Step title="Confirm">
-    Ankra writes a `clusters/{cluster-name}-{cluster-short-id}/` folder to the repository on the next sync. A `repo:push` webhook is registered automatically - there is no manual webhook setup.
+  <Step title="Choose the repository and branch">
+    Choose the repository, then the branch from the repository's own branch list. Picking a repository selects its default branch.
+  </Step>
+  <Step title="Connect">
+    Click **Connect Repository**. Ankra writes a `clusters/{cluster-name}-{cluster-short-id}/` folder to the repository on the next sync and registers the repository's webhook - there is no manual webhook setup.
   </Step>
 </Steps>
 
+A Stack's **Connect repository** dialog, shown when you create a Stack on a cluster with no repository, offers the same Bitbucket Cloud credentials, repositories and branches, and so does the GitOps step of the cloud cluster create wizards. The cluster's **View source** links open its folder on bitbucket.org at the connected branch.
+
+A branch whose name contains a slash, such as `release/2026-10`, works too. The agent reads add-on values files at that branch's commit, and a branch that no longer exists fails the deploy with the branch named rather than deploying the chart's defaults.
+
 ---
 
-## Webhook delivery
+## Webhooks
+
+Ankra registers the webhooks itself, one per repository and credential. A repository gets one when:
+
+- a cluster's GitOps connection uses it;
+- it is connected to [Ankra Pipelines](/guides/ankra-pipelines#connect-a-repository-push-see-the-run) with the credential, unless the organisation already has a webhook on it;
+- AI review or mention replies are switched on for it - on the credential's **All repositories** row, which covers every repository the credential can see, or on a repository rule.
+
+Under an **All repositories** row, a repository the credential's repository sync discovers later gets its webhook on the credential's next check, which runs every five minutes. Webhooks are only ever added: switching a capability off or disconnecting a repository leaves the webhook in place, because it may still serve GitOps or pipelines, and Ankra declines the deliveries nothing asked for.
 
 - Per-credential URL: `{platform-base-url}/webhooks/bitbucket-cloud/{credential-id}`.
-- Event filter: `repo:push` only.
+- Events: `repo:push`, plus `pullrequest:created`, `pullrequest:updated`, `pullrequest:comment_created`, `pullrequest:fulfilled` and `pullrequest:rejected` when the credential grants the `pullrequest` scope. Without that scope the webhook subscribes `repo:push` alone - see [Granting the pull request permission](#granting-the-pull-request-permission).
+- When several of the organisation's credentials have a webhook on the same repository, only one of them subscribes the pull request events, so a pull request is reviewed and a mention answered once.
+- A push that updates several branches or tags at once is handled per branch and per tag: each branch syncs the clusters that track it and starts its push pipelines, and each tag starts its tag pipelines.
 - Signature: `X-Hub-Signature: sha256=<hmac>` validated on every request.
 
-If a webhook delivery fails, Bitbucket retries with exponential backoff. Investigate by checking the webhook details on the credential page in Ankra.
+Ankra does not show individual deliveries. Bitbucket keeps each webhook's request history under the repository's **Repository settings → Webhooks**.
 
 ---
 
@@ -88,19 +128,48 @@ Ankra AI can review Bitbucket Cloud pull requests automatically and answer when 
 
 Both are off until an organisation admin switches them on, under **AI** → **Settings** → **Connections** → **Source control & AI review** → **Bitbucket**, on the workspace's **All repositories** row or on a rule for an individual repository. [AI code review](/platform/ai-code-review) covers every switch, the review model, the review instructions, and what the review posts.
 
-PR previews are GitHub-only, so the Bitbucket rows carry no preview switch.
+Both need the pull request events, so the credential must grant the `pullrequest` scope - see [Granting the pull request permission](#granting-the-pull-request-permission). On Bitbucket Cloud:
+
+- **Review drafts** applies: a draft pull request is skipped until it is marked ready, and marking it ready starts the review.
+- A mention reply is posted as a reply to the comment that asked.
+- Bitbucket has no comment reactions, so no 👀 acknowledges a mention. The reply is the first sign Ankra picked it up.
+- In **Agent** mode, Ankra cannot open a pull request on Bitbucket, so a reply proposes the fix with a branch name and a commit message instead of offering one.
+
+PR previews cannot be switched on for Bitbucket Cloud repositories: the Bitbucket rows carry no preview switch.
+
+---
+
+## Disconnecting
+
+- **An organisation credential** is deleted from its card under **Organisation → Credentials**. Ankra first removes the webhooks it registered from each repository, while it still holds the token, then deletes the stored token and the credential. Connect any cluster that syncs through the credential to another credential first: a cluster records its credential by name and cannot sync without it.
+- **A personal credential** is disconnected with **Disconnect** under **Profile → General → Bitbucket Cloud Connection**, which removes its webhooks and token the same way.
+
+If Bitbucket refuses a webhook's removal, because access was already revoked for example, Ankra deletes its own record and leaves the webhook on the repository. Remove it under the repository's **Repository settings → Webhooks**.
 
 ---
 
 ## Limitations
 
-- Only HTTPS authentication is supported. SSH keys are not used for Bitbucket Cloud.
-- Atomic multi-file commits are written using the `POST /2.0/repositories/{ws}/{repo}/src` endpoint with up to 5 retries on conflict.
+- Only HTTPS authentication is supported. SSH keys are not used for Bitbucket Cloud. Git authenticates as `x-token-auth` with the credential's OAuth access token, which Ankra refreshes shortly before it expires.
+- Atomic multi-file commits are written using the `POST /2.0/repositories/{ws}/{repo}/src` endpoint, with the branch head Ankra read as the parent of the commit. When another commit lands on the branch first, Bitbucket refuses the write: Ankra reads the new head, checks the change against it again and retries, up to three times, before reporting a conflict. A transient refusal - a 400, a 422 or a 429 rate limit, whose `Retry-After` is honoured - is retried up to five times, waiting at most 35 seconds in all.
+- PR previews are not available, and merge-when-green is GitHub only - see [Ankra Pipelines](/guides/ankra-pipelines#what-is-in-place-today).
 
 ---
 
 ## Troubleshooting
 
-- **OAuth callback errors** appear as `?bitbucket_error=...` on the credentials page after the redirect. The error code comes from Bitbucket's OAuth response (e.g. `access_denied`).
-- **Token refresh failures** show the credential as `Down`. Reconnect the credential to mint a fresh refresh token.
-- **No repositories visible** typically means the OAuth user lacks `repository` scope on the workspace. Re-run the OAuth flow.
+A connection's outcome comes back as `?bitbucket_connected=<credential-name>` or `?bitbucket_error=<code>` and is shown as a banner: on the credential's page or **Organisation → Credentials** for an organisation credential, and on **Profile → General**, or the page a personal reconnect started from, for a personal one.
+
+- **`access_denied`** - the connection was declined on Bitbucket's consent screen. Start it again and grant access.
+- **`state_session_mismatch`** - the connection was finished by a different Ankra user than the one who started it, or in a browser with no Ankra session, for example a consent link forwarded to someone else. Nothing was connected. Start again from Ankra while signed in, and approve in the same browser.
+- **`credential_create_failed`** - Bitbucket authorised the connection, but Ankra could not store the credential. Try again.
+- Any other code is Bitbucket's own OAuth error, shown as it arrived.
+
+Other symptoms:
+
+- **Pushes sync, but AI review, mention replies and pull request pipelines never start** - the credential lacks the `pullrequest` scope. Reconnect it, as in [Granting the pull request permission](#granting-the-pull-request-permission). If they still do not start, check the switches under [Ankra AI on pull requests](#ankra-ai-on-pull-requests).
+- **The credential shows `Down`** - Bitbucket refused the credential's refresh token, typically because access was revoked. Reconnect the credential to mint a fresh one.
+- **A push fails with "Bitbucket authentication failed. Your token may have expired - reconnect your Bitbucket account in settings."** - reconnect the credential the cluster uses. The cluster's GitOps page and a failed Stack deploy offer **Reconnect Bitbucket**, which starts the flow for that credential, organisation or personal.
+- **A push fails with "Bitbucket rate limit hit while pushing."** - Bitbucket limits API requests per user and hour. Wait a minute and try again.
+- **Reconnect is disabled** - reconnecting an organisation credential needs `credentials.write`, and the button's tooltip says who can. You can still reconnect your own personal credential.
+- **No repositories visible** - press **Sync Repositories** on the credential's page. A workspace whose listing Bitbucket refuses, such as one behind an IP allowlist, is skipped while the others still sync. If nothing appears, the OAuth user may lack `repository` scope on the workspace: reconnect the credential.
