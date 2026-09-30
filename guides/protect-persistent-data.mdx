@@ -1,0 +1,85 @@
+---
+title: Protect Persistent Data Before Changing a Stack
+description: Removing or renaming a Stack manifest deletes its objects, PersistentVolumeClaims included, and a Delete reclaim policy destroys the disk too. Check and fix this before you change the Stack.
+---
+
+import { CliVersion } from "/snippets/cli-version.jsx";
+
+You want to tidy up a Stack - rename a manifest, split one into two, or drop one you no longer need - and the manifest owns a namespace or a PersistentVolumeClaim. Done carelessly, that change deletes the volume and the data on it. This guide shows how to check what is at risk and make the change safely.
+
+## Why a Stack Change Can Delete Data
+
+Ankra identifies a manifest by its `name`. When a Stack is applied - with `ankra cluster apply`, a GitOps sync, or an edit in the portal - and a manifest name is no longer there, Ankra deletes every object in that manifest's stored YAML. A rename is the same thing: the old name is deleted and the new name is created as a new manifest, with nothing ordering the two.
+
+- A manifest that holds a `Namespace` takes the namespace with it, and every PersistentVolumeClaim inside it.
+- A manifest that holds PersistentVolumeClaims deletes those claims.
+- What happens to the disk depends on the PersistentVolume's reclaim policy. With `Delete`, the default for most CSI drivers, the disk is destroyed with the claim. With `Retain`, the PersistentVolume and its data stay behind in the `Released` state.
+
+The field-level rules are in the [ImportCluster reference](/reference/importcluster#spec-stacks-manifests).
+
+## Prerequisites
+
+- Access to the cluster in Ankra, and permission to edit the Stack.
+- The Ankra CLI, logged in, if you use the commands below. Everything can also be done in the portal.
+
+## Steps
+
+<Steps>
+  <Step title="Find the volumes the change touches">
+    List the claims in the namespaces the manifest owns or deploys into. In the portal, open the cluster and go to **Kubernetes → Storage → Persistent Volume Claims**. From the CLI:
+
+    <CliVersion since="0.15.0" />
+
+    ```bash
+    ankra cluster get resources PersistentVolumeClaim -n my-namespace
+    ```
+
+    Note the volume each claim is bound to. A claim created by a StatefulSet's `volumeClaimTemplates` is not in any manifest, but it is still deleted when the namespace around it is.
+  </Step>
+  <Step title="Check each volume's reclaim policy">
+    Go to **Kubernetes → Storage → Persistent Volumes** and read the **Reclaim Policy** column for those volumes, or list them:
+
+    ```bash
+    ankra cluster get resources PersistentVolume
+    ```
+
+    Any volume with `Delete` loses its data if its claim is deleted.
+  </Step>
+  <Step title="Switch the volumes you need to Retain">
+    A volume's reclaim policy can be changed in place, with no downtime. From the CLI:
+
+    ```bash
+    ankra cluster patch pv <pv-name> --type merge \
+      --patch '{"spec":{"persistentVolumeReclaimPolicy":"Retain"}}'
+    ```
+
+    Or open the volume, go to its **Manifest** tab, click **Edit**, set `persistentVolumeReclaimPolicy: Retain`, and **Apply**.
+
+    For volumes created later, a StorageClass's `reclaimPolicy` cannot be changed after it is created. Add a second StorageClass with `reclaimPolicy: Retain` and use it for stateful workloads.
+  </Step>
+  <Step title="Take a copy if the data matters">
+    `Retain` keeps the disk, but it does not give you a copy. If your organisation has [Backups](/guides/backups) enabled (closed beta), [take a restore point](/guides/backups#take-a-restore-point-now) of the Stack first. Otherwise use your database's or storage provider's own backup.
+  </Step>
+  <Step title="Make the Stack change">
+    Rename or remove the manifest. Where you can, avoid renaming a manifest that owns a namespace or a claim at all: keep its name fixed and change its contents instead. If you rename a parent, update every `parents` entry that names it in the same change.
+  </Step>
+</Steps>
+
+## Verify
+
+After the Stack has synced, check **Kubernetes → Storage → Persistent Volumes** again. Volumes you switched to `Retain` whose claims were deleted show the status `Released`, with their data intact.
+
+To use a `Released` volume again, clear its `spec.claimRef` and create a claim that names it with `spec.volumeName`. A released volume keeps costing money until you reuse or delete it; [Cloud Cost](/platform/cloud-cost) lists released persistent volumes among its savings findings.
+
+## Changing the Cluster's GitOps Repository
+
+Pointing a cluster at a different GitOps repository or branch carries the same risk on a larger scale. Ankra writes the cluster's current state to the new source first, but from then on that source is authoritative: anything that later leaves it is removed, including workloads that own claims. `ankra cluster apply` refuses a repoint unless you pass `--allow-repoint`, and on a cluster that holds PersistentVolumeClaims it also needs `--allow-repoint-destroying-data`. Only pass the second flag after you have done the steps above. See `spec.git_repository` in the [ImportCluster reference](/reference/importcluster).
+
+## Troubleshooting
+
+- **The claim is gone and the volume was `Delete`.** The disk has been removed by the storage provider. Restore from a backup or restore point; Ankra cannot bring it back.
+- **The recreated claim is empty.** A new claim with the old name is bound to a new, empty volume by the StorageClass, not to the retained one. To get the data back, clear the retained volume's `spec.claimRef` and create the claim with `spec.volumeName` set to that volume.
+
+## Next Steps
+
+Before your next Stack change, switch the volumes of every stateful workload to `Retain` now, so a later rename cannot take data with it. For help with a volume you have already lost, [contact support](/platform/support).

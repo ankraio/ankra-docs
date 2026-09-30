@@ -1,0 +1,175 @@
+---
+title: Scaleway Clusters
+description: Create a Kubernetes cluster on Scaleway Instances in your own Scaleway project, behind a Public Gateway, with Ankra installing and operating Kubernetes, ingress, TLS and DNS.
+tag: "Closed Beta"
+---
+
+import { CliVersion } from "/snippets/cli-version.jsx";
+
+Choose Scaleway Instances when you want a Kubernetes cluster on Scaleway servers in a project you own, with the nodes on a private network and no public addresses. Ankra creates the Instances, the Private Network and a Public Gateway in your Scaleway project, installs Kubernetes and the Scaleway cloud integration, and then operates the cluster for you - this is an **Ankra Managed** cluster. Scaleway bills you directly.
+
+<Warning>
+**Closed beta.** Scaleway as a cluster provider is in closed beta. The workflow is stable but the surface may still change, and it is enabled per organisation on request - until it is, Scaleway does not appear in the create dialog or among the credential providers, and its endpoints are not served. [Contact support](/platform/support) to have it turned on for your organisation.
+</Warning>
+
+If you would rather have Scaleway run the control plane, use Scaleway Kapsule instead - see [Scaleway Kapsule](/guides/managed-kubernetes#scaleway-kapsule-closed-beta).
+
+## Before you start
+
+- A **Scaleway project**, ideally one dedicated to Ankra: every resource Ankra creates is scoped to that one project.
+- An **API key on a Scaleway IAM application** with project-scoped permissions, stored as a [Scaleway credential](/platform/credentials/scaleway). A second, narrower key for the in-cluster components is recommended - see [Scaleway specifics](#scaleway-specifics).
+- An **SSH key credential**. Scaleway clusters take exactly one. See [SSH Key Credentials](/platform/credentials/ssh-key).
+- A **region and a zone** in that region, for example `fr-par` and `fr-par-1`, and either a private CIDR for a new Private Network (a prefix between `/20` and `/29`) or an existing Private Network in the region.
+
+## Create the cluster
+
+<Tabs>
+  <Tab title="Dashboard">
+    <Steps>
+      <Step title="Open the create dialog">
+        Go to **Clusters**, click **Create cluster** and pick **Scaleway** under **Ankra Managed**.
+      </Step>
+      <Step title="Credentials">
+        Pick the **Scaleway credential**, the **Runtime credential** the in-cluster controller and CSI driver use (**Reuse provisioning credential** is the default), the **SSH Key**, then the **Region** and **Zone**. Regions and zones load live from your project.
+      </Step>
+      <Step title="Network">
+        Choose **Create a dedicated network** and enter the **Network CIDR**, or **Use an existing network** in the region. Pick the **Gateway type**, set **Gateway allowed IPs** to the CIDRs that may reach the bastion (empty keeps Scaleway's defaults), and the **Managed bastion SSH port**. **Storage retention on teardown** decides what happens to persistent volumes and load balancers when the cluster is deleted: **Retain persistent storage (recommended)** or **Delete provider storage during teardown**.
+      </Step>
+      <Step title="Compute">
+        Set the control-plane count (1, 3 or 5) and instance type, then one or more worker node pools, each with an instance type, count and optional autoscaling. Instance types can be filtered by **ARM** or **Intel/AMD**. The cost summary is marked incomplete: the gateway, flexible IP, storage, load balancer and transfer charges are not in it.
+      </Step>
+      <Step title="Kubernetes">
+        Keep **kubeadm** (the default, Cilium only) or pick **K3s** with a choice of CNI, and optionally the version. On kubeadm, etcd runs stacked on the control plane or on 3 or 5 dedicated nodes. See [Choices fixed at create time](/guides/operate-ankra-managed-clusters#choices-fixed-at-create-time).
+      </Step>
+      <Step title="GitOps">
+        Optionally connect a Git repository; without one the `scaleway-cloud-provider` stack is still deployed, just not committed. Two checkboxes are on by default:
+        - **Include Networking Stack** - Traefik, cert-manager and a Let's Encrypt ClusterIssuer, with Traefik behind a Scaleway Load Balancer.
+        - **Include DNS Integration** - external-dns, so Ingress hostnames publish their DNS records automatically.
+      </Step>
+      <Step title="Review">
+        Name the cluster and click **Run preflight**. The checks read your project live; when they pass, click **Create cluster**. A progress view follows the network, gateway, Instances, Kubernetes installation and Ankra Agent.
+      </Step>
+    </Steps>
+  </Tab>
+  <Tab title="CLI">
+    <CliVersion since="0.14.0" />
+
+    ```bash
+    ankra credentials scaleway create --name scw-prod --project-id <project-id> --access-key <access-key>   # prompts for the secret key
+    ankra credentials scaleway ssh-key create --name my-ssh-key --generate
+
+    # What the credential can use
+    ankra cluster scaleway locations --credential-id <scaleway-credential-id>
+    ankra cluster scaleway instance-types --credential-id <scaleway-credential-id> --zone fr-par-1
+    ankra cluster scaleway gateway-types --credential-id <scaleway-credential-id> --zone fr-par-1
+    ankra cluster scaleway networks --credential-id <scaleway-credential-id> --region fr-par
+
+    # Create the cluster; `preflight` takes the same flags and checks the request first
+    ankra cluster scaleway create \
+      --name my-cluster \
+      --credential-id <scaleway-credential-id> \
+      --runtime-credential-id <runtime-credential-id> \
+      --ssh-key-credential-id <ssh-key-credential-id> \
+      --region fr-par \
+      --zone fr-par-1 \
+      --network-ip-range 10.64.0.0/20 \
+      --gateway-allowed-ips 203.0.113.10/32 \
+      --control-plane-type DEV1-M \
+      --worker-count 2 \
+      --worker-type DEV1-M
+    ```
+
+    Run `ankra cluster scaleway preflight` with the same flags first. Use `--private-network-id` instead of `--network-ip-range` to adopt an existing network. `--distribution`, `--cni`, `--etcd-topology`, `--gateway-type`, `--bastion-port`, `--retention-policy`, `--include-networking=false` and `--include-dns=false` cover the other choices. Preflight reports each check as pass, warn or fail; a quota warning means the instance types are in stock, not that your project has hard-quota headroom.
+  </Tab>
+  <Tab title="API">
+    ```bash
+    curl -X POST https://platform.ankra.app/api/v1/clusters/scaleway/preflight \
+      -H "Authorization: Bearer $ANKRA_API_TOKEN" \
+      -H "Content-Type: application/json" \
+      -d @cluster.json
+
+    curl -X POST https://platform.ankra.app/api/v1/clusters/scaleway \
+      -H "Authorization: Bearer $ANKRA_API_TOKEN" \
+      -H "Content-Type: application/json" \
+      -d @cluster.json
+    ```
+
+    With `cluster.json`:
+
+    ```json
+    {
+      "name": "my-cluster",
+      "credential_id": "<scaleway-credential-id>",
+      "runtime_credential_id": "<runtime-credential-id>",
+      "ssh_key_credential_id": "<ssh-key-credential-id>",
+      "region": "fr-par",
+      "zone": "fr-par-1",
+      "network_ip_range": "10.64.0.0/20",
+      "gateway_allowed_ips": ["203.0.113.10/32"],
+      "control_plane_count": 1,
+      "control_plane_type": "DEV1-M",
+      "node_groups": [
+        {"name": "default", "instance_type": "DEV1-M", "count": 2}
+      ],
+      "retention_policy": "retain"
+    }
+    ```
+
+    Defaults: `gateway_type` `VPC-GW-S`, `bastion_port` `61000` (or any port from 1024 to 59999), `control_plane_type` and `worker_type` `DEV1-M`, `distribution` `kubeadm`, `etcd_topology` `stacked`, `retention_policy` `retain`, and `include_networking` and `include_dns` `true`. `private_network_id` and `network_ip_range` are mutually exclusive; without either, Ankra derives a CIDR. `control_plane_count` is 1 to 9.
+  </Tab>
+</Tabs>
+
+## Verify
+
+1. The cluster moves from **Provisioning** to **Online** in the clusters list once the Ankra Agent has connected.
+2. Point `kubectl` at it through Ankra (this needs a [Cluster Access](/guides/cluster-access) grant) and check the nodes:
+
+   <CliVersion since="0.3.0" command="cluster kubeconfig add" />
+
+   ```bash
+   ankra cluster kubeconfig add my-cluster --use
+   kubectl get nodes
+   ```
+
+   Every control plane and worker should be `Ready`. See [Accessing Clusters with kubectl](/guides/kubeconfig).
+
+## What Ankra created in your project
+
+- **A Private Network** with its IPAM subnet, unless you adopted an existing one. An adopted network is never deleted.
+- **A Public Gateway** (v2) with a flexible IP, attached to the Private Network. It is the nodes' route to the internet and runs the managed SSH bastion.
+- **A security group** that opens the Kubernetes and CNI overlay ports only to the cluster's private CIDR - never publicly.
+- **The Instances** for the control plane, workers and any dedicated etcd nodes, with private addresses only, and a generated SSH key.
+- **The `scaleway-cloud-provider` stack** in `kube-system`: the Scaleway cloud controller manager (Load Balancers for `LoadBalancer` Services) and the CSI driver (block volumes), both using the runtime credential.
+
+## Scaleway specifics
+
+- **Region and zone.** Private Networks are regional; Instances, block volumes, security groups and the Public Gateway are zonal. The zone must belong to the region (`fr-par-1` in `fr-par`).
+- **Runtime credential.** The runtime credential's key is installed in the cluster for the controller and CSI driver, so give it a second IAM application with narrower permissions than the provisioning one - see [Scaleway Credentials](/platform/credentials/scaleway#least-privilege-permissions). It must target the same project. Without one, the provisioning credential is reused.
+- **The bastion is the gateway's.** SSH goes through the Public Gateway's managed bastion as the user `bastion` on port `61000` by default - not port 22 on a VM. **Settings → Access** shows the commands, and `GET /api/v1/clusters/scaleway/{cluster_id}/access-info` returns the host, port and users. Restrict **Gateway allowed IPs** to your own addresses. `ankra cluster scaleway bastion status` reports its health; there is no bastion resize.
+- **Storage classes.** `scw-bssd` (the default) deletes a volume when its claim is deleted; `scw-bssd-retain` keeps it. That Kubernetes reclaim policy is separate from the cluster's `retention_policy`, which decides what a cluster teardown does with tagged volumes and load balancers.
+- **Stopping keeps the Instances.** A stop powers the Instances off and keeps them with their volumes, so the cluster comes back with its state. Root storage, the Public Gateway, flexible IPs, load balancers and retained volumes keep billing while it is stopped.
+- **Estimates are incomplete.** Scaleway's APIs do not return gateway, flexible IP, block storage or load balancer prices, so the wizard total leaves them out. Check Scaleway's pricing and your billing console.
+
+## Operate it
+
+Day-2 tasks work the same way on every Ankra Managed provider, with the CLI name `scaleway`:
+
+- [Node groups](/guides/operate-ankra-managed-clusters#node-groups) and [legacy worker scaling](/guides/operate-ankra-managed-clusters#legacy-worker-scaling)
+- [Control plane](/guides/operate-ankra-managed-clusters#control-plane)
+- [Restart a node](/guides/operate-ankra-managed-clusters#restart-a-node) and [the bastion](/guides/operate-ankra-managed-clusters#bastion)
+- [SSH access and keys](/guides/operate-ankra-managed-clusters#ssh-access-and-keys)
+- [Upgrade Kubernetes](/guides/operate-ankra-managed-clusters#upgrade-kubernetes)
+- [Stop and start](/guides/operate-ankra-managed-clusters#stop-and-start)
+- [Terminate a cluster](/guides/operate-ankra-managed-clusters#terminate-a-cluster)
+
+## Troubleshooting
+
+| Issue | Solution |
+|-------|----------|
+| `401` or `403` from Scaleway | Check the Project ID, that the API key is active and project-scoped, and that its IAM application has the permission sets listed on [Scaleway Credentials](/platform/credentials/scaleway#least-privilege-permissions). Rotate the key rather than widening it to the Organization |
+| `404` for a resource you know exists | Scaleway IDs are region- or zone-qualified; check the region and zone |
+| `429` or `5xx` from Scaleway | Ankra retries these with backoff; let the operation finish, then retry the Ankra operation rather than creating the cluster again |
+| Instance type unavailable | Refresh the zone's catalog or pick another type or zone. Stock is not the same as quota |
+| Preflight fails on the network | The adopted network has no IPv4 subnet, or the CIDR is outside `/20` to `/29` or overlaps another network |
+| Nodes stay `NotReady` or keep the `uninitialized` taint | Check the CCM, CSI and CNI pods in `kube-system` and the private routes through the gateway |
+| Resources remain after a delete | With `retention_policy: retain`, tagged volumes and load balancers are kept on purpose and keep billing; delete them in the Scaleway console when you no longer need them |
