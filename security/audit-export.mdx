@@ -42,6 +42,8 @@ Export is gated by the same `audit.read` permission as the audit viewer, held by
 
 Granting `audit.read` to a compliance or security function lets them pull evidence themselves without broader administrative access, which is usually what you want.
 
+An API token calling the export needs the same permission: the role behind the token (the service account's role, or the owner's role for a personal token) must hold `audit.read`, and a token restricted to a list of scopes must include it.
+
 ---
 
 ## Exporting from the portal
@@ -62,18 +64,39 @@ Granting `audit.read` to a compliance or security function lets them pull eviden
 
 ## Exporting for automation
 
-The audit export is a portal download today: its route accepts a signed-in browser session only, so an API token cannot call it. A script that sends a bearer token to it is redirected to the sign-in page rather than refused, which looks like success unless you check the file.
+Scripts, scheduled jobs and SIEM collectors call the token route of the same export:
 
-For scheduled, token-authenticated evidence collection, use the organisation [compliance report](/security/compliance-management). It accepts API tokens (the caller needs both the security read and `audit.read` permissions), and its date range bounds an audit summary section. That section summarises administrative actions over the window; it is not the row-by-row trail, so keep taking the portal export for that.
-
-```bash
-curl -sS \
-  -H "Authorization: Bearer <your-token>" \
-  "https://platform.ankra.app/api/v1/org/security/compliance-report?format=json&start_date=2026-07-01&end_date=2026-07-31" \
-  -o compliance-report-july.json
+```
+GET https://platform.ankra.app/api/v1/org/organisation/audit-logs/export
 ```
 
-The same download is `ankra security compliance export` from the terminal. See [Compliance Management](/security/compliance-management) for what the report contains.
+It accepts a [service token](/guides/service-tokens) or a personal API token as a bearer credential, and takes the same filters, formats and row cap as the portal download. The export is scoped to the token's organisation.
+
+| Query parameter | Meaning |
+|-----------------|---------|
+| `format` | `csv` (default) or `json` |
+| `start_date`, `end_date` | Window bounds, both inclusive. A date (`2026-07-01`) or an RFC 3339 timestamp (`2026-07-31T23:59:59Z`) |
+| `action_type`, `resource_type` | Narrow to one kind of action or resource |
+| `user_id`, `cluster_id`, `agent_task_id` | Narrow to one member, one cluster, or one AI task |
+| `actor_type` | `human`, `agent` or `system` |
+| `outcome` | `succeeded` or `failed` |
+| `search` | Free-text match, as in the audit viewer |
+
+```bash
+curl -fsS \
+  -H "Authorization: Bearer $ANKRA_API_TOKEN" \
+  -D headers.txt \
+  "https://platform.ankra.app/api/v1/org/organisation/audit-logs/export?format=csv&start_date=2026-07-01&end_date=2026-07-31T23:59:59Z" \
+  -o audit-log-2026-07.csv
+
+grep -qi '^x-ankra-export-truncated: true' headers.txt && echo "export truncated - narrow the window" >&2
+```
+
+`-f` makes `curl` fail on a `401` or `403` instead of writing the error body to the file. A token without `audit.read` receives a `403` naming the missing permission.
+
+<Warning>
+Use the `/api/v1/...` path above. The portal's own route, `/org/organisation/audit-logs/export`, accepts a signed-in browser session only: a request carrying a bearer token is redirected to the sign-in page rather than refused, which looks like success unless you check the file.
+</Warning>
 
 ---
 
@@ -96,13 +119,62 @@ When the export is truncated, narrow the date window and export again until it c
 
 Audit entries are retained for **365 days** by default, after which older rows are removed by a background retention job.
 
-If your framework requires a longer trail - and most do, with ISO/IEC 27001 and many SOC 2 programmes expecting multi-year retention - the platform is not your system of record. Export regularly into storage you control, with the retention and immutability your policy requires: for example a monthly portal export into write-once object storage, or a scheduled pull of the token-authenticated compliance report.
+If your framework requires a longer trail - and most do, with ISO/IEC 27001 and many SOC 2 programmes expecting multi-year retention - the platform is not your system of record. Export regularly into storage you control, with the retention and immutability your policy requires: for example a scheduled daily [token export](#exporting-for-automation) into write-once object storage.
 
 ---
 
 ## Forwarding to a SIEM
 
-There is no push integration, and the audit export cannot be pulled with a token today. To feed a SIEM, either upload the portal CSV or JSON export, or run a scheduled job - such as a [pipeline agent](/guides/pipeline-agents) - that pulls the [compliance report](/security/compliance-management) for a bounded date window with a [service token](/guides/service-tokens) and forwards its audit summary. Keep the raw file in your evidence store as well: the SIEM is for detection, the file is for the assessor.
+There is no push integration: your SIEM pulls. Run a scheduled job that exports a bounded window with a service token and hands the file to your SIEM's ingestion, and keep the raw file in your evidence store as well - the SIEM is for detection, the file is for the assessor.
+
+<Steps>
+  <Step title="Create a role that can only read the audit log">
+    In **Organisation** &rarr; **Roles**, create a [custom role](/guides/roles-and-access) holding `audit.read` and nothing else.
+  </Step>
+  <Step title="Mint a service token with that role">
+    Create a [service token](/guides/service-tokens) named after the job, for example `siem-audit-export`, with the role from the previous step, and store it in your scheduler's secret store.
+  </Step>
+  <Step title="Schedule the export">
+    Pull one closed window per run - yesterday, in UTC - so every row arrives exactly once. Both window bounds are inclusive, so end the window one microsecond before midnight rather than at midnight.
+  </Step>
+</Steps>
+
+A daily GitHub Actions job, as an example. It uses GNU `date`, as on GitHub-hosted Linux runners; the last step is a placeholder for your SIEM's ingestion:
+
+```yaml
+name: audit-log-to-siem
+on:
+  schedule:
+    - cron: "15 1 * * *"
+  workflow_dispatch: {}
+
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Export yesterday's audit log
+        env:
+          ANKRA_API_TOKEN: ${{ secrets.ANKRA_AUDIT_EXPORT_TOKEN }}
+        run: |
+          day="$(date -u -d yesterday +%Y-%m-%d)"
+          curl -fsS \
+            -H "Authorization: Bearer $ANKRA_API_TOKEN" \
+            "https://platform.ankra.app/api/v1/org/organisation/audit-logs/export?format=json&start_date=${day}T00:00:00Z&end_date=${day}T23:59:59.999999Z" \
+            -o "audit-log-${day}.json"
+          if jq -e '.truncated' "audit-log-${day}.json" >/dev/null; then
+            echo "Export for ${day} hit the 100,000-row cap; split the window" >&2
+            exit 1
+          fi
+          echo "day=${day}" >> "$GITHUB_ENV"
+
+      - name: Forward to the SIEM
+        run: |
+          # Replace with your SIEM's ingestion, for example an HTTP collector
+          # or an upload to the bucket your SIEM reads from.
+          jq -c '.entries[]' "audit-log-${day}.json" > "audit-log-${day}.ndjson"
+```
+
+The JSON document is `{"entries": [...], "truncated": false}`, newest entry first, with the columns listed [above](#what-the-export-contains) as fields of each entry. Failing the job on `truncated` matters: a truncated window silently drops its oldest rows.
 
 ---
 
