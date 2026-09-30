@@ -4,19 +4,21 @@ description: Every pull request on a connected application gets a live, throwawa
 tag: "Closed Beta"
 ---
 
+import { CliVersion } from "/snippets/cli-version.jsx";
+
 <Warning>
 **Closed beta.** PR previews are part of [Applications](/concepts/applications), which is in closed beta and enabled per organisation on request. [Contact support](/platform/support) to have it turned on for your organisation.
 </Warning>
 
-<Note>
-Open a pull request on a [connected application](/concepts/applications) and Ankra deploys that PR's build to your organisation's staging cluster, then posts a status comment with a public preview link. Push again and it redeploys. Close or merge and it is torn down. No pipeline YAML, no ingress wiring, no cleanup.
-</Note>
+Reviewers should be able to open a link on a pull request and see the change running, instead of reading a diff and imagining it. Ankra deploys every pull request on a connected application to your organisation's staging cluster, keeps one status comment on the pull request up to date, and tears the preview down when the pull request closes.
+
+A preview deploys an image that was already built for the pull request. Which image that is depends on how the application is built - see [Where the preview image comes from](#where-the-preview-image-comes-from) before you rely on previews.
 
 ---
 
 ## What you get
 
-Minutes after opening a PR, a comment like this appears and keeps itself up to date:
+Once the pull request's image exists, a comment like this appears and keeps itself up to date:
 
 > ### 🚀 Ankra Preview
 >
@@ -26,7 +28,7 @@ Minutes after opening a PR, a comment like this appears and keeps itself up to d
 >
 > <sub>⏳ Expires Aug 9, 22:26 UTC · 🔁 Redeploys on every push</sub>
 
-The preview runs in its own isolated namespace on the staging cluster, PodSecurity-hardened and quota-bounded, exactly like a manually launched [preview demo](/concepts/applications#preview-demos). When the Ankra GitHub App has the optional Deployments permission, the PR also gets a GitHub deployment entry, so the preview shows up in the PR's environments box.
+The preview runs in its own isolated namespace on the staging cluster, PodSecurity-hardened and quota-bounded, exactly like a manually launched [preview demo](/concepts/applications#preview-demos). When the Ankra GitHub App has the optional Deployments permission, the pull request also gets a GitHub deployment entry, so the preview shows up in the pull request's environments box.
 
 ---
 
@@ -34,7 +36,10 @@ The preview runs in its own isolated namespace on the staging cluster, PodSecuri
 
 <Steps>
   <Step title="Connect the repository as an application">
-    The repository must be a [connected application](/concepts/applications) (GitHub only for now). Application setup opens a PR that adds the canonical build-and-publish workflow - this is what builds your PR's container image and pushes it with a `pr-<number>` tag. Automatic previews key on that tag.
+    The repository must be a [connected application](/concepts/applications) (GitHub only for now).
+  </Step>
+  <Step title="Make sure pull requests produce an image">
+    An application built with Ankra Pipelines already does: every pull request run builds the head commit. An application built with the generated GitHub Actions workflow does not, because that workflow pushes nothing for a pull request. See [Where the preview image comes from](#where-the-preview-image-comes-from).
   </Step>
   <Step title="Turn PR previews on for the installation">
     An admin switches **PR previews** on under **AI** → **Settings** → **Connections** → **Source control & AI review**, on the GitHub installation's **All repositories** row or on a rule for that repository. It is off on a new installation, and nothing is deployed until it is on. See [AI code review](/platform/ai-code-review#the-repository-table).
@@ -49,41 +54,75 @@ The preview runs in its own isolated namespace on the staging cluster, PodSecuri
 
 ---
 
+## Where the preview image comes from
+
+Ankra looks for the preview image in one of two ways, depending on what builds the application. The application's setup pull request decides that: a new application builds with Ankra Pipelines by default. [Ship Your App](/guides/deliver-your-app#where-the-image-is-built) compares the builders.
+
+### Applications built with Ankra Pipelines
+
+The preview deploys the image the pipeline's `build` step pushed for the pull request's head commit, by digest. Nothing else is needed: the pull request run that the push already starts is what produces it. Ankra never deploys a tag that could still point at an older commit.
+
+While that run is still going, the preview waits and the comment says **Building**. When the run concludes, Ankra deploys straight away. If the run fails before it produces an image, the preview reports **Failed** with the reason, for example `Pipeline run #53 failed to build 524ba32: ...`. The next push, or a later successful run for the same commit, deploys it.
+
+The pipeline needs its CI cluster and an approved definition before it runs at all - see [Before your first run](/guides/ankra-pipelines#before-your-first-run).
+
+### Applications built by GitHub Actions
+
+The preview deploys an image from the application's registry repository tagged with, in this order of preference:
+
+1. `sha-<7>` - the first seven characters of the pull request's head commit,
+2. `pr-<number>` - the pull request number,
+3. the branch name, with every character other than letters, digits, `.`, `_` and `-` replaced by `-`.
+
+<Warning>
+The generated `build-and-publish.yml` workflow builds and scans the image on a pull request but never pushes it, so it produces none of these tags for a pull request. An application on the generated workflow therefore reports **Build unavailable** on every pull request. Previews work in this lane only when a workflow of your own pushes one of the tags above for pull requests, or after the application moves to [Ankra Pipelines](/guides/migrate-from-github-actions#migrate-an-existing-application-with-one-call).
+</Warning>
+
+Ankra prefers the head's own `sha-<7>` tag because a `pr-<number>` or branch tag can still hold an earlier push's image.
+
+---
+
 ## The status comment
 
-One marker-tagged comment per PR, updated in place - never a stream of new comments.
+One marker-tagged comment per pull request, updated in place - never a stream of new comments.
 
 | Status | Meaning |
 |---|---|
-| 🔄 **Building** | The PR image has not landed in the registry yet. Ankra polls for it for a few minutes and updates the comment when it arrives. |
-| ✅ **Ready** | Deployed. The **Visit Preview** link opens the running PR build; the **Commit** column shows the deployed head SHA. |
-| ⚠️ **Build unavailable** | No `pr-<number>` image was published for this head. Fork PRs and repositories on an old workflow template cannot push preview images. |
-| ❌ **Failed** | The deploy itself failed. The reason appears in a caution callout under the table. |
-| ⚪ **Stopped** | The PR was closed or merged and the preview namespace was deleted. |
+| 🔄 **Building** | No image exists for this head yet. Ankra checks again for a few minutes and updates the comment when it arrives; a later completed build for the same head also re-triggers it. The comment's footer mentions a `pr-<number>` tag in both lanes; a pipeline-built application waits for its pipeline run instead. |
+| ⏳ **Deploying** | The image was found and the preview is starting on the staging cluster. |
+| ✅ **Ready** | Deployed. The **Visit Preview** link opens the running pull request build; the **Commit** column shows the deployed head SHA. |
+| ⚠️ **Build unavailable** | Ankra stopped waiting and found no image for this head. See [Troubleshooting](#troubleshooting). |
+| ❌ **Failed** | The deploy failed, or the pipeline run failed to build the head. The reason appears in a caution callout under the table. |
+| ⚪ **Stopped** | The pull request was closed or merged and the preview namespace was deleted. |
 
 Lifecycle:
 
-- **On open**: the preview deploys as soon as the PR's image build publishes.
+- **On open**: the preview deploys as soon as the pull request's image exists.
 - **On every push**: the preview redeploys with the new head; the comment's Commit and Updated cells refresh.
 - **On close or merge**: the namespace is torn down immediately and the comment flips to ⚪ Stopped.
-- **On expiry**: previews are time-limited (24 hours by default) and reaped automatically; pushing again deploys a fresh one.
+- **On expiry**: previews are time-limited (the organisation's demo lifetime, 24 hours by default) and reaped automatically; pushing again deploys a fresh one.
 
 ---
 
 ## Configuration and data
 
-Automatic previews inherit the application's **demo environment defaults** - env vars, secret slots, and the optional throwaway Postgres - configured as the environment template under the application's **Previews** section (*Preview settings*). See [environment variables and a throwaway database](/concepts/applications#environment-variables-and-a-throwaway-database). If your app needs configuration to boot, set the defaults once and every PR preview gets them.
+Automatic previews inherit the application's **demo environment defaults** - env vars, secret slots, and the optional throwaway Postgres - configured as the environment template under the application's **Previews** section (*Preview settings*). See [environment variables and a throwaway database](/concepts/applications#environment-variables-and-a-throwaway-database). If your app needs configuration to boot, set the defaults once and every pull request preview gets them.
 
 ---
 
 ## Troubleshooting
 
+<CliVersion since="0.15.0" />
+
 | Symptom | What to check |
 |---|---|
-| No comment appears on a new PR | Is **PR previews** on for that repository, is the repository a connected application, and is the staging cluster set? If both hold, push a new commit (or close and reopen the PR) - either re-triggers the preview. |
-| Stuck on 🔄 Building | Open the PR's **Build and Publish** workflow run. The `pr-<number>` image tag must reach the registry; a failed or skipped build leaves the preview waiting until the next push. |
-| ⚠️ Build unavailable | Fork PRs cannot push preview images by design. For same-repo PRs, the repository is likely on an old workflow template - re-run application setup to update the workflow. |
-| ✅ Ready but the URL errors or 503s | The preview runs *your PR's container* - a crash on boot is application-side, not platform-side. Inspect the preview namespace's pod logs on the staging cluster (the preview's detail page under **Previews**, or `kubectl`). A config file change that breaks the container's server is the classic cause. |
+| No comment appears on a new pull request | Is **PR previews** on for that repository, is the repository a connected application, and is the staging cluster set? If all three hold, push a new commit (or close and reopen the pull request) - either re-triggers the preview. |
+| Stuck on 🔄 Building, pipeline-built application | Find the pull request's run with `ankra pipeline list --application <application> --head-sha <full-sha>`, or in the application's **Pipelines** section. No run at all usually means the organisation's CI cluster has no CI workers or no cluster is set - see [Before your first run](/guides/ankra-pipelines#before-your-first-run). |
+| ⚠️ Build unavailable, application on the generated workflow | Expected: that workflow pushes no image for a pull request. Push a `sha-<7>` or `pr-<number>` tag from your own CI, or [move the application to Ankra Pipelines](/guides/migrate-from-github-actions#migrate-an-existing-application-with-one-call). The comment's advice to update the workflow through application setup does not change this. |
+| ⚠️ Build unavailable, your own workflow | The workflow did not push any of the tags [listed above](#applications-built-by-github-actions) to the application's registry repository for this head. Check the workflow run and the tags it pushed. |
+| No preview for a pull request from a fork | Forks get no preview image in either lane. A fork's pipeline build is restricted and pushes nothing, and GitHub does not give a fork's workflow the secrets it would need to push. |
+| ❌ Failed with a pipeline run named | The pull request's pipeline run failed before its `build` step produced an image. Open the run named in the callout, fix it, and push again. |
+| ✅ Ready but the URL errors or 503s | The preview runs *your pull request's container* - a crash on boot is application-side, not platform-side. Inspect the preview namespace's pod logs on the staging cluster (the preview's detail page under **Previews**, or `kubectl`). A config file change that breaks the container's server is the classic cause. |
 | The preview URL does not resolve | The staging cluster's DNS zone must be active (or a demo base domain configured). If it resolves publicly but not on your machine, a stale negative DNS cache is usually to blame - retry against another resolver. |
 | HTTP instead of HTTPS | Platform-zone previews (`*.ankra.cc`, or your selected Ankra domain) are HTTP by design. Configure a demo base domain with a TLS secret for HTTPS. |
 
@@ -91,7 +130,8 @@ Automatic previews inherit the application's **demo environment defaults** - env
 
 ## Related
 
+- [Ship Your App](/guides/deliver-your-app) - the routes from a repository to a running, redeploying application, and which builder feeds previews
 - [Branch demos](/guides/branch-demos) - the manual launch dialog, its environment variables, throwaway database, and teardown timer
 - [Preview demos](/concepts/applications#preview-demos) - launch a demo manually from the portal, CLI, or the `deploy_pr_demo` MCP tool
 - [The preview URL](/concepts/applications#the-preview-url) - how the public hostname is resolved
-- [GitHub Actions CI/CD pipeline](/guides/cicd-pipeline) - the delivery flow the preview build rides on
+- [Ankra Pipelines](/guides/ankra-pipelines) - the in-cluster CI whose pull request runs build preview images
