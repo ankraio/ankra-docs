@@ -90,7 +90,7 @@ This is what makes the 80-word cap lossless rather than lossy. Write the referen
 
 ### The archive
 
-Month records up to and including **July 2026** are a genuine historical account and stay exactly as they are, `#` headings included. They are frozen: no new entry is added to an existing month record, and no new month-labelled `<Update>` is created. `scripts/check_changelog.py` enforces all of this and runs in Docs CI.
+Month records up to and including **July 2026** are a genuine historical account and stay exactly as they are, `#` headings included. The **August 2026** record predates this format too: it stays one month record, with its headline in the `description` prop and its `##` sections kept, and only its wording may be corrected. They are frozen: no new entry is added to an existing month record, and no new month-labelled `<Update>` is created. `scripts/check_changelog.py` enforces all of this and runs in Docs CI.
 
 ## Release status: closed beta
 
