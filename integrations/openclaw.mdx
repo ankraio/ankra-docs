@@ -1,0 +1,109 @@
+---
+title: OpenClaw
+description: Give an OpenClaw assistant the Ankra CLI and Ankra's Agent Skills, so your team can ask about and work with Ankra clusters from Slack, Discord, Telegram or another chat app.
+---
+
+import { CliVersion } from "/snippets/cli-version.jsx";
+
+Your team already talks in Slack, Discord or Telegram, and you want to ask "which clusters have failing pods?" there rather than opening the portal. [OpenClaw](https://docs.openclaw.ai) is an open-source gateway you host yourself that connects chat apps to an AI agent. Ankra does not ship or run OpenClaw. What Ankra provides is what the agent needs to work with Ankra: the `ankra` CLI and Ankra's [Agent Skills](/integrations/agent-skills), installed where OpenClaw looks for skills.
+
+The agent runs `ankra` commands on the machine where the OpenClaw gateway runs, with the token you give that machine. It can do exactly what that token's role allows, for anyone who can message it.
+
+<Note>
+**Looking for Hermes?** An earlier version of this page used that name for this integration. Nous Research's Hermes Agent is a separate open-source agent, available in the add-on catalogue as **Hermes Agent**.
+</Note>
+
+## Prerequisites
+
+- OpenClaw installed and running, with at least one chat channel connected. Follow the [OpenClaw documentation](https://docs.openclaw.ai) for both.
+- The [Ankra CLI](/integrations/ankra-cli#installation), v0.13.0 or later, installed on the machine that runs the OpenClaw gateway and on its `PATH`.
+- A [service token](/guides/service-tokens) for the assistant. Pick its role for what the assistant should be allowed to do: `viewer` gives read-only access plus ask-mode AI, and Ankra refuses anything that would change a cluster. See [Roles & Access](/guides/roles-and-access).
+
+## Connect OpenClaw to Ankra
+
+<CliVersion since="0.13.0" />
+
+<Steps>
+  <Step title="Give the gateway the token">
+    Add the token to OpenClaw's global environment file, `~/.openclaw/.env`, on the gateway machine:
+
+    ```bash
+    ANKRA_API_TOKEN=<your-service-token>
+    ```
+
+    The CLI reads `ANKRA_API_TOKEN` when there is no saved login. See [OpenClaw's environment variables](https://docs.openclaw.ai/help/environment) for the other places OpenClaw reads variables from, and their order.
+  </Step>
+  <Step title="Check the CLI works with that token">
+    On the gateway machine, run a read with the same token:
+
+    ```bash
+    ANKRA_API_TOKEN=<your-service-token> ankra cluster list
+    ```
+
+    You should see the organisation's clusters. If you see someone else's view, or a different organisation, a saved `ankra login` on this machine is taking precedence - see [Troubleshooting](#troubleshooting).
+  </Step>
+  <Step title="Install the Ankra skills for OpenClaw">
+    ```bash
+    ankra skills install --client openclaw
+    ```
+
+    This copies the Ankra skills into `~/.openclaw/skills`, one folder per skill, where OpenClaw discovers them itself. The skills ship inside the CLI binary, so they match the CLI version you installed. `ankra skills list` shows what is installed.
+  </Step>
+  <Step title="Restart OpenClaw">
+    Restart the gateway so it loads the new skills.
+  </Step>
+</Steps>
+
+## Verify
+
+From a chat channel connected to OpenClaw, ask something that needs Ankra, for example:
+
+```text
+Use ankra-platform-principles. Which of our Ankra clusters are online?
+```
+
+The agent should run `ankra` commands on the gateway machine and answer from their output.
+
+## Add a skill for one cluster (optional)
+
+`ankra openclaw skill` writes a skill that names one cluster - its name, ID and portal link - and tells the agent to route changes to that cluster through Ankra rather than running them locally. OpenClaw loads a skill from a folder that holds a `SKILL.md`, so give it a folder of its own:
+
+```bash
+ankra openclaw skill --cluster my-cluster \
+  --output ~/.openclaw/skills/ankra-my-cluster/SKILL.md
+```
+
+Restart OpenClaw after writing it.
+
+## Update and remove
+
+The skills are versioned with the CLI. After upgrading the CLI, reinstall them:
+
+```bash
+ankra upgrade
+ankra skills install --client openclaw --force
+```
+
+To remove them:
+
+```bash
+ankra skills uninstall --client openclaw
+```
+
+To cut the assistant off from Ankra completely, revoke its token under **Organisation** → **Service tokens**.
+
+## Troubleshooting
+
+| Symptom | What to check |
+|---|---|
+| The agent says it has no `ankra` command | The CLI is not on the `PATH` of the process running the gateway. Install it system-wide, or start the gateway from a shell where `ankra --version` works. |
+| Commands fail with `not logged in` | `ANKRA_API_TOKEN` did not reach the gateway. Check `~/.openclaw/.env` and restart the gateway. |
+| Commands act as a person, not the service account | A saved login from `ankra login` takes precedence over `ANKRA_API_TOKEN`. On the gateway machine, run `ankra logout --local-only` to clear it without revoking the token. |
+| The agent never uses the Ankra skills | OpenClaw was not restarted after the install, or the skills went to another client. Run `ankra skills clients` and check that `openclaw` shows `[installed]`. |
+| A request to change something is refused | The token's role does not allow it. That is expected with `viewer`. Give the service account a broader role only if the assistant should make changes. |
+
+## Related
+
+- [Agent Skills](/integrations/agent-skills) - the skills, the other supported assistants, and what an install writes
+- [Service Tokens](/guides/service-tokens) - organisation-owned tokens and how to rotate them
+- [`ankra openclaw` reference](/reference/cli/openclaw) and [`ankra skills` reference](/reference/cli/skills) - every flag

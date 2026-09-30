@@ -25,20 +25,19 @@ Ankra connects to any Prometheus-compatible endpoint:
 | Provider | Example Endpoint |
 |----------|------------------|
 | Self-hosted Prometheus | `http://prometheus.monitoring.svc.cluster.local:9090` |
-| Prometheus via port-forward | `http://localhost:9090` |
 | Grafana Cloud | `https://prometheus-prod-xx-xxx.grafana.net` |
-| Amazon Managed Prometheus | `https://aps-workspaces.<region>.amazonaws.com/workspaces/<id>` |
-| Google Cloud Managed Prometheus | `https://monitoring.googleapis.com/v1/projects/<project>` |
 | Thanos Query | `http://thanos-query.monitoring.svc.cluster.local:9090` |
 | Victoria Metrics | `http://victoria-metrics.monitoring.svc.cluster.local:8428` |
+
+Amazon Managed Prometheus, Google Cloud Managed Prometheus and Azure Monitor appear in the connection dialog but cannot be selected yet.
 
 ---
 
 ## Connecting Prometheus
 
 <Steps>
-  <Step title="Open Data Sources">
-    Navigate to your cluster → **Settings** → **Data Sources**.
+  <Step title="Open Integrations">
+    Navigate to your cluster → **Settings** → **Integrations**.
   </Step>
   <Step title="Select Metrics">
     Choose **Metrics** in the sidebar.
@@ -139,14 +138,14 @@ In the portal, the credential is created with the metrics source, in the **Authe
 Ankra keeps its own copy of the secret and sends it with every query and with the health probe that runs every five minutes. It never reads the credential from the cluster - not from a Kubernetes Secret, not from the Prometheus configuration - so rotating the password on the Prometheus side does not update Ankra, and updating Ankra does not change Prometheus.
 
 <Note>
-A saved credential cannot be edited in place. To rotate a token or password, delete the credential from **Settings** → **Data Sources** → **Metrics** and create a new one.
+A saved credential cannot be edited in place. To rotate a token or password, delete the credential from **Settings** → **Integrations** → **Metrics** and create a new one.
 
 To keep the gap short, rotate Prometheus first, then Ankra: once the new secret is live on the Prometheus side, open **Edit** on the metrics source, type the new credentials into the **Authentication** section and click **Test Connection**. The test uses what you typed without saving it, so a green result proves the new secret opens the door before you replace the saved credential. Queries fail with a 401 for the time between Prometheus dropping the old secret and Ankra receiving the new one.
 </Note>
 
 ### Rotating by API
 
-The portal path needs a browser. A scripted rotation re-submits the cluster's import request with the new secret. `POST /api/v1/clusters/import` is create-or-update and **merges by member**: on a cluster that already exists it applies each `spec` member the body carries and leaves the members it omits exactly as they are. A body holding only `prometheus_credential` touches nothing else - not the stacks, add-ons and manifests, not the GitOps binding, not the metrics source and its endpoint. The one thing that runs the other way is a stack that *is* in the body: it replaces the saved stack of that name whole, so leave stacks out of a credential-only call. A `spec.prometheus_credential` block replaces the cluster's saved metrics credential in place: same credential, new secret. The credential itself never reaches Git.
+To rotate from a script, send the cluster's import request with only the new credential. The call replaces the saved metrics credential and leaves everything else on the cluster as it is - as long as the body carries no `stacks`, because a stack in the body replaces the saved stack of that name.
 
 ```bash
 curl -sS -X POST "https://platform.ankra.app/api/v1/clusters/import?wait=true" \
@@ -164,14 +163,13 @@ curl -sS -X POST "https://platform.ankra.app/api/v1/clusters/import?wait=true" \
   }'
 ```
 
-- **The token is a REST token** - a [personal access token](/reference/tokens) created without `--scopes`, or a [service token](/guides/service-tokens) with no MCP scope - belonging to a role that can change the cluster. A token carrying `mcp:read` or `mcp:write` reaches only the [MCP server](/platform/mcp-server) and is refused here with `403`.
-- **Send the whole block.** It replaces the saved credential rather than patching it: `name`, `username` and `password` for basic auth, or `name` and `token` for bearer auth. An omitted `username` is saved as empty and basic auth stops working.
-- **Keep the name** the **Metrics** panel shows, so the stored secret is overwritten rather than left behind under the old name. A cluster holds one metrics credential, and a different name still replaces that one.
-- **Use `wait=true`.** Without it the call answers `202` at once and whatever goes wrong afterwards is visible only in platform logs. With it the call blocks until the write is done and answers `200` with the outcome (check its `errors` list) or a `4xx` naming the rejection.
-- **Expect one Git commit after a hand rotation.** On a cluster connected to a Git repository the call ends with the platform's routine push of the cluster state. A plain file is written only when it differs from the branch, and a SOPS-encrypted file only when the `# ankra_content_fingerprint` header Ankra stamped on it no longer matches the values Ankra holds, so on a cluster whose files Ankra last wrote itself the push commits nothing. A rotation breaks that steady state on purpose: the manifest holding Prometheus's own basic-auth Secret was just re-sealed by your `sops` run, Ankra imported the rotated values from your commit, and the header on the file - kept from the old seal or dropped - no longer matches them. The push re-encrypts that manifest (same values, new ciphertext: every `sops` run draws a fresh data key) and rewrites `.ankra-owned.json` beside it. The commit is titled `Update cluster configuration`, authored by `ankra-platform[bot]`, and touches nothing else. To check that yourself, fetch the cluster's IaC export with the same token - `GET /api/v1/org/clusters/imported/{cluster_id}/iac`, decode `yaml_string_base64` - before and after the call: the two documents are identical.
-- **Let Ankra sync your rotation commit first.** The push refuses to touch a file that changed in Git since the last commit Ankra synced ([Monitoring Sync Status](/concepts/gitops#monitoring-sync-status) shows which one that is). A call that lands before the sync has caught up therefore answers `422 Failed to push changes to Git repository` - *after* the credential has been saved. Do not retry: verify with the query below; the reconciler imports your commit on its next pass and Ankra's next write re-seals the manifest then. To skip the push altogether, send your existing `prometheus_metrics` block verbatim alongside the credential: a save that changes nothing outside the metrics members never pushes, and the re-seal waits for Ankra's next write instead.
+- **Use a REST token** - a [personal access token](/reference/tokens) created without `--scopes`, or a [service token](/guides/service-tokens) with no MCP scope, whose role can change the cluster. A token with `mcp:read` or `mcp:write` is refused with `403`.
+- **Send the whole block.** `name`, `username` and `password` for basic auth, or `name` and `token` for bearer auth. An omitted `username` is saved as empty and basic auth stops working.
+- **Keep the name** the **Metrics** panel shows, so the old secret is overwritten rather than left behind.
+- **Use `wait=true`**, so the call answers with the outcome - check its `errors` list - instead of `202` before the work is done.
+- **If the call answers `422 Failed to push changes to Git repository`**, the credential is already saved: Ankra has not yet synced your latest commit to the cluster's repository. Do not retry; check with the query below.
 
-`ankra cluster apply` drops `prometheus_credential` from the YAML before sending it, and the Git sync reads only `git_repository`, `prometheus_metrics`, `log_source` and `stacks` from `spec`, so a `prometheus_credential` block in the cluster file is ignored. Neither creates a second credential - a cluster holds one - and neither updates it: this call is the only scripted path to the secret. To make Git name the credential in use, set `prometheus_metrics.credential_name` to the saved credential's name; the sync refuses a name that resolves to nothing. There is no API twin of **Test Connection**: the portal is the one place a credential can be tried without saving it. After the call, `ankra cluster metrics query 'up'` against the cluster proves the whole path - the saved credential, the agent, Prometheus - in one read. Query results are cached for ten seconds, so vary the query or wait before reading the new state.
+This call is the only scripted way to change the secret: `ankra cluster apply` and the Git sync both ignore a `prometheus_credential` block. To check the whole path afterwards - the saved credential, the agent and Prometheus - run `ankra cluster metrics query 'up'` against the cluster. Results are cached for ten seconds.
 
 ---
 
@@ -187,12 +185,12 @@ spec:
     credential_name: prometheus-prod
 ```
 
-Accepted fields are `endpoint`, `credential_name`, `flavor` and `verify_ssl` - see the [ImportCluster schema](/reference/importcluster#spec-prometheus-metrics) for what each one means. Any other top-level field is refused with an error naming it, rather than ignored. A block without `credential_name` keeps using the credential already saved on the cluster, if there is one; the **Metrics** panel under **Settings** → **Data Sources** shows which.
+Accepted fields are `endpoint`, `credential_name`, `flavor` and `verify_ssl` - see the [ImportCluster schema](/reference/importcluster#spec-prometheus-metrics) for what each one means. Any other top-level field is refused with an error naming it, rather than ignored. A block without `credential_name` keeps using the credential already saved on the cluster, if there is one; the **Metrics** panel under **Settings** → **Integrations** shows which.
 
 <Warning>
 **Credentials never go in Git.** A `username`, `password`, `token` or `auth_scheme` inside the block is refused by name: silently ignoring it would leave a live secret in your repository while you believe it is in effect. Create the credential in the platform and reference it with `credential_name`.
 
-**Removing the block does not disconnect Prometheus.** Git can create and update the source, never disconnect it - the source survives the sync and the block reappears the next time Ankra regenerates the file. Disconnect from **Settings** → **Data Sources** instead.
+**Removing the block does not disconnect Prometheus.** Git can create and update the source, never disconnect it - the source survives the sync and the block reappears the next time Ankra regenerates the file. Disconnect from **Settings** → **Integrations** instead.
 </Warning>
 
 ---
@@ -201,7 +199,7 @@ Accepted fields are `endpoint`, `credential_name`, `flavor` and `verify_ssl` - s
 
 After connecting Prometheus:
 
-1. **Check Data Sources** - The **Metrics** entry in the sidebar shows a green dot, and the panel shows the last health check
+1. **Check Integrations** - The **Metrics** entry in the sidebar shows a green dot, and the panel shows the last health check
 2. **View Resource Metrics** - Go to any pod or deployment and check for metric graphs
 3. **Ask the AI** - Press `⌘+J` and ask "What's the CPU usage of this pod?"
 
@@ -209,7 +207,7 @@ If metrics aren't showing:
 
 - Verify the endpoint URL is correct
 - Check that Prometheus has data for your cluster
-- Re-test the connection from **Settings** → **Data Sources** → **Metrics** → **Edit**
+- Re-test the connection from **Settings** → **Integrations** → **Metrics** → **Edit**
 - Check network connectivity between your cluster and Prometheus
 
 ---

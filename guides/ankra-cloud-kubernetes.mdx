@@ -1,0 +1,130 @@
+---
+title: Ankra Cloud Kubernetes
+description: Provision, import, and operate Ankra Cloud Kubernetes clusters with Ankra - a control plane the Ankra team runs in Ankra Cloud, node pools with autoscaling, upgrades, GitOps, and AI-assisted operations.
+icon: "cloud"
+tag: "Closed Beta"
+---
+
+import { CliVersion } from "/snippets/cli-version.jsx";
+
+Ankra Cloud Kubernetes is the managed Kubernetes service of [Ankra Cloud](https://cloud.ankra.app). The Ankra team runs the control plane inside Ankra Cloud; Ankra creates the cluster through the Ankra Cloud API, installs the Ankra Agent, and manages everything on top - node pools, Kubernetes upgrades, add-ons, stacks, GitOps, and AI-assisted operations.
+
+<Warning>
+**Closed beta.** Ankra Cloud as a cluster provider is in closed beta. The workflow is stable but the surface may still change, and it is enabled per organisation on request - until it is, Ankra Cloud Kubernetes does not appear in the create-cluster dialog or among the import providers. [Contact support](/platform/support) to have it turned on for your organisation.
+</Warning>
+
+This page covers Ankra Cloud Kubernetes specifically. For the shared concepts across all managed providers - live options, discovery and import, and day-2 API patterns - see [Managed Kubernetes](/guides/managed-kubernetes). To run kubeadm or k3s yourself on Ankra Cloud servers instead, see [Ankra Cloud Clusters](/guides/ankra-cloud-clusters).
+
+## Prerequisites
+
+An **Ankra Cloud credential** stored in Ankra - the same credential the self-managed clusters use. See [Ankra Cloud Credentials](/platform/credentials/ankra-cloud). No SSH key is needed: there is no bastion and no server access.
+
+GitOps is optional: connect a repository at creation and Ankra commits the cluster's stack definitions to Git.
+
+## Creating a cluster
+
+<Tabs>
+  <Tab title="Portal">
+    <Steps>
+      <Step title="Create Cluster">
+        Go to **Clusters** → **Create Cluster** and pick **Ankra Cloud Kubernetes** under **Cloud Managed**.
+      </Step>
+      <Step title="Credential & Zone">
+        Select the Ankra Cloud credential, or add one inline, and a zone. Zones, versions and plans load live from Ankra Cloud.
+      </Step>
+      <Step title="Node Pools">
+        Define one or more node pools: name, plan (with live pricing), count, labels and taints, and optionally autoscaling bounds.
+      </Step>
+      <Step title="Kubernetes">
+        Pick a Kubernetes version or keep Ankra Cloud's default. The cost summary includes the control-plane fee Ankra Cloud publishes with its versions.
+      </Step>
+      <Step title="GitOps (optional) & Create">
+        Optionally connect a Git repository, then create. Ankra runs the preflight checks, creates the cluster, fetches a kubeconfig, and installs the Ankra Agent.
+      </Step>
+    </Steps>
+  </Tab>
+  <Tab title="API">
+    ```bash
+    curl -X POST https://platform.ankra.app/api/v1/clusters/managed/ankracloud_k8s \
+      -H "Authorization: Bearer $ANKRA_API_TOKEN" \
+      -H "Content-Type: application/json" \
+      -d '{
+        "name": "my-cluster",
+        "credential_id": "<ankra-cloud-credential-id>",
+        "location": "de-fsn1",
+        "node_pools": [
+          {"name": "workers", "size": "<plan>", "count": 2,
+           "autoscaling": {"enabled": true, "min_count": 2, "max_count": 5}}
+        ]
+      }'
+    ```
+
+    `location` is the Ankra Cloud zone and `size` is the plan name. `GET /api/v1/clusters/managed/ankracloud_k8s/options?credential_id=<id>` lists the zones, versions, plans and the control-plane fee.
+  </Tab>
+</Tabs>
+
+### Ankra Cloud Kubernetes options
+
+Every option is optional and goes in an `ankracloud_k8s` block on the create request:
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `private_network_id` | | An existing Ankra Cloud private network the nodes join |
+| `network_cidr` | `10.100.0.0/24` | The RFC 1918 range of the network Ankra creates when `private_network_id` is not set |
+| `public_ipv4` | `true` | Give the cluster's API endpoint a public IPv4 address, at €3 a month. The endpoint is IPv6 otherwise, and Ankra installs the agent over IPv4 |
+
+Without `private_network_id`, Ankra creates a network named `ankra-<cluster-name>` and deletes it again when the cluster is deleted. A network you named is never deleted.
+
+### Limits
+
+| Limit | Value |
+|-------|-------|
+| Clusters per Ankra Cloud account | 5 |
+| Cluster name | 2 to 40 lowercase letters, digits or hyphens, starting with a letter |
+| Node pools at creation | 8 |
+| Node pool name | 2 to 32 lowercase letters, digits or hyphens, starting with a letter |
+| Nodes per pool | 0 to 100 |
+
+Preflight checks the name, zone, version and every pool's plan, and counts the account's live clusters, so a sixth cluster is refused before anything is created.
+
+## How Ankra connects
+
+Ankra Cloud hands out a kubeconfig whose token expires eight hours after it is issued. Ankra never stores it: it fetches a fresh one each time it needs the Kubernetes API directly, installs the Ankra Agent with it at creation, and from then on works through the agent. For your own access, use [Ankra's kubeconfig](/guides/kubeconfig) or download one from the Ankra Cloud console.
+
+Ankra labels the cluster in Ankra Cloud with `platform.ankra.io/managed-by=ankra-platform` and `platform.ankra.io/cluster-id=<cluster-id>`, so Ankra Cloud knows the platform already manages it.
+
+Ankra Cloud installs its own cloud controller manager and CSI driver in the cluster, so `LoadBalancer` Services get Ankra Cloud load balancers and persistent volumes use Ankra Cloud storage, with the same StorageClasses as a [self-managed cluster](/guides/ankra-cloud-clusters#cloud-controller-and-storage). Ankra does not add a cloud-provider stack of its own.
+
+## Verify
+
+The create progress view follows the control plane, the node pools, kubeconfig retrieval and the Ankra Agent install. The cluster shows **Online** once the agent has connected. Then point `kubectl` at it through Ankra - this needs a [Cluster Access](/guides/cluster-access) grant - and check that every node is `Ready`:
+
+<CliVersion since="0.3.0" command="cluster kubeconfig add" />
+
+```bash
+ankra cluster kubeconfig add <cluster-name> --use
+kubectl get nodes
+```
+
+See [Accessing Clusters with kubectl](/guides/kubeconfig).
+
+## Day-2 operations
+
+- **Node pools** - add, scale and delete pools from cluster settings or the API. Labels and taints are set when a pool is created.
+- **Autoscaling** - set `min_count` and `max_count` on a pool and Ankra Cloud scales it between them; clear autoscaling to return to a fixed count. See [Managed Kubernetes - day-2 operations](/guides/managed-kubernetes#day-2-operations).
+- **Upgrades** - Ankra Cloud upgrades one minor version at a time; cluster settings offer the next version when one is available.
+- **Deletion** - deleting the cluster waits for Ankra Cloud to release its nodes, volumes and load balancers, then removes the network Ankra created for it.
+
+## Cost
+
+Nodes are billed by Ankra Cloud at their plan price, plus a monthly control-plane fee per cluster that Ankra Cloud publishes with its Kubernetes versions. The wizard reads the fee live and includes it in the cost summary. A public IPv4 address on the API endpoint costs €3 a month.
+
+## Importing an existing cluster
+
+Already running Ankra Cloud Kubernetes? Discover the clusters in your Ankra Cloud account and adopt them into Ankra without touching them. See [Managed Kubernetes - importing existing clusters](/guides/managed-kubernetes#importing-existing-clusters).
+
+## Related
+
+- [Managed Kubernetes overview](/guides/managed-kubernetes)
+- [Ankra Cloud Clusters](/guides/ankra-cloud-clusters)
+- [Ankra Cloud Credentials](/platform/credentials/ankra-cloud)

@@ -13,7 +13,7 @@ The `ImportCluster` manifest is the declarative entry point for onboarding a clu
 ankra cluster apply -f cluster.yaml --cluster my-cluster
 ```
 
-The same schema is what Ankra reads from a connected [GitOps repository](/concepts/gitops).
+`--cluster` targets the cluster you name, by name or id; without it the target is the manifest's `metadata.name`. `cluster apply` honours `--cluster` from CLI v0.16.0 - earlier versions ignore it and use `metadata.name`. The same schema is what Ankra reads from a connected [GitOps repository](/concepts/gitops).
 
 ## Full Example
 
@@ -75,10 +75,11 @@ Connect a Git repository so stacks are stored and synced from Git. Omit the bloc
 
 | Field | Required | Description |
 |-------|----------|-------------|
-| `provider` | yes | `github`, `bitbucket_cloud`, or `bitbucket_data_center` |
+| `provider` | no | `github` (the default) or `bitbucket_cloud`. The legacy spelling `bitbucket` is read as `bitbucket_cloud`. Any other value, `bitbucket_data_center` and `bitbucket_dc` included, is refused with a `422` naming the accepted values; matching is case-sensitive, so `GitHub` is refused too |
 | `credential_name` | yes | Name of a Git credential registered in Ankra |
-| `repository` | yes | `owner/name` form, e.g. `my-org/my-gitops-repo` |
-| `branch` | yes | Branch Ankra reads from and pushes to |
+| `repository` | yes, for GitHub | `owner/name` form, e.g. `my-org/my-gitops-repo`. For Bitbucket Cloud, `workspace/repo-slug` |
+| `workspace`, `repo_slug` | no | Bitbucket Cloud only: the workspace and the repository slug, in place of `repository` |
+| `branch` | yes | Branch Ankra reads from and pushes to. The cluster's GitOps settings list the repository's branches to pick from, for GitHub and Bitbucket Cloud alike |
 
 Applying a changed `git_repository` block **repoints the cluster**. Ankra first writes the cluster's current state - every stack, add-on and manifest it manages, with secrets sealed under your organisation's key - to the new repository and branch as a commit, overwriting the files it manages there, and only then syncs from it. The new source does not need to be seeded by hand: the switch itself brings it to parity. Any branch works - a cluster is not tied to its repository's default branch, so one repository with a branch per environment is a supported layout - but the branch must already exist; Ankra does not create branches.
 
@@ -101,7 +102,7 @@ Three rules apply to both members:
 - **Removing the block does not disconnect the source.** Git can create and update a source; only the platform can disconnect one.
 
 <Warning>
-Deleting `prometheus_metrics` or `log_source` from the file is not a disconnect. The source survives the sync, and the next time Ankra regenerates the cluster document the block comes back. To disconnect, remove the source in the cluster's **Settings** → **Data Sources**; the platform then drops the block from Git on its own.
+Deleting `prometheus_metrics` or `log_source` from the file is not a disconnect. The source survives the sync, and the next time Ankra regenerates the cluster document the block comes back. To disconnect, remove the source in the cluster's **Settings** → **Integrations**; the platform then drops the block from Git on its own.
 
 This asymmetry is deliberate: reading "disconnect" out of an absent key is what deleted hand-written blocks before these members round-tripped, so a destructive change stays a platform action.
 </Warning>
@@ -113,7 +114,7 @@ The cluster's metrics data source. See [Prometheus](/integrations/prometheus) fo
 | Field | Required | Description |
 |-------|----------|-------------|
 | `endpoint` | yes | Query endpoint the Ankra agent reaches from inside the cluster. `http://` or `https://`, or a scheme-less `host:port`. Any other scheme is refused, as is an endpoint containing whitespace or control characters |
-| `credential_name` | no | Name of a metrics credential already registered in Ankra. Omitting it does not turn authentication off: a cluster that already has a saved metrics credential keeps sending it with every query (the **Metrics** panel under **Settings** → **Data Sources** names it), and only a cluster with no saved metrics credential queries unauthenticated - ordinary for in-cluster Prometheus. A name that resolves to no credential on the cluster fails the sync |
+| `credential_name` | no | Name of a metrics credential already registered in Ankra. Omitting it does not turn authentication off: a cluster that already has a saved metrics credential keeps sending it with every query (the **Metrics** panel under **Settings** → **Integrations** names it), and only a cluster with no saved metrics credential queries unauthenticated - ordinary for in-cluster Prometheus. A name that resolves to no credential on the cluster fails the sync |
 | `flavor` | no | Which Prometheus-compatible product is behind the endpoint: `self_hosted`, `grafana_cloud`, or `victoria_metrics`. Affects the labels and placeholders the portal shows, not how the endpoint is queried |
 | `verify_ssl` | no | Verify the endpoint's TLS certificate. Omitted means not verified, which is the historical behaviour for clusters that never set it |
 
@@ -182,13 +183,9 @@ Each stack groups related manifests, add-ons, and applications.
 | `manifests` | no | List of [manifest entries](#spec-stacks-manifests) or `- include: <path>` directives |
 | `addons` | no | List of [add-on entries](#spec-stacks-addons) or `- include: <path>` directives |
 | `applications` | no | List of [application entries](#spec-stacks-applications) |
-| `backup` | no | The stack's [backup policy](#spec-stacks-backup) - `Closed Beta` |
+| `backup` | no | The stack's [backup policy](#spec-stacks-backup) |
 
 ### `spec.stacks[].backup`
-
-<Warning>
-**Closed beta.** The `backup` block requires the **backups** feature to be enabled for your organisation. While it is off, a block in the file is rejected with `Backups are not enabled for this organisation.` See [Backup Vaults](/guides/backups#not-enabled-yet).
-</Warning>
 
 Protecting a stack is one block. Ankra turns it into scheduled restore points in the [backup vault](/guides/backups) you name - a Velero `Schedule` for the volumes you selected, a CloudNativePG `ScheduledBackup` and object store for each Postgres cluster, and a schedule entry inside each Percona cluster.
 
@@ -296,7 +293,7 @@ Raw Kubernetes YAML resources.
 
 For a manifest that holds a `Namespace`, this deletes the namespace and every PersistentVolumeClaim in it. For a manifest that holds PVCs, the delete removes the PVCs the new manifest has just applied. With a StorageClass whose `reclaimPolicy` is `Delete` (the default for most CSI drivers, including AWS EBS gp3), the underlying volumes are destroyed as well.
 
-Keep the names of manifests that own namespaces or stateful resources fixed. If you must rename one, move its data first, or make sure the PersistentVolumes behind it use `reclaimPolicy: Retain`. See [Kubernetes Storage](/platform/kubernetes-storage#reclaim-policies).
+Keep the names of manifests that own namespaces or stateful resources fixed. If you must rename one, move its data first, or make sure the PersistentVolumes behind it use `reclaimPolicy: Retain`. See [Protect Persistent Data Before Changing a Stack](/guides/protect-persistent-data).
 </Warning>
 
 ## `spec.stacks[].addons[]`
@@ -316,7 +313,7 @@ Helm releases.
 | `configuration.from_file` | no | Repo-relative path to a values file |
 | `configuration.encrypted_paths` | no | Values paths that are SOPS-encrypted; see [SOPS](/guides/sops). Same empty-versus-absent rule as a manifest's `encrypted_paths` |
 | `parents` | no | [Dependency edges](#parents) |
-| `settings` | no | ArgoCD-backed sync behaviour - see below |
+| `settings` | no | Sync behaviour for the add-on (automated sync, prune, self-heal, retry) - see below |
 | `namespace_migration_strategy` | no | How to handle a namespace change on update |
 | `job_configuration` | no | Per-add-on job timeouts (`read_job_timeout`, `update_job_timeout`, `delete_job_timeout`) |
 | `group` | no | Organizational grouping label within the stack (max 63 characters). Purely visual - never triggers a redeploy |
@@ -325,7 +322,7 @@ Helm releases.
 
 ### `settings` defaults
 
-Sync behaviour maps to ArgoCD and defaults to fully automated. See [Add-on Settings](/concepts/addon-settings) for semantics.
+Sync behaviour defaults to fully automated. See [Add-on Settings](/concepts/addon-settings) for semantics.
 
 ```yaml
 settings:

@@ -18,9 +18,13 @@ Each row is one audit entry, with the same fields the audit viewer shows:
 | `created_at` | UTC timestamp of the action |
 | `user_email` | The acting member's email address |
 | `user_id` | The acting member's stable identifier |
+| `actor_type` | Who acted: `human`, `agent` (an action taken by Ankra's AI) or `system` |
 | `action_type` | What was done, for example a role assignment or credential change |
 | `resource_type` | The kind of resource acted on |
 | `resource_id` | The specific resource |
+| `target_kind` | The kind of object the action named, where one can be resolved |
+| `target_name` | That object's name |
+| `outcome` | `succeeded`, `failed`, or `unknown` for actions that record no result marker (most non-AI changes, which are logged once already committed) |
 | `ip_address` | Source IP the action came from |
 | `cluster_id` | The cluster the action applied to, where the action is cluster-scoped |
 | `cluster_name` | That cluster's name at export time |
@@ -34,9 +38,11 @@ Cell values that would otherwise be interpreted as formulas by a spreadsheet app
 
 ## Permissions
 
-Export is gated by the same audit read permission as the audit viewer, held by **owners** and **admins** by default and available to [custom roles](/guides/roles-and-access). A caller without it receives a `403` naming the missing permission.
+Export is gated by the same `audit.read` permission as the audit viewer, held by **owners** and **admins** by default and available to [custom roles](/guides/roles-and-access). A caller without it receives a `403` naming the missing permission.
 
-Granting the audit read permission to a compliance or security function lets them pull evidence themselves without broader administrative access, which is usually what you want.
+Granting `audit.read` to a compliance or security function lets them pull evidence themselves without broader administrative access, which is usually what you want.
+
+An API token calling the export needs the same permission: the role behind the token (the service account's role, or the owner's role for a personal token) must hold `audit.read`, and a token restricted to a list of scopes must include it.
 
 ---
 
@@ -44,7 +50,7 @@ Granting the audit read permission to a compliance or security function lets the
 
 <Steps>
   <Step title="Open the audit log">
-    Go to **Organisation** &rarr; **Settings** &rarr; **Audit Log**.
+    Go to **Organisation** &rarr; **Audit log**.
   </Step>
   <Step title="Filter to the evidence you need">
     Narrow by user, action type, resource type and date range. The export follows the filters currently applied, so filter first.
@@ -56,30 +62,41 @@ Granting the audit read permission to a compliance or security function lets the
 
 ---
 
-## Exporting via the API
+## Exporting for automation
 
-The same export is available to scripts and scheduled jobs, which is how most teams feed a SIEM. Authenticate with an [API token](/reference/tokens) belonging to a member who holds the audit read permission.
+Scripts, scheduled jobs and SIEM collectors call the token route of the same export:
 
-```bash
-curl -sS \
-  -H "Authorization: Bearer <your-token>" \
-  "https://platform.ankra.app/org/organisation/audit-logs/export?format=csv&start_date=2026-07-01&end_date=2026-07-31" \
-  -o audit-log-july.csv
+```
+GET https://platform.ankra.app/api/v1/org/organisation/audit-logs/export
 ```
 
-Supported query parameters mirror the viewer's filters:
+It accepts a [service token](/guides/service-tokens) or a personal API token as a bearer credential, and takes the same filters, formats and row cap as the portal download. The export is scoped to the token's organisation.
 
-| Parameter | Purpose |
-|-----------|---------|
+| Query parameter | Meaning |
+|-----------------|---------|
 | `format` | `csv` (default) or `json` |
-| `start_date` / `end_date` | Bound the window, as dates |
-| `user_id` | Limit to one member |
-| `cluster_id` | Limit to one cluster |
-| `action_type` | Limit to one kind of action |
-| `resource_type` | Limit to one kind of resource |
-| `search` | Free-text match |
+| `start_date`, `end_date` | Window bounds, both inclusive. A date (`2026-07-01`) or an RFC 3339 timestamp (`2026-07-31T23:59:59Z`) |
+| `action_type`, `resource_type` | Narrow to one kind of action or resource |
+| `user_id`, `cluster_id`, `agent_task_id` | Narrow to one member, one cluster, or one AI task |
+| `actor_type` | `human`, `agent` or `system` |
+| `outcome` | `succeeded` or `failed` |
+| `search` | Free-text match, as in the audit viewer |
 
-Full request and response detail is in the **API Reference** tab.
+```bash
+curl -fsS \
+  -H "Authorization: Bearer $ANKRA_API_TOKEN" \
+  -D headers.txt \
+  "https://platform.ankra.app/api/v1/org/organisation/audit-logs/export?format=csv&start_date=2026-07-01&end_date=2026-07-31T23:59:59Z" \
+  -o audit-log-2026-07.csv
+
+grep -qi '^x-ankra-export-truncated: true' headers.txt && echo "export truncated - narrow the window" >&2
+```
+
+`-f` makes `curl` fail on a `401` or `403` instead of writing the error body to the file. A token without `audit.read` receives a `403` naming the missing permission.
+
+<Warning>
+Use the `/api/v1/...` path above. The portal's own route, `/org/organisation/audit-logs/export`, accepts a signed-in browser session only: a request carrying a bearer token is redirected to the sign-in page rather than refused, which looks like success unless you check the file.
+</Warning>
 
 ---
 
@@ -94,20 +111,7 @@ A single export returns at most **100,000 rows**. When more rows match your filt
 Truncation is silent if you only look at the file. A monthly export of a busy organisation can exceed the cap without any visible sign in the CSV itself. Always check the header or the JSON member, and narrow the date window until the export comes back complete.
 </Warning>
 
-A scheduled job should check for truncation and split the window rather than assume a complete pull:
-
-```bash
-response_headers=$(mktemp)
-curl -sS -D "$response_headers" \
-  -H "Authorization: Bearer <your-token>" \
-  "https://platform.ankra.app/org/organisation/audit-logs/export?format=csv&start_date=2026-07-01&end_date=2026-07-31" \
-  -o audit-log-july.csv
-
-if grep -qi "^x-ankra-export-truncated: true" "$response_headers"; then
-  echo "Export truncated - narrow the window and re-run" >&2
-  exit 1
-fi
-```
+When the export is truncated, narrow the date window and export again until it comes back complete.
 
 ---
 
@@ -115,34 +119,62 @@ fi
 
 Audit entries are retained for **365 days** by default, after which older rows are removed by a background retention job.
 
-If your framework requires a longer trail - and most do, with ISO/IEC 27001 and many SOC 2 programmes expecting multi-year retention - the platform is not your system of record. Export on a schedule into storage you control, with the retention and immutability your policy requires.
-
-<Tip>
-A monthly scheduled export into write-once object storage is usually enough to satisfy retention and integrity expectations at once, and it gives you evidence that survives any change to the platform.
-</Tip>
+If your framework requires a longer trail - and most do, with ISO/IEC 27001 and many SOC 2 programmes expecting multi-year retention - the platform is not your system of record. Export regularly into storage you control, with the retention and immutability your policy requires: for example a scheduled daily [token export](#exporting-for-automation) into write-once object storage.
 
 ---
 
 ## Forwarding to a SIEM
 
-The export is a pull interface rather than a push integration, so the pattern is a scheduled job that pulls a window and forwards it.
+There is no push integration: your SIEM pulls. Run a scheduled job that exports a bounded window with a service token and hands the file to your SIEM's ingestion, and keep the raw file in your evidence store as well - the SIEM is for detection, the file is for the assessor.
 
 <Steps>
-  <Step title="Create a dedicated token">
-    Issue an [API token](/reference/tokens) for a member whose role grants audit read and nothing else. Do not reuse an administrator's token for automation.
+  <Step title="Create a role that can only read the audit log">
+    In **Organisation** &rarr; **Roles**, create a [custom role](/guides/roles-and-access) holding `audit.read` and nothing else.
   </Step>
-  <Step title="Pull a bounded window on a schedule">
-    Run daily or hourly with explicit `start_date` and `end_date`, rather than pulling everything each time. Bounded windows keep you under the row cap and make gaps visible.
+  <Step title="Mint a service token with that role">
+    Create a [service token](/guides/service-tokens) named after the job, for example `siem-audit-export`, with the role from the previous step, and store it in your scheduler's secret store.
   </Step>
-  <Step title="Check for truncation">
-    Fail the job on a truncated response instead of forwarding a partial file.
-  </Step>
-  <Step title="Forward and retain">
-    Ship the rows to your SIEM and keep the raw file in your evidence store. Keep both - the SIEM is for detection, the file is for the assessor.
+  <Step title="Schedule the export">
+    Pull one closed window per run - yesterday, in UTC - so every row arrives exactly once. Both window bounds are inclusive, so end the window one microsecond before midnight rather than at midnight.
   </Step>
 </Steps>
 
-Run this as a [pipeline agent](/guides/pipeline-agents) or any scheduled runner that can reach the platform API.
+A daily GitHub Actions job, as an example. It uses GNU `date`, as on GitHub-hosted Linux runners; the last step is a placeholder for your SIEM's ingestion:
+
+```yaml
+name: audit-log-to-siem
+on:
+  schedule:
+    - cron: "15 1 * * *"
+  workflow_dispatch: {}
+
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Export yesterday's audit log
+        env:
+          ANKRA_API_TOKEN: ${{ secrets.ANKRA_AUDIT_EXPORT_TOKEN }}
+        run: |
+          day="$(date -u -d yesterday +%Y-%m-%d)"
+          curl -fsS \
+            -H "Authorization: Bearer $ANKRA_API_TOKEN" \
+            "https://platform.ankra.app/api/v1/org/organisation/audit-logs/export?format=json&start_date=${day}T00:00:00Z&end_date=${day}T23:59:59.999999Z" \
+            -o "audit-log-${day}.json"
+          if jq -e '.truncated' "audit-log-${day}.json" >/dev/null; then
+            echo "Export for ${day} hit the 100,000-row cap; split the window" >&2
+            exit 1
+          fi
+          echo "day=${day}" >> "$GITHUB_ENV"
+
+      - name: Forward to the SIEM
+        run: |
+          # Replace with your SIEM's ingestion, for example an HTTP collector
+          # or an upload to the bucket your SIEM reads from.
+          jq -c '.entries[]' "audit-log-${day}.json" > "audit-log-${day}.ndjson"
+```
+
+The JSON document is `{"entries": [...], "truncated": false}`, newest entry first, with the columns listed [above](#what-the-export-contains) as fields of each entry. Failing the job on `truncated` matters: a truncated window silently drops its oldest rows.
 
 ---
 
@@ -150,7 +182,7 @@ Run this as a [pipeline agent](/guides/pipeline-agents) or any scheduled runner 
 
 Being clear about the boundary saves you from over-claiming in an audit response.
 
-- **Kubernetes-level activity is not in the audit log.** Actions taken directly against your cluster's API server - by any tool, including `kubectl` through Ankra's proxy - are recorded by your cluster's own Kubernetes audit policy, not by Ankra. Enable Kubernetes audit logging separately if you need that trail.
+- **Individual Kubernetes API calls are not in the audit log.** Ankra records who was given Kubernetes access (grant changes, kubeconfig generation, token minting) and every pod terminal session, with a transcript. Individual calls made against your cluster's API server - by any tool, including `kubectl` through Ankra's proxy - are recorded by your cluster's own Kubernetes audit policy. Enable Kubernetes audit logging separately if you need that trail.
 - **Desired-state changes live in Git.** What changed in a cluster definition, and who committed it, is in your repository's history as attributed commits. The audit log records the platform action, and Git records the content of the change. See [GitOps](/concepts/gitops).
 - **Data-plane activity is not recorded.** Ankra is not in your application's request path and has no view of it.
 
@@ -168,7 +200,7 @@ Together the audit export, your Git history and your Kubernetes audit log cover 
     The organisation compliance report and benchmark results.
   </Card>
   <Card title="Roles & Access" icon="user-shield" href="/guides/roles-and-access">
-    Grant audit read to a compliance function.
+    Grant `audit.read` to a compliance function.
   </Card>
   <Card title="Shared Responsibility" icon="scale-balanced" href="/security/shared-responsibility">
     Where this evidence fits in your certification.

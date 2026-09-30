@@ -1,0 +1,115 @@
+---
+title: Connect to a Managed Service
+description: Find a managed service's in-cluster address and credentials Secret, read a value with kubectl, and wire it into an application running in another namespace.
+tag: "Closed Beta"
+---
+
+<Warning>
+**Closed beta.** Connecting to a service is part of [Managed services](/concepts/managed-services), which is in closed beta and enabled per organisation on request. [Contact support](/platform/support) to have it turned on for your organisation.
+</Warning>
+
+A managed service answers only inside its own cluster, at fixed addresses in its namespace. It keeps the credentials it generated in a Secret in that namespace. Ankra does not deliver those credentials into your application environments yet, so you give your application the values it needs yourself.
+
+---
+
+## Find the connection details
+
+Open the service in **My services**. Its **Connect** section shows:
+
+- the namespace, which is the service name;
+- each address, with a **Copy** button;
+- the name of the Secret that holds the credentials;
+- for each key in that Secret, a `kubectl` command that prints its value.
+
+The portal never shows the values themselves. The details follow a fixed pattern for each service, below, with `<service>` standing for the service name.
+
+## Addresses and Secrets
+
+| Service | Address | Secret | Keys |
+|---------|---------|--------|------|
+| PostgreSQL | Read-write: `postgresql-rw.<service>.svc.cluster.local:5432`<br />Read-only: `postgresql-ro.<service>.svc.cluster.local:5432` | `postgresql-app` | `fqdn-uri`, `fqdn-jdbc-uri`, `username`, `password`, `dbname`, `port` |
+| Valkey | Primary: `valkey.<service>.svc.cluster.local:6379`<br />Read replicas: `valkey-read.<service>.svc.cluster.local:6379` | `valkey-credentials` | `url`, `username`, `password`, `host`, `port` |
+| NATS | `nats://nats.<service>.svc.cluster.local:4222` | `nats-credentials` | `url`, `username`, `password` |
+| OpenSearch | `https://opensearch.<service>.svc.cluster.local:9200` | `opensearch-credentials` | `url`, `username`, `password`, `ca.crt` |
+| SeaweedFS (S3) | `http://seaweedfs-all-in-one.<service>.svc.cluster.local:8333` | `seaweedfs-s3-secret` | `admin_access_key_id`, `admin_secret_access_key`, `read_access_key_id`, `read_secret_access_key` |
+| VictoriaLogs | `http://victoria-logs.<service>.svc.cluster.local:9428` | `victoria-logs-credentials` | `url`, `username`, `password` |
+| VictoriaMetrics | `http://victoria-metrics.<service>.svc.cluster.local:8428` | `victoria-metrics-credentials` | `url`, `username`, `password` |
+
+The addresses resolve from any namespace on the service's cluster, and not from outside it. On a cluster with a custom DNS domain, use the shorter `<name>.<service>.svc` form, for example `valkey.<service>.svc:6379`.
+
+## Read a value
+
+Run this against the service's cluster (see [Kubeconfig](/guides/kubeconfig) for access), with the Secret, namespace and key from the table:
+
+```bash
+kubectl get secret <secret> -n <service> -o jsonpath='{.data.<key>}' | base64 -d
+```
+
+For a PostgreSQL service named `orders-db`, this prints its connection URI:
+
+```bash
+kubectl get secret postgresql-app -n orders-db -o jsonpath='{.data.fqdn-uri}' | base64 -d
+```
+
+A key with a dot in its name, such as OpenSearch's `ca.crt`, needs the dot escaped:
+
+```bash
+kubectl get secret opensearch-credentials -n search -o jsonpath='{.data.ca\.crt}' | base64 -d > opensearch-ca.crt
+```
+
+## Wire it into an application
+
+A workload can only read Secrets in its own namespace, so an application in another namespace cannot use the service's Secret directly. Copy the values it needs into a Secret in the application's namespace. For an application in `storefront` using the `orders-db` PostgreSQL service:
+
+```bash
+kubectl create secret generic orders-db-connection -n storefront \
+  --from-literal=DATABASE_URL="$(kubectl get secret postgresql-app -n orders-db -o jsonpath='{.data.fqdn-uri}' | base64 -d)"
+```
+
+Then reference it from the workload's container:
+
+```yaml
+env:
+  - name: DATABASE_URL
+    valueFrom:
+      secretKeyRef:
+        name: orders-db-connection
+        key: DATABASE_URL
+```
+
+If you keep the Secret in Git instead of creating it by hand, encrypt it with [SOPS](/guides/sops). Ankra will deliver credentials into application environments in a later release.
+
+## Notes per service
+
+- **PostgreSQL.** From another namespace, use `fqdn-uri`, or `fqdn-jdbc-uri` for JDBC. The operator also writes `uri`, `jdbc-uri` and `host` keys, but they name the short host `postgresql-rw`, which resolves only inside the service's own namespace. You connect as `app`, the owner of the database `app`, and superuser access is off. The read-only address reaches replicas only, so it answers only when `instances` is above 1. The image includes the pgvector and pgaudit extensions.
+- **Valkey.** Authenticate as the `default` user with `password`; `url` is a complete `redis://` URL. Write to the primary address. The read-replicas address serves reads from every pod.
+- **NATS.** Connect as `app`. `url` carries no credentials, so pass `username` and `password` separately. JetStream is on; memory-backed streams are disabled.
+- **OpenSearch.** Use HTTPS with basic auth as `admin`, the only user. The certificate is signed by a private CA generated in the cluster: have your client trust `ca.crt`.
+- **SeaweedFS.** Use the S3 API over plain HTTP inside the cluster, with path-style addressing. The admin key pair can read, write, list and administer buckets. The read-only key pair can only read.
+- **VictoriaLogs.** Send logs over HTTP with basic auth, as JSON lines, Loki push, OpenTelemetry or Elasticsearch bulk, and query them with LogsQL. No log collector is installed, so ship logs with your own agent.
+- **VictoriaMetrics.** Push metrics with basic auth using Prometheus `remote_write`, OpenTelemetry, InfluxDB or another supported protocol, and query with PromQL or MetricsQL on the Prometheus HTTP API. It scrapes nothing itself, so push from vmagent, a Prometheus agent or an OpenTelemetry Collector.
+
+## Check that the service answers
+
+Ankra does not verify readiness yet: a finished deployment reads **Verification needed**, not ready. Check the service before you rely on it. Its pods run in its namespace:
+
+```bash
+kubectl get pods -n <service>
+```
+
+A PostgreSQL service can report its deployment finished 30 to 100 seconds before the database accepts connections. Wait for the database itself:
+
+```bash
+kubectl wait --for=condition=Ready clusters.postgresql.cnpg.io/postgresql -n <service> --timeout=5m
+```
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Managed service settings" icon="sliders" href="/reference/managed-services">
+    What each setting changes, with its range and default.
+  </Card>
+  <Card title="Managed services" icon="database" href="/concepts/managed-services">
+    How the services run, and their current limits.
+  </Card>
+</CardGroup>

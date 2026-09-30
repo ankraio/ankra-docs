@@ -73,11 +73,12 @@ Most changes are the smallest. Without a cheap tier a one-line fix has to become
 | Entry | Something a user can now do that they could not before | Its own `<Update>`: `##` headline, 80 words, one link. |
 | Launch | A subsystem arriving - Ankra Pipelines, the Cost center | Its own `<Update>`, same 80 words, pointing at a guide that carries the depth. |
 
-A week's small changes collect into one entry. A roll-up has no `##` headline - it is a bucket, not a change, and it is addressed by its label:
+A week's small changes collect into one entry. A roll-up has no `##` headline - it is a bucket, not a change, and it is addressed by its label. Leave a blank line between its lines, or Mintlify runs them together into one paragraph:
 
 ```mdx
 <Update label="2026-09-05" tags={["Fixes"]} description="Also shipped this week" rss={{ title: "Also shipped this week" }}>
 **Clusters** - the overview now says what every cluster is. [→](/platform/clusters)
+
 **Playground** - storage rows say what they are. [→](/platform/playground)
 </Update>
 ```
@@ -90,11 +91,11 @@ This is what makes the 80-word cap lossless rather than lossy. Write the referen
 
 ### The archive
 
-Month records up to and including **July 2026** are a genuine historical account and stay exactly as they are, `#` headings included. They are frozen: no new entry is added to an existing month record, and no new month-labelled `<Update>` is created. `scripts/check_changelog.py` enforces all of this and runs in Docs CI.
+Month records up to and including **July 2026** are a genuine historical account and stay exactly as they are, `#` headings included. The **August 2026** record predates this format too: it stays one month record, with its headline in the `description` prop and its `##` sections kept, and only its wording may be corrected. They are frozen: no new entry is added to an existing month record, and no new month-labelled `<Update>` is created. `scripts/check_changelog.py` enforces all of this and runs in Docs CI.
 
 ## Release status: closed beta
 
-A feature that is behind an organisation feature flag (enabled per organisation by Ankra, off by default) is documented as **closed beta**, and every page of it says so the same way:
+A feature that is behind an organisation feature flag (enabled per organisation by Ankra, off by default) is documented as **closed beta**, and every page of it says so the same way. A feature the product team has decided to keep in closed beta without a flag (HPE Morpheus today) is labelled the same way, and its `<Warning>` asks the reader to contact support before relying on it rather than to have it turned on:
 
 - Frontmatter `tag: "Closed Beta"` on the feature's canonical page *and* on every page that only works with the feature enabled (its credentials page, reference page, sub-feature guides).
 - A `<Warning>` at the top of the page, before the first `<Note>`, opening with `**Closed beta.**` and carrying the enablement fact and the support link:
@@ -107,7 +108,7 @@ A feature that is behind an organisation feature flag (enabled per organisation 
 
   A sub-feature page says which feature it belongs to instead: `**Closed beta.** Branch demos are part of [Applications](/concepts/applications), which is in closed beta …`. A page that describes what the product does while the flag is dark (an error message, a hidden menu entry) keeps that in the same block.
 - A gated *section* of an otherwise generally available page gets the same `<Warning>` at the top of the section, not a page tag.
-- Cards, tables and headings that name the feature append `(Closed Beta)` to the name, as the landing page does for Applications.
+- Cards, tables and headings that name the feature append `(Closed Beta)` to the name, as the provider cards do for Scaleway and Ankra Cloud.
 - Never use "beta", "preview", "experimental", "rolling out" or "coming soon" as a status label - the only statuses are closed beta and generally available. When a feature becomes generally available, remove the tag, the `<Warning>` and the suffixes in the same PR that announces it in the changelog.
 
 ## CLI version requirements

@@ -1,0 +1,240 @@
+---
+title: Ship Your App
+sidebarTitle: Pick a Route
+description: Get an application from a Git repository running on a cluster, and redeployed every time a change merges - pick the route that fits where your code lives and who builds the image.
+---
+
+import { CliVersion } from "/snippets/cli-version.jsx";
+
+You have an application in a Git repository. You want it running on a cluster, and you want every merge to the main branch rebuilt and redeployed without anyone running a command. Ankra has more than one way to do that, and the right one depends on where your code lives and how much of the pipeline you want Ankra to own. This page helps you pick one and points you to the guide for it.
+
+---
+
+## Pick your route
+
+| Route | Your code lives on | Who builds the image | Deploys, and redeploys on merge |
+|---|---|---|---|
+| [**Applications**](#applications), with `ankra application ship` | GitHub | Ankra Pipelines in your own cluster (the default), the generated GitHub Actions workflow, your own workflow, or Ankra platform builders | Yes. Push to deploy is on from registration |
+| [**Your own CI**](#bring-your-own-ci), committing the new tag to your GitOps repository | Anywhere. The GitOps repository must be on GitHub or Bitbucket Cloud | Your CI | Yes, once CI commits the tag and Ankra syncs it |
+| [**Ankra Pipelines**](/guides/ankra-pipelines) on a repository that is not an application | GitHub, GitLab or Bitbucket Cloud | Nobody: `build` needs an application to push to | No. It runs CI only; the `deploy` stage kind has no executor yet |
+| [**Previews**](#preview-a-change-before-merge) of a pull request or branch | GitHub, as an application | Nobody: it deploys an image already built | A throwaway copy on your staging cluster, redeployed on every push |
+
+In short:
+
+- **Your repository is on GitHub and you want Ankra to handle the build and the deploy:** use Applications. It is the only route where Ankra writes the Dockerfile, the manifests and the CI definition for you.
+- **You already have CI you want to keep, or your code is on GitLab:** keep your CI and have it commit the new image tag to the GitOps repository.
+- **You want CI inside your own cluster:** [Ankra Pipelines](/guides/ankra-pipelines). To also deploy, connect the repository as an application; the pipeline then builds its image.
+
+---
+
+## Applications
+
+An application is a GitHub repository Ankra builds and deploys. Registering one opens a setup pull request with a Dockerfile (when the repository has none), Kubernetes manifests and a CI definition. After you merge it, every successful build of the tracked branch rolls out to the clusters the application runs on. [Applications](/concepts/applications) explains the model in full.
+
+### Ship from your checkout
+
+One command takes a local checkout to a running deployment. Run it in a checkout whose `origin` remote is the GitHub repository, with a cluster selected (`ankra cluster select`) or named with `--cluster`:
+
+<CliVersion since="0.15.0" />
+
+```bash
+ankra application ship .
+```
+
+`ship` works through these steps and prints what it is waiting on at each one:
+
+1. **Register.** If your organisation has no application for this repository yet, `ship` registers one, with the same flags as `ankra application add`. The GitHub credential and the branch are detected when you do not pass `--credential` and `--branch`.
+2. **Wait for setup.** Ankra analyses the repository and opens the setup pull request. `ship` prints its URL.
+3. **Wait for you to merge the setup pull request.** This is the one step that needs a person.
+4. **Wait for a green build** of the tracked branch.
+5. **Deploy** to the cluster, in a namespace derived from the application name unless you pass `--namespace`.
+6. **Wait until the workload is running**, then print the public URL when the application has one.
+
+`--timeout` bounds all the waiting together (one hour by default). Re-running `ship` is safe at any point: it reads where the flow stands and carries on from there, so an interrupted run resumes instead of registering, building or deploying twice. Add `-o json` to get the application, cluster, namespace and URL as JSON on stdout.
+
+<Warning>
+**`ship` waits for GitHub Actions, not for Ankra Pipelines.** Step 4 reads the repository's GitHub Actions workflow runs on the tracked branch. It does not read Ankra pipeline runs, and a new application builds with Ankra Pipelines by default, so it has no workflow run for `ship` to wait on. For such an application, either:
+
+- pass `--ankra-build`, which builds the first image on [Ankra platform builders](/concepts/applications#building-on-ankras-builders) and skips steps 3 and 4. Ankra enables platform builders per organisation; without them `--ankra-build` is refused; or
+- take the steps by hand: `ankra application add .`, merge the setup pull request, follow the pipeline run with `ankra pipeline list --application <application>` until it succeeds, then `ankra application deploy <application-id> --cluster <cluster-id>`.
+</Warning>
+
+### How a merge redeploys
+
+Push to deploy is on for every new application from the moment it is registered. Once the application has been deployed once - by `ship` or by `ankra application deploy` - every successful build of the tracked branch rolls out to every cluster it is installed on, with no approval step. A successful build is whichever of these the application uses:
+
+- an Ankra pipeline run whose `publish` stage re-tagged the image as `sha-<7>` in your registry,
+- a completed, successful run of the generated GitHub Actions workflow or of your own workflow,
+- an Ankra platform build.
+
+A build of any other branch never deploys. With push to deploy off, a merge still builds; the new image just waits for an explicit `ankra application deploy`.
+
+Check and change the switch from the CLI:
+
+```bash
+# On or off, the branch it watches, and the newest build seen there
+ankra application auto-deploy get <application-id>
+
+# Turn it off, or back on
+ankra application auto-deploy set <application-id> --enabled=false
+ankra application auto-deploy set <application-id> --enabled
+```
+
+In the portal the same switch is the application's **Settings** → **Push to deploy**. Once the application runs in more than one environment, that section lists each one under **What follows pushes** with its own switch, so you can let staging follow every merge while production waits for an explicit deploy. Changing the switch needs permission to deploy applications; reading it does not.
+
+<Note>
+Applications registered before push to deploy became the default keep the setting they had, which is off unless someone turned it on. Run `ankra application auto-deploy get` to check.
+</Note>
+
+### Where the image is built
+
+The setup pull request decides what builds the application, and that choice also decides which images a preview can use.
+
+| Builder | What it is | What it publishes |
+|---|---|---|
+| **Ankra Pipelines** (default for new applications) | `.ankra/pipeline.yaml`, run as Jobs in the cluster your organisation runs CI on. Needs that cluster set up first - see [Before your first run](/guides/ankra-pipelines#before-your-first-run) | A pull request run builds and scans the head commit and pushes it by digest to a staging repository. A push to the tracked branch also runs `publish`, which re-tags the approved digest as `sha-<7>` in the application's registry |
+| **Generated GitHub Actions workflow** | `.github/workflows/build-and-publish.yml`, for a repository that must keep building on GitHub. See [Application CI/CD](/guides/cicd-pipeline) | A pull request builds and scans the image but pushes nothing. A push to the tracked branch pushes `sha-<7>` and a tag named after the branch |
+| **Your own workflow** | A workflow you wrote that pushes the image the application deploys | Whatever tags your workflow pushes |
+| **Ankra platform builders** | Builds a commit on Ankra's infrastructure, on request: `ankra application build start <application-id> --commit <full-sha>`, or `ship --ankra-build` | `sha-<7>` for the commit you asked for |
+
+For previews this means:
+
+- A **pull request preview** of a pipeline-built application deploys the digest the pipeline built for that pull request's head. Nothing else is needed.
+- A **pull request preview** of any other application needs an image tagged `sha-<7>` of the head commit, `pr-<number>` or the branch name in the application's registry. The generated workflow never pushes one for a pull request, so those previews only work when your own CI pushes such a tag.
+- A **branch demo** deploys a tag that already exists. With the generated workflow or the generated pipeline, only the tracked branch gets one; for any other branch, build its head on platform builders or pick an existing tag.
+
+### Preview a change before merge
+
+Two features deploy a throwaway copy of a change to your organisation's staging cluster before it merges:
+
+- [PR preview environments](/guides/pr-preview-environments) deploy every pull request automatically, post a status comment with the link, redeploy on each push and tear the copy down when the pull request closes.
+- [Branch demos](/guides/branch-demos) launch a copy of any branch by hand, with its own environment variables, an optional throwaway Postgres and a teardown timer.
+
+---
+
+## Bring your own CI
+
+Keep the CI you have. Your pipeline builds and pushes an image with a tag that never changes, commits the new tag to the cluster's GitOps repository, and Ankra syncs the commit into the cluster. CI never needs credentials for the cluster itself.
+
+Before you start:
+
+- **Connect a GitOps repository to the cluster** under the cluster's **Settings** → **GitOps**. It must be on [GitHub](/integrations/github#connecting-github) or [Bitbucket Cloud](/integrations/bitbucket-cloud#connecting-a-repository-to-a-cluster): Ankra does not sync cluster configuration from GitLab. Your application code and CI can live anywhere.
+- **Deploy the application once as a manifest in a Stack.** Ankra writes it to `clusters/<cluster-name>-<short-id>/stacks/<stack-name>/manifests/<manifest-name>.yaml` in the GitOps repository. That is the file your CI edits.
+- **Give CI a token that can push to the GitOps repository**, and nothing more. On GitHub, a fine-grained personal access token with **Contents** read and write on that one repository.
+- **Let the cluster pull the image.** For a private registry, add an image pull secret to the Stack (encrypt it with [SOPS](/guides/sops)) and reference it from the Deployment.
+
+Both examples below build on every push to `main`, tag the image with the commit, and replace the `image:` line in the manifest. Replace `my-org/my-app`, `my-org/my-gitops-repo` and the manifest path with your own.
+
+<Tabs>
+  <Tab title="GitHub Actions">
+    `.github/workflows/deploy.yml` in the application repository, pushing to GitHub Container Registry and bumping a GitOps repository on GitHub:
+
+    ```yaml
+    name: build-and-deploy
+    on:
+      push:
+        branches: [main]
+
+    permissions:
+      contents: read
+      packages: write
+
+    env:
+      IMAGE: ghcr.io/my-org/my-app
+      MANIFEST: clusters/my-cluster-<short-id>/stacks/my-app/manifests/my-app.yaml
+
+    jobs:
+      build-and-deploy:
+        runs-on: ubuntu-latest
+        steps:
+          - uses: actions/checkout@v4
+
+          - name: Build and push an immutable tag
+            run: |
+              TAG="sha-${GITHUB_SHA::7}"
+              echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+              docker build -t "$IMAGE:$TAG" .
+              docker push "$IMAGE:$TAG"
+              echo "TAG=$TAG" >> "$GITHUB_ENV"
+
+          - name: Check out the GitOps repository
+            uses: actions/checkout@v4
+            with:
+              repository: my-org/my-gitops-repo
+              token: ${{ secrets.GITOPS_TOKEN }}
+              path: gitops
+
+          - name: Commit the new tag
+            working-directory: gitops
+            run: |
+              sed -i "s|image: ${IMAGE}:.*|image: ${IMAGE}:${TAG}|" "$MANIFEST"
+              git config user.name "ci-bot"
+              git config user.email "ci-bot@users.noreply.github.com"
+              git commit -am "Deploy my-app ${TAG}"
+              git push
+    ```
+  </Tab>
+  <Tab title="GitLab CI">
+    `.gitlab-ci.yml` in the application repository, pushing to the GitLab Container Registry and bumping a GitOps repository on GitHub. Store the token as a masked, protected CI/CD variable named `GITOPS_TOKEN`:
+
+    ```yaml
+    stages: [build, deploy]
+
+    variables:
+      IMAGE: $CI_REGISTRY_IMAGE
+      MANIFEST: clusters/my-cluster-<short-id>/stacks/my-app/manifests/my-app.yaml
+
+    build:
+      stage: build
+      image: docker:27
+      services: [docker:27-dind]
+      rules:
+        - if: $CI_COMMIT_BRANCH == "main"
+      script:
+        - echo "$CI_REGISTRY_PASSWORD" | docker login -u "$CI_REGISTRY_USER" --password-stdin "$CI_REGISTRY"
+        - docker build -t "$IMAGE:sha-$CI_COMMIT_SHORT_SHA" .
+        - docker push "$IMAGE:sha-$CI_COMMIT_SHORT_SHA"
+
+    deploy:
+      stage: deploy
+      image: alpine:3.20
+      needs: [build]
+      rules:
+        - if: $CI_COMMIT_BRANCH == "main"
+      script:
+        - apk add --no-cache git
+        - git clone "https://x-access-token:${GITOPS_TOKEN}@github.com/my-org/my-gitops-repo.git" gitops
+        - cd gitops
+        - 'sed -i "s|image: ${IMAGE}:.*|image: ${IMAGE}:sha-${CI_COMMIT_SHORT_SHA}|" "$MANIFEST"'
+        - git config user.name "ci-bot"
+        - git config user.email "ci-bot@example.com"
+        - git commit -am "Deploy my-app sha-${CI_COMMIT_SHORT_SHA}"
+        - git push
+    ```
+
+    The [GitLab CI/CD tutorial](/guides/gitlab-cicd-pipeline) walks through the same setup step by step, with a deploy key instead of a token.
+  </Tab>
+</Tabs>
+
+After the commit lands, Ankra picks it up on the connected branch and applies it; the cluster's **GitOps** page shows the sync, and **Sync** there pulls it at once. Once CI has edited the file, its contents in Git no longer match what Ankra last wrote, so Ankra keeps the Git version from then on and later edits from the portal do not overwrite your tag - see [Hand-maintaining a file](/concepts/gitops#hand-maintaining-a-file).
+
+To roll back, revert the commit in the GitOps repository.
+
+---
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Applications" icon="box" href="/concepts/applications">
+    The application model: setup, registries, robot accounts, scanning and demos.
+  </Card>
+  <Card title="Ankra Pipelines" icon="diagram-project" href="/guides/ankra-pipelines">
+    CI in your own cluster, and exactly which stages run today.
+  </Card>
+  <Card title="PR preview environments" icon="code-pull-request" href="/guides/pr-preview-environments">
+    A live copy of every pull request on your staging cluster.
+  </Card>
+  <Card title="GitOps" icon="git-alt" href="/concepts/gitops">
+    How Ankra syncs a cluster from its GitOps repository.
+  </Card>
+</CardGroup>

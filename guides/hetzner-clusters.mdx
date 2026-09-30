@@ -1,14 +1,14 @@
 ---
 title: Hetzner Clusters
-description: Create, manage, and scale Kubernetes clusters on Hetzner Cloud with Ankra.
+description: Create a Kubernetes cluster on servers in your own Hetzner Cloud project, with Ankra installing and operating Kubernetes, ingress, TLS and DNS.
 ---
 
 import { CliVersion } from "/snippets/cli-version.jsx";
 import { YouTube } from "/snippets/youtube.jsx";
 
-Ankra supports provisioning fully managed Kubernetes clusters on [Hetzner Cloud](https://www.hetzner.com/cloud). You can create clusters with configurable control planes, workers, and networking - then scale workers up or down as needed.
+Choose Hetzner when you want a multi-node Kubernetes cluster on Hetzner Cloud servers in Germany, Finland, the US or Singapore, in a project you own. Ankra creates the servers, private network and bastion in your Hetzner Cloud project, installs Kubernetes and the Hetzner cloud integration, and then operates the cluster for you - this is an **Ankra Managed** cluster. Hetzner bills you directly for the servers.
 
-<Frame caption="Creating a Hetzner Cluster on Ankra">
+<Frame caption="Creating a Hetzner cluster on Ankra">
   <video
     controls
     autoPlay
@@ -20,687 +20,143 @@ Ankra supports provisioning fully managed Kubernetes clusters on [Hetzner Cloud]
   ></video>
 </Frame>
 
----
-
-Watch a Hetzner cluster created from the wizard.
-
-<YouTube id="-77mTYJiSuA" title="Create a managed Kubernetes cluster on Hetzner" />
-
-## Prerequisites
-
-Before creating a Hetzner cluster, you need two credentials:
-
-<Tip>
-Don't have a Hetzner account? [Sign up for Hetzner Cloud](https://www.hetzner.com/cloud) to get started.
-</Tip>
-
-<CardGroup cols={2}>
-  <Card title="Hetzner API Credential" icon="key">
-    A Hetzner Cloud API token with read/write permissions. See [Hetzner Credentials](/platform/credentials/hetzner).
-  </Card>
-  <Card title="SSH Key Credentials" icon="lock">
-    One or more SSH public keys for server access. You can provide your own or let Ankra generate one. Multiple keys can be attached to a single cluster. See [SSH Key Credentials](/platform/credentials/ssh-key).
-  </Card>
-</CardGroup>
-
----
-
-## Creating a Hetzner Cluster
-
-### Via the Platform UI
-
-<Steps>
-  <Step title="Navigate to Clusters">
-    Go to **Clusters** in the Ankra dashboard and click **Create Cluster**.
-  </Step>
-  <Step title="Select Hetzner">
-    Choose **Hetzner Cloud** as the provider.
-  </Step>
-  <Step title="Configure Cluster">
-    Fill in the cluster configuration:
-    - **Name** - a unique name for your cluster
-    - **Hetzner Credential** - select your Hetzner API credential
-    - **SSH Keys** - select one or more SSH key credentials
-    - **Location** - Hetzner datacenter (e.g., `fsn1`, `nbg1`, `hel1`)
-    - **Control Plane** - count and server type (e.g., `cx33`)
-    - **Workers** - count and server type
-    - **Distribution** - Kubernetes distribution: `kubeadm` (vanilla upstream Kubernetes with Cilium CNI, preselected) or `k3s`
-  </Step>
-  <Step title="GitOps, Networking & DNS">
-    Optionally connect a GitHub repository for GitOps-driven deployment. Two checkboxes on this step are on by default:
-    - **Include Networking Stack** - deploys Traefik, cert-manager, and a Let's Encrypt ClusterIssuer configured for Hetzner Cloud load balancers.
-    - **Include Public DNS** - gives the cluster its own delegated subdomain on `ankra.cc` and installs external-dns with its credentials already wired, so an ingress hostname under that subdomain gets its DNS record and TLS certificate automatically.
-  </Step>
-  <Step title="Create">
-    Click **Create** to start provisioning. The cluster will appear with an **offline** state until provisioning completes.
-  </Step>
-</Steps>
-
-### Via the CLI
-
-<CliVersion since="0.9.0" />
-
-```bash
-# Create credentials first
-ankra credentials hetzner create --name my-hetzner-token  # securely prompts for token
-ankra credentials hetzner ssh-key create --name my-ssh-key --generate
-
-# Create the cluster with one SSH key
-ankra cluster hetzner create \
-  --name my-cluster \
-  --credential-id <hetzner-credential-id> \
-  --ssh-key-credential-id <ssh-key-credential-id> \
-  --location fsn1 \
-  --control-plane-count 1 \
-  --control-plane-server-type cx33 \
-  --worker-count 2 \
-  --worker-server-type cx33
-
-# Or with multiple SSH keys
-ankra cluster hetzner create \
-  --name my-cluster \
-  --credential-id <hetzner-credential-id> \
-  --ssh-key-credential-ids <key-id-1>,<key-id-2>,<key-id-3> \
-  --location fsn1 \
-  --control-plane-count 1 \
-  --control-plane-server-type cx33 \
-  --worker-count 2 \
-  --worker-server-type cx33
-```
-
-### Via the API
-
-```bash
-curl -X POST https://platform.ankra.app/api/v1/clusters/hetzner \
-  -H "Authorization: Bearer $ANKRA_API_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "name": "my-cluster",
-    "credential_id": "<hetzner-credential-id>",
-    "ssh_key_credential_ids": ["<key-id-1>", "<key-id-2>"],
-    "location": "fsn1",
-    "control_plane_count": 1,
-    "control_plane_server_type": "cx33",
-    "node_groups": [
-      {"name": "default", "instance_type": "cx33", "count": 2},
-      {"name": "gpu-workers", "instance_type": "ccx33", "count": 1, "labels": {"gpu": "true"}, "taints": [{"key": "gpu", "value": "true", "effect": "NoSchedule"}]}
-    ],
-    "distribution": "k3s",
-    "include_ingress": true
-  }'
-```
-
-<Note>
-The `worker_count` and `worker_server_type` fields are still accepted for backward compatibility. If `node_groups` is provided, it takes precedence.
-The singular `ssh_key_credential_id` field is also still accepted. If both fields are provided, they are merged.
-</Note>
-
-Every configuration parameter, the list of datacenter locations, and the details of the provisioned infrastructure (hcloud CCM, CSI driver, ingress stack) are in the [Hetzner Reference](/reference/hetzner).
-
----
-
-## Access Settings
-
-The **Access** tab in cluster settings provides SSH access commands and SSH key management for Hetzner clusters.
-
-### SSH Access
-
-The Access page displays copy-pasteable commands for connecting to your cluster:
-
-**SSH to the control plane** via the bastion host:
-
-```bash
-ssh -J root@<bastion-ip> root@<control-plane-ip>
-```
-
-**Port-forward the Kubernetes API** for local `kubectl` access:
-
-```bash
-ssh -L 6443:<control-plane-ip>:6443 -N -J root@<bastion-ip> root@<control-plane-ip>
-```
-
-After running the port-forward command, configure `kubectl` to use `https://localhost:6443`.
-
-The Access page also shows the network topology with the bastion host and all control plane nodes.
-
-### Managing SSH Keys
-
-You can add or remove SSH key credentials from a running cluster in **Settings > Access**. Changes are synced to all servers on the next reconciliation - SSH keys are registered with the Hetzner API and `authorized_keys` is updated on all nodes.
-
-SSH keys can also be managed via the [SSH key API](/reference/hetzner#ssh-key-api).
-
----
-
-## Node Groups
-
-Node groups let you organize worker nodes into logical groups with independent instance types, counts, labels, and taints. Each group can be scaled, upgraded, and configured independently.
-
-### Via the Platform UI
-
-Navigate to cluster **Settings** > **Nodes** to manage node groups. From this tab you can:
-
-- View all node groups with their instance type, count, labels, and taints
-- Add new node groups with a name, instance type, count, and optional labels/taints
-- Scale individual groups up or down (0–100 nodes)
-- Upgrade the instance type (upgrade only - see [Instance Type Changes](#instance-type-changes))
-- Edit labels and taints per group
-- Delete a node group and all its nodes
-
-### List Node Groups
-
-<CodeGroup>
-
-```bash CLI
-ankra cluster hetzner node-group list <cluster_id>
-```
-
-```bash cURL
-curl https://platform.ankra.app/api/v1/clusters/hetzner/<cluster_id>/node-groups \
-  -H "Authorization: Bearer $ANKRA_API_TOKEN"
-```
-
-</CodeGroup>
-
-Response:
-```json
-{
-  "node_groups": [
-    {
-      "name": "default",
-      "instance_type": "cx33",
-      "count": 2,
-      "min": 0,
-      "max": 100,
-      "labels": {},
-      "taints": []
-    }
-  ]
-}
-```
-
-### Add a Node Group
-
-<CodeGroup>
-
-```bash CLI
-ankra cluster hetzner node-group add <cluster_id> \
-  --name gpu-workers \
-  --instance-type ccx33 \
-  --count 3
-```
-
-```bash cURL
-curl -X POST https://platform.ankra.app/api/v1/clusters/hetzner/<cluster_id>/node-groups \
-  -H "Authorization: Bearer $ANKRA_API_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "name": "gpu-workers",
-    "instance_type": "ccx33",
-    "count": 3,
-    "labels": {"workload": "gpu"},
-    "taints": [{"key": "gpu", "value": "true", "effect": "NoSchedule"}]
-  }'
-```
-
-</CodeGroup>
-
-### Scale a Node Group
-
-<CodeGroup>
-
-```bash CLI
-ankra cluster hetzner node-group scale <cluster_id> default 4
-```
-
-```bash cURL
-curl -X PUT https://platform.ankra.app/api/v1/clusters/hetzner/<cluster_id>/node-groups/default/scale \
-  -H "Authorization: Bearer $ANKRA_API_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"count": 4}'
-```
-
-</CodeGroup>
-
-Node groups can be scaled to 0 nodes. This keeps the group definition but removes all servers.
-
-### Instance Type Changes
-
-<Warning>
-Instance type upgrades are **irreversible**. Once upgraded, the server disk is enlarged and cannot be shrunk. You cannot downgrade a node group to a smaller instance type.
-
-To use a smaller instance type, create a new node group with the desired type and delete the old one.
-</Warning>
-
-<CodeGroup>
-
-```bash CLI
-ankra cluster hetzner node-group upgrade <cluster_id> default cx43
-```
-
-```bash cURL
-curl -X PUT https://platform.ankra.app/api/v1/clusters/hetzner/<cluster_id>/node-groups/default/instance-type \
-  -H "Authorization: Bearer $ANKRA_API_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"instance_type": "cx43"}'
-```
-
-</CodeGroup>
-
-Each node is powered off, resized, and powered back on. This causes brief downtime for workloads on those nodes.
-
-### Delete a Node Group
-
-<CodeGroup>
-
-```bash CLI
-ankra cluster hetzner node-group delete <cluster_id> gpu-workers
-```
-
-```bash cURL
-curl -X DELETE https://platform.ankra.app/api/v1/clusters/hetzner/<cluster_id>/node-groups/gpu-workers \
-  -H "Authorization: Bearer $ANKRA_API_TOKEN"
-```
-
-</CodeGroup>
-
-<Warning>
-Deleting a node group removes all its servers. Workloads running on those nodes will be evicted.
-</Warning>
-
-### Update Labels and Taints
-
-```bash
-# Update labels
-curl -X PUT https://platform.ankra.app/api/v1/clusters/hetzner/<cluster_id>/node-groups/default/labels \
-  -H "Authorization: Bearer $ANKRA_API_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"labels": {"env": "production", "tier": "backend"}}'
-
-# Update taints
-curl -X PUT https://platform.ankra.app/api/v1/clusters/hetzner/<cluster_id>/node-groups/default/taints \
-  -H "Authorization: Bearer $ANKRA_API_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"taints": [{"key": "dedicated", "value": "ml", "effect": "NoSchedule"}]}'
-```
-
-### Node Group API Reference
-
-All node-group operations are also available via the REST API - see the [Node Group API](/reference/hetzner#node-group-api).
-
----
-
-## Restarting a Node
-
-Restart any individual node - a control plane node, a worker, or the bastion - without waiting for a full reconciliation. Ankra schedules a native reboot (falling back to a power cycle if the server doesn't respond) as a tracked operation.
-
-### Via the Platform UI
-
-Open cluster **Settings** > **Nodes**, find the node in the table, and choose **Restart** from its row menu. Confirm the dialog to schedule the restart.
-
-### Via the CLI or API
-
-Find the node's ID with `nodes list`, then restart it:
-
-<CodeGroup>
-
-```bash CLI
-ankra cluster hetzner nodes list <cluster_id>
-ankra cluster hetzner nodes restart <cluster_id> <node_id>
-```
-
-```bash cURL
-curl -X POST https://platform.ankra.app/api/v1/clusters/hetzner/<cluster_id>/nodes/<node_id>/restart \
-  -H "Authorization: Bearer $ANKRA_API_TOKEN"
-```
-
-</CodeGroup>
-
-Response:
-```json
-{
-  "operation_id": "9f2b1e3a-...",
-  "node_id": "<node_id>",
-  "job_name": "hetzner_restart_server"
-}
-```
-
-<Note>
-The node must be in the `up` state with no restart already in flight. Track the restart with the returned `operation_id` via `ankra cluster operations list <operation_id>` or the [CLI reference](/reference/cli/cluster#ankra-cluster-operations-list). Workloads on the node are briefly unavailable while it reboots.
-</Note>
-
-You can also ask the Ankra AI assistant to do this in chat or Slack - for example, "restart the bastion on my-cluster" or "restart worker-2".
-
----
-
-## Resizing the Bastion or Gateway
-
-Change the instance type of the cluster's bastion host without recreating the cluster. Ankra powers the bastion off, resizes it, and powers it back on.
-
-<Warning>
-Resizing the bastion causes a brief SSH and outbound-NAT interruption for the cluster while it reboots.
-</Warning>
-
-### Via the Platform UI
-
-Open cluster **Settings** > **Nodes**, find the bastion row, and choose **Resize** from its row menu to pick a new instance type.
-
-### Via the CLI or API
-
-<CodeGroup>
-
-```bash CLI
-ankra cluster hetzner bastion resize <cluster_id> cx33
-```
-
-```bash cURL
-curl -X PUT https://platform.ankra.app/api/v1/clusters/hetzner/<cluster_id>/bastion/instance-type \
-  -H "Authorization: Bearer $ANKRA_API_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"instance_type": "cx33"}'
-```
-
-</CodeGroup>
-
-Response:
-```json
-{
-  "node_id": "<node_id>",
-  "kind": "hetzner_bastion",
-  "name": "bastion",
-  "instance_type": "cx33"
-}
-```
-
-<Note>
-Like node-group writes, this endpoint answers `202 Accepted` and applies the resize in the background unless you pass `--wait` (CLI) or `?wait=true` (API).
-</Note>
-
----
-
-## Stopping and Starting a Cluster
-
-You can stop a Hetzner cluster to release its compute (servers, networks, and SSH keys in Hetzner Cloud) while keeping its configuration, stacks, and credentials in Ankra. Starting the cluster re-provisions the compute and reconciles it back to a running state. This is useful for pausing non-production clusters to save cost.
-
-In the portal, choose **Stop cluster** in **Settings** → **General** → **Danger Zone**. You can run the same lifecycle from the CLI, API, or by asking Ankra's AI or any MCP client to stop or start the cluster.
-
-When starting, use `scope=control_plane` to bring up only the control plane first (for example to inspect or repair it), or `scope=all` (the default) to provision the whole cluster.
-
-<CliVersion since="0.11.0" command="cluster hetzner stop --force" />
-
-<CodeGroup>
-
-```bash CLI
-ankra cluster hetzner stop <cluster_id>
-ankra cluster hetzner stop <cluster_id> --force  # also delete load balancers; volumes are kept
-ankra cluster hetzner start <cluster_id>
-```
-
-```bash cURL
-curl -X POST https://platform.ankra.app/api/v1/clusters/hetzner/<cluster_id>/stop \
-  -H "Authorization: Bearer $ANKRA_API_TOKEN"
-
-curl -X POST "https://platform.ankra.app/api/v1/clusters/hetzner/<cluster_id>/start?scope=all" \
-  -H "Authorization: Bearer $ANKRA_API_TOKEN"
-```
-
-</CodeGroup>
-
-<Note>
-Stop and start are background operations. A start returns `409` if a stop or terminate operation is still running. The cluster's saved topology is preserved while stopped - `ankra cluster hetzner nodes list` includes the soft-deleted entries that are re-provisioned on the next start. Use `ankra cluster hetzner stop|start` from the CLI, the portal Danger Zone, the API, or Ankra AI.
-</Note>
-
-### What Happens on Start
-
-<Steps>
-  <Step title="Ankra Restores Infrastructure">
-    Ankra provisions fresh infrastructure for the stopped cluster:
-    - Private network and subnet
-    - SSH keys
-    - Bastion host
-    - Control plane servers (same count and type as before the stop)
-    - Kubernetes (k3s) installation on all control plane nodes
-  </Step>
-  <Step title="Workers Join the Cluster">
-    Worker servers are created and join the restored Kubernetes cluster. The worker k8s jobs wait for the first control plane to be ready before attempting to join.
-  </Step>
-  <Step title="Stacks Reconcile">
-    Once the Ankra Agent is deployed and connected, stacks and addons configured in Ankra begin reconciling automatically.
-  </Step>
-</Steps>
-
-<Note>
-The started cluster gets entirely fresh infrastructure - new Hetzner servers, new IP addresses, new k3s installation. Data from before the stop is not preserved on the servers. Persistent data stored in Hetzner Volumes (via the CSI driver) is preserved: a stop, forced or not, and a plain deprovision never delete the volumes. The kept volumes bill while the cluster is parked; deprovision with `--force` to delete them, which destroys their data.
-</Note>
-
-<Note>
-Adding a node group to a stopped cluster also brings it back online: Ankra restores the control plane (same count and type as before the stop) and joins the new group's workers. On that path, previously existing worker node groups are **not** restored - the node group you add is the only worker pool. Use **start** to re-provision the full saved topology instead.
-</Note>
-
----
-
-## Legacy Worker Scaling
-
-The legacy `scale-workers` and `worker-count` endpoints still work for backward compatibility. They operate on all workers as a single pool.
-
-<CodeGroup>
-
-```bash CLI
-ankra cluster hetzner workers <cluster_id>
-ankra cluster hetzner scale <cluster_id> 4
-```
-
-```bash cURL
-curl https://platform.ankra.app/api/v1/clusters/hetzner/<cluster_id>/worker-count \
-  -H "Authorization: Bearer $ANKRA_API_TOKEN"
-
-curl -X POST https://platform.ankra.app/api/v1/clusters/hetzner/<cluster_id>/scale-workers \
-  -H "Authorization: Bearer $ANKRA_API_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"worker_count": 4}'
-```
-
-</CodeGroup>
-
-<Note>
-For new clusters, prefer using [Node Groups](#node-groups) for more granular control.
-</Note>
-
----
-
-## Upgrading Kubernetes Version
-
-You can upgrade the Kubernetes version (kubeadm or k3s) on all nodes in a Hetzner cluster. Upgrades are applied to control plane nodes first, then workers.
-
-<Warning>
-- Both kubeadm and k3s clusters can be upgraded; list targets with `ankra cluster kubeadm-versions` or `ankra cluster k3s-versions`.
-- Downgrades are not supported - k3s downgrades require an etcd snapshot restore.
-- You can only upgrade one minor version at a time (e.g., v1.33.x to v1.34.x, not v1.33.x to v1.35.x).
-- The cluster must be online with no active operations.
-</Warning>
-
-### Check Current Version
-
-<CodeGroup>
-
-```bash CLI
-ankra cluster hetzner k8s-version <cluster_id>
-```
-
-```bash cURL
-curl https://platform.ankra.app/api/v1/clusters/hetzner/<cluster_id>/k8s-version \
-  -H "Authorization: Bearer $ANKRA_API_TOKEN"
-```
-
-</CodeGroup>
-
-Response:
-```json
-{
-  "current_version": "v1.34.4+k3s1",
-  "distribution": "k3s"
-}
-```
-
-### Upgrade Version
-
-<CodeGroup>
-
-```bash CLI
-ankra cluster hetzner upgrade <cluster_id> v1.35.1+k3s1
-```
-
-```bash cURL
-curl -X POST https://platform.ankra.app/api/v1/clusters/hetzner/<cluster_id>/upgrade-k8s-version \
-  -H "Authorization: Bearer $ANKRA_API_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"target_version": "v1.35.1+k3s1"}'
-```
-
-</CodeGroup>
-
-Response:
-```json
-{
-  "previous_version": "v1.34.4+k3s1",
-  "new_version": "v1.35.1+k3s1",
-  "nodes_affected": 3
-}
-```
-
----
-
-## Cluster Lifecycle
-
-### Delete Kubernetes
-
-Deleting the Kubernetes layer destroys all Hetzner infrastructure (servers, networks, SSH keys) but keeps the cluster registered in Ankra. The cluster moves to a **stopped** state and can be brought back online by [starting it](#stopping-and-starting-a-cluster) or adding a node group.
-
-This is useful for cost savings when a cluster is not needed temporarily - you stop paying for Hetzner servers while preserving the cluster configuration, credentials, and history in Ankra.
-
-**What happens when you delete Kubernetes:**
-
-- All Hetzner servers (control planes, workers, bastion) are deleted from Hetzner Cloud
-- Network and SSH keys are deleted from Hetzner Cloud
-- All cloud resources are marked as stopped in Ankra
-- The cluster record, credentials, and stacks remain in Ankra
-- You stop incurring Hetzner infrastructure charges
-
-**What happens when you add a node group to a stopped cluster:**
-
-- Ankra automatically restores the control plane infrastructure (bastion, network, SSH keys, control plane servers)
-- Kubernetes is installed on the restored control planes
-- The new node group workers are created and join the cluster
-- Stacks and addons begin reconciling once the cluster is online
-
-The restored cluster gets fresh infrastructure - new servers, new IPs, new k3s installation. Workloads from before the deletion are not preserved. Stacks and addons configured in Ankra will be redeployed automatically.
-
-### Terminate Cluster
-
-Terminating a cluster permanently deletes all Hetzner resources and removes the cluster from Ankra entirely. The cluster cannot be recovered.
-
-<Warning>
-This action is irreversible. All data on the cluster will be permanently deleted, and the cluster record is removed from Ankra.
-</Warning>
-
-<Warning>
-**Load Balancers are always deleted, Volumes only once you accept it.** The Hetzner CCM and CSI driver create objects in your Hetzner Cloud project, and terminating does not treat them the same way:
-
-- **Load Balancers** (created by `Service` resources of type `LoadBalancer`) are deleted on every terminate, with or without `--force`. An attached Load Balancer blocks the network delete itself, so removing it is part of the teardown.
-- **Volumes** (created by `PersistentVolumeClaim` resources on the `hcloud-volumes` StorageClass) are deleted with the cluster, and the data on them, only when you accept that: the terminate dialog and `ankra cluster deprovision` list them and ask, and the API needs `?accept_volume_data_loss=true`. `--force` does not stand in for that. A volume labelled `ankra-retain` is kept. See [persistent volumes](/platform/cluster-settings#persistent-volumes).
-</Warning>
-
-<Note>
-**What a terminate touches in your Hetzner project.** Every delete is scoped to this one cluster. Servers, the network, and SSH keys are deleted by the resource IDs Ankra recorded when it created them - Ankra never enumerates your project and deletes what it finds there. The only account-wide list calls are three scoped sweeps run just before the network is deleted: servers carrying this cluster's `ankra-cluster-id` label **and** attached to its network, volumes carrying that label (`--force` only), and Load Balancers attached to its network **or** carrying that label. The cluster's CSI volumes are deleted by the IDs Ankra recorded from the cluster's PersistentVolumes, once you have accepted it.
-
-Two effects reach beyond the objects Ankra created for the cluster, so they are worth knowing before you terminate:
-
-- That last filter is a union: a Load Balancer you attached to this cluster's Ankra-managed network by hand, without the `ankra-cluster-id` label, is swept along with the rest.
-- SSH keys are registered in Hetzner by fingerprint, so the same public key used on several Ankra Hetzner clusters is one Hetzner key object. Terminating any one of those clusters deletes it. Running nodes are unaffected (their `authorized_keys` are already written), and the next key sync re-registers it.
-
-Other clusters' servers, networks and volumes are not reachable by this teardown, and your Hetzner API token is never touched.
-</Note>
-
-<CliVersion since="0.19.0" command="cluster deprovision --accept-volume-data-loss" />
-
-<CodeGroup>
-
-```bash CLI
-ankra cluster deprovision <cluster>                            # names the CSI volumes and asks
-ankra cluster deprovision <cluster> --accept-volume-data-loss  # for scripts
-```
-
-```bash cURL
-curl https://platform.ankra.app/api/v1/clusters/hetzner/<cluster_id>/deprovision-volumes \
-  -H "Authorization: Bearer $ANKRA_API_TOKEN"
-
-curl -X DELETE "https://platform.ankra.app/api/v1/clusters/hetzner/<cluster_id>?accept_volume_data_loss=true" \
-  -H "Authorization: Bearer $ANKRA_API_TOKEN"
-```
-
-</CodeGroup>
-
----
-
-## GitOps Integration
-
-Hetzner clusters support optional GitOps integration with GitHub. When configured, Ankra pushes the cluster's stack state to a Git repository, enabling version-controlled infrastructure.
-
-To enable GitOps during cluster creation, provide:
-
-| Parameter | Description |
-|-----------|-------------|
-| `gitops_credential_name` | Name of a GitHub credential registered in Ankra |
-| `gitops_repository` | GitHub repository (e.g., `my-org/my-cluster-config`) |
-| `gitops_branch` | Branch to push to (default: `master`) |
-
-```bash
-curl -X POST https://platform.ankra.app/api/v1/clusters/hetzner \
-  -H "Authorization: Bearer $ANKRA_API_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "name": "my-cluster",
-    "credential_id": "<hetzner-credential-id>",
-    "ssh_key_credential_ids": ["<ssh-key-id>"],
-    "location": "fsn1",
-    "control_plane_count": 3,
-    "control_plane_server_type": "cx33",
-    "node_groups": [
-      {"name": "default", "instance_type": "cx33", "count": 2}
-    ],
-    "include_ingress": true,
-    "gitops_credential_name": "my-github-token",
-    "gitops_repository": "my-org/cluster-state",
-    "gitops_branch": "main"
-  }'
-```
-
-When GitOps is enabled, Ankra commits the hcloud stack (and ingress stack, if included) to the repository after creation.
-
----
+## Before you start
+
+- A **Hetzner Cloud API token** with read and write permissions, stored as a [Hetzner credential](/platform/credentials/hetzner). No Hetzner account yet? [Sign up for Hetzner Cloud](https://www.hetzner.com/cloud).
+- One or more **SSH key credentials** - your own public key, or one Ankra generates. See [SSH Key Credentials](/platform/credentials/ssh-key).
+- Room in your Hetzner project's limits for the servers, a network and the SSH keys. Check them in the [Hetzner Console](https://console.hetzner.cloud); Hetzner support raises them.
+
+## Create the cluster
+
+<Tabs>
+  <Tab title="Dashboard">
+    <Steps>
+      <Step title="Open the create dialog">
+        Go to **Clusters**, click **Create cluster** and pick **Hetzner** under **Ankra Managed**.
+      </Step>
+      <Step title="Credential & Region">
+        Pick the Hetzner credential (or add one inline), one or more SSH keys, and the location, for example `fsn1`, `nbg1` or `hel1`.
+      </Step>
+      <Step title="Network & Compute">
+        Keep or change the private network ranges, then pick the bastion server type, the control plane count and server type (for example `cx33`), and one or more worker node groups. The wizard shows each server type's price.
+      </Step>
+      <Step title="Kubernetes">
+        Keep **kubeadm** (the default, with Cilium) or pick **k3s**, and optionally the version. See [Choices fixed at create time](/guides/operate-ankra-managed-clusters#choices-fixed-at-create-time) for the CNI and etcd options.
+      </Step>
+      <Step title="GitOps">
+        Optionally connect a Git repository; Ankra commits the cluster's stacks to it. Two checkboxes are on by default:
+        - **Include Networking Stack** - Traefik, cert-manager and a Let's Encrypt ClusterIssuer, with Traefik behind a Hetzner Load Balancer.
+        - **Include Public DNS** - a delegated subdomain on `ankra.cc` with external-dns wired, so an ingress hostname under it gets its DNS record and TLS certificate automatically.
+      </Step>
+      <Step title="Details">
+        Name the cluster, set its environment, and click **Create cluster**. A progress view follows the network, bastion, servers, Kubernetes installation and Ankra Agent.
+      </Step>
+    </Steps>
+
+    <YouTube id="-77mTYJiSuA" title="Create a managed Kubernetes cluster on Hetzner" />
+  </Tab>
+  <Tab title="CLI">
+    <CliVersion since="0.9.0" />
+
+    ```bash
+    ankra credentials hetzner create --name my-hetzner-token   # prompts for the token
+    ankra credentials hetzner ssh-key create --name my-ssh-key --generate
+
+    ankra cluster hetzner create \
+      --name my-cluster \
+      --credential-id <hetzner-credential-id> \
+      --ssh-key-credential-ids <key-id-1>,<key-id-2> \
+      --location fsn1 \
+      --control-plane-count 1 \
+      --control-plane-server-type cx33 \
+      --worker-count 2 \
+      --worker-server-type cx33
+    ```
+
+    `ankra cluster hetzner locations` and `ankra cluster hetzner server-types --location fsn1 --available-only` list what your credential can use. `--distribution k3s`, `--etcd-topology external`, `--include-networking=false` and the `--gitops-*` flags cover the other choices.
+  </Tab>
+  <Tab title="API">
+    ```bash
+    curl -X POST https://platform.ankra.app/api/v1/clusters/hetzner \
+      -H "Authorization: Bearer $ANKRA_API_TOKEN" \
+      -H "Content-Type: application/json" \
+      -d '{
+        "name": "my-cluster",
+        "credential_id": "<hetzner-credential-id>",
+        "ssh_key_credential_ids": ["<key-id-1>", "<key-id-2>"],
+        "location": "fsn1",
+        "control_plane_count": 1,
+        "control_plane_server_type": "cx33",
+        "node_groups": [
+          {"name": "default", "instance_type": "cx33", "count": 2},
+          {"name": "gpu-workers", "instance_type": "ccx33", "count": 1, "labels": {"gpu": "true"}, "taints": [{"key": "gpu", "value": "true", "effect": "NoSchedule"}]}
+        ],
+        "include_networking": true,
+        "include_dns": true,
+        "gitops_credential_name": "my-github-token",
+        "gitops_repository": "my-org/my-repo",
+        "gitops_branch": "main"
+      }'
+    ```
+
+    The `gitops_*` fields are optional; with them, Ankra commits the hcloud stack (and the networking stack, when included) to the repository after creation. `worker_count` and `worker_server_type` are still accepted, and `node_groups` wins when both are given; the singular `ssh_key_credential_id` is merged with `ssh_key_credential_ids`. Every field and default is in the [Hetzner Reference](/reference/hetzner).
+  </Tab>
+</Tabs>
+
+## Verify
+
+1. The cluster moves from **Provisioning** to **Online** in the clusters list once the Ankra Agent has connected.
+2. Point `kubectl` at it through Ankra (this needs a [Cluster Access](/guides/cluster-access) grant) and check the nodes:
+
+   <CliVersion since="0.3.0" command="cluster kubeconfig add" />
+
+   ```bash
+   ankra cluster kubeconfig add my-cluster --use
+   kubectl get nodes
+   ```
+
+   Every control plane and worker should be `Ready`. See [Accessing Clusters with kubectl](/guides/kubeconfig).
+
+## What Ankra created in your project
+
+- **A private network** that every server joins. Nodes have private addresses only.
+- **A bastion** - the only server with a public IP. It is the SSH jump host and also the NAT gateway for all node egress, so stopping or deleting it cuts the nodes off from the internet.
+- **Control plane and worker servers**, and your SSH keys registered in the project.
+- **The hcloud stack** in the `hcloud` namespace: the Hetzner cloud controller manager (Load Balancers for `LoadBalancer` Services, node metadata) and the CSI driver (Hetzner Volumes through the `hcloud-volumes` StorageClass), both using your credential's token.
+
+The [Hetzner Reference](/reference/hetzner#architecture) has the full layout and the CCM and CSI configuration.
+
+## Hetzner specifics
+
+- **Disk growth is irreversible.** Moving a node group to a larger server type enlarges each server's disk, which Hetzner cannot shrink, so a group can never move back to a smaller type. Each node is powered off, resized and powered on, with brief downtime for its workloads. For smaller nodes, create a new group and delete the old one.
+- **Restart** is a native reboot, falling back to a power cycle when the server does not respond.
+- **SSH keys are shared by fingerprint.** Hetzner registers a public key once per project, so a key used on several Ankra Hetzner clusters is one Hetzner key object, and terminating any of those clusters deletes it. Running nodes keep working (their `authorized_keys` are already written), and the next key sync registers it again.
+- **What a terminate touches.** Servers, the network and SSH keys are deleted by the IDs Ankra recorded - Ankra never lists your project and deletes what it finds. Just before the network is deleted, three scoped sweeps run: servers carrying this cluster's `ankra-cluster-id` label **and** attached to its network, volumes carrying that label, and Load Balancers attached to its network **or** carrying that label. That last filter is a union, so a Load Balancer you attached to the cluster's network by hand is removed too. Load Balancers are deleted on every terminate, because an attached one blocks the network delete. Your Hetzner API token is never touched.
+- **Keeping a volume.** A Hetzner Volume labelled `ankra-retain` is kept when the cluster is terminated.
+
+## Operate it
+
+Day-2 tasks work the same way on every Ankra Managed provider, with the CLI name `hetzner`:
+
+- [Node groups](/guides/operate-ankra-managed-clusters#node-groups) and [legacy worker scaling](/guides/operate-ankra-managed-clusters#legacy-worker-scaling)
+- [Control plane](/guides/operate-ankra-managed-clusters#control-plane)
+- [Restart a node](/guides/operate-ankra-managed-clusters#restart-a-node) and [the bastion](/guides/operate-ankra-managed-clusters#bastion)
+- [SSH access and keys](/guides/operate-ankra-managed-clusters#ssh-access-and-keys)
+- [Upgrade Kubernetes](/guides/operate-ankra-managed-clusters#upgrade-kubernetes)
+- [Stop and start](/guides/operate-ankra-managed-clusters#stop-and-start)
+- [Terminate a cluster](/guides/operate-ankra-managed-clusters#terminate-a-cluster)
 
 ## Troubleshooting
 
-### Common Issues
-
 | Issue | Solution |
 |-------|----------|
-| Cluster stuck in provisioning | Check Hetzner API token permissions and quota |
-| Cannot scale workers | Ensure no operations are running |
-| Invalid API token | Re-validate at [Hetzner Console](https://console.hetzner.cloud) |
-| Server type unavailable | Try a different location or server type |
-| Cannot downgrade instance type | Hetzner disks cannot be shrunk. Create a new node group with the desired type and delete the old one |
-| `412: error during placement` | Hetzner capacity issue at that location. Retry later or try a different server type |
-| Node has `uninitialized` taint | The CCM removes this taint automatically after initializing the node. If it persists, check that the CCM pods are running in the `hcloud` namespace |
-| LoadBalancer service stuck in `Pending` | Verify the CCM is running: `kubectl get pods -n hcloud`. Check CCM logs for Hetzner API errors |
-| PVCs stuck in `Pending` | Verify the CSI driver is running: `kubectl get pods -n hcloud`. Check that the `hcloud-volumes` StorageClass exists |
-| CCM/CSI pods in `CrashLoopBackOff` | Check that the `hcloud-token` secret in the `hcloud` namespace contains a valid Hetzner API token: `kubectl get secret -n hcloud hcloud-token -o yaml` |
-| Ankra Agent pod `Pending` | Check node taints - the agent tolerates the `uninitialized` taint but if all nodes are unschedulable for other reasons, verify node status with `kubectl describe nodes` |
-
-### Hetzner API Quota
-
-Hetzner Cloud has default resource limits per project. If provisioning fails, check your quotas in the [Hetzner Console](https://console.hetzner.cloud):
-- Servers
-- Networks
-- SSH Keys
-
-Contact Hetzner support to increase limits if needed.
+| Cluster stuck in provisioning | Check the token's permissions and your project limits in the [Hetzner Console](https://console.hetzner.cloud) |
+| Invalid API token | Create a new read and write token and [rotate the credential](/platform/credentials/hetzner) |
+| Server type unavailable | Try another location or server type |
+| `412: error during placement` | Hetzner has no capacity for that type at that location. Retry later or pick another server type |
+| Cannot move a node group to a smaller type | Hetzner disks cannot shrink. Create a new node group and delete the old one |
+| Node keeps the `uninitialized` taint | The CCM removes it once it has initialised the node. Check that the CCM pods run: `kubectl get pods -n hcloud` |
+| `LoadBalancer` Service stuck in `Pending` | Check the CCM pods in `hcloud` and their logs for Hetzner API errors |
+| PVCs stuck in `Pending` | Check the CSI pods in `hcloud` and that the `hcloud-volumes` StorageClass exists |
+| CCM or CSI pods in `CrashLoopBackOff` | Check that the `hcloud-token` Secret in `hcloud` holds a valid token: `kubectl get secret -n hcloud hcloud-token -o yaml` |
+| Ankra Agent pod `Pending` | The agent tolerates the `uninitialized` taint; if every node is unschedulable for another reason, check `kubectl describe nodes` |

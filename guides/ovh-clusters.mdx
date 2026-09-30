@@ -1,127 +1,133 @@
 ---
 title: OVH Clusters
-description: Create, manage, and scale Kubernetes clusters on OVH Cloud with Ankra.
+description: Create a Kubernetes cluster on Public Cloud instances in your own OVHcloud project, with Ankra installing and operating Kubernetes, ingress, TLS and DNS.
 ---
 
 import { CliVersion } from "/snippets/cli-version.jsx";
 
-Ankra supports provisioning fully managed Kubernetes clusters on [OVH Cloud](https://www.ovhcloud.com/). You can create clusters with configurable control planes, workers, and networking - then scale workers up or down as needed.
+Choose OVHcloud when you want Kubernetes on Public Cloud instances in a project you own, including OVHcloud's 3-AZ regions where a cluster can be spread across three availability zones. Ankra creates the private network, managed network gateway, bastion and instances in your project, installs Kubernetes and the OpenStack cloud integration, and then operates the cluster for you - this is an **Ankra Managed** cluster. OVHcloud bills you directly for the instances.
 
----
+## Before you start
 
-## Prerequisites
+- **OVHcloud API credentials** - application key, application secret, consumer key and Public Cloud project ID - stored as an [OVH credential](/platform/credentials/ovh).
+- An **SSH key credential** - your own public key, or one Ankra generates. See [SSH Key Credentials](/platform/credentials/ssh-key).
+- Room in your project's quotas for the instances, a network and the SSH keys, and the target region enabled on the project. Check them in the [OVHcloud Control Panel](https://www.ovh.com/manager/); OVHcloud support raises quotas.
 
-Before creating an OVH cluster, you need two credentials:
+## Create the cluster
 
-<CardGroup cols={2}>
-  <Card title="OVH API Credential" icon="key">
-    OVH Cloud API credentials (application key, application secret, consumer key, and project ID). See [OVH API Credentials](/platform/credentials/ovh).
-  </Card>
-  <Card title="SSH Key Credential" icon="lock">
-    An SSH public key for server access. You can provide your own or let Ankra generate one. See [SSH Key Credentials](/platform/credentials/ssh-key).
-  </Card>
-</CardGroup>
+<Tabs>
+  <Tab title="Dashboard">
+    <Steps>
+      <Step title="Open the create dialog">
+        Go to **Clusters**, click **Create cluster** and pick **OVHcloud** under **Ankra Managed**.
+      </Step>
+      <Step title="Credential & Region">
+        Pick the OVH credential and the SSH key (or add either inline), and the region, for example Gravelines, Strasbourg, Beauharnois, Warsaw, London or Frankfurt.
+      </Step>
+      <Step title="Network & Compute">
+        Keep or change the subnet CIDR, then pick the bastion flavor, the control plane count and flavor, and the worker flavor and count, with optional autoscaling bounds and a cloud-init document for the workers. The wizard shows each flavor's vCPUs, RAM, disk and hourly price. Add more node groups once the cluster is running.
+      </Step>
+      <Step title="Kubernetes">
+        Keep **kubeadm** (the default, with Cilium) or pick **k3s**, and optionally the version. See [Choices fixed at create time](/guides/operate-ankra-managed-clusters#choices-fixed-at-create-time) for the CNI and etcd options.
+      </Step>
+      <Step title="GitOps">
+        Optionally connect a Git repository; Ankra commits the cluster's stacks to it. Two checkboxes are on by default:
+        - **Include Networking Stack** - Traefik, cert-manager and a Let's Encrypt ClusterIssuer, with Traefik behind an OVHcloud load balancer.
+        - **Include Public DNS** - a delegated subdomain on `ankra.cc` with external-dns wired, so an ingress hostname under it gets its DNS record and TLS certificate automatically.
+      </Step>
+      <Step title="Details">
+        Name the cluster, set its environment, and click **Create cluster**. A progress view follows the network, bastion, control plane and worker instances, Kubernetes installation and Ankra Agent.
+      </Step>
+    </Steps>
+  </Tab>
+  <Tab title="CLI">
+    <CliVersion since="0.9.0" />
 
----
+    ```bash
+    ankra credentials ovh create --name my-ovh-cred --project-id <project-id>   # prompts for the keys
+    ankra credentials ovh ssh-key create --name my-ssh-key --generate
 
-## Creating an OVH Cluster
+    ankra cluster ovh regions --credential-id <ovh-credential-id>
 
-### Via the Platform UI
+    ankra cluster ovh create \
+      --name my-cluster \
+      --credential-id <ovh-credential-id> \
+      --ssh-key-credential-id <ssh-key-credential-id> \
+      --region GRA7 \
+      --gateway-flavor-id c3-4 \
+      --control-plane-count 1 \
+      --control-plane-flavor-id b3-16 \
+      --worker-count 2 \
+      --worker-flavor-id b3-16
+    ```
 
-A guided wizard walks you through creating an OVH cluster - select credentials, pick a region, choose instance flavors (general purpose, CPU-optimized, or RAM-optimized), set control plane and worker counts, and launch.
+    Pass the flavors explicitly: the CLI's own flag defaults (`b2-7` for the bastion, `b2-15` for nodes) differ from the API defaults. `--distribution k3s`, `--etcd-topology external`, `--include-networking=false` and the `--gitops-*` flags cover the other choices.
+  </Tab>
+  <Tab title="API">
+    ```bash
+    curl -X POST https://platform.ankra.app/api/v1/clusters/ovh \
+      -H "Authorization: Bearer $ANKRA_API_TOKEN" \
+      -H "Content-Type: application/json" \
+      -d '{
+        "name": "my-cluster",
+        "credential_id": "<ovh-credential-id>",
+        "ssh_key_credential_id": "<ssh-key-credential-id>",
+        "region": "GRA7",
+        "control_plane_count": 1,
+        "control_plane_flavor_id": "b3-16",
+        "node_groups": [
+          {"name": "default", "instance_type": "b3-16", "count": 2}
+        ],
+        "include_networking": true,
+        "include_dns": true
+      }'
+    ```
 
-<Steps>
-  <Step title="Navigate to Clusters">
-    Go to **Clusters** in the Ankra dashboard and click **Create Cluster**.
-  </Step>
-  <Step title="Select OVH Cloud">
-    Choose **OVH Cloud** as the provider.
-  </Step>
-  <Step title="Select Credentials">
-    Pick your OVH API credential and SSH key credential from the dropdowns. You can also create new credentials directly from the wizard.
-  </Step>
-  <Step title="Choose Region">
-    Select an OVH Cloud region (e.g., Gravelines, Strasbourg, Beauharnois, Warsaw, London, Frankfurt). Each region shows the location and country.
-  </Step>
-  <Step title="Configure Nodes">
-    Set your cluster topology:
-    - **Bastion** - instance flavor for the SSH bastion (e.g., `b2-7`)
-    - **Control Plane** - count and flavor (e.g., 1x `b2-15`)
-    - **Workers** - count and flavor (e.g., 2x `b2-15`)
+    Omitted, the bastion flavor (`gateway_flavor_id`) defaults to `c3-4` and the control plane and worker flavors to `b3-16`. Every field, the region list and the flavors are in the [OVH Reference](/reference/ovh).
+  </Tab>
+</Tabs>
 
-    The wizard shows vCPUs, RAM, disk, and hourly cost for each flavor to help you choose.
-  </Step>
-  <Step title="GitOps, Networking & DNS">
-    Optionally connect a GitHub repository for GitOps-driven deployment. Two checkboxes on this step are on by default:
-    - **Include Networking Stack** - deploys Traefik, cert-manager, and a Let's Encrypt ClusterIssuer configured for OVHcloud load balancers.
-    - **Include Public DNS** - gives the cluster its own delegated subdomain on `ankra.cc` and installs external-dns with its credentials already wired, so an ingress hostname under that subdomain gets its DNS record and TLS certificate automatically.
-  </Step>
-  <Step title="Create & Track Progress">
-    Click **Create** to start provisioning. A live progress view tracks every step - network creation, bastion setup, control plane provisioning, worker provisioning, Kubernetes installation (kubeadm or k3s), and Ankra Agent setup. The cluster appears with an **offline** state until provisioning completes, then transitions to **online**.
-  </Step>
-</Steps>
+## Verify
 
-### Managing from the Dashboard
+1. The cluster moves from **Provisioning** to **Online** in the clusters list once the Ankra Agent has connected.
+2. Point `kubectl` at it through Ankra (this needs a [Cluster Access](/guides/cluster-access) grant) and check the nodes:
 
-Once your OVH cluster is online, you can manage it directly from the Ankra dashboard:
+   <CliVersion since="0.3.0" command="cluster kubeconfig add" />
 
-- **Scale workers** - go to **Cluster Settings** → **General** to scale worker nodes up or down
-- **Upgrade Kubernetes** - upgrade the Kubernetes version from cluster settings
-- **Deprovision** - delete the cluster and all OVH resources from the **Danger Zone** in cluster settings
+   ```bash
+   ankra cluster kubeconfig add my-cluster --use
+   kubectl get nodes
+   ```
 
-### Via the CLI
+   Every control plane and worker should be `Ready`. See [Accessing Clusters with kubectl](/guides/kubeconfig).
 
-<CliVersion since="0.9.0" />
+## What Ankra created in your project
 
-```bash
-# Create credentials first
-ankra credentials ovh create --name my-ovh-cred --project-id <project-id>
-# You will be prompted for application key, application secret, and consumer key
+- **A private network** - a vRack VLAN with a DHCP subnet. Nodes have private addresses only.
+- **A managed network gateway** (`<cluster>-network-gw`) attached to the subnet. It is the nodes' default route and NAT: all node egress leaves through it.
+- **A bastion** (`<cluster>-bastion`) - the only instance with a public IP. It is an SSH jump host, not a router: Ankra reaches the nodes through it to provision, upgrade and reconcile, and you can use it for `ssh -J`. Clusters created before the bastion rename carry the instance name `<cluster>-gateway` for the same component.
+- **Control plane and worker instances**, and your SSH key on every instance.
+- **The OpenStack cloud controller manager and Cinder CSI driver**, for `LoadBalancer` Services and persistent volumes.
 
-ankra credentials ovh ssh-key create --name my-ssh-key --generate
+Because no workload traffic depends on the bastion, workloads keep running while it is unavailable, but Ankra cannot provision, scale, upgrade or reconcile the cluster until it is back, and the dashboard can show the cluster as degraded meanwhile. The [OVH Reference](/reference/ovh#architecture) has the diagram.
 
-# Create the cluster
-ankra cluster ovh create \
-  --name my-cluster \
-  --credential-id <ovh-credential-id> \
-  --ssh-key-credential-id <ssh-key-credential-id> \
-  --region GRA7 \
-  --control-plane-count 1 \
-  --control-plane-flavor-id b2-15 \
-  --worker-count 2 \
-  --worker-flavor-id b2-15
-```
+## OVHcloud specifics
 
-### Via the API
+- **Flavor changes go one way.** A node group moves to a larger flavor only; each node is powered off, resized and powered on, with brief downtime for its workloads. For smaller nodes, create a new group and delete the old one.
+- **Labels and taints at add time.** `ankra cluster ovh node-group add` also takes `--labels` and `--taints`, so a group can be created with them in one step.
+- **First-boot scripts.** A node group can carry a cloud-init document, applied at first boot on every instance the group ever creates, including replacements - see [Node Group Cloud-init User Data](/guides/node-group-user-data).
+- **Restart** is a soft reboot through the OVHcloud API, falling back to a hard reboot when the guest OS does not respond. An instance that is `SHUTOFF` is started instead. `ankra cluster ovh nodes list` shows each node's live `provider_status` and `provider_power_state`, which helps spot a crashed or powered-off instance first.
+- **Access.** `ankra cluster ovh access-info <cluster>` prints the bastion and control plane IPs with ready-to-paste `ssh -J` and Kubernetes API port-forward commands.
+- **Stop.** A stop releases the node instances, the bastion and the managed network gateway. The private network is kept and reused on the next start, and the Cinder volumes are kept and billed while the cluster is stopped.
+- **Terminate** deletes the instances, networks and SSH keys; the dialog and `ankra cluster deprovision` list the Cinder volumes the teardown deletes.
 
-```bash
-curl -X POST https://platform.ankra.app/api/v1/clusters/ovh \
-  -H "Authorization: Bearer $ANKRA_API_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "name": "my-cluster",
-    "credential_id": "<ovh-credential-id>",
-    "ssh_key_credential_id": "<ssh-key-credential-id>",
-    "region": "GRA7",
-    "control_plane_count": 1,
-    "control_plane_flavor_id": "b2-15",
-    "worker_count": 2,
-    "worker_flavor_id": "b2-15",
-    "distribution": "k3s"
-  }'
-```
-
-Every configuration parameter, the region list, and instance flavors are in the [OVH Reference](/reference/ovh).
-
----
-
-## Availability Zones
+### Availability Zones
 
 Some OVH regions are *3-AZ*: one region spanning three availability zones with independent power, cooling, and networking. `EU-WEST-PAR` holds `eu-west-par-a`, `eu-west-par-b` and `eu-west-par-c`, and `EU-SOUTH-MIL` holds the equivalent three. Every other region is a single failure domain, so check before you plan around zones.
 
 Two rules come from OVH and shape everything below. An instance's zone is chosen at creation, and a request that names no zone gets whichever zone OVH picks - in practice the same one for every node of a cluster. And an instance's zone is fixed for its lifetime, so re-placing a node means replacing it.
 
-### Find the zones a region has
+#### Find the zones a region has
 
 Zone names are region-scoped, so check the spelling before you use one. Only a region whose type is `region-3-az` accepts zone placement.
 
@@ -137,7 +143,7 @@ Regions available to credential <ovh-credential-id>:
   GRA              region
 ```
 
-### Spread a new cluster across zones
+#### Spread a new cluster across zones
 
 Pass the zone pool at create. Ankra distributes instances across it deterministically: control planes and etcd spread per role, workers spread per node group, so a three-node database group gets one node in each zone rather than being balanced against unrelated workers.
 
@@ -151,9 +157,9 @@ ankra cluster ovh create \
   --region EU-WEST-PAR \
   --availability-zones eu-west-par-a,eu-west-par-b,eu-west-par-c \
   --control-plane-count 3 \
-  --control-plane-flavor-id b2-15 \
+  --control-plane-flavor-id b3-16 \
   --worker-count 3 \
-  --worker-flavor-id b2-15
+  --worker-flavor-id b3-16
 ```
 
 ```bash cURL
@@ -167,10 +173,10 @@ curl -X POST https://platform.ankra.app/api/v1/clusters/ovh \
     "region": "EU-WEST-PAR",
     "availability_zones": ["eu-west-par-a", "eu-west-par-b", "eu-west-par-c"],
     "control_plane_count": 3,
-    "control_plane_flavor_id": "b2-15",
-    "worker_count": 3,
-    "worker_flavor_id": "b2-15",
-    "distribution": "k3s"
+    "control_plane_flavor_id": "b3-16",
+    "node_groups": [
+      {"name": "default", "instance_type": "b3-16", "count": 3}
+    ]
   }'
 ```
 
@@ -180,14 +186,14 @@ curl -X POST https://platform.ankra.app/api/v1/clusters/ovh \
 Spreading across more than one zone requires **at least 3 control planes**. Fewer cannot keep etcd quorum through the loss of a zone, which is the only reason to spread a control plane, so the create is refused rather than quietly producing a cluster that fails on the first zone outage.
 </Warning>
 
-Omitting the zones leaves placement to OVH and changes nothing about how clusters behaved before. Clusters in single-zone regions are unaffected by everything on this page.
+Omitting the zones leaves placement to OVH and changes nothing about how clusters behaved before. Clusters in single-zone regions are unaffected by everything in this section.
 
-### Pin a node group to one zone
+#### Pin a node group to one zone
 
 A node group can be pinned to a single zone instead of spreading. Pin the group that runs zonal storage, because an OVH volume cannot attach from another zone.
 
 ```bash
-ankra cluster ovh node-group add <cluster-id> \
+ankra cluster node-group add <cluster> \
   --name database-par-a \
   --instance-type r3-128 \
   --count 1 \
@@ -198,34 +204,25 @@ Day-2 growth follows the cluster's stored zone pool: node group add, node group 
 
 Spreading is per group, so a group with fewer nodes than the pool has zones cannot cover every zone. A new group added without a pin takes the zone with the fewest instances cluster-wide for each of its nodes, and a one-node group therefore lands wherever the cluster is thinnest, which is not necessarily the zone its name suggests: two groups called `general-par-a` and `general-par-b`, added without `--availability-zone` to a cluster whose `eu-west-par-c` held only one control plane, both went to `eu-west-par-c`. A group whose name promises a zone needs the pin.
 
-`ankra cluster node-group list` ends each line with `az=` and the zones the group's nodes were placed into (`availability_zones` on the node-group listing API), so a group that has collapsed into one zone is visible in a single call rather than one `ovh nodes get` per node.
+`ankra cluster node-group list` ends each line with `az=` and the zones the group's nodes were placed into (`availability_zones` on the node-group listing API), so a group that has collapsed into one zone is visible in a single call.
 
-### Node topology labels
+#### Node topology labels
 
-Every OVH node carries the standard Kubernetes topology pair, so zone-aware scheduling works without extra configuration:
-
-| Label | Value |
-|-------|-------|
-| `topology.kubernetes.io/zone` | the zone OVH reports for the instance |
-| `topology.kubernetes.io/region` | the cluster's region |
-
-The zone comes from what OVH reports for the live instance rather than what was requested, so it is correct even on clusters created before zone placement existed.
-
-On those older clusters Ankra records the zone automatically the next time it reads the instance, but the labels are written by a server sync. Trigger one rather than waiting for it:
+Every OVH node carries `topology.kubernetes.io/zone` (the zone OVH reports for the instance) and `topology.kubernetes.io/region` (the cluster's region), so zone-aware scheduling works without extra configuration. The zone comes from what OVH reports for the live instance rather than what was requested, so it is correct even on clusters created before zone placement existed. On those older clusters Ankra records the zone the next time it reads the instance, but the labels are written by a server sync; trigger one rather than waiting:
 
 ```bash
-ankra cluster reconcile <cluster-id>
+ankra cluster reconcile <cluster>
 kubectl get nodes -L topology.kubernetes.io/zone
 ```
 
-### Fixing a cluster that is already in one zone
+#### Fixing a cluster that is already in one zone
 
 - **Workers - in place.** Add a node group pinned to the target zone, drain the old group, then delete it. No cluster rebuild.
-- **Control planes - not in place.** The zone is immutable, Ankra never re-places an existing control plane, and a control plane count change is stopped-cluster-only. A zone-spread control plane on an existing cluster means recreating the cluster.
+- **Control planes - not in place.** The zone is immutable and Ankra never re-places an existing control plane, so a zone-spread control plane on an existing cluster means recreating the cluster.
 
 A cluster created before zone placement existed has no stored zone pool, so a node group added to it without a zone still lands wherever OVH picks. Pin each group explicitly: three zones means three pinned node groups.
 
-### Zone tolerance needs more than node spread
+#### Zone tolerance needs more than node spread
 
 **OVH High Speed block storage is zonal.** It is triple-replicated *within* a single zone and cannot attach from another. A single database pod with a single PersistentVolume is therefore **not** zone-fault-tolerant however the nodes are spread: the volume is the single-zone dependency, and if its zone goes down the pod cannot start anywhere else.
 
@@ -249,577 +246,26 @@ Node spread is necessary but never sufficient.
 Until the gate can be re-enabled per region, pin each stateful replica to a node group in one zone, so its pod can only ever be scheduled where its volume already is.
 </Warning>
 
----
-
-## Node Groups
-
-Node groups let you organize worker nodes into logical groups with independent instance flavors, counts, labels, and taints. Each group can be scaled, re-flavored, and configured independently.
-
-### Via the Platform UI
-
-Navigate to cluster **Settings** > **Nodes** to manage node groups. From this tab you can:
-
-- View all node groups with their instance flavor, count, labels, and taints
-- Add new node groups with a name, instance flavor, count, and optional labels/taints
-- Scale individual groups up or down (0–100 nodes)
-- Upgrade the instance flavor (upgrade only - see [Instance Flavor Changes](#instance-flavor-changes))
-- Edit labels and taints per group
-- Delete a node group and all its nodes
-
-### List Node Groups
-
-<CodeGroup>
-
-```bash CLI
-ankra cluster ovh node-group list <cluster_id>
-```
-
-```bash cURL
-curl https://platform.ankra.app/api/v1/clusters/ovh/<cluster_id>/node-groups \
-  -H "Authorization: Bearer $ANKRA_API_TOKEN"
-```
-
-</CodeGroup>
-
-Response:
-```json
-{
-  "node_groups": [
-    {
-      "name": "default",
-      "instance_type": "b2-15",
-      "count": 2,
-      "min": 0,
-      "max": 100,
-      "labels": {},
-      "taints": []
-    }
-  ]
-}
-```
-
-### Add a Node Group
-
-From the CLI, a node group can be created with its Kubernetes labels and taints in one step:
-
-<CodeGroup>
-
-```bash CLI
-ankra cluster ovh node-group add <cluster_id> \
-  --name gpu-workers \
-  --instance-type b2-30 \
-  --count 2 \
-  --labels workload=gpu \
-  --taints dedicated=gpu:NoSchedule
-```
-
-```bash cURL
-curl -X POST https://platform.ankra.app/api/v1/clusters/ovh/<cluster_id>/node-groups \
-  -H "Authorization: Bearer $ANKRA_API_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "name": "gpu-workers",
-    "instance_type": "b2-30",
-    "count": 2,
-    "labels": {"workload": "gpu"},
-    "taints": [{"key": "dedicated", "value": "gpu", "effect": "NoSchedule"}]
-  }'
-```
-
-</CodeGroup>
-
-A group can also carry a cloud-init document, applied verbatim at first boot on every instance the group ever creates, including replacements. Use it for anything that must survive node replacement, such as carving a partition for LUKS before the root filesystem is grown. See [Node Group Cloud-init User Data](/guides/node-group-user-data).
-
-### Scale a Node Group
-
-<CodeGroup>
-
-```bash CLI
-ankra cluster ovh node-group scale <cluster_id> default 4
-```
-
-```bash cURL
-curl -X PUT https://platform.ankra.app/api/v1/clusters/ovh/<cluster_id>/node-groups/default/scale \
-  -H "Authorization: Bearer $ANKRA_API_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"count": 4}'
-```
-
-</CodeGroup>
-
-Node groups can be scaled to 0 nodes. This keeps the group definition but removes all instances.
-
-### Instance Flavor Changes
-
-<Warning>
-Instance flavor upgrades are one-way - you cannot downgrade a node group to a smaller flavor. To use a smaller flavor, create a new node group with the desired flavor and delete the old one.
-</Warning>
-
-<CodeGroup>
-
-```bash CLI
-ankra cluster ovh node-group upgrade <cluster_id> default b2-30
-```
-
-```bash cURL
-curl -X PUT https://platform.ankra.app/api/v1/clusters/ovh/<cluster_id>/node-groups/default/instance-type \
-  -H "Authorization: Bearer $ANKRA_API_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"instance_type": "b2-30"}'
-```
-
-</CodeGroup>
-
-Each node is powered off, resized, and powered back on. This causes brief downtime for workloads on those nodes.
-
-### Update Labels and Taints
-
-<CodeGroup>
-
-```bash CLI
-ankra cluster ovh node-group labels <cluster_id> default --labels env=production,tier=backend
-ankra cluster ovh node-group taints <cluster_id> default --taints dedicated=ml:NoSchedule
-```
-
-```bash cURL
-curl -X PUT https://platform.ankra.app/api/v1/clusters/ovh/<cluster_id>/node-groups/default/labels \
-  -H "Authorization: Bearer $ANKRA_API_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"labels": {"env": "production", "tier": "backend"}}'
-
-curl -X PUT https://platform.ankra.app/api/v1/clusters/ovh/<cluster_id>/node-groups/default/taints \
-  -H "Authorization: Bearer $ANKRA_API_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"taints": [{"key": "dedicated", "value": "ml", "effect": "NoSchedule"}]}'
-```
-
-</CodeGroup>
-
-Labels and taints are applied to every node in the group; passing `--clear` (or an empty value via the API) removes them, and a taint effect defaults to `NoSchedule`.
-
-### Delete a Node Group
-
-<CodeGroup>
-
-```bash CLI
-ankra cluster ovh node-group delete <cluster_id> gpu-workers
-```
-
-```bash cURL
-curl -X DELETE https://platform.ankra.app/api/v1/clusters/ovh/<cluster_id>/node-groups/gpu-workers \
-  -H "Authorization: Bearer $ANKRA_API_TOKEN"
-```
-
-</CodeGroup>
-
-<Warning>
-Deleting a node group removes all its instances. Workloads running on those nodes will be evicted.
-</Warning>
-
-### Node Group API Reference
-
-All node-group operations are also available via the REST API - see the [OVH Node Group API](/reference/ovh#node-group-api-reference).
-
----
-
-## Legacy Worker Scaling
-
-The legacy `scale-workers` and `worker-count` endpoints still work for backward compatibility.
-
-<CodeGroup>
-
-```bash CLI
-ankra cluster ovh workers <cluster_id>
-ankra cluster ovh scale <cluster_id> 4
-```
-
-```bash cURL
-curl https://platform.ankra.app/api/v1/clusters/ovh/<cluster_id>/worker-count \
-  -H "Authorization: Bearer $ANKRA_API_TOKEN"
-
-curl -X POST https://platform.ankra.app/api/v1/clusters/ovh/<cluster_id>/scale-workers \
-  -H "Authorization: Bearer $ANKRA_API_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"worker_count": 4}'
-```
-
-</CodeGroup>
-
-<Note>
-For new clusters, prefer using [Node Groups](#node-groups) for more granular control.
-</Note>
-
----
-
-## Upgrading Kubernetes Version
-
-You can upgrade the Kubernetes version (kubeadm or k3s) on all nodes in an OVH cluster. Upgrades are applied to control plane nodes first, then workers.
-
-<Warning>
-- Both kubeadm and k3s clusters can be upgraded; list targets with `ankra cluster kubeadm-versions` or `ankra cluster k3s-versions`.
-- Downgrades are not supported - k3s downgrades require an etcd snapshot restore.
-- You can only upgrade one minor version at a time (e.g., v1.33.x to v1.34.x, not v1.33.x to v1.35.x).
-- The cluster must be online with no active operations.
-</Warning>
-
-### Via the Dashboard
-
-Go to your cluster → **Settings** → **General** to see the current Kubernetes version and trigger an upgrade.
-
-### Check Current Version
-
-<CodeGroup>
-
-```bash CLI
-ankra cluster ovh k8s-version <cluster_id>
-```
-
-```bash cURL
-curl https://platform.ankra.app/api/v1/clusters/ovh/<cluster_id>/k8s-version \
-  -H "Authorization: Bearer $ANKRA_API_TOKEN"
-```
-
-</CodeGroup>
-
-Response:
-```json
-{
-  "current_version": "v1.34.4+k3s1",
-  "distribution": "k3s"
-}
-```
-
-### Upgrade Version
-
-<CodeGroup>
-
-```bash CLI
-ankra cluster ovh upgrade <cluster_id> v1.35.1+k3s1
-```
-
-```bash cURL
-curl -X POST https://platform.ankra.app/api/v1/clusters/ovh/<cluster_id>/upgrade-k8s-version \
-  -H "Authorization: Bearer $ANKRA_API_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"target_version": "v1.35.1+k3s1"}'
-```
-
-</CodeGroup>
-
-Response:
-```json
-{
-  "previous_version": "v1.34.4+k3s1",
-  "new_version": "v1.35.1+k3s1",
-  "nodes_affected": 3
-}
-```
-
----
-
-## Stopping and Starting a Cluster
-
-You can stop an OVH cluster to release its compute (node instances, the bastion, and the managed network gateway) while keeping its configuration, networking definition, and SSH keys. Starting the cluster re-provisions the compute and reconciles it back to a running state. This is useful for pausing non-production clusters to save cost.
-
-When starting, use `--scope control_plane` to bring up only the control plane first (for example to inspect or repair it), or `--scope all` (the default) to provision the whole cluster.
-
-<CliVersion since="0.11.0" command="cluster ovh stop --force" />
-
-<CodeGroup>
-
-```bash CLI
-ankra cluster ovh stop <cluster_id>
-ankra cluster ovh stop <cluster_id> --force                # also delete load balancers; volumes are kept
-ankra cluster ovh start <cluster_id>                       # scope defaults to "all"
-ankra cluster ovh start <cluster_id> --scope control_plane # control plane only
-```
-
-```bash cURL
-curl -X POST https://platform.ankra.app/api/v1/clusters/ovh/<cluster_id>/stop \
-  -H "Authorization: Bearer $ANKRA_API_TOKEN"
-
-curl -X POST "https://platform.ankra.app/api/v1/clusters/ovh/<cluster_id>/start?scope=all" \
-  -H "Authorization: Bearer $ANKRA_API_TOKEN"
-```
-
-</CodeGroup>
-
-<Note>
-Stop and start are background operations. A start returns `409` if a stop or terminate operation is still running. The private network is preserved while stopped and reused on the next start.
-</Note>
-
-A stop keeps the Cinder volumes your workloads provisioned through the CSI driver, and OVH bills them while the cluster is parked. That holds for a forced stop too: `--force` (or `?force=true` on the API) cancels in-flight operations, tolerates unreachable infrastructure and deletes the load balancers the cluster created, but never its volumes: a stop is reversible, so the data on them is kept for the next start. Deprovisioning deletes them once you accept it - see [persistent volumes](/platform/cluster-settings#persistent-volumes).
-
----
-
-## SSH Access and Keys
-
-`ankra cluster ovh access-info` prints the bastion and control plane IPs along with ready-to-paste `ssh -J` jump and Kubernetes API port-forward commands, so you can reach nodes behind the bastion without looking up IPs by hand.
-
-<CodeGroup>
-
-```bash CLI
-ankra cluster ovh access-info <cluster_id>
-```
-
-```bash cURL
-curl https://platform.ankra.app/api/v1/clusters/ovh/<cluster_id>/access-info \
-  -H "Authorization: Bearer $ANKRA_API_TOKEN"
-```
-
-</CodeGroup>
-
-You can also view and replace the SSH key credentials attached to a cluster. Replacing the keys applies on the next reconciliation.
-
-<CodeGroup>
-
-```bash CLI
-ankra cluster ovh ssh-keys get <cluster_id>
-ankra cluster ovh ssh-keys set <cluster_id> --ssh-key-credential-ids <id>,<id>
-```
-
-```bash cURL
-curl https://platform.ankra.app/api/v1/clusters/ovh/<cluster_id>/ssh-keys \
-  -H "Authorization: Bearer $ANKRA_API_TOKEN"
-
-curl -X PUT https://platform.ankra.app/api/v1/clusters/ovh/<cluster_id>/ssh-keys \
-  -H "Authorization: Bearer $ANKRA_API_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"ssh_key_credential_ids": ["<ssh-key-credential-id>"]}'
-```
-
-</CodeGroup>
-
----
-
-## Managing the Control Plane
-
-Inspect the control plane configuration, then change the node count or instance flavor. OVH control planes support a count of `1` or `3`.
-
-<CodeGroup>
-
-```bash CLI
-ankra cluster ovh control-plane get <cluster_id>
-ankra cluster ovh control-plane set-count <cluster_id> 3
-ankra cluster ovh control-plane set-instance-type <cluster_id> b2-15
-```
-
-```bash cURL
-curl https://platform.ankra.app/api/v1/clusters/ovh/<cluster_id>/control-plane \
-  -H "Authorization: Bearer $ANKRA_API_TOKEN"
-
-curl -X PUT https://platform.ankra.app/api/v1/clusters/ovh/<cluster_id>/control-plane \
-  -H "Authorization: Bearer $ANKRA_API_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"count": 3}'
-
-curl -X PUT https://platform.ankra.app/api/v1/clusters/ovh/<cluster_id>/control-plane/instance-type \
-  -H "Authorization: Bearer $ANKRA_API_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"instance_type": "b2-15"}'
-```
-
-</CodeGroup>
-
-<Warning>
-Control plane changes require the cluster to be **stopped** first. Changing the count or instance type on a running cluster returns `409` with "The cluster must be stopped" - stop it, apply the change, then start it again.
-</Warning>
-
----
-
-## Inspecting Nodes
-
-List every node in the cluster or fetch the details of a single node by ID. The list includes each node's live status as last reported by the OVH API (`provider_status` / `provider_power_state`) - useful for spotting a crashed or unexpectedly powered-off instance before you restart it.
-
-<CodeGroup>
-
-```bash CLI
-ankra cluster ovh nodes list <cluster_id>
-ankra cluster ovh nodes get <cluster_id> <node_id>
-```
-
-```bash cURL
-curl https://platform.ankra.app/api/v1/clusters/ovh/<cluster_id>/nodes \
-  -H "Authorization: Bearer $ANKRA_API_TOKEN"
-
-curl https://platform.ankra.app/api/v1/clusters/ovh/<cluster_id>/nodes/<node_id> \
-  -H "Authorization: Bearer $ANKRA_API_TOKEN"
-```
-
-</CodeGroup>
-
----
-
-## Restarting a Node
-
-Restart any individual node - a control plane node, a worker, or the bastion/gateway - without waiting for a full reconciliation. Ankra schedules the restart as a tracked operation via the OVH API: a running instance gets a soft reboot (falling back to a hard reboot if the guest OS doesn't respond), and a `SHUTOFF` instance is started instead.
-
-### Via the Platform UI
-
-Open cluster **Settings** > **Nodes**, find the node in the table, and choose **Restart** from its row menu. Confirm the dialog to schedule the restart.
-
-### Via the CLI or API
-
-Find the node's ID with `nodes list`, then restart it:
-
-<CodeGroup>
-
-```bash CLI
-ankra cluster ovh nodes list <cluster_id>
-ankra cluster ovh nodes restart <cluster_id> <node_id>
-```
-
-```bash cURL
-curl -X POST https://platform.ankra.app/api/v1/clusters/ovh/<cluster_id>/nodes/<node_id>/restart \
-  -H "Authorization: Bearer $ANKRA_API_TOKEN"
-```
-
-</CodeGroup>
-
-Response:
-```json
-{
-  "operation_id": "9f2b1e3a-...",
-  "node_id": "<node_id>",
-  "job_name": "ovh_restart_server"
-}
-```
-
-<Note>
-The node must be in the `up` state with no restart already in flight. Track the restart with the returned `operation_id` via `ankra cluster operations list <operation_id>` or the [CLI reference](/reference/cli/cluster#ankra-cluster-operations-list). Workloads on the node are briefly unavailable while it reboots.
-</Note>
-
-You can also ask the Ankra AI assistant to do this in chat or Slack - for example, "restart the bastion on my-cluster" or "restart worker-2".
-
----
-
-## Resizing the Bastion or Gateway
-
-Change the bastion/gateway's instance flavor without recreating the cluster. Ankra powers it off, resizes it, and powers it back on - causing a brief SSH and outbound-NAT interruption.
-
-<CodeGroup>
-
-```bash CLI
-ankra cluster ovh bastion resize <cluster_id> b2-15
-```
-
-```bash cURL
-curl -X PUT https://platform.ankra.app/api/v1/clusters/ovh/<cluster_id>/bastion/instance-type \
-  -H "Authorization: Bearer $ANKRA_API_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"instance_type": "b2-15"}'
-```
-
-</CodeGroup>
-
-<Note>
-Like node-group writes, this endpoint answers `202 Accepted` and applies the resize in the background unless you pass `--wait` (CLI) or `?wait=true` (API).
-</Note>
-
----
-
-## Deprovisioning
-
-Deprovisioning deletes all OVH resources (instances, networks, SSH keys) and removes the cluster from Ankra.
-
-<Warning>
-This action is irreversible. All data on the cluster will be permanently deleted.
-</Warning>
-
-### Via the Dashboard
-
-Go to your cluster → **Settings** → **General** → **Danger Zone** and click **Terminate**. The dialog lists the Cinder volumes the deprovision deletes and asks you to accept that before it begins.
-
-### Via CLI or API
-
-<CliVersion since="0.19.0" command="cluster deprovision --accept-volume-data-loss" />
-
-<CodeGroup>
-
-```bash CLI
-ankra cluster deprovision <cluster>                                    # names the Cinder volumes and asks
-ankra cluster deprovision <cluster> --accept-volume-data-loss --force  # for scripts; --force also deletes load balancers
-```
-
-```bash cURL
-curl https://platform.ankra.app/api/v1/clusters/ovh/<cluster_id>/deprovision-volumes \
-  -H "Authorization: Bearer $ANKRA_API_TOKEN"
-
-curl -X DELETE "https://platform.ankra.app/api/v1/clusters/ovh/<cluster_id>?accept_volume_data_loss=true&force=true" \
-  -H "Authorization: Bearer $ANKRA_API_TOKEN"
-```
-
-</CodeGroup>
-
-The Cinder volumes your workloads provisioned through the CSI driver are deleted with the cluster, and the data on them, only once you accept it; without `?accept_volume_data_loss=true` the API answers `409` naming them, forced or not - see [persistent volumes](/platform/cluster-settings#persistent-volumes). `--force` deletes the load balancers too, tolerates unreachable cluster infrastructure, and works on a cluster that was stopped earlier: the volumes recorded at stop time are still known.
-
----
-
-## Architecture
-
-An OVH cluster provisions the following infrastructure:
-
-| Component | Description |
-|-----------|-------------|
-| **Private Network** | Isolated vRack VLAN with a DHCP subnet for inter-node communication |
-| **Managed Network Gateway** | OVH-managed gateway attached to the subnet - the default route and NAT for all node egress |
-| **Bastion** | Small instance holding the cluster's only public IP - the SSH jump host Ankra uses to provision and manage nodes |
-| **Control Plane(s)** | Kubernetes control plane instances (private IPs only) |
-| **Worker(s)** | Kubernetes worker instances for running workloads (private IPs only) |
-| **SSH Keys** | Deployed to all instances for access |
-
-```mermaid
-flowchart TB
-    Internet((Internet))
-    Platform[Ankra Platform]
-
-    subgraph Network [OVH private network - vRack VLAN]
-        Bastion[Bastion<br/>public + private IP]
-        CP[Control plane nodes<br/>private IP only]
-        Workers[Worker nodes<br/>private IP only]
-        Agent[Ankra Agent<br/>runs in the cluster]
-    end
-
-    MGW[OVH managed network gateway<br/>default route + NAT]
-
-    Platform -->|SSH to public IP| Bastion
-    Bastion -->|SSH jump| CP
-    Bastion -->|SSH jump| Workers
-    Agent -->|outbound only - NATS| Platform
-    CP -->|egress| MGW
-    Workers -->|egress| MGW
-    MGW --> Internet
-```
-
-All nodes are deployed within a private OVH network and have no public IPs. Two different components share the word "gateway", so it helps to keep them apart:
-
-- The **managed network gateway** (created alongside the private network, named `<cluster>-network-gw`) is the actual router: every node's default route points at it, and all outbound traffic to the internet leaves through it.
-- The **bastion** (named `<cluster>-bastion`) is an SSH jump host, not a router. No workload or egress traffic flows through it. Ankra connects to its public IP to provision nodes, install Kubernetes, apply upgrades, and run reconciliation, and you can use it for `ssh -J` access to the nodes.
-
-<Note>
-Clusters created before the bastion rename carry the instance name `<cluster>-gateway` in OVH instead of `<cluster>-bastion`. It is the same component with the same role; existing clusters keep their original instance name.
-</Note>
-
-Because the data plane does not depend on the bastion, workloads keep running if it is briefly unavailable - but Ankra cannot provision, scale, upgrade, or reconcile the cluster until it is back, and the cluster can appear degraded in the dashboard while reads fail.
-
----
+## Operate it
+
+Day-2 tasks work the same way on every Ankra Managed provider, with the CLI name `ovh`:
+
+- [Node groups](/guides/operate-ankra-managed-clusters#node-groups) and [legacy worker scaling](/guides/operate-ankra-managed-clusters#legacy-worker-scaling)
+- [Control plane](/guides/operate-ankra-managed-clusters#control-plane)
+- [Restart a node](/guides/operate-ankra-managed-clusters#restart-a-node) and [the bastion](/guides/operate-ankra-managed-clusters#bastion)
+- [SSH access and keys](/guides/operate-ankra-managed-clusters#ssh-access-and-keys)
+- [Upgrade Kubernetes](/guides/operate-ankra-managed-clusters#upgrade-kubernetes)
+- [Stop and start](/guides/operate-ankra-managed-clusters#stop-and-start)
+- [Terminate a cluster](/guides/operate-ankra-managed-clusters#terminate-a-cluster)
 
 ## Troubleshooting
 
-### Common Issues
-
 | Issue | Solution |
 |-------|----------|
-| Cluster stuck in provisioning | Check OVH API credentials and project quota |
-| Cannot scale workers | Ensure cluster is online and no operations are running |
-| Invalid API credentials | Re-validate at [OVH API Console](https://api.ovh.com/console/) |
-| Flavor unavailable | Try a different region or flavor |
-
-### OVH Cloud Quotas
-
-OVH Cloud has default resource limits per project. If provisioning fails, check your quotas in the [OVH Control Panel](https://www.ovh.com/manager/):
-- Instances
-- Networks / VLANs
-- SSH Keys
-
-Contact OVH support to increase limits if needed.
+| Cluster stuck in provisioning | Check the OVH API credentials and the project's quotas (instances, networks and VLANs, SSH keys) in the [OVHcloud Control Panel](https://www.ovh.com/manager/) |
+| Network setup fails during the reconcile | The region is not enabled on the project's private network. List the regions the credential can deploy in with `ankra cluster ovh regions` |
+| Invalid API credentials | Re-validate them at the [OVH API Console](https://api.ovh.com/console/) |
+| Flavor unavailable | Try another region or flavor |
+| Cannot scale workers | Ensure the cluster is online and no operation is running |
+| A node group's nodes all landed in one zone | Pin the group with `--availability-zone`; see [Pin a node group to one zone](#pin-a-node-group-to-one-zone) |
+| Volume creation fails with `Availability zone '...' is invalid` | See the warning under [Zone tolerance needs more than node spread](#zone-tolerance-needs-more-than-node-spread) |

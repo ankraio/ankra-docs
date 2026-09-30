@@ -1,175 +1,150 @@
 ---
 title: Proxmox VE Clusters
-description: Create, manage, and scale Kubernetes clusters on your own Proxmox VE infrastructure with Ankra.
+description: Create a Kubernetes cluster on virtual machines in your own Proxmox VE datacenter, with Ankra installing and operating Kubernetes, ingress, TLS and DNS.
 ---
 
 import { CliVersion } from "/snippets/cli-version.jsx";
 
-Ankra supports provisioning fully managed Kubernetes clusters on [Proxmox VE](https://www.proxmox.com/en/proxmox-virtual-environment). You bring your own Proxmox nodes and can use existing storage and network bridges. Ankra fills in safe defaults when they are absent, creates the VMs, installs Kubernetes, and manages the full cluster lifecycle: node groups, scaling, upgrades, and deprovisioning.
+Choose Proxmox VE when the cluster has to run on hardware you already own, on-premises or on dedicated servers. You bring the Proxmox nodes, storage and bridges; Ankra fills in safe defaults where they are missing, creates the VMs, installs Kubernetes, and then operates the cluster for you - this is an **Ankra Managed** cluster. There is no cloud bill: [Cloud Cost](/platform/cloud-cost#private-capacity-rate-cards) prices the cluster from a rate card on its Proxmox credential, which starts with Ankra's default rates.
 
----
+## Before you start
 
-## Prerequisites
+- A **Proxmox VE API credential**: the API URL and an API token with VM management privileges. If Ankra needs to initialise storage or networking, the token also needs `Datastore.Allocate`, `Sys.Modify` and `SDN.Use`. See [Proxmox VE Credentials](/platform/credentials/proxmox).
+- An **SSH key credential** for VM access - your own public key, or one Ankra generates. A Proxmox cluster takes a single key. See [SSH Key Credentials](/platform/credentials/ssh-key).
+- **A cloud-init VM template.** If a node has none, Ankra creates one during credential setup: it downloads the Ubuntu 24.04 cloud image and registers it as the `ankra-ubuntu-24-04` template. You can bring your own and pin it with `template` - see [Creating a cloud-init template](#creating-a-cloud-init-template).
+- **A network bridge.** Use an existing active Linux bridge, or let Ankra convert the single active management Ethernet or bond interface (static or `manual` method) to `vmbr0`. Ankra also creates a private NAT network `ankra` (10.20.0.0/16) through Proxmox SDN - see [Networking](#networking).
+- **The `dnsmasq` package** on each node for the private network's DHCP (`apt install dnsmasq && systemctl disable --now dnsmasq`), and `source /etc/network/interfaces.d/*` in `/etc/network/interfaces` (present by default on standard installs).
+- **Free local disk or existing VM storage.** If no active storage supports VM images, Ankra enables `images` and `rootdir` on the `local` directory storage, or creates it at `/var/lib/vz`. The `import` content type is enabled on `local` for cloud-image downloads.
+- **API reachability.** The Proxmox API must use HTTPS and be reachable from Ankra, directly or through an [SSH jumphost](#hybrid-connectivity-ssh-jumphost).
 
-Before creating a Proxmox VE cluster, you need two credentials:
+### Hybrid connectivity (SSH jumphost)
 
-<CardGroup cols={2}>
-  <Card title="Proxmox VE API Credential" icon="key">
-    The Proxmox API URL and an API token with VM management privileges. If Ankra needs to initialize storage or networking, the token also needs `Datastore.Allocate`, `Sys.Modify`, and `SDN.Use`. See [Proxmox VE Credentials](/platform/credentials/proxmox).
-  </Card>
-  <Card title="SSH Key Credential" icon="lock">
-    An SSH public key for VM access. You can provide your own or let Ankra generate one. See [SSH Key Credentials](/platform/credentials/ssh-key).
-  </Card>
-</CardGroup>
+Many Proxmox environments are not reachable from the internet. If Ankra cannot reach the Proxmox API and the VM network directly, attach an **SSH jumphost** (host, port, username and private key) to the Proxmox VE credential; Ankra then tunnels both the API calls and the SSH connections to your nodes through it. If the API uses a self-signed certificate, enable **TLS insecure** (`tls_insecure`) on the credential. Both are set on the credential - see [Proxmox VE Credentials](/platform/credentials/proxmox).
 
-Your Proxmox environment must also provide:
+## Create the cluster
 
-- **A cloud-init VM template.** If no template exists on a node, Ankra creates one automatically during credential setup: it downloads the Ubuntu 24.04 cloud image and registers it as the `ankra-ubuntu-24-04` template. You can also bring your own template and pin it with the `template` option — see [Creating a cloud-init template](#creating-a-cloud-init-template).
-- **A network bridge.** You can provide an existing active Linux bridge. If none exists, Ankra converts the single active management Ethernet or bond interface (static or `manual`-method) to `vmbr0`. Ankra also creates a private NAT network `ankra` (10.20.0.0/16) through Proxmox SDN — see [Networking](#networking).
-- **The `dnsmasq` package** on each node for the private network's DHCP (`apt install dnsmasq && systemctl disable --now dnsmasq`), and `/etc/network/interfaces` must contain `source /etc/network/interfaces.d/*` (present by default on standard Proxmox installs).
-- **Local free disk space or existing VM storage.** If no active storage supports VM images, Ankra enables `images` and `rootdir` on the `local` directory storage, or creates it at `/var/lib/vz`. The `import` content type is enabled on `local` for cloud-image downloads.
-- **API reachability.** The Proxmox API must use HTTPS and be reachable from Ankra either directly or through an [SSH jumphost](#hybrid-connectivity-ssh-jumphost).
+<Tabs>
+  <Tab title="Dashboard">
+    <Steps>
+      <Step title="Open the create dialog">
+        Go to **Clusters**, click **Create cluster** and pick **Proxmox VE** under **Ankra Managed**.
+      </Step>
+      <Step title="Credential">
+        Pick the Proxmox VE credential and an SSH key, or add either inline.
+      </Step>
+      <Step title="Placement">
+        Pick **Single host** and the Proxmox node that hosts all cluster VMs, or **Host spread** and two or more hosts - see [Host-Spread Placement](#host-spread-placement). In both modes pick the **Storage** for VM disks and the **Network Bridge** the VMs attach to. Pick the `ankra` private network unless you run your own DHCP-served bridge.
+      </Step>
+      <Step title="Compute">
+        Pick the bastion size (for example `px-small`), the control plane count (1 or 3) and size (for example `px-medium`), worker node groups, and for kubeadm the etcd topology. The wizard shows each size's vCPUs, memory and disk.
+      </Step>
+      <Step title="Kubernetes">
+        Keep **kubeadm** (the default, with Cilium) or pick **k3s** and its CNI, and optionally the version. See [Choices fixed at create time](/guides/operate-ankra-managed-clusters#choices-fixed-at-create-time).
+      </Step>
+      <Step title="Review">
+        Name the cluster and set its environment. Two checkboxes are on by default:
+        - **Include Networking Stack** - Traefik and cert-manager as Ankra-managed stacks. On k3s they run through the built-in service load balancer; unchecked, k3s keeps its bundled Traefik and no certificate manager (a kubeadm cluster gets no ingress controller or certificate manager at all).
+        - **Include Public DNS** - a delegated subdomain on `ankra.cc` with external-dns wired, so an ingress hostname under it gets its DNS record and TLS certificate automatically.
 
----
+        Click **Create cluster**. A progress view follows the SSH keys, bastion, VMs, Kubernetes installation and Ankra Agent.
+      </Step>
+    </Steps>
+  </Tab>
+  <Tab title="CLI">
+    <CliVersion since="0.9.0" />
 
-## Hybrid Connectivity (SSH Jumphost)
+    ```bash
+    ankra credentials proxmox create --name my-proxmox --api-url https://pve.example:8006 --token-id 'root@pam!ankra'   # prompts for the token secret
+    ankra credentials proxmox ssh-key create --name my-ssh-key --generate
 
-Many Proxmox environments are not directly reachable from the internet. If the Proxmox API and the VM network cannot be reached from Ankra, attach an **SSH jumphost** (host, port, username, and private key) to your Proxmox VE credential. Ankra then tunnels both the Proxmox API calls and the SSH connections to your cluster nodes through the jumphost.
+    # What the credential can use
+    ankra cluster proxmox hosts --credential-id <proxmox-credential-id>
+    ankra cluster proxmox storages --credential-id <proxmox-credential-id> --node pve01
+    ankra cluster proxmox bridges --credential-id <proxmox-credential-id> --node pve01
+    ankra cluster proxmox templates --credential-id <proxmox-credential-id> --node pve01
+    ankra cluster proxmox sizes
 
-If your Proxmox API uses a self-signed certificate, enable the **TLS insecure** toggle (`tls_insecure`) on the credential.
+    ankra cluster proxmox create \
+      --name my-cluster \
+      --credential-id <proxmox-credential-id> \
+      --ssh-key-credential-id <ssh-key-credential-id> \
+      --node pve01 \
+      --storage local-lvm \
+      --bridge ankra \
+      --control-plane-count 1 \
+      --control-plane-instance-type px-medium \
+      --worker-count 2 \
+      --worker-instance-type px-medium
+    ```
 
-Both options are configured on the credential - see [Proxmox VE Credentials](/platform/credentials/proxmox).
+    `--placement-nodes pve01,pve02,pve03` spreads the VMs across hosts. `--template`, `--distribution k3s`, `--etcd-topology external` with `--etcd-node-count` and `--etcd-instance-type`, and `--include-networking=false` cover the other choices. The credential flags `--tls-insecure` and `--jumphost-*` set the options from [Hybrid connectivity](#hybrid-connectivity-ssh-jumphost).
+  </Tab>
+  <Tab title="API">
+    ```bash
+    curl -X POST https://platform.ankra.app/api/v1/clusters/proxmox \
+      -H "Authorization: Bearer $ANKRA_API_TOKEN" \
+      -H "Content-Type: application/json" \
+      -d '{
+        "name": "my-cluster",
+        "credential_id": "<proxmox-credential-id>",
+        "ssh_key_credential_id": "<ssh-key-credential-id>",
+        "node": "pve01",
+        "storage": "local-lvm",
+        "bridge": "ankra",
+        "control_plane_count": 1,
+        "control_plane_instance_type": "px-medium",
+        "node_groups": [
+          {"name": "default", "instance_type": "px-medium", "count": 2}
+        ],
+        "include_networking": true,
+        "include_dns": true
+      }'
+    ```
 
----
+    Every field, default and instance size preset is in the [Proxmox VE Reference](/reference/proxmox).
+  </Tab>
+</Tabs>
 
-## Creating a Proxmox VE Cluster
+## Verify
 
-### Via the Platform UI
+1. The cluster moves from **Provisioning** to **Online** in the clusters list once the Ankra Agent has connected.
+2. Point `kubectl` at it through Ankra (this needs a [Cluster Access](/guides/cluster-access) grant) and check the nodes:
 
-<Steps>
-  <Step title="Navigate to Clusters">
-    Go to **Clusters** in the Ankra dashboard and click **Create Cluster**.
-  </Step>
-  <Step title="Select Proxmox VE">
-    Choose **Proxmox VE** as the provider.
-  </Step>
-  <Step title="Select Credentials">
-    Pick your Proxmox VE API credential and SSH key credential from the dropdowns. You can also create new credentials directly from the wizard.
-  </Step>
-  <Step title="Choose Placement">
-    Pick **Single host** or **Host spread** placement. With single host, select the **Proxmox node** that hosts all cluster VMs. With host spread, select two or more compatible hosts and Ankra distributes the Kubernetes VMs across them - see [Host-Spread Placement](#host-spread-placement). In both modes, select the **storage** for VM disks and the **network** the VMs attach to. Pick the `ankra` private network (created during credential setup) unless you operate your own DHCP-served bridge.
-  </Step>
-  <Step title="Configure Nodes">
-    Set your cluster topology:
-    - **Bastion** - Instance size for the SSH bastion VM (e.g., `px-small`)
-    - **Control Plane** - Count (1, 3, or 5) and size (e.g., `px-medium`)
-    - **Workers** - Count and size (e.g., 2× `px-medium`)
+   <CliVersion since="0.3.0" command="cluster kubeconfig add" />
 
-    The wizard shows vCPUs, memory, and disk for each size. Proxmox has no list pricing, so no cost estimate is shown.
-  </Step>
-  <Step title="Choose Distribution">
-    Pick the Kubernetes distribution:
- **kubeadm** Vanilla upstream Kubernetes bootstrapped with `kubeadm` and containerd (preselected). kubeadm clusters always use Cilium CNI and optionally support an external etcd topology with dedicated etcd VMs.
- **k3s** Lightweight Kubernetes with a user-selectable CNI (Flannel default, Calico, or Cilium).
+   ```bash
+   ankra cluster kubeconfig add my-cluster --use
+   kubectl get nodes
+   ```
 
-    See [Kubernetes Distribution](#kubernetes-distribution) for details.
-  </Step>
-  <Step title="Name, Networking & DNS">
-    Name the cluster and set its environment. Two checkboxes on this step are on by default:
-    - **Include Networking Stack** - deploys Traefik and cert-manager as Ankra-managed stacks. On k3s they run through the built-in service load balancer; unchecking it leaves k3s with its bundled Traefik and no certificate manager (on kubeadm, with no ingress controller or certificate manager at all).
-    - **Include Public DNS** - gives the cluster its own delegated subdomain on `ankra.cc` and installs external-dns with its credentials already wired, so an ingress hostname under that subdomain gets its DNS record and TLS certificate automatically.
-  </Step>
-  <Step title="Create & Track Progress">
-    Click **Create** to start provisioning. A live progress view tracks credential setup, SSH key deployment, bastion provisioning, VM creation, Kubernetes installation (k3s or kubeadm), and Ankra Agent setup. The cluster appears with an **offline** state until provisioning completes, then transitions to **online**.
-  </Step>
-</Steps>
+   Every control plane and worker should be `Ready`. See [Accessing Clusters with kubectl](/guides/kubeconfig).
 
-### Via the API
+## What Ankra created on your hosts
 
-<Note>
-Create the [Proxmox VE credential](/platform/credentials/proxmox) and [SSH key credential](/platform/credentials/ssh-key) from the portal first. Prefer the terminal? The `ankra` CLI covers the same lifecycle - see [`ankra cluster proxmox`](/reference/cli/cluster#ankra-cluster-proxmox) for create, stop, start, nodes, hosts, storages, and templates.
-</Note>
+- **A bastion VM** - the only SSH access point Ankra uses to reach the nodes. It carries no workload or egress traffic. With a jumphost on the credential, Ankra reaches both the Proxmox API and the bastion through it.
+- **Control plane and worker VMs** (QEMU), cloned from the cloud-init template and attached to the network you picked, plus dedicated etcd VMs for a kubeadm cluster with external etcd.
+- **The `vmbr0` bridge and the `ankra` SDN network**, when they did not exist, set up during credential setup.
 
-```bash
-curl -X POST https://platform.ankra.app/api/v1/clusters/proxmox \
-  -H "Authorization: Bearer $ANKRA_API_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "name": "my-cluster",
-    "credential_id": "<proxmox-credential-id>",
-    "ssh_key_credential_id": "<ssh-key-credential-id>",
-    "node": "pve01",
-    "storage": "local-lvm",
-    "bridge": "ankra",
-    "control_plane_count": 1,
-    "control_plane_instance_type": "px-medium",
-    "node_groups": [
-      {"name": "default", "instance_type": "px-medium", "count": 2}
-    ],
-    "distribution": "k3s"
-  }'
-```
+There is no cloud controller manager: `LoadBalancer` Services are not provisioned. Expose workloads with `NodePort` Services, an ingress controller, or a load balancer you deploy yourself. The [Proxmox VE Reference](/reference/proxmox#architecture) has the full layout.
 
----
-
-## Cluster Configuration Options
-
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `name` | *required* | Unique cluster name |
-| `credential_id` | *required* | Proxmox VE API credential ID |
-| `ssh_key_credential_id` | *required* | SSH key credential ID |
-| `node` | *required* | Proxmox node that hosts the cluster VMs (and the bastion in host-spread mode) |
-| `placement_nodes` | | Two or more Proxmox nodes to spread the Kubernetes VMs across (see [Host-Spread Placement](#host-spread-placement)). Omit for single-host placement |
-| `bridge` | *required* | Network the VMs attach to: the `ankra` private SDN network (created during credential setup) or a DHCP-served Linux bridge |
-| `storage` | *auto-picked* | Active Proxmox storage for VM disks. Prefers `local-lvm`, then `local` |
-| `template` | *auto-picked* | Cloud-init template to clone, by VMID or name. Defaults to the first template on the node |
-| `bastion_instance_type` | `px-small` | Instance size for the bastion VM |
-| `control_plane_count` | `1` | Number of control plane nodes (1, 3, or 5) |
-| `control_plane_instance_type` | `px-medium` | Instance size for control planes |
-| `worker_count` | `1` | Number of worker nodes (legacy, use `node_groups` instead) |
-| `worker_instance_type` | `px-medium` | Instance size for workers (legacy, use `node_groups` instead) |
-| `node_groups` | | Array of node group definitions (see [Node Groups](#node-groups)) |
-| `distribution` | `kubeadm` | Kubernetes distribution (`kubeadm` or `k3s`) |
-| `kubernetes_version` | *latest stable* | Kubernetes version (optional) |
-| `cni` | `cilium` (kubeadm), `flannel` (k3s) | CNI plugin (`flannel`, `calico`, or `cilium`). Follows the distribution when omitted; kubeadm clusters always use `cilium` |
-| `etcd_topology` | `stacked` | kubeadm only. `stacked` (etcd on control planes) or `external` (dedicated etcd VMs) |
-| `etcd_node_count` | `3` | kubeadm `external` topology only. Number of dedicated etcd VMs (3 or 5) |
-| `etcd_instance_type` | `px-medium` | kubeadm `external` topology only. Instance size for dedicated etcd nodes |
-
-### Instance Sizes
-
-Proxmox VE clusters use fixed instance size presets:
-
-| Size | vCPUs | RAM | Disk | Typical use |
-|------|-------|-----|------|-------------|
-| `px-small` | 2 | 4 GB | 40 GB | Bastion |
-| `px-medium` | 4 | 8 GB | 80 GB | Control plane, general workers |
-| `px-large` | 8 | 16 GB | 160 GB | Larger workloads |
-| `px-xlarge` | 16 | 32 GB | 320 GB | Heavy workloads |
-
-<Note>
-Proxmox VE has no list pricing, so Ankra does not show cost estimates for Proxmox clusters - neither in the creation wizard nor in [Cloud Cost](/platform/cloud-cost).
-</Note>
+## Proxmox VE specifics
 
 ### Networking
 
-When you save a Proxmox VE credential, Ankra initializes two networks when they do not already exist:
+When you save a Proxmox VE credential, Ankra initialises two networks when they do not already exist:
 
 | Network | Purpose | Address |
 |---------|---------|---------|
-| `vmbr0` (Linux bridge) | Management — carries the host's public or provider-assigned IP | Inherited from the physical interface |
-| `ankra` (SDN vnet) | Private compute — isolated from the management interface | 10.20.0.1/16 (SNAT to the public interface) |
+| `vmbr0` (Linux bridge) | Management - carries the host's public or provider-assigned IP | Inherited from the physical interface |
+| `ankra` (SDN vnet) | Private compute - isolated from the management interface | 10.20.0.1/16 (SNAT to the public interface) |
 
-**`vmbr0` (management bridge).** If no active bridge exists, Ankra converts the single active Ethernet or bond management interface to `vmbr0`. A statically addressed interface's address and gateway move to the bridge; a `manual`-method interface (common on dedicated-server providers such as Scaleway) converts to an address-less bridge. The physical interface becomes the bridge's uplink. DHCP-managed management interfaces cannot be converted through the Proxmox API — create the bridge manually in that case. Ankra refuses the conversion when the management interface is ambiguous, has custom options, or another network change is pending.
+**`vmbr0` (management bridge).** If no active bridge exists, Ankra converts the single active Ethernet or bond management interface to `vmbr0`. A statically addressed interface's address and gateway move to the bridge; a `manual`-method interface (common on dedicated-server providers such as Scaleway) converts to an address-less bridge. The physical interface becomes the bridge's uplink. DHCP-managed management interfaces cannot be converted through the Proxmox API - create the bridge manually in that case. Ankra refuses the conversion when the management interface is ambiguous, has custom options, or another network change is pending.
 
-**`ankra` (private SDN network).** Ankra creates a Proxmox SDN *simple zone* named `ankra` with a vnet of the same name and the subnet 10.20.0.0/16 (gateway 10.20.0.1). The subnet has **SNAT** enabled, so Proxmox masquerades outbound VM traffic through the host's public interface, and **DHCP** served by dnsmasq (range 10.20.1.1–10.20.254.254) backed by the built-in PVE IPAM. Because addresses are registered in the IPAM the moment a VM's NIC attaches, Ankra reads VM addresses without requiring the QEMU guest agent in the image.
+**`ankra` (private SDN network).** Ankra creates a Proxmox SDN *simple zone* named `ankra` with a vnet of the same name and the subnet 10.20.0.0/16 (gateway 10.20.0.1). The subnet has **SNAT** enabled, so Proxmox masquerades outbound VM traffic through the host's public interface, and **DHCP** served by dnsmasq (range 10.20.1.1 to 10.20.254.254) backed by the built-in PVE IPAM. Because addresses are registered in the IPAM the moment a VM's NIC attaches, Ankra reads VM addresses without requiring the QEMU guest agent in the image.
 
-**Recommended setup.** Place cluster VMs on the `ankra` network — it appears alongside Linux bridges in the cluster creation wizard. This keeps Kubernetes traffic off the management bridge and gives VMs internet access through NAT without exposing them publicly. Because the VMs are private, attach the Proxmox host itself (or another host with a route into 10.20.0.0/16) as the [SSH jumphost](#hybrid-connectivity-ssh-jumphost) on the credential so Ankra can reach the bastion.
+**Recommended setup.** Place cluster VMs on the `ankra` network - it appears alongside Linux bridges in the cluster creation wizard. This keeps Kubernetes traffic off the management bridge and gives VMs internet access through NAT without exposing them publicly. Because the VMs are private, attach the Proxmox host itself (or another host with a route into 10.20.0.0/16) as the [SSH jumphost](#hybrid-connectivity-ssh-jumphost) on the credential so Ankra can reach the bastion.
 
----
-
-## Creating a cloud-init template
+### Creating a cloud-init template
 
 Ankra clones a cloud-init VM template for every cluster VM. **Nodes without any template get one automatically**: during credential setup Ankra downloads the Ubuntu 24.04 cloud image and registers it as the `ankra-ubuntu-24-04` template. Nodes that already carry a template are left untouched, so a custom template always wins.
 
@@ -216,9 +191,7 @@ The template VM ID (9000 in this example) must be unique on your node. Ankra aut
 
 For **host-spread placement**, create the same-named template on every selected node before provisioning the cluster.
 
----
-
-## Host-Spread Placement
+### Host-Spread Placement
 
 When your Proxmox VE cluster has multiple nodes, you can spread the Kubernetes VMs across them so a single host failure does not take down the whole Kubernetes cluster. Host spread is opt-in: pass `placement_nodes` with two or more nodes via the API, or pick **Host spread** in the creation wizard.
 
@@ -243,7 +216,7 @@ curl -X POST https://platform.ankra.app/api/v1/clusters/proxmox \
   }'
 ```
 
-### Prerequisites
+#### Prerequisites
 
 Every selected host must be online and provide the **same-named resources**, because VMs are cloned locally on each host:
 
@@ -253,20 +226,20 @@ Every selected host must be online and provide the **same-named resources**, bec
 
 Creation is rejected if any selected host is missing one of these. `node` stays required and must be one of the `placement_nodes`; the bastion always runs there.
 
-### How VMs are distributed
+#### How VMs are distributed
 
 Ankra assigns control planes, dedicated etcd members, and each worker group deterministically: the host with the fewest members of the same role or group wins, ties break by fewest total Kubernetes VMs, then by your selected-node order. Every Kubernetes node is labeled with `topology.kubernetes.io/zone=<proxmox-node>` so you can use standard [topology spread constraints](https://kubernetes.io/docs/concepts/scheduling-eviction/topology-spread-constraints/) and pod anti-affinity against the physical failure domain.
 
 Later scaling keeps the policy: adding node groups, scaling them up, and adding control planes all place new VMs on the least-represented eligible host. Restart, resize, upgrade, and delete operations stay pinned to each VM's recorded host.
 
-### Requirements and limitations
+#### Requirements and limitations
 
 - **At least 3 control planes.** Host-spread clusters must be created with 3 or 5 control plane nodes so the Kubernetes control plane keeps quorum when one host fails.
 - **Two hosts give reduced resilience.** With only two hosts, losing the host that carries the control-plane majority still takes the Kubernetes API down. Three or more hosts are recommended.
 - **The bastion is not spread.** It runs on the primary `node`; if that host fails, Ankra's SSH path to the cluster is unavailable until the host returns, while workloads keep running.
 - **No Proxmox HA-manager integration.** Ankra does not enroll VMs in Proxmox HA groups and never live-migrates or recreates VMs on another host after a failure. Resilience comes from Kubernetes replication across hosts, so run workloads with multiple replicas spread over zones.
 
-### Workload guidance
+#### Workload guidance
 
 For a workload to survive a host outage, run at least two replicas and spread them across zones:
 
@@ -280,352 +253,26 @@ topologySpreadConstraints:
         app: my-app
 ```
 
----
-
-## Kubernetes Distribution
-
-Proxmox VE clusters can be provisioned with either **kubeadm** (the default everywhere - the wizard, the API and the CLI) or **k3s** (`--distribution k3s`).
-
-| | k3s | kubeadm |
-|---|-----|---------|
-| Kubernetes | Lightweight, single-binary distribution | Vanilla upstream Kubernetes |
-| CNI | User-selectable (Flannel default, Calico, or Cilium) | Cilium (fixed, cannot be changed after creation) |
-| etcd | Embedded | `stacked` (on control planes) or `external` (dedicated VMs) |
-| Version format | `v1.35.1+k3s1` | `v1.31.0` (plain upstream tag) |
-
-<Note>
-kubeadm clusters always use Cilium CNI (eBPF-based networking, L7 policies, Hubble observability). The CNI cannot be changed after creation.
-</Note>
-
-### External etcd topology (kubeadm)
-
-By default kubeadm runs etcd **stacked** on the control plane nodes. For larger clusters you can run etcd on dedicated VMs by setting `etcd_topology` to `external`:
-
-```bash
-curl -X POST https://platform.ankra.app/api/v1/clusters/proxmox \
-  -H "Authorization: Bearer $ANKRA_API_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "name": "my-cluster",
-    "credential_id": "<proxmox-credential-id>",
-    "ssh_key_credential_id": "<ssh-key-credential-id>",
-    "node": "pve01",
-    "storage": "local-lvm",
-    "bridge": "ankra",
-    "control_plane_count": 3,
-    "control_plane_instance_type": "px-medium",
-    "node_groups": [
-      {"name": "default", "instance_type": "px-medium", "count": 2}
-    ],
-    "distribution": "kubeadm",
-    "etcd_topology": "external",
-    "etcd_node_count": 3,
-    "etcd_instance_type": "px-medium"
-  }'
-```
-
----
-
-## Node Groups
-
-Node groups let you organize worker nodes into logical groups with independent instance sizes, counts, labels, and taints. Each group can be scaled, resized, and configured independently. Node groups are managed from the portal or the API.
-
-### Via the Platform UI
-
-Navigate to cluster **Settings** > **Nodes** to manage node groups. From this tab you can:
-
-- View all node groups with their instance size, count, labels, and taints
-- Add new node groups with a name, instance size, count, and optional labels/taints
-- Scale individual groups up or down (0–100 nodes)
-- Upgrade the instance size (upgrade only - see [Instance Size Changes](#instance-size-changes))
-- Edit labels and taints per group
-- Delete a node group and all its VMs
-
-### List Node Groups
-
-```bash
-curl https://platform.ankra.app/api/v1/clusters/proxmox/<cluster_id>/node-groups \
-  -H "Authorization: Bearer $ANKRA_API_TOKEN"
-```
-
-Response:
-```json
-{
-  "node_groups": [
-    {
-      "name": "default",
-      "instance_type": "px-medium",
-      "count": 2,
-      "min": 0,
-      "max": 100,
-      "labels": {},
-      "taints": []
-    }
-  ]
-}
-```
-
-### Add a Node Group
-
-```bash
-curl -X POST https://platform.ankra.app/api/v1/clusters/proxmox/<cluster_id>/node-groups \
-  -H "Authorization: Bearer $ANKRA_API_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "name": "workers-large",
-    "instance_type": "px-large",
-    "count": 2,
-    "labels": {"tier": "backend"},
-    "taints": [{"key": "dedicated", "value": "backend", "effect": "NoSchedule"}]
-  }'
-```
-
-On [host-spread](#host-spread-placement) clusters, new VMs are placed on the least-represented eligible host automatically.
-
-### Scale a Node Group
-
-```bash
-curl -X PUT https://platform.ankra.app/api/v1/clusters/proxmox/<cluster_id>/node-groups/default/scale \
-  -H "Authorization: Bearer $ANKRA_API_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"count": 4}'
-```
-
-Node groups can be scaled to 0 nodes. This keeps the group definition but removes all VMs.
-
-### Instance Size Changes
-
-<Warning>
-Instance size upgrades are one-way - you cannot downgrade a node group to a smaller size. To use a smaller size, create a new node group with the desired size and delete the old one.
-</Warning>
-
-```bash
-curl -X PUT https://platform.ankra.app/api/v1/clusters/proxmox/<cluster_id>/node-groups/default/instance-type \
-  -H "Authorization: Bearer $ANKRA_API_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"instance_type": "px-large"}'
-```
-
-Each node is powered off, resized, and powered back on. This causes brief downtime for workloads on those nodes.
-
-### Update Labels and Taints
-
-```bash
-# Update labels
-curl -X PUT https://platform.ankra.app/api/v1/clusters/proxmox/<cluster_id>/node-groups/default/labels \
-  -H "Authorization: Bearer $ANKRA_API_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"labels": {"env": "production", "tier": "backend"}}'
-
-# Update taints
-curl -X PUT https://platform.ankra.app/api/v1/clusters/proxmox/<cluster_id>/node-groups/default/taints \
-  -H "Authorization: Bearer $ANKRA_API_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"taints": [{"key": "dedicated", "value": "ml", "effect": "NoSchedule"}]}'
-```
-
-### Delete a Node Group
-
-```bash
-curl -X DELETE https://platform.ankra.app/api/v1/clusters/proxmox/<cluster_id>/node-groups/workers-large \
-  -H "Authorization: Bearer $ANKRA_API_TOKEN"
-```
-
-<Warning>
-Deleting a node group removes all its VMs. Workloads running on those nodes will be evicted.
-</Warning>
-
-### Node Group API Reference
-
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/api/v1/clusters/proxmox/{id}/node-groups` | GET | List all node groups |
-| `/api/v1/clusters/proxmox/{id}/node-groups` | POST | Add a node group |
-| `/api/v1/clusters/proxmox/{id}/node-groups/{name}/scale` | PUT | Scale a node group (0-100) |
-| `/api/v1/clusters/proxmox/{id}/node-groups/{name}/instance-type` | PUT | Change instance size |
-| `/api/v1/clusters/proxmox/{id}/node-groups/{name}/labels` | PUT | Update labels |
-| `/api/v1/clusters/proxmox/{id}/node-groups/{name}/taints` | PUT | Update taints |
-| `/api/v1/clusters/proxmox/{id}/node-groups/{name}` | DELETE | Delete a node group |
-
----
-
-## Restarting a Node
-
-Restart any node - a control plane node, a worker, or the bastion - as a tracked operation, from cluster **Settings** > **Nodes** in the dashboard, via the CLI or API, or by asking the Ankra AI assistant (e.g. "restart the bastion on my-cluster").
-
-<CliVersion since="0.9.0" />
-
-<CodeGroup>
-
-```bash CLI
-ankra cluster proxmox nodes list <cluster_id>
-ankra cluster proxmox nodes restart <cluster_id> <node_id>
-```
-
-```bash cURL
-curl -X POST https://platform.ankra.app/api/v1/clusters/proxmox/<cluster_id>/nodes/<node_id>/restart \
-  -H "Authorization: Bearer $ANKRA_API_TOKEN"
-```
-
-</CodeGroup>
-
-See [Restarting a Node](/guides/hetzner-clusters#restarting-a-node) for the full walkthrough, response shape, and state requirements - identical across providers.
-
----
-
-## Resizing the Bastion
-
-Resize the bastion without recreating the cluster - Ankra powers it off, resizes it, and powers it back on.
-
-```bash
-curl -X PUT https://platform.ankra.app/api/v1/clusters/proxmox/<cluster_id>/bastion/instance-type \
-  -H "Authorization: Bearer $ANKRA_API_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"instance_type": "<instance-size>"}'
-```
-
-See [Resizing the Bastion or Gateway](/guides/hetzner-clusters#resizing-the-bastion-or-gateway) for the accept/wait contract - identical across providers.
-
----
-
-## Legacy Worker Scaling
-
-The legacy `scale-workers` and `worker-count` endpoints operate on all workers as a single pool.
-
-```bash
-curl https://platform.ankra.app/api/v1/clusters/proxmox/<cluster_id>/worker-count \
-  -H "Authorization: Bearer $ANKRA_API_TOKEN"
-
-curl -X POST https://platform.ankra.app/api/v1/clusters/proxmox/<cluster_id>/scale-workers \
-  -H "Authorization: Bearer $ANKRA_API_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"worker_count": 4}'
-```
-
-<Note>
-Prefer using [Node Groups](#node-groups) for more granular control.
-</Note>
-
----
-
-## Upgrading Kubernetes Version
-
-You can upgrade the Kubernetes version on all nodes in a Proxmox VE cluster. Upgrades are applied to control plane nodes first, then workers. Both k3s and kubeadm clusters are supported.
-
-<Warning>
-- Both k3s and kubeadm clusters are supported for version upgrades, including kubeadm clusters with an **external** etcd topology: the dedicated etcd members are upgraded first, one at a time, each saving a pre-upgrade snapshot before its static pod rolls to the etcd image matching the target Kubernetes version.
-- Use the matching version format for the target: `v1.35.1+k3s1` for k3s, or a plain `v1.31.0` upstream tag for kubeadm.
-- Downgrades are not supported - downgrades require an etcd snapshot restore.
-- You can only upgrade one minor version at a time (e.g., v1.33.x to v1.34.x, not v1.33.x to v1.35.x).
-- The cluster must be online with no active operations.
-</Warning>
-
-### Check Current Version
-
-```bash
-curl https://platform.ankra.app/api/v1/clusters/proxmox/<cluster_id>/k8s-version \
-  -H "Authorization: Bearer $ANKRA_API_TOKEN"
-```
-
-### Upgrade Version
-
-```bash
-curl -X POST https://platform.ankra.app/api/v1/clusters/proxmox/<cluster_id>/upgrade-k8s-version \
-  -H "Authorization: Bearer $ANKRA_API_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"target_version": "v1.35.1+k3s1"}'
-```
-
-For a kubeadm cluster, use a plain upstream tag instead (for example `"target_version": "v1.31.0"`).
-
----
-
-## Stopping and Starting a Cluster
-
-You can stop a Proxmox VE cluster to release its compute (the cluster VMs on your Proxmox nodes) while keeping its configuration, stacks, and credentials in Ankra. Starting the cluster re-provisions the VMs and reconciles the cluster back to a running state. This is useful for freeing host capacity when a cluster is not needed.
-
-When starting, use `scope=control_plane` to bring up only the control plane first (for example to inspect or repair it), or `scope=all` (the default) to provision the whole cluster.
-
-```bash
-curl -X POST https://platform.ankra.app/api/v1/clusters/proxmox/<cluster_id>/stop \
-  -H "Authorization: Bearer $ANKRA_API_TOKEN"
-
-curl -X POST "https://platform.ankra.app/api/v1/clusters/proxmox/<cluster_id>/start?scope=all" \
-  -H "Authorization: Bearer $ANKRA_API_TOKEN"
-```
-
-<Note>
-Stop and start are background operations. A start returns `409` if a stop or terminate operation is still running. The cluster's saved topology is preserved while stopped and re-provisioned on the next start. From the terminal, use `ankra cluster proxmox stop` and `ankra cluster proxmox start`.
-</Note>
-
----
-
-## Deprovisioning
-
-Deprovisioning deletes all VMs Ankra created on your Proxmox nodes (bastion, control planes, workers, and dedicated etcd VMs if any) and removes the cluster from Ankra. Your Proxmox nodes, storage, and bridges are left untouched.
-
-<Warning>
-This action is irreversible. All data on the cluster will be permanently deleted.
-</Warning>
-
-```bash
-curl -X DELETE https://platform.ankra.app/api/v1/clusters/proxmox/<cluster_id> \
-  -H "Authorization: Bearer $ANKRA_API_TOKEN"
-```
-
----
-
-## Architecture
-
-A Proxmox VE cluster provisions the following infrastructure:
-
-| Component | Description |
-|-----------|-------------|
-| **Bastion VM** | Jump server for secure SSH access to cluster nodes |
-| **Control Plane(s)** | Kubernetes control plane VMs (1, 3, or 5) |
-| **Worker(s)** | Kubernetes worker VMs organized in [node groups](#node-groups) |
-| **etcd Node(s)** | Dedicated etcd VMs, only for kubeadm clusters with an `external` [etcd topology](#external-etcd-topology-kubeadm) |
-| **SSH Keys** | Deployed to all VMs for access |
-
-```mermaid
-flowchart TB
-    Platform[Ankra Platform]
-    Jumphost[Optional SSH jumphost<br/>hybrid connectivity]
-    Internet((Internet))
-
-    subgraph Host [Proxmox host]
-        vmbr0[vmbr0 — management bridge<br/>public / provider IP]
-        ankra[ankra — private SDN network<br/>10.20.0.0/16 · SNAT + DHCP]
-        subgraph Private [Cluster VMs on ankra]
-            Bastion[Bastion VM]
-            CP[Control plane VMs]
-            Workers[Worker VMs]
-            Agent[Ankra Agent<br/>runs in the cluster]
-        end
-    end
-
-    Platform -->|SSH| Jumphost
-    Jumphost -->|SSH| Bastion
-    Bastion -->|SSH jump| CP
-    Bastion -->|SSH jump| Workers
-    Agent -->|outbound only - NATS| Platform
-    ankra -->|SNAT| vmbr0
-    vmbr0 --> Internet
-```
-
-All VMs are QEMU virtual machines on the Proxmox node you selected, attached to the selected network. Ankra initializes `vmbr0` (management) and the `ankra` private SDN network (10.20.0.0/16 with SNAT and DHCP) during credential setup when they do not already exist. Place cluster VMs on `ankra` — they receive DHCP addresses from the zone's dnsmasq instance and reach the internet through the host's public interface via SNAT.
-
-The bastion VM provides the only SSH access point Ankra uses to reach the cluster nodes - it carries no workload or egress traffic. When an [SSH jumphost](#hybrid-connectivity-ssh-jumphost) is configured, Ankra reaches both the Proxmox API and the bastion through the jumphost (without one, Ankra connects to the bastion directly).
-
-<Note>
-Proxmox VE clusters do not include a cloud controller manager or load balancer integration - `external_cloud_provider` is not supported. Kubernetes `LoadBalancer` services are not provisioned automatically; expose workloads with `NodePort` services, an ingress controller, or a load balancer solution you deploy yourself.
-</Note>
-
----
+### Other differences
+
+- **Resizing a node group** powers each VM off, resizes it and powers it on again, with brief downtime for its workloads. Sizes only grow; for smaller nodes, create a new group and delete the old one. On a host-spread cluster, new VMs go to the least-represented eligible host.
+- **Restart** works from the CLI (`ankra cluster proxmox nodes restart`); the bastion is resized from the dashboard or the API.
+- **A stop** captures the cluster's etcd state through the credential's jump host before the VMs are deleted, and frees the host capacity. **Terminating** deletes every VM Ankra created (bastion, control planes, workers and etcd VMs) and leaves your Proxmox nodes, storage and bridges untouched.
+- **No cost estimate in the create wizard**, because Proxmox VE has no list pricing. [Cloud Cost](/platform/cloud-cost#private-capacity-rate-cards) prices running clusters from the credential's rate card, which ships with default rates you can change.
+
+## Operate it
+
+Day-2 tasks work the same way on every Ankra Managed provider, with the CLI name `proxmox`:
+
+- [Node groups](/guides/operate-ankra-managed-clusters#node-groups) and [legacy worker scaling](/guides/operate-ankra-managed-clusters#legacy-worker-scaling)
+- [Control plane](/guides/operate-ankra-managed-clusters#control-plane)
+- [Restart a node](/guides/operate-ankra-managed-clusters#restart-a-node) and [the bastion](/guides/operate-ankra-managed-clusters#bastion)
+- [SSH access and keys](/guides/operate-ankra-managed-clusters#ssh-access-and-keys)
+- [Upgrade Kubernetes](/guides/operate-ankra-managed-clusters#upgrade-kubernetes)
+- [Stop and start](/guides/operate-ankra-managed-clusters#stop-and-start)
+- [Terminate a cluster](/guides/operate-ankra-managed-clusters#terminate-a-cluster)
 
 ## Troubleshooting
-
-### Common Issues
 
 | Issue | Solution |
 |-------|----------|
@@ -633,8 +280,8 @@ Proxmox VE clusters do not include a cloud controller manager or load balancer i
 | TLS certificate errors (self-signed) | Enable the **TLS insecure** toggle (`tls_insecure`) on the Proxmox VE credential |
 | Nodes never get an IP address | On the `ankra` SDN network, verify the zone is healthy (`dnsmasq` installed, zone status *available* under **Datacenter → SDN**). On your own bridge, verify a DHCP server answers there |
 | Provisioning fails waiting for a VM's IP address | On the `ankra` SDN network, addresses come from the PVE IPAM automatically. On other bridges the cloned template must ship the **QEMU guest agent** - rebuild the template with `qemu-guest-agent` and retry |
-| No VM templates found on the node | Re-save the Proxmox credential to run the automatic setup (it creates the `ankra-ubuntu-24-04` template), or create one yourself — see [Creating a cloud-init template](#creating-a-cloud-init-template) |
+| No VM templates found on the node | Re-save the Proxmox credential to run the automatic setup (it creates the `ankra-ubuntu-24-04` template), or create one yourself - see [Creating a cloud-init template](#creating-a-cloud-init-template) |
 | Cluster stuck in provisioning | Check the API token privileges (see [Proxmox VE Credentials](/platform/credentials/proxmox)) and free capacity on the selected node and storage |
 | VM creation fails with a permission error | The API token is missing privileges (e.g., `VM.Allocate`, `Datastore.AllocateSpace`) on the selected node, storage, or bridge |
 | LoadBalancer service stuck in `Pending` | Proxmox clusters have no cloud controller manager - use `NodePort`, ingress, or your own load balancer |
-| No cost estimates shown | Expected - Proxmox has no list pricing, so cost estimation is not supported |
+| No cost estimate in the wizard | Expected - Proxmox has no list pricing. Running clusters are priced in Cloud Cost from the credential's [rate card](/platform/cloud-cost#private-capacity-rate-cards) |

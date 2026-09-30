@@ -1,14 +1,9 @@
 ---
 title: Branch Demos
 description: Launch a throwaway demo of any branch build on your staging cluster - with environment variables, an optional Postgres, and an automatic teardown timer
-tag: "Closed Beta"
 ---
 
 import { CliVersion } from "/snippets/cli-version.jsx";
-
-<Warning>
-**Closed beta.** Branch demos are part of [Applications](/concepts/applications), which is in closed beta and enabled per organisation on request. [Contact support](/platform/support) to have it turned on for your organisation.
-</Warning>
 
 <Note>
 A branch demo runs a branch's already-built container images in their own isolated namespace on your organisation's staging cluster, and stops itself when the timer runs out. Use it to show work in progress, reproduce a bug against a specific build, or hand a reviewer a live URL instead of a screenshot.
@@ -22,13 +17,13 @@ Pull requests get [previews automatically](/guides/pr-preview-environments). Thi
 
 <Steps>
   <Step title="Connect the repository as an application">
-    The branch must belong to a [connected application](/concepts/applications). Application setup adds the canonical build-and-publish workflow, which is what pushes the image a demo deploys.
+    The branch must belong to a [connected application](/concepts/applications). Application setup adds the CI definition that builds its images - `.ankra/pipeline.yaml` for a new application, or the generated GitHub Actions workflow.
   </Step>
   <Step title="Set the organisation's staging cluster">
     An admin sets it under **AI** → **Settings** → **Workspaces**. Every demo lands there. Without it, there is nowhere to launch.
   </Step>
   <Step title="Build the branch at least once">
-    A demo deploys an image, it does not build one. Push the branch so the workflow publishes a tag for it. If nothing was ever published, the dialog offers [Fix the build](#no-built-image-for-this-branch).
+    A demo deploys an image, it does not build one, so the branch needs a tag in the application's registry. The generated pipeline and the generated workflow publish only the tracked branch: for any other branch, see [Which image a demo finds](#which-image-a-demo-finds). If nothing was ever published, the dialog offers [Fix the build](#no-built-image-for-this-branch).
   </Step>
   <Step title="Optional: a demo base domain for HTTPS">
     Without one, demos are served over the staging cluster's own Ankra zone (`*.ankra.cc` by default, or the [Ankra domain your organisation selected](/concepts/applications#the-preview-url)) on plain HTTP, or stay in-cluster-only.
@@ -61,6 +56,35 @@ Pick the branch to demo. The list marks the application's configured **build bra
 | ✅ **Build found** | The resolved image tag is shown and will be deployed. |
 | ⚠️ **No built image was found** | Nothing was published for this branch yet. See [below](#no-built-image-for-this-branch). |
 | ❌ An error message | The registry or the repository could not be read - the message names the cause. |
+
+### Which image a demo finds
+
+Ankra looks in the application's registry repository for these tags, in this order, and deploys the first one it finds:
+
+1. `sha-<7>` - the first seven characters of the branch's head commit, the only tag that is provably this head's build,
+2. for each open pull request from the branch, `sha-<7>` of its merge commit, then `pr-<number>`,
+3. the branch name, with every character other than letters, digits, `.`, `_` and `-` replaced by `-` (`feature/login` becomes `feature-login`).
+
+A pull request tag is built from merging the branch into its base, not from the branch head, and the dialog says so when it picks one.
+
+What publishes these tags depends on what builds the application (see [Ship Your App](/guides/deliver-your-app#where-the-image-is-built)):
+
+| Builder | Tags it publishes |
+|---|---|
+| Ankra Pipelines, as generated | `sha-<7>` for commits on the tracked branch only: the `publish` stage runs on a push to that branch, not on a pull request |
+| Generated GitHub Actions workflow | `sha-<7>` and the branch name for commits on the tracked branch only. A pull request is built and scanned but never pushed |
+| Your own workflow | Whatever it pushes |
+| Ankra platform builders | `sha-<7>` of any commit you ask for, where Ankra has enabled platform builders for your organisation |
+
+So a demo of any branch other than the tracked one needs an image from somewhere else. Build the branch's head on Ankra platform builders:
+
+<CliVersion since="0.14.0" command="application build start" />
+
+```bash
+ankra application build start <application-id> --commit <full-sha> --ref feature/login --reason demo --wait
+```
+
+Or push a `sha-<7>` tag from your own CI, or pick an existing tag with the [image tag override](#advanced-options).
 
 ### Components (monorepos only)
 
@@ -178,6 +202,7 @@ Demo namespaces are ephemeral by design. The throwaway database starts empty on 
 | Symptom | What to check |
 |---|---|
 | **Launch demo** is disabled | The dialog names the reason on hover: no branch picked, an unresolved image tag, a TTL beyond your role's cap, an invalid container port, or an incomplete environment variable. |
+| **No built image was found** for a branch other than the tracked one | Expected with the generated pipeline or workflow, which publish only the tracked branch. See [Which image a demo finds](#which-image-a-demo-finds). |
 | No branches are listed | The application's Git credential can no longer read the repository. Re-check it on the application's settings, then reopen the dialog. |
 | Deployed, but the pod crash-loops | The demo runs *your* image, so a boot crash is application-side. Read the pod logs on the demo's detail page. If the container refuses to start without configuration, Ankra dispatches a [pre-setup agent](/concepts/applications#automatic-pre-setup-when-a-demo-crashes) that works out the missing variables, saves them as the application's demo defaults, and redeploys. |
 | Pods stay `Pending` | The namespace quota or the cluster is full. Check the capacity panel and the demo's Kubernetes events, and stop demos you no longer need. |
@@ -191,4 +216,4 @@ Demo namespaces are ephemeral by design. The throwaway database starts empty on 
 - [Preview demos](/concepts/applications#preview-demos) - the concept, the namespace model, and the isolation guarantees
 - [PR preview environments](/guides/pr-preview-environments) - the automatic per-pull-request flow and its status comment
 - [Environment variables and a throwaway database](/concepts/applications#environment-variables-and-a-throwaway-database) - the defaults layer shared by every demo surface
-- [GitHub Actions CI/CD pipeline](/guides/cicd-pipeline) - the build that publishes the image a demo deploys
+- [Ship Your App](/guides/deliver-your-app) - the routes from a repository to a running application, and which builder publishes which tags
