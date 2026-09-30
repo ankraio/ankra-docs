@@ -1,11 +1,15 @@
 ---
 title: GitLab CI/CD Pipeline
-description: Automate deployments by connecting your GitLab repositories to Ankra GitOps
+description: Build images with GitLab CI and deploy them by committing the new tag to a GitOps repository on GitHub or Bitbucket Cloud
 ---
 
 <Note>
 This guide shows you how to build a CI/CD pipeline with GitLab CI that automatically deploys your applications to Kubernetes when you push code. Your pipeline builds container images and updates the GitOps repository. Ankra handles the rest.
 </Note>
+
+<Warning>
+**The GitOps repository cannot be on GitLab.** Ankra syncs a cluster's GitOps repository from GitHub or Bitbucket Cloud only. Your application code and GitLab CI stay on GitLab; the pipeline in this guide commits the new image tag to a GitOps repository on GitHub. For the other routes from a repository to a running application, see [Ship Your App](/guides/deliver-your-app).
+</Warning>
 
 ---
 
@@ -62,7 +66,7 @@ A complete CI/CD pipeline with:
 | Component | Purpose |
 |-----------|---------|
 | **Application Repo** | Your app code with Dockerfile and `.gitlab-ci.yml` |
-| **GitOps Repo** | Kubernetes manifests managed by Ankra |
+| **GitOps Repo** | Kubernetes manifests managed by Ankra, on GitHub or Bitbucket Cloud |
 | **Container Registry** | Stores your built images (GitLab Container Registry, GCR, ECR, etc.) |
 | **GitLab CI** | Builds images and updates the GitOps repo |
 
@@ -71,45 +75,30 @@ A complete CI/CD pipeline with:
 ## Prerequisites
 
 - A cluster imported into Ankra with the agent connected
+- A GitOps repository on GitHub (this guide) or Bitbucket Cloud
 - A container registry (GitLab Container Registry, Google Artifact Registry, AWS ECR, Docker Hub, etc.)
 - An application repository on GitLab with a Dockerfile
 
 ---
 
-## Step 1: Connect a GitLab Repository
+## Step 1: Connect a GitOps Repository to the Cluster
 
-First, connect a GitLab repository to your cluster. This enables GitOps and installs the necessary components on your cluster.
+Connect the repository that will hold the cluster's configuration. It must be on GitHub or Bitbucket Cloud.
 
 <Steps>
-  <Step title="Navigate to Integration Settings">
-    Go to your cluster → **Settings** → **Integration** tab.
+  <Step title="Open the cluster's GitOps settings">
+    Go to your cluster → **Settings** → **GitOps**.
   </Step>
-  <Step title="Add a GitLab Credential">
-    If you haven't connected GitLab yet, add a new credential:
-
-    1. Go to **Credentials** and create a new Git credential
-    2. Select **GitLab** as the provider
-    3. Provide your GitLab URL and a [Personal Access Token](https://docs.gitlab.com/ee/user/profile/personal_access_tokens.html) with `api` and `read_repository` scopes
-  </Step>
-  <Step title="Select a Repository">
-    Choose the repository that will store your GitOps configuration.
+  <Step title="Connect the repository">
+    Pick a GitHub or Bitbucket Cloud credential, then the repository and branch, and click **Connect Repository**. The [GitHub](/integrations/github#connecting-github) and [Bitbucket Cloud](/integrations/bitbucket-cloud#connecting-a-repository-to-a-cluster) guides cover the credential and each screen.
 
     <Tip>
-    We recommend creating a dedicated repository (e.g., `infrastructure-gitops`) to keep your cluster configurations separate from application code.
+    We recommend a dedicated repository (for example `my-org/infrastructure-gitops`) to keep cluster configuration separate from application code.
     </Tip>
-  </Step>
-  <Step title="Confirm Installation">
-    When you connect for the first time, Ankra will install:
-    - **ArgoCD** - GitOps continuous delivery
-    - **Ankra Stack Builder** - Declarative infrastructure management
-    - **Ankra Resource Engine** - Intelligent resource orchestration
-    - **GitOps Monitoring** - Continuous deployment from your repository
-
-    Click **Install ArgoCD & Connect** to proceed.
   </Step>
 </Steps>
 
-Once connected, Ankra will create the repository structure and begin syncing your cluster configuration.
+Once connected, Ankra writes the cluster's configuration to a `clusters/<cluster-name>-<short-id>/` folder in the repository and keeps it in sync.
 
 ---
 
@@ -132,7 +121,7 @@ In Ankra, manifests are organized into **Stacks**. A Stack is a collection of re
 
     ```
     Create a deployment manifest for my backend service:
-    - Image: registry.gitlab.com/my-group/my-app/backend:latest
+    - Image: registry.gitlab.com/my-group/my-app/backend:sha-1a2b3c4d
     - Namespace: production
     - 2 replicas
     - Port 8080
@@ -150,7 +139,7 @@ In Ankra, manifests are organized into **Stacks**. A Stack is a collection of re
 </Steps>
 
 <Tip>
-You can view your stack's manifests in the GitOps repository under `clusters/{cluster-name}/manifests/`.
+You can view your stack's manifests in the GitOps repository under `clusters/<cluster-name>-<short-id>/stacks/<stack-name>/manifests/`.
 </Tip>
 
 ---
@@ -170,9 +159,13 @@ Your GitLab CI pipeline needs write access to the GitOps repository to update im
     This creates `deploy_key` (private) and `deploy_key.pub` (public).
   </Step>
   <Step title="Add Public Key to GitOps Repo">
-    Go to your GitOps repository on GitLab → **Settings** → **Repository** → **Deploy keys**.
+    Go to your GitOps repository on GitHub → **Settings** → **Deploy keys** → **Add deploy key**.
 
-    Add the contents of `deploy_key.pub` and check **Grant write permissions to this key**.
+    Add the contents of `deploy_key.pub` and check **Allow write access**.
+
+    <Note>
+    On Bitbucket Cloud, repository access keys are read-only, so they cannot push. Use a repository access token with write permission over HTTPS instead.
+    </Note>
   </Step>
   <Step title="Add Private Key to App Repo">
     Go to your application repository → **Settings** → **CI/CD** → **Variables**.
@@ -203,9 +196,9 @@ Add a `.gitlab-ci.yml` file to your application repository that builds your cont
     - Triggers on push to main branch
     - Builds a Docker image from my Dockerfile
     - Pushes to GitLab Container Registry
-    - Tags with the git SHA
-    - Updates my GitOps repo at gitlab.com/my-group/infrastructure-gitops
-    - Updates the image tag in clusters/my-cluster/manifests/backend-deployment.yaml
+    - Tags with the git SHA, never latest
+    - Updates my GitOps repo at github.com/my-org/infrastructure-gitops
+    - Updates the image tag in clusters/my-cluster-<short-id>/stacks/backend-services/manifests/backend-deployment.yaml
     ```
 
     The AI will generate a complete pipeline tailored to your setup.
@@ -226,7 +219,7 @@ Add a `.gitlab-ci.yml` file to your application repository that builds your cont
 </Steps>
 
 <Accordion title="Example Pipeline: GitLab Container Registry">
-Here's a pipeline using GitLab's built-in container registry. Use the AI to customize it for your setup:
+Here's a pipeline using GitLab's built-in container registry. It tags every image with the commit SHA, never `latest`, so each deploy names exactly one build. Use the AI to customise it for your setup:
 
 ```yaml
 stages:
@@ -235,8 +228,8 @@ stages:
 
 variables:
   IMAGE_NAME: $CI_REGISTRY_IMAGE/backend
-  GITOPS_REPO: git@gitlab.com:my-group/infrastructure-gitops.git
-  MANIFEST_PATH: clusters/my-cluster/manifests/backend-deployment.yaml
+  GITOPS_REPO: git@github.com:my-org/infrastructure-gitops.git
+  MANIFEST_PATH: clusters/my-cluster-<short-id>/stacks/backend-services/manifests/backend-deployment.yaml
 
 build:
   stage: build
@@ -250,9 +243,8 @@ build:
         - Dockerfile
   script:
     - docker login -u $CI_REGISTRY_USER -p $CI_REGISTRY_PASSWORD $CI_REGISTRY
-    - docker build -t $IMAGE_NAME:$CI_COMMIT_SHA -t $IMAGE_NAME:latest .
+    - docker build -t $IMAGE_NAME:$CI_COMMIT_SHA .
     - docker push $IMAGE_NAME:$CI_COMMIT_SHA
-    - docker push $IMAGE_NAME:latest
 
 update-gitops:
   stage: deploy
@@ -269,7 +261,7 @@ update-gitops:
     - chmod 600 $GITOPS_DEPLOY_KEY
     - ssh-add $GITOPS_DEPLOY_KEY
     - mkdir -p ~/.ssh
-    - ssh-keyscan gitlab.com >> ~/.ssh/known_hosts
+    - ssh-keyscan github.com >> ~/.ssh/known_hosts
   script:
     - git clone $GITOPS_REPO gitops-repo
     - cd gitops-repo
@@ -292,8 +284,8 @@ stages:
 
 variables:
   IMAGE_NAME: europe-west1-docker.pkg.dev/my-project/docker-images/backend
-  GITOPS_REPO: git@gitlab.com:my-group/infrastructure-gitops.git
-  MANIFEST_PATH: clusters/my-cluster/manifests/backend-deployment.yaml
+  GITOPS_REPO: git@github.com:my-org/infrastructure-gitops.git
+  MANIFEST_PATH: clusters/my-cluster-<short-id>/stacks/backend-services/manifests/backend-deployment.yaml
 
 build:
   stage: build
@@ -325,7 +317,7 @@ update-gitops:
     - chmod 600 $GITOPS_DEPLOY_KEY
     - ssh-add $GITOPS_DEPLOY_KEY
     - mkdir -p ~/.ssh
-    - ssh-keyscan gitlab.com >> ~/.ssh/known_hosts
+    - ssh-keyscan github.com >> ~/.ssh/known_hosts
   script:
     - git clone $GITOPS_REPO gitops-repo
     - cd gitops-repo
@@ -460,99 +452,6 @@ To add CI/CD for additional services, use the AI Assistant to scaffold everythin
 
 ---
 
-## Common AI Prompts
-
-Use these prompts with the AI Assistant (`⌘+J`) to set up your CI/CD:
-
-<AccordionGroup>
-  <Accordion title="Create a Deployment">
-    ```
-    Create a deployment manifest for my backend service:
-    - Image: registry.gitlab.com/my-group/backend:latest
-    - Namespace: production
-    - 2 replicas with rolling update strategy
-    - Port 8080
-    - Health checks on /health and /ready
-    - Resource requests: 256Mi memory, 100m CPU
-    - Resource limits: 512Mi memory, 500m CPU
-    - Environment variables from a ConfigMap called backend-config
-    ```
-  </Accordion>
-  <Accordion title="Create a Complete Service Stack">
-    ```
-    Set up a complete service stack for my API:
-    - Deployment with 3 replicas
-    - Service exposing port 80
-    - Ingress with TLS using cert-manager
-    - HorizontalPodAutoscaler scaling 2-10 replicas at 70% CPU
-    - PodDisruptionBudget allowing 1 unavailable
-    ```
-  </Accordion>
-  <Accordion title="Add Image Pull Secret">
-    ```
-    Create a docker registry secret for pulling images from:
-    - Registry: registry.gitlab.com
-    - Namespace: production
-
-    Then update my backend deployment to use this secret.
-    ```
-  </Accordion>
-  <Accordion title="Generate GitLab CI Pipeline">
-    ```
-    Generate a GitLab CI pipeline that:
-    - Builds my Docker image on push to main
-    - Pushes to GitLab Container Registry
-    - Updates clusters/prod/manifests/app-deployment.yaml in my GitOps repo
-    - Only builds when files in src/ or Dockerfile change
-    ```
-  </Accordion>
-  <Accordion title="Troubleshoot Deployment">
-    ```
-    My backend deployment isn't updating after CI pushed a new image.
-    Help me troubleshoot why the pods aren't rolling out.
-    ```
-  </Accordion>
-</AccordionGroup>
-
-<Tip>
-The AI Assistant has full context of your cluster. It can see your existing resources, logs, and events. Describe what you want to achieve and it will generate the right configuration.
-</Tip>
-
----
-
-## Best Practices
-
-<AccordionGroup>
-  <Accordion title="Use Immutable Image Tags">
-    Always use unique, immutable tags like `$CI_COMMIT_SHA` or `$CI_PIPELINE_ID`. Avoid relying solely on `latest`.
-
-    Ask the AI: *"Ensure my deployment uses immutable image tags and imagePullPolicy IfNotPresent"*
-  </Accordion>
-  <Accordion title="Use GitLab Deploy Tokens for Pull Access">
-    Instead of using Personal Access Tokens, create [Deploy Tokens](https://docs.gitlab.com/ee/user/project/deploy_tokens/) with `read_registry` scope for image pull secrets. They're scoped to a project and easy to rotate.
-  </Accordion>
-  <Accordion title="Add Health Checks">
-    Let the AI configure proper health checks for your deployments.
-
-    Ask the AI: *"Add appropriate liveness and readiness probes to my backend deployment for a Node.js app"*
-  </Accordion>
-  <Accordion title="Set Resource Limits">
-    Prevent runaway resource usage with proper limits.
-
-    Ask the AI: *"Review my deployment and suggest appropriate resource requests and limits based on a typical web API"*
-  </Accordion>
-  <Accordion title="Use SOPS for Secrets">
-    Encrypt sensitive values in your GitOps repository.
-
-    Ask the AI: *"Help me encrypt my database password using SOPS"*
-  </Accordion>
-  <Accordion title="Protect CI/CD Variables">
-    Mark sensitive variables as **Protected** and **Masked** in GitLab CI/CD settings. Use **File** type for SSH keys to avoid shell escaping issues.
-  </Accordion>
-</AccordionGroup>
-
----
-
 ## Troubleshooting
 
 Having issues? Open the AI Assistant (`⌘+J`) and describe your problem:
@@ -568,7 +467,7 @@ Having issues? Open the AI Assistant (`⌘+J`) and describe your problem:
     Common causes:
     - Deploy key doesn't have write permissions on the GitOps repo
     - `GITOPS_DEPLOY_KEY` variable is not set as **File** type
-    - `ssh-keyscan` is missing for the GitLab host
+    - `ssh-keyscan` is missing for `github.com`
   </Accordion>
   <Accordion title="Image Not Updating">
     Ask the AI:
@@ -593,7 +492,7 @@ Having issues? Open the AI Assistant (`⌘+J`) and describe your problem:
   </Accordion>
   <Accordion title="GitOps Sync Not Triggering">
     Check the **GitOps** page in your cluster to see sync status. If sync isn't triggering:
-    - Verify the GitLab repository is still connected in **Settings** → **Integration**
+    - Verify the GitOps repository is still connected under the cluster's **Settings** → **GitOps**
     - Check that your commit was pushed to the correct branch
     - Look for webhook configuration issues in the GitOps status
   </Accordion>
@@ -608,8 +507,8 @@ The AI has access to your pod logs, events, and deployment status. It can pinpoi
 ## Next Steps
 
 <CardGroup cols={2}>
-  <Card title="GitHub CI/CD Pipeline" icon="github" href="/guides/cicd-pipeline">
-    See the equivalent guide for GitHub Actions.
+  <Card title="Ship Your App" icon="rocket" href="/guides/deliver-your-app">
+    Compare the routes from a repository to a running application, including GitHub Actions.
   </Card>
   <Card title="GitOps Reference" icon="git-alt" href="/concepts/gitops">
     Learn more about GitOps file formats and include paths.
