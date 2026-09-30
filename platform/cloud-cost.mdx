@@ -1,335 +1,195 @@
 ---
 title: Cloud Cost
-description: Estimated cloud spend for every cluster and your whole fleet - compute, storage, network, and per-namespace allocation.
+description: See what every cluster costs, split the money down to namespaces and stacks, and find the idle capacity worth cutting - without a separate cost tool.
 ---
 
 import { YouTube } from "/snippets/youtube.jsx";
+import { CliVersion } from "/snippets/cli-version.jsx";
 
-Cloud Cost gives you an estimated view of what your clusters cost to run, without wiring up a separate cost tool. Ankra combines the live node and volume inventory it already syncs from your cluster with public cloud pricing to produce per-cluster and fleet-wide estimates, broken down by category and allocated back to namespaces and stacks.
+Your cloud bill tells you what you spent last month, not which cluster or team caused it or what you could turn off tonight. Cloud Cost prices every cluster from the machines and volumes Ankra already sees, splits the money down to namespaces and stacks, and points at the idle capacity worth cutting. It needs no extra cost tool.
 
 <Note>
-All figures are **estimates**, derived from on-demand and spot pricing for the resources Ankra can see. They are designed for trend-watching, right-sizing, and chargeback - not for reconciling a cloud invoice to the cent.
+All figures are **estimates** built from list prices for the resources Ankra can see. Use them for trends, right-sizing and chargeback, not for reconciling an invoice to the cent.
 </Note>
 
 ---
 
-## Where it lives
+## Get a number for every cluster
 
-**Cost** has its own place in the sidebar, between **Credentials** and **Security**, with six tabs:
+Ankra prices a cluster once two things are in place:
 
-- **Overview** - the dashboard: projected month end (with its pace against the run rate), month to date, run rate, priced-cluster coverage, the fleet cost trend, then the same money three ways - by provider, by credential, and by costliest cluster - each linking to the tab with the complete breakdown, plus a preview of the costliest workloads.
-- **Clusters** - the whole fleet in one table: every cluster's run rate, month to date, projection, confidence and the credential that pays for it, with the unpriced ones marked instead of shown as free. Filter by provider; every row opens the cluster's [cost drill-down](#per-cluster-drill-down).
-- **Credentials** - spend grouped the way the bill arrives: provider, then the credential that provisions the capacity (see [Spend by credential](#spend-by-credential)). Each credential opens its own page.
-- **Workloads** - what the allocated money is actually running: namespace allocations across the analysed fleet with the stacks, addons and applications in them (see [Workloads](#workloads)).
-- **Savings** - recommendations with an estimated monthly saving each, the organisation's orphaned-resource findings, and actions that change cluster configuration in one click (see [Savings](#savings)).
-- **Settings** - the display currency, effective discount and network egress estimate behind every figure.
+1. **A price source for its capacity.** For a public provider, a [cloud credential](/platform/credentials) for that provider. For Proxmox VE, VMware, HPE Morpheus or your own hardware, a [rate card](#private-capacity-rate-cards).
+2. **The cluster online**, so the [agent](/concepts/cluster-agent) can sync its nodes and volumes.
 
-Every cluster links into its own **cost drill-down** (`/organisation/cost/clusters/<id>`) - the finest-grained view, with the measured evidence behind each recommendation (see [Per-cluster drill-down](#per-cluster-drill-down)).
+Until then, the cost panel on the cluster's **Overview** page says what is missing, such as no credential, no rate card, cluster offline or pricing still resolving. A cluster that cannot be priced is shown as **not priced**, never as free. The state values are listed in the [Cost API reference](/reference/cost-api#readiness-states).
 
-The clusters list carries the same rollup as a collapsible strip above the table, and the fleet numbers also appear on the [Dashboard](/platform/dashboard).
+Open **Cost** in the main sidebar. It has six tabs:
+
+| Tab | What it answers |
+|-----|-----------------|
+| **Overview** | Projected month end, month to date, run rate and priced clusters, then the money by provider, by credential and by costliest cluster |
+| **Clusters** | Every cluster's run rate, projection, confidence and paying credential. Each row opens the cluster's [drill-down](#per-cluster-drill-down) |
+| **Credentials** | Spend grouped the way the bill arrives: provider, then credential, then the clusters it built |
+| **Workloads** | Which stacks, add-ons and applications the money runs |
+| **Savings** | Recommendations with an estimated monthly saving, and orphaned resources |
+| **Settings** | Display currency, discount and network egress estimate |
+
+The fleet totals also appear on the [Dashboard](/platform/dashboard).
 
 ---
 
-## How it works
+## Where the prices come from
 
-To estimate cost for a cluster, Ankra needs three things:
+| Provider | Price source |
+|----------|--------------|
+| AWS, Google Cloud, Azure | Each provider's public price catalogue, per region |
+| Hetzner | Hetzner's own price list, read every hour with the organisation's Hetzner credential, per location |
+| OVHcloud, UpCloud, DigitalOcean, Scaleway | Ankra's built-in book of published list prices |
+| Proxmox VE, VMware, HPE Morpheus, imported hardware | Your [rate card](#private-capacity-rate-cards) |
 
-1. A **cloud credential** for the cluster's provider (for example AWS or GCP), so it can resolve instance and volume pricing. See [Credentials](/platform/credentials).
-2. The cluster to be **online**, so the agent can sync the current nodes and volumes.
-3. **Pricing** for the region and instance types in use.
-
-A background inventory sync keeps the node and volume picture current per provider; cost is recomputed from that inventory plus your pricing settings.
-
-### Where the prices come from
-
-- **AWS, Google Cloud and Azure** prices come from each provider's public price catalogue, refreshed by a background inventory per region.
-- **Hetzner** prices are read from Hetzner's own price list (`GET /v1/pricing`) every hour with the organisation's stored Hetzner credential, per location - Singapore and the US locations price above Europe - for server types, the default `lb11` load balancer, primary and floating IPv4 and block volumes. Hetzner keeps a server on the list it was ordered under, so a server provisioned before the 2026-06-15 increase is priced from that earlier list and everything ordered later, and every volume, load balancer and IP, from the current one. A platform with no Hetzner credential falls back to Ankra's built-in copy of the list and reports `medium` confidence rather than `high`.
-- **OVHcloud, UpCloud, DigitalOcean and Scaleway** prices come from Ankra's built-in price book of published list prices.
-
-Hetzner bills per started hour and caps each server at its monthly price; Ankra prices every machine at its monthly list price spread over the month, so an always-on server matches the invoice and a server that ran only part of the month reads somewhat low. Short-lived servers outside the cluster - CI runners, one-off VMs in the same Hetzner project - are not part of a cluster's estimate, so a project invoice that includes them will exceed the sum of its clusters' estimates.
-
-### Readiness states
-
-The per-cluster cost view reports a readiness state so you always know why an estimate is or isn't available:
-
-| State | Meaning |
-|-------|---------|
-| `ready` | A cost estimate is available |
-| `no_credential` | No cloud credential is attached for this provider |
-| `unsupported_provider` | The cluster's provider isn't supported for cost estimation |
-| `cluster_offline` | The cluster is offline, so inventory can't be synced |
-| `awaiting_nodes` | Waiting for the first node inventory sync |
-| `awaiting_pricing` | Nodes are known, pricing is still resolving |
-| `estimate_pending` | Inventory and pricing are present; the first estimate is being computed |
-| `no_rate_card` | Private capacity (Proxmox, VMware, imported hardware) that nobody has priced yet - see [Private capacity](#private-capacity-rate-cards) |
+<Note>
+**Hetzner.** A server ordered before the 2026-06-15 price increase is priced from the earlier list. Without a Hetzner credential, Ankra uses its built-in copy of the list and reports `medium` confidence instead of `high`. A server that ran for only part of the month reads slightly low, and servers outside the cluster, such as CI runners in the same project, are not in any cluster's estimate.
+</Note>
 
 ---
 
 ## Private capacity: rate cards
 
-Public providers publish a price for every machine size, so Ankra can look
-one up. Proxmox, VMware, Morpheus and clusters you imported from your own
-hardware have no size anyone sells - so you state what the capacity costs
-and Ankra multiplies it by what each cluster actually holds.
+Proxmox, VMware, Morpheus and imported hardware have no published price, so you state what the capacity costs. A **rate card** is three monthly rates in your own currency: per vCPU, per GB of memory and per GB of provisioned storage. Ankra multiplies them by what each cluster holds.
 
-A **rate card** is three monthly rates in your own currency:
+The card lives on the **credential** that provisions the capacity, so every cluster built from one Proxmox datacentre inherits the same rates. Set it under **Credentials** → your credential → **Pricing**.
 
-| Rate | Applied to |
-|------|-----------|
-| Per vCPU | Each node's CPU capacity |
-| Per GB of memory | Each node's memory capacity |
-| Per GB of storage | Each provisioned volume |
+- **Proxmox ships with defaults** of EUR 3.00 per vCPU, 0.75 per GB of memory and 0.02 per GB of storage per month, labelled **Ankra defaults**. Saving the form makes them your own; clearing it returns to the defaults.
+- **Other private providers have no defaults**, so their clusters stay **not priced** until you set rates.
+- **Imported clusters with no provider credential** use the organisation's own rate card, if you set one.
 
-The card lives on the **credential** that provisions the capacity, so one
-Proxmox datacentre is priced once and every cluster built from it inherits
-those rates. Open **Credentials → your credential → Pricing** to set them.
-
-**Proxmox ships with defaults** (EUR 3.00 per vCPU, 0.75 per GB of memory
-and 0.02 per GB of storage per month) so a cluster reports a number the day
-it is connected. The Cost page labels them **Ankra defaults** rather than
-your own figures; saving the form makes them yours, and clearing it returns
-to the defaults.
-
-Other private providers ship no defaults on purpose: inventing a price for
-hardware Ankra knows nothing about would be a confident wrong answer. Until
-you state rates, those clusters are reported as **not priced** - never as
-free - and their readiness state is `no_rate_card`.
-
-Clusters you imported without any provider credential fall back to the
-organisation's own card, if you set one.
-
-<Note>
-Rates feed the same pipeline as a public provider's catalogue: the hourly
-snapshot, the month-to-date and projected figures, the namespace
-allocation, and the savings recommendations. Changing a rate applies from
-the next hourly metering pass; it does not rewrite past snapshots.
-</Note>
+A rate change applies from the next hourly pass. It does not rewrite past figures.
 
 ---
 
-## Per-cluster cost
+## Read the fleet by credential
 
-Open a cluster and select the **Cost** view to see its estimate. It includes:
-
-- **Summary** - hourly cost, estimated monthly cost, month-to-date, and a projected month-end total, with a confidence level.
-- **Breakdown** - compute split into on-demand and spot, plus storage, network, and control-plane cost, along with idle and unallocated portions.
-- **Coverage** - how many nodes and volumes were priced. If some couldn't be priced, the estimate is flagged as `coverage_incomplete` so you know it understates the true figure.
-- **Per-namespace allocation** - cost allocated to each namespace (and the owning stack, where known) by CPU and memory share, so you can attribute spend to teams or workloads.
-- **Trend** - a daily series of the monthly cost estimate so you can spot changes over time.
-
-```bash
-GET /org/clusters/{cluster_id}/cost
-```
+A cloud bill arrives per account, and an account is what a credential holds. The **Credentials** tab groups spend by provider, then by the credential that actually built each cluster. Each live credential opens its own page with its clusters and, for private capacity, its rate card. A deleted credential keeps its name in the list while its clusters still cost money, and clusters with no recorded credential, such as imported ones, collect into one **No credential recorded** row per provider.
 
 ---
 
-## Fleet summary
+## Attribute spend to teams
 
-The organisation-wide rollup aggregates every cluster's estimate into a single number, with breakdowns by provider and a list of your top-spending clusters:
-
-```bash
-GET /org/cloud-cost/summary
-```
-
-It returns estimated monthly cost, month-to-date, and projected month-end totals - in your configured display currency - overall, per provider, **per credential** (`by_credential`), and for every analysed cluster (`clusters`, each carrying the `credential_id` / `credential_name` it resolves to; `top_clusters` stays the ranked slice). This is the same rollup shown on the **Cost** page, the clusters list strip, and the [Dashboard](/platform/dashboard).
+Every hour Ankra allocates each cluster's cost to its namespaces by their share of CPU and memory. The **Workloads** tab joins that allocation to names you recognise: the **stack** a namespace belongs to, the **add-ons** in it and the **applications** installed into it. Rows are ranked by monthly cost and can be filtered by cluster, which gives you a chargeback view per team. The tab shows the 500 costliest rows.
 
 ---
 
-## Spend by credential
+## Cut waste
 
-A cloud bill arrives per account, and an account is what a credential holds - so the **Credentials** tab regroups the fleet the way finance will read it: provider, then credential, then the clusters each credential provisions. Ankra resolves the credential from each cluster's own resource graph (the same lookup provisioning uses), so the attribution is what actually built the cluster, not a guess:
+**Savings** turns the same data into actions, each with an estimated monthly saving:
 
-- A **live credential** links to its own page - `/organisation/cost/credentials/<id>` - with its figures, its clusters, and (for private capacity) the rate card pricing it, badged with where the rates come from and an edit path.
-- A credential **deleted after its clusters were built** keeps its name in the listing - its clusters still cost money - but has no page to open.
-- Clusters that name **no credential** (imported clusters, torn-down graphs) collect into one honest *No credential recorded* bucket per provider, so the totals always account for the whole fleet.
+- **Right-size idle capacity.** When a large share of a cluster's run rate sits idle, **Right-size with AI** opens Ankra's AI on that cluster. It proposes scaling changes and applies nothing until you confirm.
+- **Stop non-production clusters off-hours.** A non-production cluster running around the clock on a provider with [power schedule](/platform/cluster-power-schedules) support gets **Add off-hours schedule**. It creates two schedules in UTC: weekdays at 19:00 the worker servers are deleted, at 07:00 new ones are created, and weekends stay down. The control plane, etcd, cloud volumes and addresses are kept and keep billing. Data on the workers' own disks is lost at every stop. A cluster without a known environment label is never offered this.
+- **Reduce unallocated spend.** Raised when a quarter or more of a cluster's run rate is not allocated to any workload.
 
----
+### Orphaned and idle resources
 
-## Workloads
-
-The **Workloads** tab answers "where does the money actually run" with names you recognise, not namespace strings. For every analysed cluster it takes the namespace allocation at the latest snapshot and joins in what lives there:
-
-- the **stack** the namespace belongs to,
-- the **addons** placed in it,
-- the **applications** installed into it (each linking to its application page).
-
-Rows are ranked by allocated monthly cost across the whole fleet, searchable and filterable by cluster, with the compute/storage split behind each figure. The same enrichment appears on each cluster's drill-down beside the namespace allocation donut.
-
-```bash
-GET /org/cloud-cost/workloads
-```
-
-The read is capped at the 500 costliest rows and says so when it truncates. On an installation older than this feature the tab says the backend does not serve workload allocations yet - never "nothing runs".
-
----
-
-## Settings
-
-Currency resolves in two layers. The **organisation default** is what everyone gets out of the box; each member can set **their own display currency** on top (Cost → Settings → *Your display currency*), and every cost figure the platform shows them - fleet, clusters, credentials, workloads, savings, drill-downs - renders in it. Provider quotes in the cluster-create wizards convert too: UpCloud quotes arrive in US dollars, Hetzner and OVHcloud in euros, and the wizard converts them into your display currency at the latest exchange rate (keeping the provider's own currency, honestly labelled, when no rate is known).
-
-Organisation admins tune the defaults and estimation behaviour under cost settings:
-
-| Setting | Description |
-|---------|-------------|
-| `currency` | The organisation's default display currency: `eur` (the default), `usd`, `gbp`, `sek`, `nok`, `dkk`, `chf`, `pln`, `czk`, `jpy`, `cad`, `aud` or `inr` |
-| `effective_discount_pct` | A flat discount (0-100) applied to list pricing, to approximate committed-use or enterprise agreements |
-| `include_network_egress_estimate` | Whether to add an estimated network egress component |
-
-The settings read also answers `display_currency` (the currency effective for the caller) and `fx_rates`; the personal preference itself lives on `PATCH /org/me/preferences` as `display_currency` (empty clears it back to the organisation default).
-
-```bash
-GET /org/cloud-cost/settings
-PUT /org/cloud-cost/settings   # organisation admins only
-```
-
-<Warning>
-Only organisation admins can change cost settings. The discount must be between 0 and 100, and the currency must be one of the supported display currencies listed above.
-</Warning>
-
----
-
-## Savings
-
-The **Savings** section turns the same data into actions:
-
-- **Right-size idle capacity** - when a meaningful share of a cluster's run rate sits idle, one click opens Ankra AI's cost optimisation for that cluster; the scaling updates it proposes (`scale_workers`, `update_node_group`) apply to the cluster after your confirmation.
-- **Stop non-production clusters off-hours** - a non-production cluster on a provider with [power schedule](/platform/cluster-power-schedules) support, running around the clock, gets a one-click schedule: weekdays 19:00 UTC the workers scale to zero, 07:00 UTC they come back, and weekends stay down - roughly 64% of its compute off the bill. The exact pair is spelled out before anything is written, and both schedules stay editable under the cluster's power schedules. A cluster with an unknown environment label is never offered a shutdown.
-- **Reduce unallocated spend** - when a quarter or more of a cluster's run rate is not allocated to any workload.
-
-Each cluster lane links into its [drill-down page](#per-cluster-drill-down), and **Costliest namespaces** lists the workload dependencies fleet-wide, each with its monthly cost and its share of the cluster. A cluster whose cost could not be read is counted as unanalysed and makes the savings total an explicit lower bound - it is never read as "no savings".
-
-### Orphaned & idle resources
-
-A six-hourly waste scan finds resources that bill money while doing no work and lists them on the Savings page (and, narrowed, on each cluster's drill-down):
+A waste scan runs every six hours and lists resources that bill while doing no work:
 
 | Finding | What it means |
 |---------|---------------|
-| Stopped server (still billed) | A Hetzner server with `status: off` - Hetzner bills a stopped server fully as long as it exists |
+| Stopped server (still billed) | A switched-off Hetzner server. Hetzner bills it in full for as long as it exists |
 | Unattached volume | A block volume attached to no server |
-| Unassigned IP address | A primary IPv4 or floating IP assigned to nothing (unassigned primary IPv6 is free and not reported) |
-| Load balancer with no targets | A load balancer forwarding to nothing |
-| Released persistent volume | A Kubernetes PV stuck in phase `Released` - its disk keeps billing while no claim can bind it again |
+| Unassigned IP address | A primary IPv4 or floating IP assigned to nothing |
+| Load balancer with no targets | A load balancer that forwards to nothing |
+| Released persistent volume | A Kubernetes volume stuck in `Released`, still billing while no claim can bind it |
 
-Every finding carries its estimated monthly cost (or "price unknown" - never a fabricated zero) and a one-click **Resolve with AI** that opens a chat naming the exact resource. The section is honest about its own limits: it says when the first scan is still pending, when a credential could not be listed (a partial scan, not "no waste"), and how long ago the last scan ran. The provider-side scan covers Hetzner accounts today; the released-PV check covers every cluster.
-
-```bash
-GET /org/cloud-cost/waste            # organisation-wide findings
-GET /org/cloud-cost/waste?cluster_id=<id>
-```
+Each finding shows its monthly cost, or "price unknown", and **Resolve with AI** opens a chat naming the exact resource. The provider-side scan covers Hetzner accounts; the released-volume check covers every cluster. A credential that could not be listed is shown as a partial scan, not as "no waste".
 
 ---
 
 ## Per-cluster drill-down
 
-Clicking a cluster in Savings (or a costliest-cluster row on the Overview) opens its cost drill-down - the page to use when you want to know **what exactly to adjust, and why it is safe**:
+Open a cluster from **Clusters**, **Savings** or the Overview to see what to change on it and why it is safe:
 
-- **Cost trend** - the daily run-rate over the last 30 days, with the delta over the window.
-- **Where the money goes** - a donut of the itemised components (compute on-demand and spot, storage, network, control plane, Bastion & VMs), with idle and unallocated called out.
-- **Node evidence** - the proof behind right-sizing: for every node, the measured **average, p95 and peak** CPU and memory usage over a selectable window (24h / 7d / 30d) against what the scheduler reserved, a derived monthly cost, and a verdict:
-  - *underutilised* - even the busy moments (p95) fit well under the reservation on **both** CPU and memory, with the estimated saving from sizing to 1.5x the observed p95;
-  - *spiky - keep headroom* - bursts make the average misleading, or p95 already approaches the reservation. A spiky node is never called safe to downsize, whatever its average;
-  - *well sized*, or *no metrics* when the store has no series for the node - usage unknown, never "0% used".
-- **Usage over time** - the per-node CPU and memory charts behind those numbers, so you can see the pattern (a nightly batch job, a business-hours curve) rather than trust a single statistic.
-- **Recommendations** - the same recommendations Savings shows (one model, one set of thresholds), now with the measured evidence attached, and the same one-click resolves.
-- **Namespace costs and efficiency** - the allocation donut next to requested-vs-used per namespace.
-- **This cluster's waste findings.**
+- **Cost trend** over the last 30 days, and **where the money goes**: compute (on-demand and spot), storage, network, control plane, and Bastion and VMs, with idle and unallocated portions.
+- **Node evidence**: for every node, the measured average, p95 and peak CPU and memory over 24 hours, 7 days or 30 days, against what the scheduler reserved. Each node gets a verdict: *underutilised* (p95 fits well under the reservation on both CPU and memory, with the saving from sizing to 1.5 times p95), *spiky - keep headroom* (never called safe to downsize), *well sized*, or *no metrics*.
+- **Recommendations** with that evidence attached, **namespace costs**, and the cluster's **waste findings**.
 
-Node evidence needs the platform metrics pipeline; without it the page says so and keeps the recommendations request-based, and the endpoint answers:
-
-```bash
-GET /org/clusters/{cluster_id}/metrics/utilisation?range_seconds=604800
-```
+Node evidence needs the platform metrics pipeline. Without it, recommendations are based on resource requests and the page says so.
 
 ### What if the node groups changed?
 
-Under the breakdown, the drill-down carries a **what-if draft**: the cluster's node groups as they run today - name, node count, vCPU, memory and disk per node - plus its load balancers, editable in place. Change a count, resize a group, add a group or drop one, add a load balancer, and the panel prices the draft and shows three figures side by side: **today's bill** (the metered run rate), the **predicted bill**, and the **change** between them. The draft is page state and nothing more: reload the page, or press *Discard draft*, and it is gone. Nothing is saved and nothing is applied to the cluster.
+Under the breakdown, a **what-if draft** lists the cluster's node groups (node count, vCPU, memory and disk per node) and its load balancers. Change a count, resize or add a group, or add a load balancer, and the panel shows **today's bill**, the **predicted bill** and the **change**. Nothing is saved or applied; **Discard draft** or a reload clears it.
 
-The prediction is honest about how it is built. It is today's bill plus the difference between the draft and the current configuration **priced the same way**, so every charge the draft does not touch cancels out, and only what you changed moves the number. Pricing comes from the same source the bill is metered from:
+The prediction is today's bill plus the priced difference between the draft and today, so only what you changed moves the number. A resized group lands on the cheapest published size that holds its vCPU and memory, keeping its CPU architecture, and the panel names the size. Private capacity is priced from the cluster's rate card. Pick another provider to price the same draft there, including from private capacity.
 
-- **Public providers** (Hetzner, OVHcloud, UpCloud, Scaleway, and any size the cluster already runs) price from the price book; a self-managed [AWS cluster](/guides/aws-clusters) prices from the AWS per-region catalogue in its own region. A group you resize is placed on the **cheapest published size that holds the requested vCPU and memory**, locked to the current size's CPU architecture (an ARM group never silently becomes x86) and preferring its current line (a dedicated group stays dedicated while a size in that line fits). A size holds what a node booted on it reports: a plan sold as 16 GB is 16 GiB, and the 16.7 GB the kubelet sees on it still fits. The size it landed on is shown beside the price. Disk beyond what the size bundles is priced as volume storage; where a provider sells spot capacity the group can be priced as spot.
-- **Private capacity** (Proxmox, VMware, Morpheus, MAAS, imported clusters) prices per vCPU, per GB of memory and per GB of disk from the [rate card](#private-capacity-rate-cards) that prices the cluster today - the credential's own, Ankra's Proxmox default, or the organisation fallback - and says which.
-
-**Moving to another provider.** The same draft can be priced as if the cluster ran somewhere else: pick a provider in the panel (DigitalOcean, Hetzner, OVHcloud, Scaleway, UpCloud, AWS, Google Cloud or Azure - whichever the price book carries sizes for - or Proxmox VE and HPE Morpheus, priced per unit from a rate card) and every group is placed on the cheapest size of *that* provider that holds its vCPU and memory, keeping its CPU architecture where the target sells it, with disk beyond the bundled disk priced as the target's volumes and load balancers at the target's price. Today's configuration stays priced on its own provider, so the change reads as "what moving costs" - and it works from private capacity too, so a Proxmox cluster priced by a rate card can be compared with the same shape on a public cloud. The control plane Ankra provisioned is priced on both sides and the cluster's metered volume storage is re-priced at the target's rate, so both move with the number; a hyperscaler's control-plane fee or a provider's egress pricing is not part of the comparison. For the whole bill on every target at once, open [Compare providers](#compare-providers).
-
-A group nothing can price - a shape no published size holds, a size the book has no price for, a private cluster without a rate card - reads *Not priced* with the reason, and the total shows *from* the priced part rather than a number that leaves the unknown out. If an unpriced part differs between the draft and today, the prediction is withheld rather than guessed. Every figure is an estimate in your display currency, after your organisation's discount.
-
-The same estimate is served over the API for scripts and the CLI's `/api/v1` twin:
-
-```bash
-GET  /org/clusters/{cluster_id}/cost/estimate      # what runs today, priced - seeds a draft
-POST /org/clusters/{cluster_id}/cost/estimate      # price a draft
-```
-
-```json
-{
-  "node_groups": [
-    { "name": "workers", "count": 3, "vcpus": 4, "memory_gb": 8, "disk_gb": 100 },
-    { "name": "batch", "count": 1, "vcpus": 2, "memory_gb": 4, "disk_gb": 0, "spot": true }
-  ],
-  "network": { "load_balancers": 2 },
-  "provider": "upcloud"
-}
-```
-
-The response carries the `baseline` and the `estimate` (one priced line per group with the size it was placed on and its `instance_class`, the provisioned `control_plane` priced the same way, the network resources, and totals with a `coverage_incomplete` flag), `metered_monthly_cents`, `predicted_monthly_cents` and `delta_monthly_cents`, and a `pricing` block naming the mode (`catalog`, `rate_card` or `unavailable`), the source and the unit prices behind the figures. `network` may be omitted to keep today's resources. `provider` prices the draft on another provider: it must be one of the response's `available_targets`, and the response then carries `target_provider`, a `target_pricing` block for that provider while `pricing` keeps the cluster's own, and a `volumes` line with the metered volume storage and what it would bill on the target. `match` picks the matching rule - `cheapest` (the default) or `like_for_like` - and `priced_delta_monthly_cents` is the change over the parts both sides could price, answered even when the prediction is withheld.
+A group nothing can price reads **Not priced** with the reason. Scripts can use the same estimate: see [What-if estimate](/reference/cost-api#what-if-estimate).
 
 ---
 
 ## Compare providers
 
-The what-if panel prices one provider at a time. **Compare providers**, opened from the button of the same name on the cluster's cost page (`/organisation/cost/clusters/{cluster_id}/compare`), prices the cluster's whole bill on **every** provider Ankra can build on, side by side: today stays metered where it runs, and each column is the same fleet - the node groups, the control plane Ankra provisioned, the volumes and the load balancers - re-priced on that provider's book.
-
-Three kinds of column, from three kinds of evidence:
-
-- **Providers Ankra keeps a size catalogue for** - DigitalOcean, Hetzner, OVHcloud, Scaleway and UpCloud - price from the same list-price book the metering loop bills from. One price applies everywhere, so the column names no region.
-- **The hyperscalers** - AWS, Google Cloud and Azure - price from their own catalogues as the platform's inventory loops have read them, and those catalogues are per region: a machine costs different money in Frankfurt and in Ohio. Each column says **which region it was priced in**: the cluster's own region where the target prices it, else the first European region the book carries, else the region it prices the most sizes in. Shapes come off the catalogue itself - the EC2 inventory publishes each type's vCPU and memory, and Compute Engine and Azure machine-type names state theirs (an `n2-standard-8` is 8 vCPU and 32 GB; a `Standard_D8s_v5` the same) - so only the general-purpose, compute- and memory-balanced families are placed on; GPU, HPC, burstable and constrained-core sizes are left out rather than guessed at. A hyperscaler whose inventory loop has not run yet on your installation simply does not appear.
-- **Private providers** - Proxmox VE and HPE Morpheus - sell no size anyone quotes, so the fleet is priced **per unit of capacity** - per vCPU, per GB of memory and per GB of disk - from a [rate card](#private-capacity-rate-cards): the card stated for one of the organisation's credentials of that kind, else the organisation's fallback card, else, for Proxmox only, the rates Ankra ships. The column names which, and a figure from Ankra's default rates reads as exactly that, never as a price you stated. Morpheus appears only once a card prices it.
-
-Watch a production cluster priced on every provider, like for like and cheapest fit.
+**Compare providers**, a button on the cluster's cost page, prices the whole bill (node groups, the control plane Ankra provisioned, volumes and load balancers) on every provider Ankra can build on, side by side.
 
 <YouTube id="cZWsyu1vUaU" title="Ankra Compare Providers: your cluster, priced on every cloud" />
 
-The verdict row leads. Each target carries its predicted monthly bill, the difference against today in money and percent, whether every line could be priced, and whether the vCPU class changed. Above it, the tiles name the **cheapest full match** (the lowest bill among the targets every line of which could be priced), the **closest to today**, and a **break-even**: a fortnight of running both clusters for the cut-over, against what the move saves per day.
+- **DigitalOcean, Hetzner, OVHcloud, Scaleway and UpCloud** price from Ankra's list-price book.
+- **AWS, Google Cloud and Azure** price from their per-region catalogues, and each column names the region it used. AWS offers every current-generation EC2 type except Apple Mac hosts, burstable T instances included. Google Cloud and Azure offer only the families whose shape can be read from the size name: general-purpose and compute-optimised, plus Azure's memory-optimised E series. [Which sizes each hyperscaler offers](/reference/cost-api#hyperscaler-sizes).
+- **Proxmox VE and HPE Morpheus** price per unit of capacity from a rate card, and the column says which card.
 
-Two matching rules, picked at the top of the page:
+Each column shows the predicted monthly bill and the difference against today. Tiles name the **cheapest full match**, the **closest to today**, and a **break-even**: two weeks of running both clusters during the move, against what the move saves per day.
 
-- **Like-for-like** (the default) keeps each group on a size of the same vCPU class as today - shared or dedicated - wherever the target sells one, so a production fleet on dedicated cores is not quoted as a saving on shared ones. Each provider's own vocabulary is read for the class: Hetzner's CCX line, DigitalOcean's dedicated-CPU droplets, OVHcloud's B3/C3/R3 flavours, UpCloud's General Purpose, Premium and Cloud Native plans, every current AWS family but the burstable T line, every Compute Engine family but E2, and Azure's D, E and F series sell dedicated cores; Hetzner's CX and CPX lines, DigitalOcean's basic droplets, OVHcloud's Discovery flavours, UpCloud's Developer and Starter plans, AWS T instances and Compute Engine E2 share them. A rate-carded column has no class to keep: capacity is capacity. When the target has no such size that holds the group, the cheapest size that does is used and the mapping says so.
-- **Cheapest size that fits** takes the cheapest size that holds each group, whatever its class - what the what-if panel does. Under like-for-like, this figure stays as a footnote on each column, so the saving it would show is visible but never the verdict.
+Pick a matching rule at the top:
 
-Staying put is a column too. When the cluster's own provider has a price book, the page also prices the same fleet **re-sized in place** on it - every group and the control plane land afresh on the cheapest size that holds them, under the matching rule you picked - and marks that column **Stay**. It leads only when it is the column that saves, and it never gets a break-even: there is no move to pay for. Beside the metered bill, today's tile also shows what the same shape costs **at list** on that book, so the gap between the two is visible before any other provider is read.
+- **Like-for-like** (the default) keeps each group on the same vCPU class, shared or dedicated, where the target sells one. The [class of each provider's sizes](/reference/cost-api#vcpu-classes) is listed in the reference.
+- **Cheapest size that fits** ignores class. Under like-for-like it stays as a footnote on each column.
 
-Pick a column and the page opens it **line by line**: worker compute, control plane, volumes and load balancers, each with today's figure, the target's, and the difference, then **group by group**: the size each node group runs on today, the size it lands on, and what changes about the machine - vCPU, memory, disk carried as a volume, and class.
+A **Stay** column prices the same fleet re-sized on the cluster's own provider. Select any column to see it line by line and group by group. A target with an unpriced line shows a "from" figure, names what is missing, and never sorts as cheapest.
 
-Unpriced is never free. A target a line of which could not be priced - a shape no size there holds, a provider with no volume price - keeps a **floor** ("from" the priced lines) rather than a total, names what is missing, and never sorts as cheapest. A target whose re-price failed says so instead of showing a figure. Before the cluster's first cost snapshot, today is the list-price sum of what runs and the comparison is list price against list price; the break-even then stays empty.
-
-What the page does not price: region and latency, storage class (a local NVMe disk against a network volume), availability zones, load-balancer features, egress terms, commitments and negotiated discounts. They differ between providers and belong in the decision beside the number, not inside it.
+Latency, storage class, availability zones, load-balancer features, egress terms and negotiated discounts are not priced. Weigh them next to the number.
 
 ---
 
-## Prerequisites checklist
+## Settings
 
-<Steps>
-  <Step title="Attach a cloud credential, or price your own capacity">
-    Add a credential for the cluster's provider under [Credentials](/platform/credentials). For Proxmox, VMware or
-    imported hardware there is no catalogue to look up, so set a
-    [rate card](#private-capacity-rate-cards) on that credential instead.
-  </Step>
-  <Step title="Bring the cluster online">
-    Ensure the [agent](/concepts/cluster-agent) is connected so node and volume inventory can sync.
-  </Step>
-  <Step title="Set your currency and discount">
-    As an org admin, set the display currency and any committed-use discount in cost settings.
-  </Step>
-  <Step title="Read the estimate">
-    Open the cluster's Cost view, or the fleet rollup on the Dashboard.
-  </Step>
-</Steps>
+Each member can set **Your display currency** under **Cost** → **Settings**, and every cost figure they see, including provider quotes in the cluster-create wizards, renders in it. Organisation admins set the defaults:
+
+- **Currency** - the organisation default: EUR (the default), USD, GBP, SEK, NOK, DKK, CHF, PLN, CZK, JPY, CAD, AUD or INR.
+- **Effective discount** - a flat 0-100% discount on list prices, to approximate committed-use or enterprise agreements.
+- **Network egress estimate** - whether to add an estimated egress component.
 
 ---
 
 ## From the CLI and Ankra AI
 
-The same surface is scriptable and conversational:
+<CliVersion since="0.14.0" />
 
-- **CLI** - `ankra cost summary`, `ankra cost cluster <name-or-id>`, and `ankra cost settings get|set` (`--currency`, `--discount`, `--include-egress`); every command takes `-o json`.
-- **Ankra AI and MCP** - `get_fleet_cloud_cost` and `get_cost_settings` answer in chat and over `mcp:read` tokens; `update_cost_settings` changes the pricing settings (organisation admins, with confirmation, on `mcp:write`); `get_cluster_cost` and `get_stack_cost` cover a single cluster or stack.
+```bash
+ankra cost summary
+ankra cost cluster my-cluster
+ankra cost settings set --currency eur --discount 10
+```
+
+Every command takes `-o json`. See the [`ankra cost` reference](/reference/cli/cost) for savings, the ledger and per-object cost, and the [Cost API reference](/reference/cost-api) for field meanings.
+
+In chat and over MCP, Ankra's AI reads the same figures with `get_fleet_cloud_cost`, `get_cluster_cost`, `get_stack_cost`, `get_cloud_savings` and `get_cost_settings`. Changes need an `mcp:write` token and the same permissions as in the portal.
+
+---
+
+## Budgets and the cost autopilot
+
+A **budget** is a monthly amount for the organisation, one cluster, one environment label or one application. It shows spend so far, the projected month end and the hour it would cross the budget. Ankra sends a **Budget crossing** notification when the projection reaches the alert threshold (80% unless you set another). Route it with [notification routing](/guides/notification-routing).
+
+The **cost autopilot** decides how much Ankra may do about cost without asking. Each environment kind (production, staging, development, preview, unknown) takes a tier: hands-off, scheduled, managed or ephemeral. An organisation that never set a policy is hands-off everywhere, so every change waits for a person. You can override one cluster's tier and set daily quiet hours.
+
+<CliVersion since="0.19.0" command="cost budgets, cost autopilot" />
+
+```bash
+ankra cost budgets set --scope cluster --scope-id my-cluster --name "my-cluster" --amount 1500 --currency eur
+ankra cost budgets list
+ankra cost autopilot get
+```
+
+Every member can read budgets and the autopilot policy. Changing a budget needs the `billing.manage` permission; changing the autopilot also needs `clusters.write`. Ankra's AI uses `get_cost_budgets`, `set_cost_budget`, `get_cost_autopilot` and `update_cost_autopilot`.
+
+<Warning>
+**Closed beta.** The portal Cost tabs do not show budgets or the autopilot yet; use the CLI, the API or Ankra's AI. A new Cost page that shows them (under **Autopilot** and **Signals & policy**) is in closed beta and enabled per organisation on request. When it is on, a banner on the Overview, Savings and Clusters tabs links to it. [Contact support](/platform/support) to have it turned on for your organisation.
+</Warning>
+
+**Next:** stop idle clusters on a schedule with [power schedules](/platform/cluster-power-schedules).

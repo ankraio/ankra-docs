@@ -1,0 +1,121 @@
+---
+title: Cost API fields
+description: Field meanings for scripts that read cloud cost - readiness states, cost settings, the what-if estimate, and how provider comparisons pick sizes.
+---
+
+This page lists what the cost fields mean when you read cost from a script. It complements [Cloud Cost](/platform/cloud-cost), which explains the feature, and the [API Reference](/api-reference/introduction), which lists every cost endpoint with its full schema. Every money figure is an estimate in cents, in the currency the response names.
+
+---
+
+## Readiness states
+
+A cluster's cost read carries `readiness.state`, which says whether an estimate exists and, if not, why.
+
+| Value | Meaning |
+|-------|---------|
+| `ready` | A cost estimate is available |
+| `no_credential` | No cloud credential is attached for this provider |
+| `no_rate_card` | Private capacity (Proxmox, VMware, imported hardware) that has no [rate card](/platform/cloud-cost#private-capacity-rate-cards) yet |
+| `unsupported_provider` | The cluster's provider is not supported for cost estimation |
+| `cluster_offline` | The cluster is offline, so its inventory cannot be synced |
+| `awaiting_nodes` | Waiting for the first node inventory sync |
+| `awaiting_pricing` | Nodes are known; pricing is still resolving |
+| `estimate_pending` | Inventory and pricing are present; the first estimate is being computed |
+
+A priced estimate whose nodes or volumes were not all priced sets `coverage_incomplete`, so the figure understates the real cost.
+
+---
+
+## Cost settings
+
+| Field | Meaning |
+|-------|---------|
+| `currency` | The organisation's default display currency: `eur` (the default), `usd`, `gbp`, `sek`, `nok`, `dkk`, `chf`, `pln`, `czk`, `jpy`, `cad`, `aud` or `inr` |
+| `effective_discount_pct` | A flat discount from 0 to 100 applied to list prices |
+| `include_network_egress_estimate` | Whether an estimated network egress component is added |
+| `display_currency` | Read only: the currency in effect for the caller, after their personal preference |
+| `fx_rates` | Read only: the exchange rates used for conversion |
+
+Only organisation admins can change the settings (`PUT /api/v1/org/cloud-cost/settings`).
+
+---
+
+## What-if estimate
+
+`GET /api/v1/org/clusters/{cluster_id}/cost/estimate` returns what the cluster runs today, priced, to seed a draft. `POST` to the same path prices a draft. Nothing is saved or applied.
+
+```bash cURL
+curl -X POST "https://platform.ankra.app/api/v1/org/clusters/<cluster-id>/cost/estimate" \
+  -H "Authorization: Bearer <your-token>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "node_groups": [
+      { "name": "workers", "count": 3, "vcpus": 4, "memory_gb": 8, "disk_gb": 100 },
+      { "name": "batch", "count": 1, "vcpus": 2, "memory_gb": 4, "disk_gb": 0, "spot": true }
+    ],
+    "network": { "load_balancers": 2 },
+    "provider": "upcloud"
+  }'
+```
+
+### Request
+
+| Field | Meaning |
+|-------|---------|
+| `node_groups` | The full set of node groups the draft runs: `name`, `count`, `vcpus`, `memory_gb`, `disk_gb` per node, and `spot` |
+| `network` | Optional counts of `load_balancers`, `nat_gateways`, `gateways` and `flexible_ips`. Omit it to keep today's network resources |
+| `provider` | Optional. Prices the draft on another provider; it must be one of the response's `available_targets`. The cluster's own provider re-sizes the fleet in place |
+| `match` | `cheapest` (the default) or `like_for_like`. See [vCPU classes](#vcpu-classes) |
+
+### Response
+
+| Field | Meaning |
+|-------|---------|
+| `baseline` | Today's configuration, priced |
+| `estimate` | The draft, priced: one line per node group with the size it was placed on and its `instance_class`, the provisioned `control_plane`, the network resources, and totals with a `coverage_incomplete` flag |
+| `metered_monthly_cents` | Today's metered bill |
+| `predicted_monthly_cents` | The predicted bill: today's bill plus the priced difference. Withheld when an unpriced part differs between draft and today |
+| `delta_monthly_cents` | The change between the two |
+| `priced_delta_monthly_cents` | The change over the parts both sides could price, returned even when the prediction is withheld |
+| `pricing` | How the cluster's own side is priced: `mode` is `catalog`, `rate_card` or `unavailable`, with the source and unit prices |
+| `available_targets` | The providers the draft can be priced on |
+| `target_provider`, `target_pricing` | Present when `provider` named another provider: the target and how it is priced |
+| `volumes` | The cluster's metered volume storage and what it would bill on the target |
+
+---
+
+## Hyperscaler sizes
+
+When a draft or a [provider comparison](/platform/cloud-cost#compare-providers) is priced on AWS, Google Cloud or Azure, Ankra places each node group on a size from that provider's catalogue.
+
+| Provider | Sizes offered |
+|----------|---------------|
+| AWS | Every current-generation EC2 instance type with a published vCPU count, memory size and CPU architecture, except Apple Mac hosts. GPU, memory-optimised and burstable T types are included; T types count as shared-core |
+| Google Cloud | Shapes are read from the machine type name (an `n2-standard-8` is 8 vCPU and 32 GB), so only the general-purpose and compute-optimised families are used. Accelerator, memory-optimised and HPC families, and the shared-core `e2-micro`, `e2-small` and `e2-medium`, are left out |
+| Azure | Shapes are read from the size name (a `Standard_D8s_v5` is 8 vCPU and 32 GB), so only the D (general-purpose), E (memory-optimised) and F (compute-optimised) series are used. B burstable, L, M, N and H series, confidential sizes, and sizes whose feature letters change the memory ratio are left out |
+
+Hyperscaler catalogues are priced per region. Each comparison column names the region it used: the cluster's own region when the target prices it, else the first region in a fixed preference list that the target prices, else the region with the most priced sizes.
+
+| Provider | Preference list |
+|----------|-----------------|
+| AWS | `eu-central-1`, `eu-west-1`, `eu-north-1`, `eu-west-2`, `us-east-1` |
+| Google Cloud | `europe-west1`, `europe-west3`, `europe-west4`, `us-central1` |
+| Azure | `westeurope`, `northeurope`, `swedencentral`, `eastus` |
+
+A hyperscaler whose catalogue has not been read yet is not offered as a target.
+
+---
+
+## vCPU classes
+
+The `like_for_like` rule keeps each node group on the same vCPU class, shared or dedicated, when the target sells one. If no same-class size holds the group, the cheapest size that does is used and the mapping says so. Rate-carded providers (Proxmox VE, HPE Morpheus) have no class.
+
+| Provider | Dedicated cores | Shared cores |
+|----------|-----------------|--------------|
+| Hetzner | CCX | CX, CPX |
+| DigitalOcean | Dedicated-CPU droplets | Basic droplets |
+| OVHcloud | B3, C3, R3 | Discovery |
+| UpCloud | General Purpose, Premium, Cloud Native | Developer, Starter |
+| AWS | Every current family except T | T |
+| Google Cloud | Every Compute Engine family except E2 | E2 |
+| Azure | D, E and F series | - |
