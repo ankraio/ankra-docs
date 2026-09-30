@@ -1,0 +1,238 @@
+---
+title: "Operate an Ankra Managed Cluster"
+description: "Day-2 tasks for clusters Ankra builds on your own account - node groups, control plane, restarts, the bastion, Kubernetes upgrades, stop and start, and teardown - with the commands for every provider."
+---
+
+import { CliVersion } from "/snippets/cli-version.jsx";
+
+Your cluster is running and now it needs to change: more workers, a bigger instance type, a new Kubernetes version, a pause overnight, or a clean teardown. This page covers those tasks for every cluster Ankra builds on your own account - the **Ankra Managed** clusters in the create dialog, on Hetzner, OVHcloud, UpCloud, DigitalOcean, Scaleway, AWS EC2, Ankra Cloud, Proxmox VE and HPE Morpheus. Where a provider behaves differently, the table in each section says so, and the provider's own guide carries the details.
+
+<Note>
+Clusters whose control plane your cloud runs (EKS, GKE, AKS, DOKS, UKS, OVHcloud MKS, Kapsule) are **Cloud Managed**; their node pools, upgrades and deletion are on [Managed Kubernetes](/guides/managed-kubernetes#day-2-operations).
+</Note>
+
+## Before you start
+
+- The cluster shows **Online** and no operation is running on it. Day-2 changes are queued one at a time; follow them under **Operations** or with `ankra cluster operations list`.
+- In the dashboard, most controls live under **Nodes** in the cluster sidebar (tabs **Node groups**, **Control plane**, **Bastion & VMs**) and under **Settings → General**. [Nodes](/platform/cluster-nodes) describes every control on those tabs.
+- On the CLI, most commands find the provider from the cluster, so they are the same everywhere. The rest take the provider name: `hetzner`, `ovh`, `upcloud`, `digitalocean`, `scaleway`, `aws`, `proxmox` or `morpheus`. Ankra Cloud clusters are operated from the dashboard and the API; the released CLI has no Ankra Cloud commands yet.
+- Every command has an API equivalent under `/api/v1/clusters/{provider}/{cluster_id}/...` - see the API reference. Writes answer `202 Accepted` and run in the background; pass `--wait` on the CLI to block until one finishes.
+
+<CliVersion since="0.17.0" />
+
+| Provider | CLI name | Restart a node | Resize the bastion | Control plane |
+|---|---|---|---|---|
+| Hetzner | `hetzner` | CLI | CLI | CLI |
+| OVHcloud | `ovh` | CLI | CLI | CLI |
+| UpCloud | `upcloud` | CLI | CLI | CLI |
+| DigitalOcean | `digitalocean` | CLI | CLI | CLI |
+| Scaleway (Closed Beta) | `scaleway` | CLI | Not applicable - the Public Gateway runs the bastion | CLI |
+| AWS EC2 (Closed Beta) | `aws` | CLI | Dashboard or API | CLI |
+| Proxmox VE | `proxmox` | CLI | Dashboard or API | CLI |
+| HPE Morpheus (Closed Beta) | `morpheus` | Not available | Dashboard or API | CLI |
+| Ankra Cloud (Closed Beta) | - | Dashboard or API | Dashboard or API | Dashboard or API |
+
+---
+
+## Node groups
+
+A node group is a set of workers with one instance type, a count, and optional labels and taints. Each group scales, changes type and carries its labels independently. A group holds 0 to 100 nodes; scaling a group to 0 keeps its definition and removes its servers.
+
+**In the dashboard:** open **Nodes → Node groups**. Each card has the group's controls, **Add node group** opens the size picker with live prices, and **Max out** sizes a group to what your cloud account still has room for.
+
+**On the CLI:**
+
+```bash
+ankra cluster node-group list <cluster>
+ankra cluster node-group add <cluster> --name workers-large --instance-type <instance-type> --count 2
+ankra cluster node-group scale <cluster> workers-large 4
+ankra cluster node-group upgrade <cluster> workers-large <larger-instance-type>
+ankra cluster node-group labels <cluster> workers-large --labels env=production,tier=backend
+ankra cluster node-group taints <cluster> workers-large --taints dedicated=ml:NoSchedule
+ankra cluster node-group delete <cluster> workers-large
+```
+
+- **Instance type changes go one way.** A group moves to an equal or larger type only; to get smaller nodes, add a new group with the smaller type and delete the old one. How the change is applied depends on the provider - most power each node off, resize it and power it on again, while AWS replaces each node - so check the provider guide before you resize a group that runs stateful workloads.
+- **Labels and taints** apply to every node in the group. `--clear` removes them all; a taint without an effect gets `NoSchedule`.
+- **Removing nodes drains them first.** A scale-down, a group delete and a replacement drain each node, honouring PodDisruptionBudgets.
+- **Deleting a group removes all its servers.** Workloads on them are evicted.
+- **Zones.** On OVHcloud 3-AZ regions (`--availability-zone`), UpCloud zone pools (`--zone`) and multi-zone AWS clusters, a group can be pinned to one zone - do that for groups that run zonal storage.
+- **Autoscaling and first-boot scripts.** Set a group's autoscaling range with `ankra cluster node-group autoscaling set` - see [Cluster Autoscaling](/guides/cluster-autoscaling). OVHcloud groups can carry a cloud-init document - see [Node Group Cloud-init User Data](/guides/node-group-user-data).
+- **A stopped cluster.** Adding or changing a node group on a stopped cluster brings its infrastructure back first, so the cluster comes online. Use **Start cluster** when you want the full saved topology back.
+
+### Legacy worker scaling
+
+Clusters also keep a single default worker pool that predates node groups. `ankra cluster scale <cluster> <count>` sets its size, and `ankra cluster <provider> workers <cluster>` shows it. Prefer node groups for anything new.
+
+---
+
+## Control plane
+
+**In the dashboard:** **Nodes → Control plane** shows the controller count and instance type, and says for each change whether it runs live or offline, or why it is refused right now.
+
+- **Growing the count is live.** Going from 1 to 3 controllers (3 to 5 on Proxmox VE) provisions the new controllers and joins them to the running cluster.
+- **Reducing the count is offline.** Stop the cluster (its state is kept and restored on start), apply the change, then start it.
+- **The instance type** changes live, one controller at a time, when the cluster has three or more controllers. A single controller is resized offline, because resizing it takes the Kubernetes API down while it reboots.
+- A cluster spread across several zones or hosts keeps at least three controllers.
+
+```bash
+ankra cluster <provider> control-plane get <cluster>
+ankra cluster <provider> control-plane set-count <cluster> 3
+ankra cluster <provider> control-plane set-instance-type <cluster> <instance-type>
+```
+
+---
+
+## Restart a node
+
+Restart one node - a control plane, a worker or the bastion - without waiting for a reconciliation. The restart is a tracked operation, and workloads on the node are briefly unavailable while it reboots.
+
+**In the dashboard:** open **Nodes**, find the machine in the **Machines** table and choose **Restart VM** from its **⋯** menu.
+
+**On the CLI:** find the node ID, restart it, and follow the operation:
+
+```bash
+ankra cluster <provider> nodes list <cluster>
+ankra cluster <provider> nodes get <cluster> <node-id>
+ankra cluster <provider> nodes restart <cluster> <node-id>
+ankra cluster operations list <operation-id>
+```
+
+The node must be `up` with no restart already in flight. If a node never joined, `ankra cluster <provider> nodes cloud-init-log <cluster> <node-id>` shows its cloud-init status and the end of its log, read over the bastion (not on Proxmox VE or HPE Morpheus). You can also ask Ankra's AI, for example "restart worker-2 on my-cluster".
+
+---
+
+## Bastion
+
+The bastion is the machine Ankra and you reach the cluster through: every SSH hop into the private network goes via it. On most providers it carries no workload traffic, so workloads keep running while it is down, but Ankra cannot provision, scale, upgrade or reconcile the cluster until it is back.
+
+**In the dashboard:** **Nodes → Bastion & VMs** shows its state and the last health verdict, with **Diagnose over SSH**, **Restart VM** and **Resize**. The **⋯** menu on the bastion row in the Machines table also has **Resize bastion**.
+
+```bash
+ankra cluster <provider> bastion status <cluster>                     # last health verdict, without probing
+ankra cluster <provider> bastion diagnose <cluster>                   # probe it now, as an operation (not Scaleway)
+ankra cluster <provider> bastion resize <cluster> <instance-type>     # Hetzner, OVHcloud, UpCloud, DigitalOcean
+```
+
+A resize powers the bastion off, changes its type and powers it on again, so SSH access is interrupted briefly. Where the bastion is also the NAT for the nodes (AWS `bastion_nat` egress), node egress stops until it is back.
+
+### SSH access and keys
+
+**Settings → Access** shows copy-paste SSH commands through the bastion for the cluster's own addresses, and the SSH key credentials attached to the cluster. To change the keys:
+
+```bash
+ankra cluster ssh-keys get <cluster>
+ankra cluster ssh-keys set <cluster> --ssh-key-credential-ids <key-id-1>,<key-id-2>
+ankra cluster ssh-keys resync <cluster>
+```
+
+The new keys are written to every node on the next reconciliation; `resync` forces it. The key Ankra itself uses is never removed. For everyday `kubectl` you need no SSH at all - see [Accessing Clusters with kubectl](/guides/kubeconfig).
+
+---
+
+## Upgrade Kubernetes
+
+**In the dashboard:** **Settings → General** shows the current Kubernetes version. Pick a target and click **Upgrade**. The same card has **Auto upgrade patch versions**, which moves the cluster to the newest patch of its current minor version on its own; minor versions are never upgraded automatically.
+
+**On the CLI:**
+
+```bash
+ankra cluster <provider> k8s-version <cluster>     # current version and distribution
+ankra cluster kubeadm-versions                     # or: ankra cluster k3s-versions
+ankra cluster upgrade <cluster> v1.33.2            # kubeadm: a plain upstream tag
+ankra cluster upgrade <cluster> v1.33.2+k3s1       # k3s
+```
+
+- Nodes upgrade one at a time, control plane first, then workers. Each node is cordoned, drained honouring PodDisruptionBudgets, upgraded, and must be `Ready` at the target version before the next one starts.
+- An etcd snapshot is taken before the control plane upgrade. With external etcd, the dedicated etcd members are upgraded first, one at a time, each saving a snapshot.
+- A drain blocked by a PodDisruptionBudget stops the rollout; `--force` proceeds anyway.
+- One minor version at a time (1.33 to 1.34, not 1.33 to 1.35), and no downgrades.
+
+---
+
+## Stop and start
+
+Stopping releases the cluster's compute and keeps its configuration, stacks and credentials in Ankra, which is how you park a cluster you do not need right now. Starting re-provisions it and reconciles it back to running. What a stop does to the servers depends on the provider:
+
+| Provider | What a stop does |
+|---|---|
+| Hetzner, UpCloud, DigitalOcean | Captures an encrypted etcd snapshot, then deletes the servers; the start restores the snapshot. k3s clusters can **Pause** instead: the servers are powered off and kept with their disks, and keep billing. |
+| OVHcloud, Proxmox VE, HPE Morpheus | Captures an encrypted etcd snapshot, then deletes the servers; the start restores the snapshot. |
+| AWS EC2, Scaleway, Ankra Cloud | Powers the servers off and keeps them with their disks, so the cluster comes back with its state. |
+
+[Stop cluster](/platform/cluster-settings#stop-cluster) explains the snapshot, the pause mode and the restore in full.
+
+**In the dashboard:** **Settings → General → Danger Zone → Stop cluster**, or **Stop cluster** / **Start cluster** in the cluster's **⋯** menu. They also run on a timetable with [Power Schedules](/platform/cluster-power-schedules).
+
+<CliVersion since="0.18.0" command="cluster <provider> stop --mode pause" />
+
+```bash
+ankra cluster <provider> stop <cluster>
+ankra cluster <provider> stop <cluster> --mode pause               # Hetzner, UpCloud, DigitalOcean k3s clusters
+ankra cluster <provider> stop <cluster> --preserve-state=false     # tear down without a snapshot
+ankra cluster <provider> stop <cluster> --force                    # cancel in-flight operations and stop now
+ankra cluster <provider> start <cluster>                           # the whole cluster
+ankra cluster <provider> start <cluster> --scope control_plane     # only the control plane, to inspect or repair it
+ankra cluster <provider> start <cluster> --restore-state=false     # start fresh instead of restoring the snapshot
+```
+
+- A stop never deletes the volumes your workloads provisioned through the CSI driver, forced or not; they keep billing while the cluster is stopped. `--force` also deletes the cluster's load balancers, and never captures a snapshot.
+- Stop and start run in the background. A start is refused with `409` while a stop or terminate is still running.
+- While the cluster is stopped, `ankra cluster <provider> nodes list` still shows the saved machines that the next start re-provisions.
+
+---
+
+## Terminate a cluster
+
+Terminating deletes the cluster's servers and the network Ankra created, then removes the cluster from Ankra. It cannot be undone.
+
+**In the dashboard:** **Settings → General → Danger Zone → Terminate**. The dialog lists the persistent volumes the teardown deletes, and the button stays disabled until you accept that.
+
+<CliVersion since="0.19.0" command="cluster deprovision --accept-volume-data-loss" />
+
+```bash
+ankra cluster deprovision <cluster>                            # names the volumes and asks
+ankra cluster deprovision <cluster> --accept-volume-data-loss  # for scripts
+```
+
+- **Volumes are deleted only once you accept it.** `--yes` skips the teardown confirmation but never the volume one. The API lists the volumes with `GET .../deprovision-volumes` and needs `?accept_volume_data_loss=true` on the `DELETE`; without it the answer is `409` naming them.
+- **`--force`** deletes leftover load balancers and tolerates infrastructure that no longer answers. It never stands in for accepting the volume loss. On Proxmox VE it finishes the teardown when the host or jumphost is unreachable, leaving the VMs behind.
+- **A stopped cluster** can be terminated too: the volumes recorded at stop time are still known and named.
+
+| Provider | What happens to persistent volumes |
+|---|---|
+| Hetzner, OVHcloud, UpCloud, DigitalOcean | Deleted with the cluster once you accept it. On Hetzner a volume labelled `ankra-retain` is kept. |
+| AWS EC2, Scaleway, Ankra Cloud | Follow the cluster's `retention_policy`: `retain` (the default) keeps them in your account, where they keep billing; `delete` removes them once you accept it. |
+| Proxmox VE, HPE Morpheus | No volume step. The VMs Ankra created are deleted; your Proxmox nodes, storage and bridges, or your Morpheus groups, clouds and networks, are left untouched. |
+
+[Persistent volumes](/platform/cluster-settings#persistent-volumes) covers every case, including volumes Ankra cannot prove belong to the cluster.
+
+---
+
+## Choices fixed at create time
+
+A few choices cannot be changed on a running cluster. They are made in the create wizard (the **Kubernetes** step) or in the create request, and they shape the upgrade and networking tasks above.
+
+- **Distribution.** `kubeadm` (the default everywhere: wizard, CLI and API) is upstream Kubernetes with containerd; its versions are plain tags such as `v1.33.2`. `k3s` is a single-binary distribution; its versions look like `v1.33.2+k3s1`.
+- **CNI** (`cni`). kubeadm clusters always run Cilium. k3s clusters choose `flannel` (the default), `calico` or `cilium`; AWS defaults to Cilium for both distributions. The CNI cannot be changed later.
+- **CNI features** (`cni_features`). Cilium offers `kube_proxy_replacement`, `hubble` and `wireguard_encryption`; Calico offers `ebpf_dataplane`; flannel takes none. On k3s, `kube_proxy_replacement` and `ebpf_dataplane` need a single control plane.
+- **etcd topology** (kubeadm only). `stacked` (the default) runs etcd on the control plane nodes. `external` runs it on 3 or 5 dedicated machines (`etcd_node_count`), sized by a provider-specific field:
+
+| Provider | Field that sizes the etcd machines |
+|---|---|
+| Hetzner | `etcd_server_type` |
+| OVHcloud | `etcd_flavor_id` |
+| UpCloud | `etcd_plan` |
+| DigitalOcean | `etcd_size` |
+| Scaleway, AWS EC2 | `etcd_type` |
+| Proxmox VE | `etcd_instance_type` |
+| HPE Morpheus | `etcd_plan_id` |
+| Ankra Cloud | `etcd_plan` |
+
+---
+
+## Next steps
+
+- [Nodes](/platform/cluster-nodes) - every control on the Nodes tabs, including standalone VMs.
+- [Cluster Autoscaling](/guides/cluster-autoscaling) - let pod demand size your node groups.
+- [Power Schedules](/platform/cluster-power-schedules) - stop and start on a timetable.
