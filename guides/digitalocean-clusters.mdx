@@ -1,708 +1,144 @@
 ---
 title: DigitalOcean Clusters
-description: Create, manage, and scale Kubernetes clusters on DigitalOcean with Ankra.
+description: Create a Kubernetes cluster on Droplets in your own DigitalOcean team, with Ankra installing and operating Kubernetes, ingress, TLS and DNS.
 ---
 
 import { CliVersion } from "/snippets/cli-version.jsx";
 
-Ankra supports provisioning fully managed Kubernetes clusters on [DigitalOcean](https://www.digitalocean.com/). You can create clusters with configurable control planes, workers, and networking then scale workers up or down as needed.
-
----
-
-## Prerequisites
-
-Before creating a DigitalOcean cluster, you need two credentials:
-
-<CardGroup cols={2}>
-  <Card title="DigitalOcean API Credential" icon="key">
-    A DigitalOcean personal access token with read/write permissions. See [DigitalOcean Credentials](/platform/credentials/digitalocean).
-  </Card>
-  <Card title="SSH Key Credential" icon="lock">
-    An SSH public key for server access. You can provide your own or let Ankra generate one. See [SSH Key Credentials](/platform/credentials/ssh-key).
-  </Card>
-</CardGroup>
-
----
-
-## Creating a DigitalOcean Cluster
-
-### Via the Platform UI
-
-<Steps>
-  <Step title="Navigate to Clusters">
-    Go to **Clusters** in the Ankra dashboard and click **Create Cluster**.
-  </Step>
-  <Step title="Select DigitalOcean">
-    Choose **DigitalOcean** as the provider.
-  </Step>
-  <Step title="Select Credentials">
-    Pick your DigitalOcean API credential and SSH key credential from the dropdowns. You can also create new credentials directly from the wizard.
-  </Step>
-  <Step title="Choose Region">
-    Select a DigitalOcean region (e.g., `nyc3`, `fra1`, `lon1`). Each region shows the location and country.
-  </Step>
-  <Step title="Configure Nodes">
-    Set your cluster topology:
-    - **Bastion** - Droplet size for the SSH bastion host (e.g., `s-1vcpu-1gb`)
-    - **Control Plane** - Count (1 or 3) and size (e.g., `s-2vcpu-4gb`)
-    - **Workers** - Count and size (e.g., 2× `s-2vcpu-4gb`)
-
-    The wizard shows vCPUs, RAM, and monthly cost for each size to help you choose.
-  </Step>
-  <Step title="Choose Distribution">
-    Pick the Kubernetes distribution:
- **kubeadm** Vanilla upstream Kubernetes bootstrapped with `kubeadm` and containerd (preselected). kubeadm clusters always use Cilium CNI and optionally support an external etcd topology with dedicated etcd droplets.
- **k3s** Lightweight Kubernetes with a user-selectable CNI.
-
-    See [Kubernetes Distribution](#kubernetes-distribution) for details.
-  </Step>
-  <Step title="GitOps, Networking & DNS">
-    Optionally connect a GitHub repository for GitOps-driven deployment. Two checkboxes on this step are on by default:
-    - **Include Networking Stack** - deploys Traefik, cert-manager, and a Let's Encrypt ClusterIssuer configured for DigitalOcean load balancers.
-    - **Include Public DNS** - gives the cluster its own delegated subdomain on `ankra.cc` and installs external-dns with its credentials already wired, so an ingress hostname under that subdomain gets its DNS record and TLS certificate automatically.
-  </Step>
-  <Step title="Create & Track Progress">
-    Click **Create** to start provisioning. A live progress view tracks credential setup, VPC creation, NAT gateway setup, SSH key deployment, bastion provisioning, droplet creation, Kubernetes installation (k3s or kubeadm), and Ankra Agent setup. The cluster appears with an **offline** state until provisioning completes, then transitions to **online**.
-  </Step>
-</Steps>
-
-### Via the CLI
-
-<CliVersion since="0.9.0" />
-
-```bash
-# Create credentials first
-ankra credentials digitalocean create --name my-do-token  # securely prompts for token
-ankra credentials digitalocean ssh-key create --name my-ssh-key --generate
-
-# List regions and sizes for your credential
-ankra cluster digitalocean regions --credential-id <digitalocean-credential-id>
-ankra cluster digitalocean sizes --credential-id <digitalocean-credential-id> --region nyc3 --available-only
-
-# Create the cluster
-ankra cluster digitalocean create \
-  --name my-cluster \
-  --credential-id <digitalocean-credential-id> \
-  --ssh-key-credential-id <ssh-key-credential-id> \
-  --region nyc3 \
-  --control-plane-count 1 \
-  --control-plane-size s-2vcpu-4gb \
-  --worker-count 2 \
-  --worker-size s-2vcpu-4gb
-```
-
-### Via the API
-
-```bash
-curl -X POST https://platform.ankra.app/api/v1/clusters/digitalocean \
-  -H "Authorization: Bearer $ANKRA_API_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "name": "my-cluster",
-    "credential_id": "<digitalocean-credential-id>",
-    "ssh_key_credential_id": "<ssh-key-credential-id>",
-    "region": "nyc3",
-    "control_plane_count": 1,
-    "control_plane_size": "s-2vcpu-4gb",
-    "node_groups": [
-      {"name": "default", "instance_type": "s-2vcpu-4gb", "count": 2}
-    ],
-    "distribution": "k3s"
-  }'
-```
-
----
-
-## Cluster Configuration Options
-
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `name` | *required* | Unique cluster name |
-| `credential_id` | *required* | DigitalOcean API credential ID |
-| `ssh_key_credential_id` | *required* | SSH key credential ID |
-| `region` | *required* | DigitalOcean region slug |
-| `network_ip_range` | `10.0.0.0/16` | Private VPC IP range |
-| `bastion_size` | `s-1vcpu-1gb` | Droplet size for the bastion host |
-| `control_plane_count` | `1` | Number of control plane nodes (1 or 3) |
-| `control_plane_size` | `s-2vcpu-4gb` | Droplet size for control planes |
-| `worker_count` | `1` | Number of worker nodes (legacy, use `node_groups` instead) |
-| `worker_size` | `s-2vcpu-4gb` | Droplet size for workers (legacy, use `node_groups` instead) |
-| `node_groups` | | Array of node group definitions (see [Node Groups](#node-groups)) |
-| `distribution` | `kubeadm` | Kubernetes distribution (`kubeadm` or `k3s`) |
-| `kubernetes_version` | *latest stable* | Kubernetes version (optional) |
-| `cni` | `cilium` (kubeadm), `flannel` (k3s) | CNI plugin. Follows the distribution when omitted; kubeadm clusters always use `cilium` |
-| `cni_features` | *all off* | Advanced CNI feature toggles, fixed at creation. Cilium: `kube_proxy_replacement`, `hubble`, `wireguard_encryption`. Calico: `ebpf_dataplane`. See [Advanced CNI features](#advanced-cni-features) |
-| `etcd_topology` | `stacked` | kubeadm only. `stacked` (etcd on control planes) or `external` (dedicated etcd droplets) |
-| `etcd_node_count` | `3` | kubeadm `external` topology only. Number of dedicated etcd droplets (3 or 5) |
-| `etcd_size` | `s-2vcpu-4gb` | kubeadm `external` topology only. Droplet size for dedicated etcd nodes |
-| `include_networking` | `true` | Deploy the networking stack: Traefik, cert-manager and a `letsencrypt-prod` Let's Encrypt ClusterIssuer |
-| `include_dns` | `true` | Give the cluster a delegated subdomain on `ankra.cc` with external-dns wired |
-
-### DigitalOcean Regions
-
-| Region | Location |
-|--------|----------|
-| `nyc3` | New York 3, United States |
-| `sfo3` | San Francisco 3, United States |
-| `ams3` | Amsterdam 3, Netherlands |
-| `sgp1` | Singapore 1, Singapore |
-| `lon1` | London 1, United Kingdom |
-| `fra1` | Frankfurt 1, Germany |
-
-<Note>
-Available regions and sizes depend on your account. Use `ankra cluster digitalocean regions` and `ankra cluster digitalocean sizes` to list what your credential can deploy.
-</Note>
-
-### Common Droplet Sizes
-
-| Size | vCPUs | RAM | Typical use |
-|------|-------|-----|-------------|
-| `s-1vcpu-1gb` | 1 | 1 GB | Bastion |
-| `s-1vcpu-2gb` | 1 | 2 GB | Small workers |
-| `s-2vcpu-4gb` | 2 | 4 GB | Control plane, general workers |
-| `s-4vcpu-8gb` | 4 | 8 GB | Larger workloads |
-
----
-
-## Kubernetes Distribution
-
-DigitalOcean clusters can be provisioned with either **kubeadm** (the default everywhere - the wizard, the API and the CLI) or **k3s** (`--distribution k3s`).
-
-| | k3s | kubeadm |
-|---|-----|---------|
-| Kubernetes | Lightweight, single-binary distribution | Vanilla upstream Kubernetes |
-| CNI | User-selectable (Flannel default) | Cilium (fixed, cannot be changed after creation) |
-| etcd | Embedded | `stacked` (on control planes) or `external` (dedicated droplets) |
-| Version format | `v1.35.1+k3s1` | `v1.31.0` (plain upstream tag) |
-
-<Note>
-kubeadm clusters always use Cilium CNI (eBPF-based networking, L7 policies, Hubble observability). The CNI cannot be changed after creation.
-</Note>
-
-### Advanced CNI features
-
-k3s clusters can enable advanced CNI features at creation time via `cni_features` (also available as toggles in the create wizard). Features are fixed once the cluster is created.
-
-| Feature | CNI | What it does |
-|---|---|---|
-| `kube_proxy_replacement` | Cilium | Replaces kube-proxy with Cilium's eBPF dataplane |
-| `hubble` | Cilium | Deploys Hubble relay and UI for network flow observability |
-| `wireguard_encryption` | Cilium | Encrypts pod-to-pod traffic between nodes with WireGuard (UDP/51871 must be open node-to-node) |
-| `ebpf_dataplane` | Calico | Runs Calico in eBPF mode, bypassing kube-proxy |
-
-<Warning>
-`kube_proxy_replacement` and `ebpf_dataplane` pin the CNI's API-server endpoint to the first control plane, so on k3s they require a **single control plane**. Creation and control-plane scaling both enforce this. Flannel accepts no feature toggles.
-</Warning>
-
-### External etcd topology (kubeadm)
-
-By default kubeadm runs etcd **stacked** on the control plane nodes. For larger clusters you can run etcd on dedicated droplets by setting `etcd_topology` to `external`:
-
-```bash
-curl -X POST https://platform.ankra.app/api/v1/clusters/digitalocean \
-  -H "Authorization: Bearer $ANKRA_API_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "name": "my-cluster",
-    "credential_id": "<digitalocean-credential-id>",
-    "ssh_key_credential_id": "<ssh-key-credential-id>",
-    "region": "nyc3",
-    "control_plane_count": 3,
-    "control_plane_size": "s-2vcpu-4gb",
-    "node_groups": [
-      {"name": "default", "instance_type": "s-2vcpu-4gb", "count": 2}
-    ],
-    "distribution": "kubeadm",
-    "etcd_topology": "external",
-    "etcd_node_count": 3,
-    "etcd_size": "s-2vcpu-4gb"
-  }'
-```
-
-The equivalent CLI flags are `--distribution kubeadm`, `--etcd-topology external`, `--etcd-node-count 3`, and `--etcd-size s-2vcpu-4gb`.
-
----
-
-## Node Groups
-
-Node groups let you organize worker nodes into logical groups with independent droplet sizes, counts, labels, and taints. Each group can be scaled, resized, and configured independently.
-
-### Via the Platform UI
-
-Open **Nodes** in the cluster sidebar, then the **Node groups** tab, to manage node groups. From there you can:
-
-- View all node groups with their droplet size, count, labels, and taints
-- Add new node groups with a name, droplet size, count, and optional labels/taints
-- Scale individual groups up or down (0–100 nodes)
-- Upgrade the droplet size (upgrade only - see [Droplet Size Changes](#droplet-size-changes))
-- Edit labels and taints per group
-- Delete a node group and all its nodes
-
-### List Node Groups
-
-<CodeGroup>
-
-```bash CLI
-ankra cluster digitalocean node-group list <cluster_id>
-```
-
-```bash cURL
-curl https://platform.ankra.app/api/v1/clusters/digitalocean/<cluster_id>/node-groups \
-  -H "Authorization: Bearer $ANKRA_API_TOKEN"
-```
-
-</CodeGroup>
-
-Response:
-```json
-{
-  "node_groups": [
-    {
-      "name": "default",
-      "instance_type": "s-2vcpu-4gb",
-      "count": 2,
-      "min": 0,
-      "max": 100,
-      "labels": {},
-      "taints": []
-    }
-  ]
-}
-```
-
-### Add a Node Group
-
-<CodeGroup>
-
-```bash CLI
-ankra cluster digitalocean node-group add <cluster_id> \
-  --name workers-large \
-  --instance-type s-4vcpu-8gb \
-  --count 2
-```
-
-```bash cURL
-curl -X POST https://platform.ankra.app/api/v1/clusters/digitalocean/<cluster_id>/node-groups \
-  -H "Authorization: Bearer $ANKRA_API_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "name": "workers-large",
-    "instance_type": "s-4vcpu-8gb",
-    "count": 2,
-    "labels": {"tier": "backend"},
-    "taints": [{"key": "dedicated", "value": "backend", "effect": "NoSchedule"}]
-  }'
-```
-
-</CodeGroup>
-
-### Scale a Node Group
-
-<CodeGroup>
-
-```bash CLI
-ankra cluster digitalocean node-group scale <cluster_id> default 4
-```
-
-```bash cURL
-curl -X PUT https://platform.ankra.app/api/v1/clusters/digitalocean/<cluster_id>/node-groups/default/scale \
-  -H "Authorization: Bearer $ANKRA_API_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"count": 4}'
-```
-
-</CodeGroup>
-
-Node groups can be scaled to 0 nodes. This keeps the group definition but removes all droplets.
-
-### Droplet Size Changes
-
-<Warning>
-Droplet size upgrades are one-way - you cannot downgrade a node group to a smaller size. To use a smaller size, create a new node group with the desired size and delete the old one.
-</Warning>
-
-<CodeGroup>
-
-```bash CLI
-ankra cluster digitalocean node-group upgrade <cluster_id> default s-4vcpu-8gb
-```
-
-```bash cURL
-curl -X PUT https://platform.ankra.app/api/v1/clusters/digitalocean/<cluster_id>/node-groups/default/instance-type \
-  -H "Authorization: Bearer $ANKRA_API_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"instance_type": "s-4vcpu-8gb"}'
-```
-
-</CodeGroup>
-
-Each node is powered off, resized, and powered back on. This causes brief downtime for workloads on those nodes.
-
-### Update Labels and Taints
-
-```bash
-# Update labels
-curl -X PUT https://platform.ankra.app/api/v1/clusters/digitalocean/<cluster_id>/node-groups/default/labels \
-  -H "Authorization: Bearer $ANKRA_API_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"labels": {"env": "production", "tier": "backend"}}'
-
-# Update taints
-curl -X PUT https://platform.ankra.app/api/v1/clusters/digitalocean/<cluster_id>/node-groups/default/taints \
-  -H "Authorization: Bearer $ANKRA_API_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"taints": [{"key": "dedicated", "value": "ml", "effect": "NoSchedule"}]}'
-```
-
-### Delete a Node Group
-
-<CodeGroup>
-
-```bash CLI
-ankra cluster digitalocean node-group delete <cluster_id> workers-large
-```
-
-```bash cURL
-curl -X DELETE https://platform.ankra.app/api/v1/clusters/digitalocean/<cluster_id>/node-groups/workers-large \
-  -H "Authorization: Bearer $ANKRA_API_TOKEN"
-```
-
-</CodeGroup>
-
-<Warning>
-Deleting a node group removes all its droplets. Workloads running on those nodes will be evicted.
-</Warning>
-
-### Node Group API Reference
-
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/api/v1/clusters/digitalocean/{id}/node-groups` | GET | List all node groups |
-| `/api/v1/clusters/digitalocean/{id}/node-groups` | POST | Add a node group |
-| `/api/v1/clusters/digitalocean/{id}/node-groups/{name}/scale` | PUT | Scale a node group (0-100) |
-| `/api/v1/clusters/digitalocean/{id}/node-groups/{name}/instance-type` | PUT | Change droplet size |
-| `/api/v1/clusters/digitalocean/{id}/node-groups/{name}/labels` | PUT | Update labels |
-| `/api/v1/clusters/digitalocean/{id}/node-groups/{name}/taints` | PUT | Update taints |
-| `/api/v1/clusters/digitalocean/{id}/node-groups/{name}` | DELETE | Delete a node group |
-
----
-
-## Restarting a Node
-
-Restart any node - a control plane node, a worker, or the bastion - as a tracked operation, from **Nodes** in the cluster sidebar, via the CLI, or via the API:
-
-<CodeGroup>
-
-```bash CLI
-ankra cluster digitalocean nodes list <cluster_id>
-ankra cluster digitalocean nodes restart <cluster_id> <node_id>
-```
-
-```bash cURL
-curl -X POST https://platform.ankra.app/api/v1/clusters/digitalocean/<cluster_id>/nodes/<node_id>/restart \
-  -H "Authorization: Bearer $ANKRA_API_TOKEN"
-```
-
-</CodeGroup>
-
-See [Restarting a Node](/guides/hetzner-clusters#restarting-a-node) for the full walkthrough, response shape, and state requirements - identical across providers.
-
----
-
-## Resizing the Bastion or Gateway
-
-Resize the bastion without recreating the cluster - Ankra powers it off, resizes it, and powers it back on.
-
-<CodeGroup>
-
-```bash CLI
-ankra cluster digitalocean bastion resize <cluster_id> s-2vcpu-4gb
-```
-
-```bash cURL
-curl -X PUT https://platform.ankra.app/api/v1/clusters/digitalocean/<cluster_id>/bastion/instance-type \
-  -H "Authorization: Bearer $ANKRA_API_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"instance_type": "s-2vcpu-4gb"}'
-```
-
-</CodeGroup>
-
-See [Resizing the Bastion or Gateway](/guides/hetzner-clusters#resizing-the-bastion-or-gateway) for the accept/wait contract - identical across providers.
-
----
-
-## Legacy Worker Scaling
-
-The legacy `scale-workers` and `worker-count` endpoints still work for backward compatibility.
-
-<CodeGroup>
-
-```bash CLI
-ankra cluster digitalocean workers <cluster_id>
-ankra cluster digitalocean scale <cluster_id> 4
-```
-
-```bash cURL
-curl https://platform.ankra.app/api/v1/clusters/digitalocean/<cluster_id>/worker-count \
-  -H "Authorization: Bearer $ANKRA_API_TOKEN"
-
-curl -X POST https://platform.ankra.app/api/v1/clusters/digitalocean/<cluster_id>/scale-workers \
-  -H "Authorization: Bearer $ANKRA_API_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"worker_count": 4}'
-```
-
-</CodeGroup>
-
-<Note>
-For new clusters, prefer using [Node Groups](#node-groups) for more granular control.
-</Note>
-
----
-
-## Upgrading Kubernetes Version
-
-You can upgrade the Kubernetes version on all nodes in a DigitalOcean cluster. Upgrades are applied to control plane nodes first, then workers. Both k3s and kubeadm clusters are supported.
-
-<Warning>
-- Both k3s and kubeadm clusters are supported for version upgrades, including kubeadm clusters with an **external** etcd topology: the dedicated etcd members are upgraded first, one at a time, each saving a pre-upgrade snapshot before its static pod rolls to the etcd image matching the target Kubernetes version.
-- Use the matching version format for the target: `v1.35.1+k3s1` for k3s, or a plain `v1.31.0` upstream tag for kubeadm.
-- Downgrades are not supported - downgrades require an etcd snapshot restore.
-- You can only upgrade one minor version at a time (e.g., v1.33.x to v1.34.x, not v1.33.x to v1.35.x).
-- The cluster must be online with no active operations.
-</Warning>
-
-### Check Current Version
-
-<CodeGroup>
-
-```bash CLI
-ankra cluster digitalocean k8s-version <cluster_id>
-```
-
-```bash cURL
-curl https://platform.ankra.app/api/v1/clusters/digitalocean/<cluster_id>/k8s-version \
-  -H "Authorization: Bearer $ANKRA_API_TOKEN"
-```
-
-</CodeGroup>
-
-### Upgrade Version
-
-<CodeGroup>
-
-```bash CLI
-ankra cluster digitalocean upgrade <cluster_id> v1.35.1+k3s1
-```
-
-```bash cURL
-curl -X POST https://platform.ankra.app/api/v1/clusters/digitalocean/<cluster_id>/upgrade-k8s-version \
-  -H "Authorization: Bearer $ANKRA_API_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"target_version": "v1.35.1+k3s1"}'
-```
-
-</CodeGroup>
-
-For a kubeadm cluster, use a plain upstream tag instead:
-
-```bash
-ankra cluster digitalocean upgrade <cluster_id> v1.31.0
-```
-
----
-
-## Stopping and Starting a Cluster
-
-You can stop a DigitalOcean cluster to release its compute (node droplets, the bastion, and the VPC NAT gateway) while keeping its configuration, networking definition, and SSH keys. Starting the cluster re-provisions the compute and reconciles it back to a running state. This is useful for pausing non-production clusters to save cost.
-
-When starting, use `--scope control_plane` to bring up only the control plane first (for example to inspect or repair it), or `--scope all` (the default) to provision the whole cluster.
-
-<CliVersion since="0.11.0" command="cluster digitalocean stop --force" />
-
-<CodeGroup>
-
-```bash CLI
-ankra cluster digitalocean stop <cluster_id>
-ankra cluster digitalocean stop <cluster_id> --force                # also delete load balancers; volumes are kept
-ankra cluster digitalocean start <cluster_id>                       # scope defaults to "all"
-ankra cluster digitalocean start <cluster_id> --scope control_plane # control plane only
-```
-
-```bash cURL
-curl -X POST https://platform.ankra.app/api/v1/clusters/digitalocean/<cluster_id>/stop \
-  -H "Authorization: Bearer $ANKRA_API_TOKEN"
-
-curl -X POST "https://platform.ankra.app/api/v1/clusters/digitalocean/<cluster_id>/start?scope=all" \
-  -H "Authorization: Bearer $ANKRA_API_TOKEN"
-```
-
-</CodeGroup>
-
-<Note>
-Stop and start are background operations. A start returns `409` if a stop or terminate operation is still running. The cluster's saved topology is preserved while stopped - `ankra cluster digitalocean nodes list` includes the soft-deleted entries that are re-provisioned on the next start.
-</Note>
-
-A stop keeps the block storage volumes your workloads provisioned through the CSI driver, and DigitalOcean bills them while the cluster is parked. That holds for a forced stop too: `--force` (or `?force=true` on the API) cancels in-flight operations, tolerates unreachable infrastructure and deletes the load balancers the cluster created, but never its volumes: a stop is reversible, so the data on them is kept for the next start. Deprovisioning deletes them once you accept it - see [persistent volumes](/platform/cluster-settings#persistent-volumes).
-
----
-
-## Deprovisioning
-
-Deprovisioning deletes all DigitalOcean resources (droplets, NAT gateway, VPC, SSH keys) and removes the cluster from Ankra.
-
-<Warning>
-This action is irreversible. All data on the cluster will be permanently deleted.
-</Warning>
-
-<Warning>
-**The block storage volumes the CSI driver provisioned are deleted with the cluster, and the data on them, once you accept it.** The Danger Zone dialog and `ankra cluster deprovision` list them and ask; the API needs `?accept_volume_data_loss=true` and answers `409` naming them without it, forced or not. See [persistent volumes](/platform/cluster-settings#persistent-volumes). `--force` also deletes the load balancers the CCM created and tolerates unreachable infrastructure. Anything already orphaned by an earlier teardown can be removed in the [DigitalOcean Control Panel](https://cloud.digitalocean.com/).
-</Warning>
-
-<CliVersion since="0.19.0" command="cluster deprovision --accept-volume-data-loss" />
-
-<CodeGroup>
-
-```bash CLI
-ankra cluster deprovision <cluster>                                    # names the volumes and asks
-ankra cluster deprovision <cluster> --accept-volume-data-loss --force  # for scripts; --force also deletes load balancers
-```
-
-```bash cURL
-curl https://platform.ankra.app/api/v1/clusters/digitalocean/<cluster_id>/deprovision-volumes \
-  -H "Authorization: Bearer $ANKRA_API_TOKEN"
-
-curl -X DELETE "https://platform.ankra.app/api/v1/clusters/digitalocean/<cluster_id>?accept_volume_data_loss=true&force=true" \
-  -H "Authorization: Bearer $ANKRA_API_TOKEN"
-```
-
-</CodeGroup>
-
-This works on a cluster that was stopped earlier too: the volumes recorded at stop time are still known, named, and deleted once you accept it.
-
----
-
-## Architecture
-
-A DigitalOcean cluster provisions the following infrastructure:
-
-| Component | Description |
-|-----------|-------------|
-| **VPC** | Private network for inter-node communication |
-| **NAT Gateway** | VPC NAT gateway providing outbound internet access for the private node droplets |
-| **Cloud Firewalls** | Two tag-scoped firewalls providing defense in depth; on clusters created before private-droplet support they are the only ingress boundary |
-| **Bastion Host** | Jump host Ankra uses to provision and manage nodes - the only droplet reachable on SSH from the internet |
-| **Control Plane(s)** | Kubernetes control plane droplets |
-| **Worker(s)** | Kubernetes worker droplets organized in [node groups](#node-groups) |
-| **etcd Node(s)** | Dedicated etcd droplets, only for kubeadm clusters with an `external` [etcd topology](#external-etcd-topology-kubeadm) |
-| **SSH Keys** | Deployed to all droplets for access |
-| **Cloud Provider Stack** | DigitalOcean CCM and CSI for LoadBalancers and block storage |
-
-```mermaid
-flowchart TB
-    Internet((Internet))
-    Platform[Ankra Platform]
-
-    subgraph VPC [DigitalOcean VPC + tag-scoped cloud firewalls]
-        Bastion[Bastion droplet<br/>public + private IP]
-        CP[Control plane droplets<br/>private IP only]
-        Workers[Worker droplets<br/>private IP only]
-        NAT[VPC NAT gateway<br/>VPC default route]
-        Agent[Ankra Agent<br/>runs in the cluster]
-    end
-
-    LB[DigitalOcean Load Balancers<br/>created by the DO CCM]
-
-    Platform -->|SSH port 22| Bastion
-    Bastion -->|SSH jump over VPC| CP
-    Bastion -->|SSH jump over VPC| Workers
-    Agent -->|outbound only - NATS| Platform
-    CP -->|egress| NAT
-    Workers -->|egress| NAT
-    NAT --> Internet
-    Internet --> LB
-    LB --> Workers
-```
-
-All nodes are deployed within a private VPC. Cluster nodes are created as **private droplets with no public IP** - the bastion host is the only droplet with a public address and provides the only external SSH access point. Outbound traffic from the nodes (image pulls, package downloads, the Ankra Agent connection) leaves through a managed **VPC NAT gateway** set as the VPC's default route. The tag-scoped cloud firewalls stay in place as defense in depth; inter-node and jump traffic stay on the VPC.
-
-<Note>
-DigitalOcean bills the VPC NAT gateway separately (from $40/month per gateway). See [DigitalOcean's VPC NAT gateway pricing](https://docs.digitalocean.com/products/networking/vpc/details/pricing/) for current rates.
-</Note>
-
-<Note>
-Clusters created before private-droplet support keep their original layout: all droplets carry public IPs and rely on tag-scoped cloud firewalls as the ingress boundary. Public networking is fixed at droplet creation, so existing clusters - including nodes added when scaling them - stay on that model. Only newly created clusters get private nodes and a NAT gateway.
-</Note>
-
-Ankra automatically deploys a **digitalocean-cloud-provider** stack after the Ankra Agent is installed, including the DigitalOcean Cloud Controller Manager and CSI driver backed by your API credential.
-
----
-
-## Provider-native Managed Kubernetes (DOKS & UKS)
-
-In addition to self-managed k3s or kubeadm on droplets, Ankra can provision and import provider-native managed Kubernetes services:
-
-| Provider kind | Service | Credential |
-|---------------|---------|------------|
-| `doks` | [DigitalOcean Kubernetes (DOKS)](https://www.digitalocean.com/products/kubernetes) | DigitalOcean API token |
-| `uks` | [UpCloud Managed Kubernetes (UKS)](https://upcloud.com/products/managed-kubernetes) | UpCloud API token |
-
-See [Managed Kubernetes](/guides/managed-kubernetes) for the full guide covering live options and pricing, preflight checks, discovery and import, node pool autoscaling, and upgrades - across DOKS, UKS, GKE, OVHcloud MKS, AKS, and EKS.
-
-Create a managed cluster from the platform UI or via the API:
-
-```bash
-# DigitalOcean Kubernetes (DOKS)
-curl -X POST https://platform.ankra.app/org/clusters/managed/doks \
-  -H "Authorization: Bearer $ANKRA_API_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "name": "my-doks-cluster",
-    "credential_id": "<digitalocean-credential-id>",
-    "location": "nyc3",
-    "node_pools": [
-      {"name": "default", "size": "s-2vcpu-4gb", "count": 2}
-    ]
-  }'
-
-# UpCloud Managed Kubernetes (UKS)
-curl -X POST https://platform.ankra.app/org/clusters/managed/uks \
-  -H "Authorization: Bearer $ANKRA_API_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "name": "my-uks-cluster",
-    "credential_id": "<upcloud-credential-id>",
-    "location": "fi-hel1",
-    "node_pools": [
-      {"name": "default", "size": "2xCPU-4GB", "count": 2}
-    ]
-  }'
-```
-
-Ankra provisions the cluster with the provider, stores kubeconfig securely, and installs the Ankra Agent so you can manage stacks and GitOps the same way as imported clusters.
-
----
+Choose DigitalOcean when your team already runs on DigitalOcean and you want a Kubernetes cluster whose control plane you own, on Droplets in your own account. Ankra creates the VPC, NAT gateway, bastion and Droplets, installs Kubernetes and the DigitalOcean cloud integration, and then operates the cluster for you - this is an **Ankra Managed** cluster. DigitalOcean bills you directly. If you would rather DigitalOcean ran the control plane, use [DOKS](/guides/doks-clusters) instead; [Managed Kubernetes](/guides/managed-kubernetes) compares the two.
+
+## Before you start
+
+- A **DigitalOcean personal access token** with read and write scope, stored as a [DigitalOcean credential](/platform/credentials/digitalocean). Tokens start with `dop_v1_`.
+- An **SSH key credential** - your own public key, or one Ankra generates. See [SSH Key Credentials](/platform/credentials/ssh-key).
+- Room in your account limits for the Droplets, a VPC, load balancers and volumes. Check them in the [DigitalOcean Control Panel](https://cloud.digitalocean.com/); DigitalOcean support raises them.
+
+## Create the cluster
+
+<Tabs>
+  <Tab title="Dashboard">
+    <Steps>
+      <Step title="Open the create dialog">
+        Go to **Clusters**, click **Create cluster** and pick **DigitalOcean** under **Ankra Managed**.
+      </Step>
+      <Step title="Credential & Region">
+        Pick the DigitalOcean credential and an SSH key (or add either inline), and a region, for example `nyc3`, `fra1` or `lon1`.
+      </Step>
+      <Step title="Network & Compute">
+        Keep or change the VPC range, then pick the bastion Droplet size (for example `s-1vcpu-1gb`), the control plane count (1 or 3) and size (for example `s-2vcpu-4gb`), and one or more worker node groups. The wizard shows each size's vCPUs, memory and monthly price.
+      </Step>
+      <Step title="Kubernetes">
+        Keep **kubeadm** (the default, with Cilium) or pick **k3s**, and optionally the version. See [Choices fixed at create time](/guides/operate-ankra-managed-clusters#choices-fixed-at-create-time) for the CNI and etcd options.
+      </Step>
+      <Step title="GitOps">
+        Optionally connect a Git repository; Ankra commits the cluster's stacks to it. Skipping GitOps still deploys the DigitalOcean cloud controller manager and CSI driver. Two checkboxes are on by default:
+        - **Include Networking Stack** - Traefik, cert-manager and a Let's Encrypt ClusterIssuer, with Traefik behind a DigitalOcean load balancer.
+        - **Include Public DNS** - a delegated subdomain on `ankra.cc` with external-dns wired, so an ingress hostname under it gets its DNS record and TLS certificate automatically.
+      </Step>
+      <Step title="Details">
+        Name the cluster, set its environment, and click **Create cluster**. A progress view follows the VPC, NAT gateway, bastion, Droplets, Kubernetes installation and Ankra Agent.
+      </Step>
+    </Steps>
+  </Tab>
+  <Tab title="CLI">
+    <CliVersion since="0.5.1" />
+
+    ```bash
+    ankra credentials digitalocean create --name my-do-token   # prompts for the token
+    ankra credentials digitalocean ssh-key create --name my-ssh-key --generate
+
+    # What your credential can deploy
+    ankra cluster digitalocean regions --credential-id <digitalocean-credential-id>
+    ankra cluster digitalocean sizes --credential-id <digitalocean-credential-id> --region nyc3 --available-only
+
+    ankra cluster digitalocean create \
+      --name my-cluster \
+      --credential-id <digitalocean-credential-id> \
+      --ssh-key-credential-id <ssh-key-credential-id> \
+      --region nyc3 \
+      --control-plane-count 1 \
+      --control-plane-size s-2vcpu-4gb \
+      --worker-count 2 \
+      --worker-size s-2vcpu-4gb
+    ```
+
+    `--distribution k3s`, `--etcd-topology external` with `--etcd-node-count` and `--etcd-size`, `--include-networking=false` and the `--gitops-*` flags cover the other choices.
+  </Tab>
+  <Tab title="API">
+    ```bash
+    curl -X POST https://platform.ankra.app/api/v1/clusters/digitalocean \
+      -H "Authorization: Bearer $ANKRA_API_TOKEN" \
+      -H "Content-Type: application/json" \
+      -d '{
+        "name": "my-cluster",
+        "credential_id": "<digitalocean-credential-id>",
+        "ssh_key_credential_id": "<ssh-key-credential-id>",
+        "region": "nyc3",
+        "control_plane_count": 1,
+        "control_plane_size": "s-2vcpu-4gb",
+        "node_groups": [
+          {"name": "default", "instance_type": "s-2vcpu-4gb", "count": 2}
+        ],
+        "include_networking": true,
+        "include_dns": true
+      }'
+    ```
+
+    `worker_count` and `worker_size` are still accepted, and `node_groups` wins when both are given. Every field, default, region and common size is in the [DigitalOcean Reference](/reference/digitalocean).
+  </Tab>
+</Tabs>
+
+## Verify
+
+1. The cluster moves from **Provisioning** to **Online** in the clusters list once the Ankra Agent has connected.
+2. Point `kubectl` at it through Ankra (this needs a [Cluster Access](/guides/cluster-access) grant) and check the nodes:
+
+   <CliVersion since="0.3.0" command="cluster kubeconfig add" />
+
+   ```bash
+   ankra cluster kubeconfig add my-cluster --use
+   kubectl get nodes
+   ```
+
+   Every control plane and worker should be `Ready`. See [Accessing Clusters with kubectl](/guides/kubeconfig).
+
+## What Ankra created in your account
+
+- **A VPC** for all traffic between the Droplets.
+- **A VPC NAT gateway**, set as the VPC's default route - the egress path for the nodes. DigitalOcean bills it separately; see [VPC NAT gateway pricing](https://docs.digitalocean.com/products/networking/vpc/details/pricing/).
+- **A bastion Droplet** - the only Droplet with a public IP and the only SSH entry point. It carries no workload or egress traffic.
+- **Control plane and worker Droplets** with private IPs only, and dedicated etcd Droplets for a kubeadm cluster with external etcd.
+- **Two tag-scoped cloud firewalls**, kept as defence in depth.
+- **The `digitalocean-cloud-provider` stack**: the DigitalOcean cloud controller manager (load balancers for `LoadBalancer` Services) and CSI driver (block storage through the `do-block-storage` StorageClass), using your credential.
+
+The [DigitalOcean Reference](/reference/digitalocean#architecture) has the full layout.
+
+## DigitalOcean specifics
+
+- **Clusters created before private-Droplet support** keep their original layout: every Droplet has a public IP and the tag-scoped cloud firewalls are the ingress boundary. Public networking is fixed when a Droplet is created, so those clusters - including nodes added when you scale them - stay on that model. Only new clusters get private nodes and a NAT gateway.
+- **Resizing a node group** powers each Droplet off, resizes it and powers it on again, with brief downtime for its workloads. Droplet sizes only grow; for smaller nodes, create a new group and delete the old one.
+- **A stop** deletes the node Droplets, the bastion and the VPC NAT gateway, and keeps the cluster's configuration, network definition and SSH keys. The block storage volumes the CSI driver created are kept and keep billing while the cluster is stopped.
+- **Terminating** deletes the Droplets, NAT gateway, VPC and SSH keys. Anything left over from an earlier teardown can be removed in the [DigitalOcean Control Panel](https://cloud.digitalocean.com/).
+
+## Operate it
+
+Day-2 tasks work the same way on every Ankra Managed provider, with the CLI name `digitalocean`:
+
+- [Node groups](/guides/operate-ankra-managed-clusters#node-groups) and [legacy worker scaling](/guides/operate-ankra-managed-clusters#legacy-worker-scaling)
+- [Control plane](/guides/operate-ankra-managed-clusters#control-plane)
+- [Restart a node](/guides/operate-ankra-managed-clusters#restart-a-node) and [the bastion](/guides/operate-ankra-managed-clusters#bastion)
+- [SSH access and keys](/guides/operate-ankra-managed-clusters#ssh-access-and-keys)
+- [Upgrade Kubernetes](/guides/operate-ankra-managed-clusters#upgrade-kubernetes)
+- [Stop and start](/guides/operate-ankra-managed-clusters#stop-and-start)
+- [Terminate a cluster](/guides/operate-ankra-managed-clusters#terminate-a-cluster)
 
 ## Troubleshooting
 
-### Common Issues
-
 | Issue | Solution |
 |-------|----------|
-| Cluster stuck in provisioning | Check API token permissions and account quota |
-| Cannot scale workers | Ensure cluster is online and no operations are running |
-| Invalid API token | Re-validate at [DigitalOcean Control Panel](https://cloud.digitalocean.com/account/api/tokens) - tokens are prefixed with `dop_v1_` |
-| Droplet size unavailable | Try a different region or size |
-| LoadBalancer service stuck in `Pending` | Verify the CCM is running in the `digitalocean-cloud-provider` namespace |
-| PVCs stuck in `Pending` | Verify the CSI driver is running and the `do-block-storage` StorageClass exists |
-
-### DigitalOcean Account Quotas
-
-DigitalOcean has default resource limits per account. If provisioning fails, check your quotas in the [DigitalOcean Control Panel](https://cloud.digitalocean.com/):
-- Droplets
-- VPCs
-- Load Balancers
-- Volumes
-
-Contact DigitalOcean support to increase limits if needed.
+| Cluster stuck in provisioning | Check the token's permissions and your account limits |
+| Invalid API token | Create a new read and write token in the [DigitalOcean Control Panel](https://cloud.digitalocean.com/account/api/tokens) (prefixed `dop_v1_`) and [rotate the credential](/platform/credentials/digitalocean) |
+| Droplet size unavailable | Try another region or size; `ankra cluster digitalocean sizes --available-only` lists what the region offers |
+| Cannot scale workers | Check that the cluster is **Online** and no operation is running |
+| `LoadBalancer` Service stuck in `Pending` | Check that the CCM runs in the `digitalocean-cloud-provider` namespace |
+| PVCs stuck in `Pending` | Check that the CSI driver runs and the `do-block-storage` StorageClass exists |
