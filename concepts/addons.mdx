@@ -1,10 +1,10 @@
 ---
 title: Add-ons
-description: Manage and deploy Helm add-ons with GitOps-powered continuous delivery.
+description: Manage and deploy Helm add-ons that Ankra installs and keeps reconciled on your clusters.
 ---
 
 <Note>
-Add-ons are Helm charts deployed through Ankra's GitOps pipeline. They provide a standardized way to extend your clusters with monitoring, networking, security, and custom applications, all managed through continuous delivery.
+Add-ons are Helm charts that Ankra deploys to your clusters and keeps reconciled. They provide a standardized way to extend your clusters with monitoring, networking, security, and custom applications.
 </Note>
 
 ## What is an Add-on?
@@ -17,34 +17,29 @@ An add-on is a packaged application or tool that extends the functionality of yo
 
 Understanding how add-ons flow from configuration to deployment helps you manage them effectively.
 
-### GitOps Deployment Pipeline
+### Deployment Pipeline
 
 ```mermaid
 flowchart LR
-    Stack[Stack Builder] --> Git[Git Repository]
-    Git --> ArgoCD[ArgoCD]
-    ArgoCD --> Helm[Helm Release]
+    Stack[Stack Builder or Git] --> Platform[Ankra platform]
+    Platform --> Agent[Ankra agent]
+    Agent --> Helm[helm upgrade --install]
     Helm --> K8s[Kubernetes Resources]
 ```
 
 **How it works:**
 
-1. **Stack Builder**: You configure add-ons with values and dependencies
-2. **Git Repository**: Configuration is committed as Helm values files
-3. **ArgoCD**: Detects changes and initiates deployment
-4. **Helm Release**: ArgoCD renders the Helm chart with your values
+1. **Stack Builder or Git**: You configure add-ons with values and dependencies in the Stack Builder, or in a connected [GitOps repository](/concepts/gitops)
+2. **Ankra platform**: Stores the desired state of the stack and dispatches the deploy
+3. **Ankra agent**: Receives the deploy inside your cluster
+4. **Helm release**: The agent runs `helm upgrade --install` with your values; the step succeeds once the release is healthy
 5. **Kubernetes Resources**: The rendered manifests are applied to your cluster
 
-### Add-on Lifecycle States
+This is the **native** engine, the default for new clusters. Clusters created before it may still use the ArgoCD engine, where an ArgoCD installation in the cluster applies the chart instead; the stack you build is the same either way. See [Deployment Engines](/concepts/deployment-engines).
 
-| State | Description |
-|-------|-------------|
-| **Pending** | Add-on is queued for deployment |
-| **Deploying** | ArgoCD is applying the Helm release |
-| **Synced** | All resources are deployed and healthy |
-| **Degraded** | Some resources are unhealthy |
-| **OutOfSync** | Git configuration differs from cluster state |
-| **Unknown** | Status cannot be determined |
+### Add-on Status
+
+An add-on's status in the dashboard shows whether its latest deploy succeeded and whether the release has drifted from the desired state. The agent reports drift to the platform, and an add-on whose settings enable self-heal is reconciled back. See [Deployment Engines](/concepts/deployment-engines) for how each engine detects and heals drift.
 
 ---
 
@@ -56,7 +51,7 @@ Each add-on creates a hierarchy of Kubernetes resources. Understanding this hier
 
 ```mermaid
 flowchart TD
-    App[ArgoCD Application] --> NS[Namespace]
+    App[Helm release] --> NS[Namespace]
     App --> Deploy[Deployments]
     App --> SVC[Services]
     App --> CM[ConfigMaps]
@@ -83,36 +78,32 @@ Navigate to any installed add-on and open its [Resource Map](#resource-map) to s
 
 ## Continuous Delivery Flow
 
-Add-ons in Ankra follow a GitOps continuous delivery model powered by ArgoCD.
-
-### Sync Process
-
 <Steps>
   <Step title="Configuration Change">
-    You modify add-on values in the Stack Builder or update values in Git directly.
+    You modify add-on values in the Stack Builder, or update values in your connected Git repository.
   </Step>
-  <Step title="Git Commit">
-    Changes are committed to your connected Git repository.
+  <Step title="Change detected">
+    A change made in the Stack Builder is deployed when you deploy the stack. A change pushed to Git is picked up through the repository's webhook (or periodic polling).
   </Step>
-  <Step title="Webhook Trigger">
-    Ankra detects the change via webhook (or periodic polling).
-  </Step>
-  <Step title="ArgoCD Sync">
-    ArgoCD compares desired state (Git) with actual state (cluster) and applies differences.
+  <Step title="Deploy">
+    The agent applies the difference with Helm on the native engine, or through ArgoCD on a cluster still using that engine.
   </Step>
   <Step title="Health Check">
-    ArgoCD monitors resource health until all pods are running and endpoints are ready.
+    The deploy is not marked successful until the release's resources are healthy.
   </Step>
 </Steps>
 
-### Sync Strategies
+### Sync Settings
 
-| Strategy | Behavior |
-|----------|----------|
-| **Auto-Sync** | Changes in Git automatically deploy to the cluster |
-| **Manual Sync** | Changes require explicit sync trigger |
-| **Self-Heal** | ArgoCD reverts manual cluster changes to match Git |
-| **Prune** | Resources removed from Git are deleted from cluster |
+Each add-on's settings control how it is kept in sync:
+
+| Setting | Behavior |
+|---------|----------|
+| **Automated sync** | Changes to the desired state deploy to the cluster automatically |
+| **Self-Heal** | Manual changes made in the cluster are reverted to match the desired state |
+| **Prune** | Resources removed from the desired state are deleted from the cluster |
+
+Both engines support these; see [Add-on Settings](/concepts/addon-settings).
 
 ---
 
@@ -126,80 +117,36 @@ Setup steps live in one place: see [Registries](/guides/registries) for connecti
 
 ---
 
-## Stacks
-
-To deploy an add-on onto your cluster, add it to a stack. You can add multiple add-ons and manifests to build a **Stack**, which is a repeatable, reusable set of components for your Kubernetes environments.
-Stacks let you bundle everything your application or platform needs, from monitoring and logging to ingress controllers and security policies. You can version stacks, share them with your team, and deploy them to any cluster with a single action. This approach speeds up onboarding, reduces errors, and helps make sure every environment is production-ready.
-
-[Learn more about Stacks →](/concepts/stacks)
-
----
-
 ## Install Add-ons
 
-Add-ons in Ankra are installed through **Stacks**. This ensures your add-ons are bundled with their dependencies and can be managed as a cohesive unit.
+Add-ons are installed through [Stacks](/concepts/stacks), next to the [manifests](/concepts/stacks#manifests) they depend on, so they deploy in the right order as one unit.
 
 <Steps>
   <Step title="Navigate to Stacks">
-    Go to the **Stacks** section in your cluster and click **Create Stack** (or edit an existing stack).
+    Go to the **Stacks** section in your cluster and click **+ Create** (or edit an existing stack).
   </Step>
   <Step title="Add an Add-on">
-    In the Stack Builder, click **Add** and select **Add-on**. Browse or search for charts from your connected registries.
+    In the Stack Builder, click **Add Add-on**. Browse or search for charts from your connected registries.
   </Step>
   <Step title="Configure Values">
     Select the chart version and configure the values. Pin an exact chart version in production to avoid unexpected upgrades. You can use the AI Assistant (`⌘+J`) to help customize the configuration.
   </Step>
   <Step title="Deploy">
-    Save your stack and deploy it to install the add-on on your cluster.
+    For a new stack, click **Create Stack** to save and deploy it, installing the add-on on your cluster.
   </Step>
 </Steps>
-
-Ankra handles versioning, dependency management, and cluster targeting for you. This makes it easy to standardize tooling and services across all your environments, ensuring consistency and reducing operational overhead.
 
 ---
 
 ## Encrypting Sensitive Values with SOPS
 
-When your add-on configuration contains sensitive data like passwords, API keys, or webhook URLs, use **SOPS** to encrypt them before storing in your GitOps repository.
-
-<Steps>
-  <Step title="Open the Add-on Editor">
-    Edit an add-on within your stack by clicking on it in the Stack Builder.
-  </Step>
-  <Step title="Click the SOPS Button">
-    In the values edit view, click the **SOPS** button in the toolbar to enable encryption.
-  </Step>
-  <Step title="Encrypt Sensitive Values">
-    SOPS will encrypt sensitive values (like `adminPassword` or `slack_api_url`) while keeping keys readable for easier Git diffs.
-  </Step>
-  <Step title="Save">
-    Save your add-on configuration. The encrypted values will be stored safely in your GitOps repository and decrypted automatically when deployed.
-  </Step>
-</Steps>
-
-<Tip>
-SOPS encryption requires initial setup. See [SOPS Encryption](/guides/sops) for configuration instructions.
-</Tip>
+When an add-on's values carry a password, an API key or a webhook URL and the cluster is connected to Git, list those key names under **Encrypted Keys (SOPS)** in the add-on's configuration, for example `adminPassword`. Ankra encrypts their values with SOPS before it writes the values file to Git, keeps the keys readable for diffs, and decrypts them when it deploys. SOPS needs a one-time setup for the organisation - see [SOPS](/guides/sops).
 
 ---
 
 ## Operational Learnings with AGENTS.md
 
 Every add-on can carry an **AGENTS.md** - a markdown document of operational learnings (upgrade gotchas, safe rollout order, values that must stay pinned) that teammates and Ankra's AI build up over time. Edit it from the **AGENTS.md** tab on the add-on in the Stack Builder; editing it never triggers a redeploy. See [Teach Your Agents with AGENTS.md](/platform/agents-md).
-
----
-
-## Manifests
-
-A **manifest** is a Kubernetes YAML file that defines resources or configuration, like namespaces, CRDs, or RBAC rules.
-In Ankra, manifests help you:
-
-- **Include manifests in stacks:** Make sure your clusters are ready for add-ons by setting up all prerequisites and custom resources first.
-- **Automate environment setup:** Create the foundational resources your add-ons and workloads need, so your stacks are fully self-contained and repeatable.
-
-Manifests are key for customizing clusters and making sure every deployment fits your team's needs.
-
-[Learn more about Manifests →](/concepts/manifests)
 
 ---
 
@@ -222,7 +169,7 @@ Click any add-on to view detailed information:
 
 | Tab | Description |
 |-----|-------------|
-| **Overview** | Chart info, status, metadata, and ArgoCD application state |
+| **Overview** | Chart info, status, metadata, and deployment state |
 | **Resource Map** | Visual hierarchy of all Kubernetes resources created by the add-on |
 | **Values** | Current Helm values configuration |
 | **Events** | Recent events related to the add-on's resources |
@@ -268,7 +215,7 @@ If an upgrade causes issues:
 
 1. Edit the stack and revert to the previous chart version
 2. Or use GitOps: revert the commit in your Git repository
-3. ArgoCD will automatically sync to the previous state
+3. Ankra deploys the previous state again - from the stack when you deploy it, or from Git on its next sync
 
 Add-on settings and Helm values are also readable and updatable through Ankra's AI and MCP clients, alongside sync, rollback, and uninstall - so routine add-on operations can run straight from chat or your editor. See the [MCP Tool Reference](/platform/mcp-tools#add-ons).
 
@@ -287,7 +234,7 @@ Check out the [API Reference](/api-reference/introduction) for endpoints to list
   <Card title="Stacks" icon="cubes" href="/concepts/stacks">
     Build stacks with multiple add-ons.
   </Card>
-  <Card title="Helm Charts" icon="box" href="/platform/helm-charts">
+  <Card title="Add-on Catalog" icon="box" href="/platform/addon-catalog">
     Browse available Helm charts.
   </Card>
   <Card title="GitOps" icon="git-alt" href="/concepts/gitops">

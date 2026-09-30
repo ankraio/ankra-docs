@@ -1,275 +1,120 @@
 ---
 title: UpCloud Clusters
-description: Create, manage, and scale Kubernetes clusters on UpCloud with Ankra.
+description: Create a Kubernetes cluster on servers in your own UpCloud account, with Ankra installing and operating Kubernetes, ingress, TLS and DNS.
 ---
 
 import { CliVersion } from "/snippets/cli-version.jsx";
 
-Ankra supports provisioning fully managed Kubernetes clusters on [UpCloud](https://upcloud.com/). You can create clusters with configurable control planes, workers, and networking - then scale workers up or down as needed.
+Choose UpCloud when you want Kubernetes on UpCloud servers in an account you own, with private nodes behind a managed NAT gateway and, in closed beta, a cluster stretched across several UpCloud zones. Ankra creates the router, private network, NAT gateway, bastion and servers, installs Kubernetes and the UpCloud cloud integration, and then operates the cluster for you - this is an **Ankra Managed** cluster. UpCloud bills you directly for the servers.
 
----
+## Before you start
 
-## Prerequisites
+- An **UpCloud API token** with permission to manage servers, networking, storage and Kubernetes, stored as an [UpCloud credential](/platform/credentials/upcloud).
+- An **SSH key credential** - your own public key, or one Ankra generates. See [SSH Key Credentials](/platform/credentials/ssh-key).
+- Room in your account's limits for the servers, networks, routers and IP addresses. Check them in the [UpCloud Control Panel](https://hub.upcloud.com/); UpCloud support raises them.
 
-Before creating an UpCloud cluster, you need two credentials:
+## Create the cluster
 
-<CardGroup cols={2}>
-  <Card title="UpCloud API Credential" icon="key">
-    An UpCloud API token with read/write permissions. See [UpCloud Credentials](/platform/credentials/upcloud).
-  </Card>
-  <Card title="SSH Key Credential" icon="lock">
-    An SSH public key for server access. You can provide your own or let Ankra generate one. See [SSH Key Credentials](/platform/credentials/ssh-key).
-  </Card>
-</CardGroup>
+<Tabs>
+  <Tab title="Dashboard">
+    <Steps>
+      <Step title="Open the create dialog">
+        Go to **Clusters**, click **Create cluster** and pick **UpCloud** under **Ankra Managed**.
+      </Step>
+      <Step title="Credential & Zone">
+        Pick the UpCloud credential and the SSH key (or add either inline), and the zone, for example Helsinki, Frankfurt, Chicago or Amsterdam.
+      </Step>
+      <Step title="Network & Compute">
+        Keep or change the private network range, then pick the bastion plan, the control plane count and plan, and the worker plan and count, with optional autoscaling bounds. The wizard shows each plan's vCPUs, RAM and monthly price. Add more node groups once the cluster is running.
+      </Step>
+      <Step title="Kubernetes">
+        Keep **kubeadm** (the default, with Cilium) or pick **k3s**, and optionally the version. See [Choices fixed at create time](/guides/operate-ankra-managed-clusters#choices-fixed-at-create-time) for the CNI and etcd options.
+      </Step>
+      <Step title="GitOps">
+        Optionally connect a Git repository; Ankra commits the cluster's stacks to it. Two checkboxes are on by default:
+        - **Include Networking Stack** - Traefik, cert-manager and a Let's Encrypt ClusterIssuer, with Traefik behind an UpCloud load balancer.
+        - **Include Public DNS** - a delegated subdomain on `ankra.cc` with external-dns wired, so an ingress hostname under it gets its DNS record and TLS certificate automatically.
+      </Step>
+      <Step title="Details">
+        Name the cluster, set its environment, and click **Create cluster**. A progress view follows the router, network, gateway, bastion, servers, Kubernetes installation and Ankra Agent.
+      </Step>
+    </Steps>
+  </Tab>
+  <Tab title="CLI">
+    <CliVersion since="0.9.0" />
 
----
+    ```bash
+    ankra credentials upcloud create --name my-upcloud-token   # prompts for the token
+    ankra credentials upcloud ssh-key create --name my-ssh-key --generate
 
-## Creating an UpCloud Cluster
+    ankra cluster upcloud create \
+      --name my-cluster \
+      --credential-id <upcloud-credential-id> \
+      --ssh-key-credential-id <ssh-key-credential-id> \
+      --zone fi-hel1 \
+      --control-plane-count 1 \
+      --control-plane-plan 2xCPU-4GB \
+      --worker-count 2 \
+      --worker-plan 4xCPU-8GB
+    ```
 
-### Via the Platform UI
+    Left unset, `--network-ip-range` is picked from ranges free in your account. `--distribution k3s`, `--etcd-topology external`, `--include-networking=false` and the `--gitops-*` flags cover the other choices; `--zones` and `--network-mode` are for [multi-zone clusters](#multi-zone-clusters).
+  </Tab>
+  <Tab title="API">
+    ```bash
+    curl -X POST https://platform.ankra.app/api/v1/clusters/upcloud \
+      -H "Authorization: Bearer $ANKRA_API_TOKEN" \
+      -H "Content-Type: application/json" \
+      -d '{
+        "name": "my-cluster",
+        "credential_id": "<upcloud-credential-id>",
+        "ssh_key_credential_id": "<ssh-key-credential-id>",
+        "zone": "fi-hel1",
+        "control_plane_count": 1,
+        "control_plane_plan": "2xCPU-4GB",
+        "node_groups": [
+          {"name": "default", "instance_type": "4xCPU-8GB", "count": 2}
+        ],
+        "include_networking": true,
+        "include_dns": true
+      }'
+    ```
 
-A guided wizard walks you through creating an UpCloud cluster - select credentials, pick a datacenter zone, choose server plans, set control plane and worker counts, and launch.
+    Every field, the zone list and the plans are in the [UpCloud Reference](/reference/upcloud).
+  </Tab>
+</Tabs>
 
-<Steps>
-  <Step title="Navigate to Clusters">
-    Go to **Clusters** in the Ankra dashboard and click **Create Cluster**.
-  </Step>
-  <Step title="Select UpCloud">
-    Choose **UpCloud** as the provider.
-  </Step>
-  <Step title="Select Credentials">
-    Pick your UpCloud API credential and SSH key credential from the dropdowns. You can also create new credentials directly from the wizard.
-  </Step>
-  <Step title="Choose Datacenter Zone">
-    Select an UpCloud zone (e.g., Helsinki, Frankfurt, Chicago, Amsterdam). Each zone shows the location and country.
-  </Step>
-  <Step title="Configure Nodes">
-    Set your cluster topology:
-    - **Bastion** - server plan for the SSH bastion host (e.g., `1xCPU-1GB`)
-    - **Control Plane** - count (1 or 3) and plan (e.g., `2xCPU-4GB`)
-    - **Workers** - count and plan (e.g., 2x `4xCPU-8GB`)
+## Verify
 
-    The wizard shows vCPUs, RAM, and monthly cost for each plan to help you choose.
-  </Step>
-  <Step title="GitOps, Networking & DNS">
-    Optionally connect a GitHub repository for GitOps-driven deployment. Two checkboxes on this step are on by default:
-    - **Include Networking Stack** - deploys Traefik, cert-manager, and a Let's Encrypt ClusterIssuer configured for UpCloud load balancers.
-    - **Include Public DNS** - gives the cluster its own delegated subdomain on `ankra.cc` and installs external-dns with its credentials already wired, so an ingress hostname under that subdomain gets its DNS record and TLS certificate automatically.
-  </Step>
-  <Step title="Create & Track Progress">
-    Click **Create** to start provisioning. A live progress view tracks every step - credential setup, router creation, network creation, gateway setup, SSH key deployment, bastion provisioning, server creation, Kubernetes installation (kubeadm or k3s), and Ankra Agent setup. The cluster appears with an **offline** state until provisioning completes, then transitions to **online**.
-  </Step>
-</Steps>
+1. The cluster moves from **Provisioning** to **Online** in the clusters list once the Ankra Agent has connected.
+2. Point `kubectl` at it through Ankra (this needs a [Cluster Access](/guides/cluster-access) grant) and check the nodes:
 
-### Managing from the Dashboard
+   <CliVersion since="0.3.0" command="cluster kubeconfig add" />
 
-Once your UpCloud cluster is online, you can manage it directly from the Ankra dashboard:
+   ```bash
+   ankra cluster kubeconfig add my-cluster --use
+   kubectl get nodes
+   ```
 
-- **Scale workers** - go to **Cluster Settings** → **General** to scale worker nodes up or down
-- **Upgrade Kubernetes** - upgrade the Kubernetes version from cluster settings
-- **Deprovision** - delete the cluster and all UpCloud resources from the **Danger Zone** in cluster settings
+   Every control plane and worker should be `Ready`. See [Accessing Clusters with kubectl](/guides/kubeconfig).
 
-### Via the CLI
+## What Ankra created in your account
 
-<CliVersion since="0.9.0" />
+- **An SDN router and a private network** with DHCP handing out the default route. Nodes have no public interface.
+- **A managed NAT gateway** on the router - the egress path for all node traffic.
+- **A bastion** - the only server with a public IP. It is an SSH jump host only: Ankra reaches the nodes through it to provision, upgrade and reconcile, and no workload or egress traffic flows through it.
+- **Control plane and worker servers**, and your SSH key on every server.
+- **The upcloud-cloud-provider stack** - the UpCloud cloud controller manager and CSI driver, for `LoadBalancer` Services and persistent storage, using your credential.
 
-```bash
-# Create credentials first
-ankra credentials upcloud create --name my-upcloud-token  # securely prompts for token
-ankra credentials upcloud ssh-key create --name my-ssh-key --generate
+On a multi-zone cluster, every additional zone gets its own router, private network and NAT gateway, and the nodes are joined by a WireGuard mesh. The [UpCloud Reference](/reference/upcloud#architecture) has the diagram.
 
-# Create the cluster
-ankra cluster upcloud create \
-  --name my-cluster \
-  --credential-id <upcloud-credential-id> \
-  --ssh-key-credential-id <ssh-key-credential-id> \
-  --zone fi-hel1 \
-  --control-plane-count 1 \
-  --control-plane-plan 2xCPU-4GB \
-  --worker-count 2 \
-  --worker-plan 4xCPU-8GB
-```
+## UpCloud specifics
 
-### Via the API
+- **Plan changes go one way.** A node group moves to a larger plan only; each node is powered off, resized and powered on, with brief downtime for its workloads. For smaller nodes, create a new group and delete the old one.
+- **Stop.** A stop releases the node servers, the bastion and the NAT gateway, and keeps the networking definition and SSH keys. The CSI storage volumes are kept and billed while the cluster is stopped.
+- **Terminate** deletes the servers, networks, routers, gateways and SSH keys. The storage volumes Ankra deletes, once you accept it, are exactly the ones it recorded for this cluster - never other disks in the account.
 
-```bash
-curl -X POST https://platform.ankra.app/api/v1/clusters/upcloud \
-  -H "Authorization: Bearer $ANKRA_API_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "name": "my-cluster",
-    "credential_id": "<upcloud-credential-id>",
-    "ssh_key_credential_id": "<ssh-key-credential-id>",
-    "zone": "fi-hel1",
-    "control_plane_count": 1,
-    "control_plane_plan": "2xCPU-4GB",
-    "worker_count": 2,
-    "worker_plan": "4xCPU-8GB",
-    "distribution": "k3s"
-  }'
-```
-
-Every configuration parameter, the zone list, and server plans are in the [UpCloud Reference](/reference/upcloud).
-
----
-
-## Node Groups
-
-Node groups let you organize worker nodes into logical groups with independent server plans, counts, labels, and taints. Each group can be scaled, re-planned, and configured independently.
-
-### Via the Platform UI
-
-Navigate to cluster **Settings** > **Nodes** to manage node groups. From this tab you can:
-
-- View all node groups with their server plan, count, labels, and taints
-- Add new node groups with a name, server plan, count, and optional labels/taints
-- Scale individual groups up or down (0–100 nodes)
-- Upgrade the server plan (upgrade only - see [Server Plan Changes](#server-plan-changes))
-- Edit labels and taints per group
-- Delete a node group and all its nodes
-
-### List Node Groups
-
-<CodeGroup>
-
-```bash CLI
-ankra cluster upcloud node-group list <cluster_id>
-```
-
-```bash cURL
-curl https://platform.ankra.app/api/v1/clusters/upcloud/<cluster_id>/node-groups \
-  -H "Authorization: Bearer $ANKRA_API_TOKEN"
-```
-
-</CodeGroup>
-
-Response:
-```json
-{
-  "node_groups": [
-    {
-      "name": "default",
-      "instance_type": "4xCPU-8GB",
-      "count": 2,
-      "min": 0,
-      "max": 100,
-      "labels": {},
-      "taints": []
-    }
-  ]
-}
-```
-
-### Add a Node Group
-
-<CodeGroup>
-
-```bash CLI
-ankra cluster upcloud node-group add <cluster_id> \
-  --name workers-large \
-  --instance-type 8xCPU-32GB \
-  --count 2
-```
-
-```bash cURL
-curl -X POST https://platform.ankra.app/api/v1/clusters/upcloud/<cluster_id>/node-groups \
-  -H "Authorization: Bearer $ANKRA_API_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "name": "workers-large",
-    "instance_type": "8xCPU-32GB",
-    "count": 2,
-    "labels": {"tier": "backend"},
-    "taints": [{"key": "dedicated", "value": "backend", "effect": "NoSchedule"}]
-  }'
-```
-
-</CodeGroup>
-
-### Scale a Node Group
-
-<CodeGroup>
-
-```bash CLI
-ankra cluster upcloud node-group scale <cluster_id> default 4
-```
-
-```bash cURL
-curl -X PUT https://platform.ankra.app/api/v1/clusters/upcloud/<cluster_id>/node-groups/default/scale \
-  -H "Authorization: Bearer $ANKRA_API_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"count": 4}'
-```
-
-</CodeGroup>
-
-Node groups can be scaled to 0 nodes. This keeps the group definition but removes all servers.
-
-### Server Plan Changes
-
-<Warning>
-Server plan upgrades are one-way - you cannot downgrade a node group to a smaller plan. To use a smaller plan, create a new node group with the desired plan and delete the old one.
-</Warning>
-
-<CodeGroup>
-
-```bash CLI
-ankra cluster upcloud node-group upgrade <cluster_id> default 8xCPU-32GB
-```
-
-```bash cURL
-curl -X PUT https://platform.ankra.app/api/v1/clusters/upcloud/<cluster_id>/node-groups/default/instance-type \
-  -H "Authorization: Bearer $ANKRA_API_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"instance_type": "8xCPU-32GB"}'
-```
-
-</CodeGroup>
-
-Each node is powered off, resized, and powered back on. This causes brief downtime for workloads on those nodes.
-
-### Update Labels and Taints
-
-```bash
-# Update labels
-curl -X PUT https://platform.ankra.app/api/v1/clusters/upcloud/<cluster_id>/node-groups/default/labels \
-  -H "Authorization: Bearer $ANKRA_API_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"labels": {"env": "production", "tier": "backend"}}'
-
-# Update taints
-curl -X PUT https://platform.ankra.app/api/v1/clusters/upcloud/<cluster_id>/node-groups/default/taints \
-  -H "Authorization: Bearer $ANKRA_API_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"taints": [{"key": "dedicated", "value": "ml", "effect": "NoSchedule"}]}'
-```
-
-### Delete a Node Group
-
-<CodeGroup>
-
-```bash CLI
-ankra cluster upcloud node-group delete <cluster_id> workers-large
-```
-
-```bash cURL
-curl -X DELETE https://platform.ankra.app/api/v1/clusters/upcloud/<cluster_id>/node-groups/workers-large \
-  -H "Authorization: Bearer $ANKRA_API_TOKEN"
-```
-
-</CodeGroup>
-
-<Warning>
-Deleting a node group removes all its servers. Workloads running on those nodes will be evicted.
-</Warning>
-
-### Node Group API Reference
-
-All node-group operations are also available via the REST API - see the [UpCloud Node Group API](/reference/upcloud#node-group-api-reference).
-
----
-
-## Multi-zone clusters
+### Multi-zone clusters
 
 UpCloud has no multi-zone region: every private SDN network, router and managed load balancer lives in one zone, so a cluster is single-zone by construction. Ankra can stretch a cluster across a **zone pool** instead - one private network and NAT gateway per zone, the nodes joined by a platform-managed kernel WireGuard mesh over UpCloud's account-wide utility network, and Kubernetes advertising the overlay address on every node. Losing a zone then costs capacity, not the cluster.
 
@@ -279,9 +124,11 @@ UpCloud has no multi-zone region: every private SDN network, router and managed 
 
 Two rules shape everything below. A pool has **at least three zones and three control planes** - one per zone - so etcd keeps quorum when any one zone is lost; a two-zone pool is refused. And the mesh is decided at create: a cluster created without it cannot be stretched later, so a single-zone cluster that may grow is created with `network_mode: wireguard_mesh`.
 
-### Create a cluster across zones
+#### Create a cluster across zones
 
 `zone` stays the primary zone - bastion, first control plane and default network - and must be in `zones`. Control planes spread one per zone; workers spread per node group unless a group is pinned.
+
+<CliVersion since="0.14.0" command="cluster upcloud create --zones" />
 
 <CodeGroup>
 
@@ -320,25 +167,19 @@ curl -X POST https://platform.ankra.app/api/v1/clusters/upcloud \
 
 `network_mode` is derived - `wireguard_mesh` for a pool, `private_network` otherwise - and can be set to `wireguard_mesh` on a single-zone cluster to make it mesh-capable:
 
-<CliVersion since="0.14.0" command="cluster upcloud create --zones" />
-
 ```bash
 ankra cluster upcloud create --name my-cluster --zone fi-hel1 --network-mode wireguard_mesh \
   --credential-id <upcloud-credential-id> --ssh-key-credential-id <ssh-key-credential-id>
 ```
 
-<Warning>
-A pool of more than one zone requires **at least 3 zones and 3 control planes**, and the `kubeadm` distribution. Anything less is refused at create rather than producing a cluster that fails on its first zone outage.
-</Warning>
-
-### Grow the pool
+#### Grow the pool
 
 Zones can be added to a `wireguard_mesh` cluster, never removed. Pass the full desired pool, primary zone first; every new zone gets its router, private network and NAT gateway, and later node groups spread across the grown pool.
 
 <CodeGroup>
 
 ```bash CLI
-ankra cluster upcloud zones <cluster_id> --zones fi-hel1,fi-hel2,se-sto1,de-fra1
+ankra cluster upcloud zones <cluster> --zones fi-hel1,fi-hel2,se-sto1,de-fra1
 ```
 
 ```bash cURL
@@ -350,12 +191,12 @@ curl -X PUT https://platform.ankra.app/api/v1/clusters/upcloud/<cluster_id>/zone
 
 </CodeGroup>
 
-### Pin a node group to one zone
+#### Pin a node group to one zone
 
 Pin the group that runs zonal storage: an UpCloud volume cannot attach from another zone.
 
 ```bash
-ankra cluster upcloud node-group add <cluster_id> \
+ankra cluster node-group add <cluster> \
   --name database-sto \
   --instance-type 4xCPU-8GB \
   --count 1 \
@@ -364,18 +205,13 @@ ankra cluster upcloud node-group add <cluster_id> \
 
 Day-2 growth follows the stored pool: node group add, node group scale, worker scale, autoscaling and control plane growth balance new servers around where the existing ones are. A group whose nodes all share one zone is treated as pinned and grows there; a spread group keeps spreading. Control planes cannot be scaled below three on a multi-zone pool. `ankra cluster node-group list` ends each line with `zones=` and the zones the group's nodes were placed in (`zones` on the node-group listing API).
 
-### Node topology labels
+#### Node topology labels
 
 Every node carries `topology.kubernetes.io/zone` (the UpCloud zone, e.g. `fi-hel2`) and `topology.kubernetes.io/region` (the zone without its index, e.g. `fi-hel`), so `topologySpreadConstraints` and zone-aware scheduling work without extra configuration.
 
-### Node addressing on a meshed cluster
+#### Node addressing on a meshed cluster
 
-Every node advertises its **overlay address** to Kubernetes, so that is what
-`kubectl get nodes -o wide` reports as `INTERNAL-IP` - not the node's private
-SDN address. Overlay addresses are allocated per cluster from a range Ankra
-manages (`172.30.0.0/16` by default) and stay stable for the life of a node,
-so anything keyed on a node IP - monitoring targets, `NO_PROXY` lists,
-allow-lists - should use the overlay address:
+Every node advertises its **overlay address** to Kubernetes, so that is what `kubectl get nodes -o wide` reports as `INTERNAL-IP` - not the node's private SDN address. Overlay addresses are allocated per cluster from a range Ankra manages (`172.30.0.0/16` by default) and stay stable for the life of a node, so anything keyed on a node IP - monitoring targets, `NO_PROXY` lists, allow-lists - should use the overlay address:
 
 ```console
 $ kubectl get nodes -o wide
@@ -385,34 +221,19 @@ my-cluster-cp-1  Ready    172.30.0.2    ...   # fi-hel2
 my-cluster-cp-2  Ready    172.30.0.3    ...   # se-sto1
 ```
 
-Each zone in the pool also takes its own consecutive `/24` from the cluster's
-private range: with the default range, `fi-hel1` gets `10.166.78.0/24`,
-`fi-hel2` `10.166.79.0/24`, and so on. Pick `network_ip_range` with room for
-every zone you expect to add.
+Each zone in the pool also takes its own consecutive `/24` from the cluster's private range: with the default range, `fi-hel1` gets `10.166.78.0/24`, `fi-hel2` `10.166.79.0/24`, and so on. Pick `network_ip_range` with room for every zone you expect to add.
 
-### `LoadBalancer` Services on a meshed cluster
+#### `LoadBalancer` Services on a meshed cluster
 
-A meshed cluster advertises each node's overlay address as its Kubernetes
-`InternalIP`. An UpCloud load balancer is not part of the WireGuard mesh, so a
-backend registered at that address would be unreachable.
+A meshed cluster advertises each node's overlay address as its Kubernetes `InternalIP`. An UpCloud load balancer is not part of the WireGuard mesh, so a backend registered at that address would be unreachable.
 
-Ankra runs a cloud controller manager on meshed clusters that takes each
-backend member's address from the node's address on the private network the
-load balancer is attached to, rather than from the `InternalIP`. That is the
-one address a load balancer can always reach, so `LoadBalancer` Services -
-including the Traefik ingress the networking stack installs - work normally.
-You do not need to configure anything.
+Ankra runs a cloud controller manager on meshed clusters that takes each backend member's address from the node's address on the private network the load balancer is attached to, rather than from the `InternalIP`. That is the one address a load balancer can always reach, so `LoadBalancer` Services - including the Traefik ingress the networking stack installs - work normally. You do not need to configure anything.
 
 <Note>
-This needs no action on your part, but it is worth knowing if you compare a
-meshed cluster against a stock UpCloud CCM: the address behaviour is a
-deliberate difference, and the controller runs with its node controller
-disabled, because the overlay address it would otherwise reject is the whole
-point of a meshed cluster. Ankra applies the `topology.kubernetes.io/*` and
-`node.kubernetes.io/instance-type` labels itself instead.
+This is worth knowing if you compare a meshed cluster against a stock UpCloud CCM: the address behaviour is a deliberate difference, and the controller runs with its node controller disabled, because the overlay address it would otherwise reject is the whole point of a meshed cluster. Ankra applies the `topology.kubernetes.io/*` and `node.kubernetes.io/instance-type` labels itself instead.
 </Note>
 
-### What stays in the primary zone
+#### What stays in the primary zone
 
 UpCloud block storage is zone-local, and the cluster's CSI is scoped to the primary zone:
 
@@ -422,283 +243,24 @@ UpCloud block storage is zone-local, and the cluster's CSI is scoped to the prim
 
 Pod MTU is 1370 inside the mesh (WireGuard and VXLAN overheads), and Cilium's own WireGuard encryption is refused on a meshed cluster - the overlay already encrypts every node-to-node byte.
 
----
-
-## Restarting a Node
-
-Restart any node - a control plane node, a worker, or the bastion - as a tracked operation, from cluster **Settings** > **Nodes** in the dashboard, via the CLI, or via the API:
-
-<CodeGroup>
-
-```bash CLI
-ankra cluster upcloud nodes list <cluster_id>
-ankra cluster upcloud nodes restart <cluster_id> <node_id>
-```
-
-```bash cURL
-curl -X POST https://platform.ankra.app/api/v1/clusters/upcloud/<cluster_id>/nodes/<node_id>/restart \
-  -H "Authorization: Bearer $ANKRA_API_TOKEN"
-```
-
-</CodeGroup>
-
-See [Restarting a Node](/guides/hetzner-clusters#restarting-a-node) for the full walkthrough, response shape, and state requirements - identical across providers.
-
----
-
-## Resizing the Bastion or Gateway
-
-Resize the bastion without recreating the cluster - Ankra powers it off, resizes it, and powers it back on.
-
-<CodeGroup>
-
-```bash CLI
-ankra cluster upcloud bastion resize <cluster_id> 2xCPU-4GB
-```
-
-```bash cURL
-curl -X PUT https://platform.ankra.app/api/v1/clusters/upcloud/<cluster_id>/bastion/instance-type \
-  -H "Authorization: Bearer $ANKRA_API_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"instance_type": "2xCPU-4GB"}'
-```
-
-</CodeGroup>
-
-See [Resizing the Bastion or Gateway](/guides/hetzner-clusters#resizing-the-bastion-or-gateway) for the accept/wait contract - identical across providers.
-
----
-
-## Legacy Worker Scaling
-
-The legacy `scale-workers` and `worker-count` endpoints still work for backward compatibility.
-
-<CodeGroup>
-
-```bash CLI
-ankra cluster upcloud workers <cluster_id>
-ankra cluster upcloud scale <cluster_id> 4
-```
-
-```bash cURL
-curl https://platform.ankra.app/api/v1/clusters/upcloud/<cluster_id>/worker-count \
-  -H "Authorization: Bearer $ANKRA_API_TOKEN"
-
-curl -X POST https://platform.ankra.app/api/v1/clusters/upcloud/<cluster_id>/scale-workers \
-  -H "Authorization: Bearer $ANKRA_API_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"worker_count": 4}'
-```
-
-</CodeGroup>
-
-<Note>
-For new clusters, prefer using [Node Groups](#node-groups) for more granular control.
-</Note>
-
----
-
-## Upgrading Kubernetes Version
-
-You can upgrade the Kubernetes version (kubeadm or k3s) on all nodes in an UpCloud cluster. Upgrades are applied to control plane nodes first, then workers.
-
-<Warning>
-- Both kubeadm and k3s clusters can be upgraded; list targets with `ankra cluster kubeadm-versions` or `ankra cluster k3s-versions`.
-- Downgrades are not supported - k3s downgrades require an etcd snapshot restore.
-- You can only upgrade one minor version at a time (e.g., v1.33.x to v1.34.x, not v1.33.x to v1.35.x).
-- The cluster must be online with no active operations.
-</Warning>
-
-### Via the Dashboard
-
-Go to your cluster → **Settings** → **General** to see the current Kubernetes version and trigger an upgrade.
-
-### Check Current Version
-
-<CodeGroup>
-
-```bash CLI
-ankra cluster upcloud k8s-version <cluster_id>
-```
-
-```bash cURL
-curl https://platform.ankra.app/api/v1/clusters/upcloud/<cluster_id>/k8s-version \
-  -H "Authorization: Bearer $ANKRA_API_TOKEN"
-```
-
-</CodeGroup>
-
-Response:
-```json
-{
-  "current_version": "v1.34.4+k3s1",
-  "distribution": "k3s"
-}
-```
-
-### Upgrade Version
-
-<CodeGroup>
-
-```bash CLI
-ankra cluster upcloud upgrade <cluster_id> v1.35.1+k3s1
-```
-
-```bash cURL
-curl -X POST https://platform.ankra.app/api/v1/clusters/upcloud/<cluster_id>/upgrade-k8s-version \
-  -H "Authorization: Bearer $ANKRA_API_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"target_version": "v1.35.1+k3s1"}'
-```
-
-</CodeGroup>
-
-Response:
-```json
-{
-  "previous_version": "v1.34.4+k3s1",
-  "new_version": "v1.35.1+k3s1",
-  "nodes_affected": 3
-}
-```
-
----
-
-## Stopping and Starting a Cluster
-
-You can stop an UpCloud cluster to release its compute (node servers, the bastion, and the NAT gateway) while keeping its configuration, networking definition, and SSH keys. Starting the cluster re-provisions the compute and reconciles it back to a running state. This is useful for pausing non-production clusters to save cost.
-
-When starting, use `--scope control_plane` to bring up only the control plane first (for example to inspect or repair it), or `--scope all` (the default) to provision the whole cluster.
-
-<CliVersion since="0.11.0" command="cluster upcloud stop --force" />
-
-<CodeGroup>
-
-```bash CLI
-ankra cluster upcloud stop <cluster_id>
-ankra cluster upcloud stop <cluster_id> --force                # also delete load balancers; volumes are kept
-ankra cluster upcloud start <cluster_id>                       # scope defaults to "all"
-ankra cluster upcloud start <cluster_id> --scope control_plane # control plane only
-```
-
-```bash cURL
-curl -X POST https://platform.ankra.app/api/v1/clusters/upcloud/<cluster_id>/stop \
-  -H "Authorization: Bearer $ANKRA_API_TOKEN"
-
-curl -X POST "https://platform.ankra.app/api/v1/clusters/upcloud/<cluster_id>/start?scope=all" \
-  -H "Authorization: Bearer $ANKRA_API_TOKEN"
-```
-
-</CodeGroup>
-
-<Note>
-Stop and start are background operations. A start returns `409` if a stop or terminate operation is still running. The cluster's saved topology is preserved while stopped - `ankra cluster upcloud nodes list` includes the soft-deleted entries that are re-provisioned on the next start.
-</Note>
-
-A stop keeps the storage volumes your workloads provisioned through the CSI driver, and UpCloud bills them while the cluster is parked. That holds for a forced stop too: `--force` (or `?force=true` on the API) cancels in-flight operations, tolerates unreachable infrastructure and deletes the load balancers the cluster created, but never its volumes: a stop is reversible, so the data on them is kept for the next start. Deprovisioning deletes them once you accept it - see [persistent volumes](/platform/cluster-settings#persistent-volumes).
-
----
-
-## Deprovisioning
-
-Deprovisioning deletes all UpCloud resources (servers, networks, routers, gateways, SSH keys) and removes the cluster from Ankra.
-
-<Warning>
-This action is irreversible. All data on the cluster will be permanently deleted.
-</Warning>
-
-### Via the Dashboard
-
-Go to your cluster → **Settings** → **General** → **Danger Zone** and click **Terminate**. The dialog lists the storage volumes the deprovision deletes and asks you to accept that before it begins.
-
-### Via CLI or API
-
-<CliVersion since="0.19.0" command="cluster deprovision --accept-volume-data-loss" />
-
-<CodeGroup>
-
-```bash CLI
-ankra cluster deprovision <cluster>                                    # names the CSI volumes and asks
-ankra cluster deprovision <cluster> --accept-volume-data-loss --force  # for scripts; --force also deletes load balancers
-```
-
-```bash cURL
-curl https://platform.ankra.app/api/v1/clusters/upcloud/<cluster_id>/deprovision-volumes \
-  -H "Authorization: Bearer $ANKRA_API_TOKEN"
-
-curl -X DELETE "https://platform.ankra.app/api/v1/clusters/upcloud/<cluster_id>?accept_volume_data_loss=true&force=true" \
-  -H "Authorization: Bearer $ANKRA_API_TOKEN"
-```
-
-</CodeGroup>
-
-The storage volumes your workloads provisioned through the CSI driver are deleted with the cluster, and the data on them, only once you accept it; without `?accept_volume_data_loss=true` the API answers `409` naming them, forced or not - see [persistent volumes](/platform/cluster-settings#persistent-volumes). `--force` deletes the load balancers too, tolerates unreachable cluster infrastructure, and works on a cluster that was stopped earlier: the volumes recorded at stop time are still known. Ankra deletes exactly the volumes it recorded for this cluster, never other disks in the account.
-
----
-
-## Architecture
-
-An UpCloud cluster provisions the following infrastructure:
-
-| Component | Description |
-|-----------|-------------|
-| **Router** | SDN router the private network and NAT gateway attach to |
-| **Private Network** | Isolated SDN network for inter-node communication, with DHCP handing out the default route |
-| **NAT Gateway** | Managed gateway on the router - the egress path for all node traffic |
-| **Zone trios** | On a multi-zone cluster, one router, private network and NAT gateway per additional zone, and a WireGuard mesh (`wg0`) between every node over the account-wide utility network |
-| **Bastion Host** | The only server with a public IP - SSH jump host Ankra uses to provision and manage nodes |
-| **Control Plane(s)** | Kubernetes control plane servers (no public interface) |
-| **Worker(s)** | Kubernetes worker servers for running workloads (no public interface) |
-| **SSH Keys** | Deployed to all servers for access |
-
-```mermaid
-flowchart TB
-    Internet((Internet))
-    Platform[Ankra Platform]
-
-    subgraph Network [UpCloud private SDN network]
-        Bastion[Bastion<br/>public + private IP]
-        CP[Control plane nodes<br/>no public interface]
-        Workers[Worker nodes<br/>no public interface]
-        Agent[Ankra Agent<br/>runs in the cluster]
-    end
-
-    Router[SDN router]
-    NAT[Managed NAT gateway]
-
-    Platform -->|SSH to public IP| Bastion
-    Bastion -->|SSH jump| CP
-    Bastion -->|SSH jump| Workers
-    Agent -->|outbound only - NATS| Platform
-    CP -->|default route| Router
-    Workers -->|default route| Router
-    Router --> NAT
-    NAT --> Internet
-```
-
-All nodes are deployed within a private UpCloud SDN network and have no public interfaces. The managed NAT gateway (attached to the router) handles all outbound traffic; the bastion is an SSH jump host only - no workload or egress traffic flows through it. Ankra connects to the bastion's public IP to provision nodes, install Kubernetes, and run upgrades and reconciliation.
-
-Ankra also deploys an **upcloud-cloud-provider** stack (UpCloud CCM and CSI) after the Ankra Agent is installed, providing `LoadBalancer` services and persistent storage backed by your API credential.
-
----
+## Operate it
+
+Day-2 tasks work the same way on every Ankra Managed provider, with the CLI name `upcloud`:
+
+- [Node groups](/guides/operate-ankra-managed-clusters#node-groups) and [legacy worker scaling](/guides/operate-ankra-managed-clusters#legacy-worker-scaling)
+- [Control plane](/guides/operate-ankra-managed-clusters#control-plane)
+- [Restart a node](/guides/operate-ankra-managed-clusters#restart-a-node) and [the bastion](/guides/operate-ankra-managed-clusters#bastion)
+- [SSH access and keys](/guides/operate-ankra-managed-clusters#ssh-access-and-keys)
+- [Upgrade Kubernetes](/guides/operate-ankra-managed-clusters#upgrade-kubernetes)
+- [Stop and start](/guides/operate-ankra-managed-clusters#stop-and-start)
+- [Terminate a cluster](/guides/operate-ankra-managed-clusters#terminate-a-cluster)
 
 ## Troubleshooting
 
-### Common Issues
-
 | Issue | Solution |
 |-------|----------|
-| Cluster stuck in provisioning | Check UpCloud API token permissions and account quota |
-| Cannot scale workers | Ensure cluster is online and no operations are running |
-| Invalid API token | Re-validate at [UpCloud Control Panel](https://hub.upcloud.com/) |
-| Server plan unavailable | Try a different zone or plan |
-
-### UpCloud Account Quotas
-
-UpCloud has default resource limits per account. If provisioning fails, check your quotas in the [UpCloud Control Panel](https://hub.upcloud.com/):
-- Servers
-- Networks
-- Routers
-- IP Addresses
-
-Contact UpCloud support to increase limits if needed.
+| Cluster stuck in provisioning | Check the token's permissions and the account's limits (servers, networks, routers, IP addresses) in the [UpCloud Control Panel](https://hub.upcloud.com/) |
+| Invalid API token | Create a new token and [rotate the credential](/platform/credentials/upcloud) |
+| Server plan unavailable | Try another zone or plan |
+| Cannot scale workers | Ensure the cluster is online and no operation is running |
+| `zones` or `network_mode` refused with "is not supported for upcloud clusters" | Multi-zone placement is not enabled for your organisation - see [Multi-zone clusters](#multi-zone-clusters) |

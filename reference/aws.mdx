@@ -4,7 +4,7 @@ description: Request fields, defaults, catalogs, limits, egress modes, tags, and
 tag: "Closed Beta"
 ---
 
-Reference material for [AWS clusters](/guides/aws-clusters) - the self-managed k3s or kubeadm lane on EC2. Amazon EKS is covered by the [managed Kubernetes reference](/reference/managed-kubernetes).
+Reference material for [AWS clusters](/guides/aws-clusters) - self-managed kubeadm or k3s clusters on EC2. Amazon EKS is covered by the [managed Kubernetes reference](/reference/managed-kubernetes).
 
 <Warning>
 **Closed beta.** Self-managed AWS clusters are in closed beta and enabled per organisation on request; until then the `aws` cluster endpoints answer `404` and the commands are not served. [Contact support](/platform/support) to have it turned on for your organisation.
@@ -35,13 +35,13 @@ Reference material for [AWS clusters](/guides/aws-clusters) - the self-managed k
 | `worker_count` | `1` | Number of worker nodes in the default pool (legacy, use `node_groups` instead) |
 | `worker_type` | `t3.medium` | Instance type for the default pool (legacy, use `node_groups` instead) |
 | `node_groups` | | Array of node group definitions (see [Node groups](#node-groups)) |
-| `distribution` | `kubeadm` | Kubernetes distribution (`k3s` or `kubeadm`). Omitted from an API request it follows the platform default, `kubeadm`, like every other self-managed provider; the portal wizard and the CLI examples on the guide use `k3s`. kubeadm on AWS is Cilium only |
+| `distribution` | `kubeadm` | Kubernetes distribution (`k3s` or `kubeadm`). Omitted, it follows the platform default, `kubeadm`, like every other self-managed provider; the portal wizard defaults to `kubeadm` too. kubeadm on AWS is Cilium only |
 | `kubernetes_version` | *latest supported* | Kubernetes version (optional) |
 | `etcd_topology` | `stacked` | kubeadm only. `stacked` (etcd on the control planes) or `external` (dedicated etcd instances) |
 | `etcd_node_count` | `3` | kubeadm `external` topology only (3 or 5) |
 | `etcd_type` | `t3.medium` | kubeadm `external` topology only. Instance type for the etcd instances |
 | `cni` | `cilium` | CNI plugin, for both distributions (`cilium`, `calico`, `flannel`). kubeadm requires `cilium`. Only Cilium and Calico can enforce the [IMDS guard](#imds-guard): `flannel` is accepted with a preflight `warning` saying the guard cannot be enforced |
-| `cni_features` | *all off* | Advanced CNI feature toggles, fixed at creation: `kube_proxy_replacement`, `hubble`, `wireguard_encryption` (Cilium), `ebpf_dataplane` (Calico) - see [Advanced CNI features](/guides/digitalocean-clusters#advanced-cni-features) |
+| `cni_features` | *all off* | Advanced CNI feature toggles, fixed at creation: `kube_proxy_replacement`, `hubble`, `wireguard_encryption` (Cilium), `ebpf_dataplane` (Calico) - see [Choices fixed at create time](/guides/operate-ankra-managed-clusters#choices-fixed-at-create-time) |
 | `k3s_disabled_components` | | k3s only. Built-in components to leave out |
 | `ubuntu_series` | `24.04` | Ubuntu LTS series for every instance. The AMI is resolved per region at create time from Canonical's public SSM parameters; the [images catalog](#catalog-api) lists the series that resolve |
 | `architecture` | `amd64` | CPU architecture of the AMI and the instance types offered. `arm64` is refused with a `422` naming the pending image-catalogue audit |
@@ -120,13 +120,59 @@ Teardown deletes everything in this table that carries the cluster's tags, the c
 
 **In an adopted VPC, never created, modified or deleted:** your VPC, subnets, internet gateway, NAT gateways, DHCP options set, and any route table Ankra did not create. In `bastion_nat` mode the node subnets' association is moved to the Ankra route table and moved back at teardown; the route tables themselves are untouched.
 
+### Network layout
+
+```mermaid
+flowchart TB
+    Internet((Internet))
+    Platform[Ankra Platform]
+
+    subgraph VPC [VPC - created by Ankra, or adopted and never modified]
+        subgraph Public [Public subnets - one per zone]
+            Bastion[Bastion<br/>Elastic IP + private IP]
+        end
+        subgraph Private [Private subnets - one per zone]
+            CP[Control plane instances<br/>private IP only]
+            Workers[Worker instances<br/>private IP only]
+            Agent[Ankra Agent<br/>runs in the cluster]
+        end
+        IGW[Internet gateway]
+        NAT[NAT gateway per zone - nat_gateway mode<br/>the bastion - bastion_nat mode<br/>your own path - existing mode]
+    end
+
+    NLB[Network Load Balancer<br/>created by the AWS cloud controller]
+
+    Platform -->|SSH from allowed IPs only| Bastion
+    Bastion -->|SSH jump| CP
+    Bastion -->|SSH jump| Workers
+    Agent -->|outbound only - NATS| Platform
+    CP -->|default route| NAT
+    Workers -->|default route| NAT
+    NAT --> IGW
+    Bastion --> IGW
+    IGW --> Internet
+    Internet --> NLB
+    NLB --> Workers
+```
+
+### Cloud integration
+
+- **Cloud controller manager.** Deployed as a vendored manifest with an exact image tag, matched to the cluster's Kubernetes minor and moved with it on upgrade. Nodes register with `cloud-provider=external`, a provider ID of `aws:///<availability-zone>/<instance-id>`, and their EC2 private DNS name as the node name. `KubernetesClusterID` is the Ankra cluster ID, matching the `kubernetes.io/cluster/<id>=owned` tag on every instance.
+- **Load balancers.** A `Service` of type `LoadBalancer` gets an AWS load balancer from the cloud controller. The networking stack's Traefik asks for a Network Load Balancer (`service.beta.kubernetes.io/aws-load-balancer-type: nlb`), and Ankra sets the managed tag on it so the teardown sweep can find it.
+- **Storage.** The EBS CSI driver is installed from its upstream chart at a pinned version, after the cloud controller (it needs the provider ID and topology labels the controller sets). The default StorageClass provisions encrypted gp3 volumes.
+- **No keys in the cluster.** The cloud controller and the CSI driver use the instance profile of the node they run on; the control-plane and worker profiles are distinct, following the upstream policy split, and the platform credential is never copied into the cluster.
+
+### Preflight checks
+
+Preflight (`ankra cluster aws preflight`, `POST /api/v1/clusters/aws/preflight`) runs every check the create runs. For a created network: whether `network_ip_range` holds a private `/20` and a public `/24` per zone, whether every zone exists and is available, the three-control-plane rule for more than one zone, and the VPC (`L-F678F1CE`), NAT gateway (`L-FE5A380F`) and Elastic IP quotas. For an adopted VPC: whether the VPC and subnets exist in the region, which zones the node subnets cover, and the resolved egress mode (and why `bastion_nat` is refused, if it is). For both: the AMI resolved for the Ubuntu series and architecture, the vCPU quota for the chosen instance families, the security-groups-per-interface quota, and `bastion_allowed_ips`. Each item is `ok`, `warning` or `error`.
+
 ### IMDS guard
 
 | Instance | IMDSv2 | Hop limit | Why |
 |----------|--------|-----------|-----|
 | Bastion | required | 1 | Nothing on the bastion needs the instance role beyond the host |
 | Workers | required | 1 | Pods on the pod network cannot reach the node role |
-| Control planes | required | 2 | The upstream EBS CSI chart cannot run its controller on the host network, and the controller needs the control-plane role |
+| Control planes | required | 3 | The upstream EBS CSI chart cannot run its controller on the host network, and the controller needs the control-plane role |
 
 The hop limit of 3 on control planes is compensated by the **IMDS guard**: a cluster-wide network policy in the AWS cloud-provider stack that denies pod egress to `169.254.169.254` for every pod except the EBS CSI controller. It is rendered for Cilium and Calico. Flannel has no policy engine, so on a flannel cluster the guard is not installed, the create result reports `imds_guard: unavailable`, and a pod scheduled onto a control-plane node can reach the control-plane instance role - prefer Cilium (the default) or keep the control planes tainted.
 
@@ -195,7 +241,7 @@ The AMI ID is resolved from these public SSM parameters in the target region at 
 | Root volume | 20 to 2000 GiB, encrypted gp3 |
 | Distribution on kubeadm | Cilium CNI only |
 | IMDS guard | Cilium and Calico only; `imds_guard: unavailable` on flannel |
-| `bastion_allowed_ips` | At least one CIDR; `0.0.0.0/0` refused |
+| `bastion_allowed_ips` | IPv4 CIDRs, or `0.0.0.0/0` / `::/0`; an empty list means `0.0.0.0/0` |
 | Node public IPs | Never assigned |
 | Node group user data | Cloud-init document, at most 16 KiB (the EC2 limit) |
 | IAM role and instance profile names | Truncated to 64 characters |
@@ -262,7 +308,7 @@ Every catalog takes `credential_id` and `region` as query parameters (`subnets` 
 |----------|--------|-------------|
 | `/api/v1/clusters/aws/{cluster_id}/control-plane` | GET | Control plane count and instance type |
 | `/api/v1/clusters/aws/{cluster_id}/control-plane` | PUT | Change the count (1 or 3; a multi-AZ cluster stays at 3) |
-| `/api/v1/clusters/aws/{cluster_id}/control-plane/instance-type` | PUT | Change the control plane instance type (cluster must be stopped) |
+| `/api/v1/clusters/aws/{cluster_id}/control-plane/instance-type` | PUT | Change the control plane instance type - live, one controller at a time, with three or more controllers; offline on a stopped cluster otherwise |
 
 ## Node Actions API
 
@@ -276,7 +322,7 @@ Every catalog takes `credential_id` and `region` as query parameters (`subnets` 
 | `/api/v1/clusters/aws/{cluster_id}/bastion/diagnose` | POST | Probe the bastion now, as a tracked operation |
 | `/api/v1/clusters/aws/{cluster_id}/bastion/instance-type` | PUT | Resize the bastion (stop, change type, start; the Elastic IP is kept) |
 
-See [Restarting, Diagnosing and Repairing a Node](/guides/aws-clusters#restarting-diagnosing-and-repairing-a-node) and [Bastion health and resize](/guides/aws-clusters#bastion-health-and-resize) for usage examples.
+See [Restart a node](/guides/operate-ankra-managed-clusters#restart-a-node) and [Bastion](/guides/operate-ankra-managed-clusters#bastion) for usage, and [AWS specifics](/guides/aws-clusters#aws-specifics) for how AWS applies them.
 
 ## Credential API
 

@@ -23,10 +23,11 @@ Reference material for [Hetzner clusters](/guides/hetzner-clusters): every confi
 | `control_plane_server_type` | `cx33` | Server type for control planes |
 | `worker_count` | `1` | Number of worker nodes (legacy, use `node_groups` instead) |
 | `worker_server_type` | `cx33` | Server type for workers (legacy, use `node_groups` instead) |
-| `node_groups` | | Array of node group definitions (see [Node Groups](/guides/hetzner-clusters#node-groups)) |
+| `node_groups` | | Array of node group definitions (see [Node groups](/guides/operate-ankra-managed-clusters#node-groups)) |
 | `distribution` | `kubeadm` | Kubernetes distribution (`kubeadm` or `k3s`) |
 | `kubernetes_version` | *latest* | Kubernetes version (optional) |
-| `include_ingress` | `false` | Deploy the ingress stack (ingress-nginx + cert-manager + Let's Encrypt) |
+| `include_networking` | `true` | Deploy the networking stack: Traefik, cert-manager and a `letsencrypt-prod` Let's Encrypt ClusterIssuer |
+| `include_dns` | `true` | Give the cluster a delegated subdomain on `ankra.cc` with external-dns wired |
 | `gitops_credential_name` | | GitHub credential name for GitOps integration |
 | `gitops_repository` | | GitHub repository for GitOps (e.g., `org/repo`) |
 | `gitops_branch` | `master` | Branch for GitOps pushes |
@@ -65,7 +66,7 @@ Reference material for [Hetzner clusters](/guides/hetzner-clusters): every confi
 | `/api/v1/clusters/hetzner/{id}/nodes/{node_id}/restart` | POST | Restart a node (native reboot, falls back to power cycle) |
 | `/api/v1/clusters/hetzner/{id}/bastion/instance-type` | PUT | Resize the bastion instance type |
 
-See [Restarting a Node](/guides/hetzner-clusters#restarting-a-node) and [Resizing the Bastion or Gateway](/guides/hetzner-clusters#resizing-the-bastion-or-gateway) for usage examples and response shapes.
+See [Restart a node](/guides/operate-ankra-managed-clusters#restart-a-node) and [Bastion](/guides/operate-ankra-managed-clusters#bastion) for the dashboard and CLI equivalents.
 
 ## SSH Key API
 
@@ -86,7 +87,7 @@ A Hetzner cluster provisions the following infrastructure:
 | **Bastion Host** | The only server with a public IP - SSH jump host *and* NAT gateway for all node egress |
 | **Private Network** | Isolated network for inter-node communication |
 | **Control Plane(s)** | Kubernetes control plane nodes (private IPs only) |
-| **Worker(s)** | Kubernetes worker nodes organized in [node groups](/guides/hetzner-clusters#node-groups), each with independent instance types, labels, and taints |
+| **Worker(s)** | Kubernetes worker nodes organised in [node groups](/guides/operate-ankra-managed-clusters#node-groups), each with independent instance types, labels, and taints |
 | **SSH Keys** | Deployed to all servers for access (multiple keys supported) |
 | **External Cloud Provider** | k3s is configured with `cloud-provider=external` for Hetzner CCM compatibility |
 
@@ -121,7 +122,7 @@ All nodes are deployed within a private Hetzner network and have no public IPs. 
 - **NAT gateway** - a network route sends the nodes' default traffic (`0.0.0.0/0`) to the bastion, which masquerades it out through its public IP. All node egress - image pulls, package installs, and the Ankra Agent's outbound connection - flows through the bastion.
 
 <Warning>
-Because the bastion is the egress path on Hetzner, stopping or deleting it cuts off internet access for every node in the cluster. This differs from [OVH clusters](/guides/ovh-clusters#architecture), where egress uses a provider-managed gateway and the bastion is only a jump host.
+Because the bastion is the egress path on Hetzner, stopping or deleting it cuts off internet access for every node in the cluster. This differs from [OVH clusters](/reference/ovh#architecture), where egress uses a provider-managed gateway and the bastion is only a jump host.
 </Warning>
 
 Inbound traffic to workloads does not pass through the bastion: `LoadBalancer` services get Hetzner Load Balancers from the CCM, attached to nodes over the private network.
@@ -196,7 +197,7 @@ podDisruptionBudget:
 To customize the CCM configuration after creation, edit the `hcloud-cloud-controller-manager` addon in the `hcloud` stack via the Stack Builder.
 
 <Note>
-The CCM creates Hetzner Cloud Load Balancers when you create Kubernetes `Service` resources of type `LoadBalancer`. These Load Balancers are managed by Hetzner Cloud, not by Ankra. Delete LoadBalancer services before [terminating the cluster](/guides/hetzner-clusters#terminate-cluster) to avoid orphaned resources and unexpected charges.
+The CCM creates Hetzner Cloud Load Balancers when you create Kubernetes `Service` resources of type `LoadBalancer`. Terminating the cluster deletes them, together with any Load Balancer attached to the cluster's network - see [Hetzner specifics](/guides/hetzner-clusters#hetzner-specifics).
 </Note>
 
 ---
@@ -249,49 +250,38 @@ spec:
 ```
 
 <Note>
-The CSI driver creates Hetzner Cloud Volumes when you create PersistentVolumeClaims using the `hcloud-volumes` StorageClass. These Volumes are managed by Hetzner Cloud, not by Ankra. The default `reclaimPolicy` is `Retain`, meaning Hetzner Volumes are **not** deleted when PVCs are removed. Delete PVCs and their backing Hetzner Volumes before [terminating the cluster](/guides/hetzner-clusters#terminate-cluster) to avoid orphaned resources and unexpected charges.
+The CSI driver creates Hetzner Cloud Volumes when you create PersistentVolumeClaims using the `hcloud-volumes` StorageClass. These Volumes are managed by Hetzner Cloud, not by Ankra. The default `reclaimPolicy` is `Retain`, meaning Hetzner Volumes are **not** deleted when PVCs are removed. Terminating the cluster lists the volumes its PersistentVolumes use and deletes them once you accept it; a volume labelled `ankra-retain` is kept - see [Terminate a cluster](/guides/operate-ankra-managed-clusters#terminate-a-cluster).
 </Note>
 
 ---
 
-## Ingress Stack (Optional)
+## Networking Stack
 
-When `include_ingress` is enabled during cluster creation, Ankra deploys an ingress stack alongside the hcloud stack. The ingress stack includes:
+With `include_networking` on (the default), Ankra deploys a `networking` stack alongside the hcloud stack. It includes:
 
-1. **[ingress-nginx](https://kubernetes.github.io/ingress-nginx/)** - NGINX-based Ingress controller with a Hetzner Cloud Load Balancer
+1. **[Traefik](https://traefik.io/)** - the Ingress controller (ingress class `traefik`, the cluster default) behind a Hetzner Cloud Load Balancer
 2. **[cert-manager](https://cert-manager.io/)** - automated TLS certificate management
-3. **Let's Encrypt ClusterIssuer** - a `letsencrypt-prod` ClusterIssuer configured for HTTP-01 validation
+3. **Let's Encrypt ClusterIssuer** - a `letsencrypt-prod` ClusterIssuer configured for HTTP-01 validation through Traefik
 
-### Ingress Configuration
+With `include_dns` on (the default), the cluster also gets a delegated subdomain on `ankra.cc` and external-dns publishes Ingress hostnames into it.
 
-The ingress-nginx controller is pre-configured with Hetzner Load Balancer annotations:
+### Load Balancer Configuration
 
-```yaml
-controller:
-  replicaCount: 2
-  service:
-    annotations:
-      load-balancer.hetzner.cloud/location: "<your-cluster-location>"
-      load-balancer.hetzner.cloud/use-private-ip: "true"
-  podDisruptionBudget:
-    enabled: true
-    minAvailable: 1
-```
-
-cert-manager is deployed with CRDs enabled and 2 replicas:
+Traefik's Service carries Hetzner Load Balancer annotations, and the balancer forwards over the private network with PROXY protocol so the client address reaches your workloads:
 
 ```yaml
-crds:
-  enabled: true
-replicaCount: 2
-podDisruptionBudget:
-  enabled: true
-  minAvailable: 1
+service:
+  annotations:
+    load-balancer.hetzner.cloud/location: "<your-cluster-location>"
+    load-balancer.hetzner.cloud/use-private-ip: "true"
+    load-balancer.hetzner.cloud/uses-proxyprotocol: "true"
 ```
+
+Traefik and cert-manager each run two replicas with a PodDisruptionBudget of one. These values are applied when the cluster is created; later changes you make to them are kept.
 
 ### Using Ingress with TLS
 
-Once the ingress stack is deployed, create Ingress resources with automatic TLS:
+Once the networking stack is deployed, create Ingress resources with automatic TLS:
 
 ```yaml
 apiVersion: networking.k8s.io/v1
@@ -301,7 +291,7 @@ metadata:
   annotations:
     cert-manager.io/cluster-issuer: letsencrypt-prod
 spec:
-  ingressClassName: nginx
+  ingressClassName: traefik
   tls:
     - hosts:
         - app.example.com
@@ -320,5 +310,5 @@ spec:
 ```
 
 <Tip>
-Point your DNS record for `app.example.com` to the Hetzner Load Balancer IP (created automatically by ingress-nginx). cert-manager will handle the Let's Encrypt certificate issuance and renewal.
+Point your DNS record for `app.example.com` to the Hetzner Load Balancer IP that Traefik's Service creates, or use a hostname under the cluster's `ankra.cc` subdomain and let external-dns publish it. cert-manager handles the Let's Encrypt certificate issuance and renewal.
 </Tip>

@@ -29,6 +29,8 @@ All Morpheus IDs are the numeric IDs from your appliance - discover them in the 
 | `bastion_plan_id` | *required* | Numeric service plan ID for the bastion instance |
 | `control_plane_count` | `1` | Number of control plane nodes (1, 3, or 5) |
 | `control_plane_plan_id` | *required* | Numeric service plan ID for control planes |
+| `worker_count` | `1` | Number of worker nodes (legacy, use `node_groups` instead) |
+| `worker_plan_id` | *required* | Numeric service plan ID for workers; required even when `node_groups` is given |
 | `node_groups` | | Array of node group definitions sized by numeric `plan_id` |
 | `distribution` | `kubeadm` | Kubernetes distribution (`kubeadm` or `k3s`) |
 | `kubernetes_version` | *latest stable* | Kubernetes version (optional) |
@@ -63,4 +65,46 @@ Cost estimates are not available for Morpheus clusters.
 | `/api/v1/clusters/morpheus/{id}/nodes/{node_id}` | GET | Get a single node's details |
 | `/api/v1/clusters/morpheus/{id}/bastion/instance-type` | PUT | Resize the bastion instance type |
 
-See [Resizing the Bastion](/guides/morpheus-clusters#resizing-the-bastion) for usage examples and response shapes. Node listing and inspection are also available from the CLI (`ankra cluster morpheus nodes list|get`); bastion resize is dashboard and API only. Restarting individual nodes is not yet supported for Morpheus.
+See [Bastion](/guides/operate-ankra-managed-clusters#bastion) for usage. Node listing and inspection are also available from the CLI (`ankra cluster morpheus nodes list|get`); bastion resize is dashboard and API only. Restarting individual nodes is not yet supported for Morpheus.
+
+---
+
+## Architecture
+
+| Component | Description |
+|-----------|-------------|
+| **Bastion Instance** | Jump server for SSH access to the cluster nodes |
+| **Control Plane(s)** | Kubernetes control plane instances |
+| **Worker(s)** | Kubernetes worker instances organised in [node groups](/guides/operate-ankra-managed-clusters#node-groups) |
+| **etcd Node(s)** | Dedicated etcd instances, only for kubeadm clusters with an `external` [etcd topology](/guides/operate-ankra-managed-clusters#choices-fixed-at-create-time) |
+| **SSH Keys** | Deployed to all instances for access |
+
+```mermaid
+flowchart TB
+    Platform[Ankra Platform]
+    Morpheus[Morpheus appliance API]
+    Jumphost[Optional SSH jumphost<br/>hybrid connectivity]
+    Router[Your network's router<br/>DHCP gateway]
+    Internet((Internet))
+
+    subgraph MorpheusNetwork [Existing Morpheus network - DHCP]
+        Bastion[Bastion instance]
+        CP[Control plane instances]
+        Workers[Worker instances]
+        Agent[Ankra Agent<br/>runs in the cluster]
+    end
+
+    Platform -->|provision instances| Morpheus
+    Platform -->|SSH| Jumphost
+    Jumphost -->|SSH| Bastion
+    Bastion -->|SSH jump| CP
+    Bastion -->|SSH jump| Workers
+    Agent -->|outbound only - NATS| Platform
+    CP -->|default route| Router
+    Workers -->|default route| Router
+    Router --> Internet
+```
+
+All instances are provisioned through your Morpheus appliance into the group, cloud and network you selected, booting from the chosen image with DHCP addressing. Ankra creates no network infrastructure. When an SSH jumphost is configured, Ankra reaches both the Morpheus API and the bastion through it; without one, Ankra connects to the bastion directly.
+
+Morpheus clusters include no cloud controller manager or load balancer integration, and `external_cloud_provider` is not supported.
