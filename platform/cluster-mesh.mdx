@@ -232,6 +232,25 @@ ankra cluster mesh delete <mesh-id>               # only when empty
 
 A mesh with members cannot be deleted out from under them. Remove the members first so their configuration is torn down deliberately.
 
+## Network ranges and their limits
+
+Every cluster Ankra builds for your organisation - on Hetzner, OVHcloud, UpCloud, DigitalOcean, Scaleway, AWS EC2, Proxmox, HPE Morpheus or Ankra Cloud - gets its own network identity from your organisation's address pools when it is created: a Cilium cluster id, a pod range, a service range and an overlay range. Because no two of your clusters share a range, any two of them can join a mesh later without being renumbered. Whether or not you ever build a mesh, the identity sets two limits:
+
+| Limit | Default | Why |
+| --- | --- | --- |
+| Ankra-built clusters in the organisation at once | 32 | The pod pool, `10.216.0.0/13`, is carved into one `/18` per cluster. |
+| Nodes in one cluster, control planes included | 64 | Kubernetes gives every node a `/24` out of its cluster's pod range, and a `/18` holds 64 of them. |
+
+Imported clusters and provider-managed clusters (DOKS, GKE, AKS, EKS and the others) take no identity and do not count. Deleting a cluster returns its ranges to the pool. A cluster created before your organisation had a network identity keeps its distribution's default `/16` pod range and holds 256 nodes.
+
+What happens at a limit:
+
+- **A create past the cluster limit** is refused with `409` and "No cluster network range is free in this organisation", naming the pool. Deprovisioning a cluster you no longer need frees a range.
+- **A create that plans more nodes than its range holds** is refused with `409` before anything is provisioned. The count is the control planes plus every node group's count, or its autoscaling maximum where autoscaling is on. The message names the range, the limit and the count you asked for.
+- **A scale-up past the node limit** is refused the same way: adding a node group, scaling one up, raising an autoscaling maximum, and a scale-up the [cluster autoscaler](/guides/cluster-autoscaling) asks for. No server is created, and the autoscaler backs off. Without this, a node past the limit would join the cluster and never become Ready.
+
+**Raising the limits.** A running cluster's pod range cannot be widened in place (see [Moving a cluster onto a fresh pod range](#moving-a-cluster-onto-a-fresh-pod-range)). If you need a cluster with more than 64 nodes, or more than 32 Ankra-built clusters at once, [contact support](/platform/support) before you create them. Ankra can change how your organisation's pool is divided for clusters created from then on: larger ranges for fewer clusters (128 nodes each, 16 clusters) or smaller ranges for more clusters (32 nodes each, 64 clusters). Clusters you already run keep their ranges.
+
 ## Troubleshooting
 
 - **A member sits in `configuring`**: the agent has not yet confirmed the trust root or a verify has not run; check the cluster is online and its operations list for the mesh resource. Ankra retries every five minutes, and sends the trust root again to a member whose agent has not confirmed it within fifteen minutes. A cluster created with networking off can never leave `configuring` - readiness refuses it under `cilium_stack` before the join, and the fix is a cluster created with networking on.
