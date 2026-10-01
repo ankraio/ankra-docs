@@ -1,61 +1,256 @@
 ---
 title: Ankra Terraform Provider
-description: What the released Ankra Terraform provider (0.1.6) contains, what it cannot do today, and how to register clusters as code in the meantime.
+description: Create and register Ankra clusters from Terraform with the ankraio/ankra provider 0.2 - provider setup, resources, the ankra_clusters data source, import, readiness waits, known limits and upgrading from 0.1.x.
 ---
 
-You manage your infrastructure with Terraform and want Ankra clusters in the same plan. The Ankra Terraform provider is published on the [Terraform Registry](https://registry.terraform.io/providers/ankraio/ankra) as `ankraio/ankra`. This page describes the latest released version, **0.1.6**, exactly as it is.
+import { CliVersion } from "/snippets/cli-version.jsx";
 
-<Warning>
-**Provider 0.1.6 cannot create or update a cluster against the current Ankra API.** Ankra now registers a cluster in the background and answers the request without a cluster ID. Provider 0.1.6 treats that as a failure: `terraform apply` stops with `Failed to create cluster: missing cluster_id`, although Ankra has registered the cluster. Use one of the [alternatives below](#register-clusters-as-code-today) to register clusters as code.
-</Warning>
+You manage your infrastructure with Terraform and want Ankra clusters in the same plan. The Ankra Terraform provider, `ankraio/ankra` on the [Terraform Registry](https://registry.terraform.io/providers/ankraio/ankra), lets Terraform create clusters on your cloud through Ankra, or register a cluster you already run together with its Stacks. This page describes provider **0.2.1**, the latest release. The Registry carries the generated reference for every attribute.
 
-## What 0.1.6 contains
+<Note>
+Upgrading from 0.1.x? Read [Upgrade from 0.1.x](#upgrade-from-0-1-x) first: two default values changed in a way that can replace a cluster.
+</Note>
+
+## Configure the provider
+
+The provider needs Terraform 1.0 or newer (it is tested with 1.6 to 1.12).
 
 ```hcl
 terraform {
   required_providers {
     ankra = {
       source  = "ankraio/ankra"
-      version = "0.1.6"
+      version = "~> 0.2.1"
+    }
+  }
+}
+
+provider "ankra" {}
+```
+
+| Argument | Environment variable | Notes |
+|---|---|---|
+| `token` | `ANKRA_TOKEN` | An Ankra [API token](/reference/tokens). Prefer the environment variable so the token stays out of your configuration. |
+| `base_url` | `ANKRA_BASE_URL` | Defaults to `https://platform.ankra.app`. |
+
+If no token reaches a resource, from the provider or the deprecated per-resource `ankra_token`, Terraform stops with `Missing API token` and sends no request.
+
+## Resources and data sources
+
+| Name | What it manages |
+|---|---|
+| `ankra_hetzner_cluster` | A cluster Ankra creates on [Hetzner](/guides/hetzner-clusters) |
+| `ankra_digitalocean_cluster` | A cluster Ankra creates on [DigitalOcean](/guides/digitalocean-clusters) droplets |
+| `ankra_ovh_cluster` | A cluster Ankra creates on [OVHcloud](/guides/ovh-clusters) |
+| `ankra_upcloud_cluster` | A cluster Ankra creates on [UpCloud](/guides/upcloud-clusters) |
+| `ankra_scaleway_cluster` | A cluster Ankra creates on [Scaleway](/guides/scaleway-clusters) Instances (Closed Beta) |
+| `ankra_cluster` | A cluster you run yourself, registered with Ankra together with its cluster GitOps repository and Stacks |
+| `ankra_clusters` (data source) | The ID and name of every cluster the token can see |
+
+Managed Kubernetes (DOKS, UKS, GKE, AKS, EKS and the others) and the AWS, Proxmox, Morpheus and Ankra Cloud providers have no Terraform resource yet. Create those with the [Ankra CLI](/integrations/ankra-cli) or the UI.
+
+## Create a cluster on your cloud
+
+The five cloud resources share most arguments and each keeps its cloud's own words for size and place: `server_type` and `location` on Hetzner, `size` and `region` on DigitalOcean, `flavor_id` and `region` on OVHcloud, `plan` and `zone` on UpCloud, `type`, `region` and `zone` on Scaleway.
+
+```hcl
+resource "ankra_hetzner_cluster" "dev" {
+  name          = "my-cluster"
+  credential_id = "<hetzner-credential-id>"
+  location      = "fsn1"
+
+  control_plane_count       = 1
+  control_plane_server_type = "cpx22"
+  worker_count              = 2
+  worker_server_type        = "cpx22"
+  bastion_server_type       = "cpx12"
+
+  gitops_repository      = "my-org/my-repo"
+  gitops_branch          = "main"
+  gitops_credential_name = "my-github-credential"
+
+  timeouts {
+    create = "60m"
+  }
+}
+```
+
+Arguments every cloud resource takes:
+
+| Argument | Notes |
+|---|---|
+| `name`, `credential_id` | Required. `credential_id` is the ID of the [cloud credential](/platform/credentials) stored in Ankra. |
+| `ssh_key_credential_id` | Required on DigitalOcean, OVHcloud, UpCloud and Scaleway, optional on Hetzner. The ID of an [SSH key credential](/platform/credentials/ssh-key). |
+| `distribution`, `cni` | `kubeadm` and `cilium` by default. For k3s set `distribution = "k3s"` and `cni` to `flannel` or `calico`. |
+| `kubernetes_version` | Defaults to the platform's stable version. |
+| `control_plane_count`, `worker_count`, and the per-role size arguments | Node counts and machine sizes. |
+| `etcd_topology`, `etcd_node_count` | `stacked` or `external` etcd on kubeadm clusters. |
+| `include_networking` | Install Traefik and cert-manager. |
+| `external_cloud_provider` | Install the cloud controller manager and CSI driver. |
+| `gitops_repository`, `gitops_branch`, `gitops_credential_name` | Commit the generated Stack to your GitOps repository. |
+| `wait_for_ready`, `timeouts` | See [Readiness and timeouts](#readiness-and-timeouts). |
+| `force_destroy` | `true` by default. See below. |
+
+Every provisioning argument forces replacement: change a node count or size in Terraform and the plan destroys and recreates the cluster. Scale and resize an existing cluster with the CLI or the UI instead, and see [Known limits](#known-limits).
+
+`terraform destroy` asks Ankra to deprovision the cluster and remove what it created in your cloud account. With `force_destroy = true` (the default) the platform skips its usual guards; set it to `false` to take the guarded delete path. Changing `force_destroy` never replaces the cluster.
+
+<Warning>
+**Closed beta.** Scaleway as a cluster provider is in closed beta, and `ankra_scaleway_cluster` only works for organisations that have it turned on. Until it is, the Scaleway endpoints are not served and the create fails. [Contact support](/platform/support) to have it turned on for your organisation.
+</Warning>
+
+Find the IDs with the CLI. The ID column of `ankra credentials list` holds `credential_id`, and the provider's `ssh-key list` holds `ssh_key_credential_id`:
+
+<CliVersion since="0.5.1" />
+
+```bash
+ankra credentials list
+ankra credentials hetzner ssh-key list
+```
+
+## Register a cluster you already run
+
+`ankra_cluster` registers a cluster you operate yourself, the same way an [ImportCluster file](/reference/importcluster) does, and keeps its Stacks in Terraform.
+
+```hcl
+resource "ankra_cluster" "prod" {
+  cluster_name           = "my-cluster"
+  github_credential_name = "my-github-credential"
+  github_repository      = "my-org/my-repo"
+  github_branch          = "main"
+
+  stacks {
+    name        = "ingress"
+    description = "Traefik ingress controller"
+
+    manifests {
+      name = "traefik-namespace"
+      manifest_base64 = base64encode(<<-YAML
+        apiVersion: v1
+        kind: Namespace
+        metadata:
+          name: traefik
+        YAML
+      )
+    }
+
+    addons {
+      name          = "traefik"
+      chart_name    = "traefik"
+      chart_version = "37.1.1"
+      registry_name = "traefik"
+      registry_url  = "https://traefik.github.io/charts"
+      namespace     = "traefik"
+      parents       = ["manifest:traefik-namespace"]
+
+      configuration = <<-YAML
+        deployment:
+          replicas: 2
+        YAML
+
+      job_configuration = jsonencode({
+        create_job_timeout = 600
+      })
     }
   }
 }
 ```
 
-| | In 0.1.6 |
+| Argument | Notes |
 |---|---|
-| Provider configuration | None. The provider block takes no arguments; the token is set on each resource. |
-| Resources | `ankra_cluster` only |
-| Data sources | None |
-| `terraform import` | Not supported |
-| Detecting changes made outside Terraform | No. Reading a cluster is a no-op, so a plan compares your configuration with Terraform state only. |
+| `cluster_name` | Changing it replaces the cluster. |
+| `github_credential_name`, `github_repository`, `github_branch` | The cluster's GitOps repository. See [Known limits](#known-limits) before changing them. |
+| `stacks` | `name`, `description`, `manifests` and `addons`. |
+| `manifests` | `name`, `manifest_base64` (the manifest, base64-encoded), optional `namespace` and `parents`. |
+| `addons` | `name`, `chart_name`, `chart_version`, `namespace`, `registry_url`, and optional `registry_name`, `registry_credential_name`, `configuration`, `job_configuration` and `parents`. |
+| `wait_for_online` | `false` by default. See [Readiness and timeouts](#readiness-and-timeouts). |
 
-### `ankra_cluster`
+How the Stack fields work:
 
-Registers an imported cluster with its cluster GitOps repository on GitHub, and optional Stacks of raw manifests.
+- **`parents`** orders deployment. Write each entry as `"manifest:<name>"` or `"addon:<name>"`. A bare `"<name>"` works when exactly one manifest or add-on of that name is declared in the resource. Leaving `parents` out keeps the order already stored in Ankra; an empty list removes it.
+- **`registry_url`** is the Helm repository that serves the chart (`https://...` or `oci://...`). **`registry_name`** is the name of that [Helm registry](/integrations/helm-registries) in your organisation. If you leave it out, the provider derives a name from the URL, which Ankra accepts when a registry with that URL is already connected; otherwise Ankra asks you to connect the registry first. Set `registry_credential_name` for a private registry.
+- **`configuration`** holds the Helm values, as YAML or base64-encoded YAML.
+- **`job_configuration`** is a JSON object of timeouts in seconds: `create_job_timeout`, `read_job_timeout`, `update_job_timeout` and `delete_job_timeout`. Build it with `jsonencode`.
 
-| Argument | Required | Notes |
-|---|---|---|
-| `cluster_name` | Yes | Changing it replaces the cluster. |
-| `ankra_token` | Yes | An Ankra API token. Changing it **replaces the cluster** - Terraform destroys and recreates it. |
-| `github_credential_name` | Yes | The name of the GitHub credential in Ankra. |
-| `github_repository` | Yes | `my-org/my-repo` |
-| `github_branch` | Yes | |
-| `stacks` | No | Blocks with `name`, `description` and `manifests`. |
-| `stacks.manifests` | No | `name`, `namespace` and `manifest_base64` (the manifest, base64-encoded). Leave `parents` unset: 0.1.6 sends it in a shape the API refuses. |
-| `stacks.addons` | No | Do not use. The block's fields do not match the API, which refuses it. |
+The provider checks `parents` and `job_configuration` at plan time. If Ankra refuses the Stack, the error names the member and the field.
 
 | Attribute | Notes |
 |---|---|
 | `cluster_id` | The Ankra cluster ID. |
-| `helm_command` | The command that installs the Ankra agent in the cluster. It contains a live agent token. |
+| `helm_command` | Installs the Ankra agent in the cluster. It contains a live agent token, so it is marked sensitive. Ankra issues it only when the cluster is first registered. |
+| `state`, `kind` | As Ankra reports them. `state` is `offline` until the agent checks in, then `online`. |
 
-`terraform destroy` deletes the cluster from Ankra by name.
+Run `helm_command` against the cluster to connect it. Terraform cannot do that for you; a `remote-exec` provisioner on a host that can reach the cluster is one way:
 
-## Register clusters as code today
+```hcl
+output "agent_install_command" {
+  value     = ankra_cluster.prod.helm_command
+  sensitive = true
+}
+```
 
-- **`ankra cluster apply`** takes the same cluster definition as a YAML file and can run in any pipeline. See the [ImportCluster YAML schema](/reference/importcluster) and the [Ankra CLI](/integrations/ankra-cli).
-- **GitOps** keeps each cluster's Stacks and add-ons in a repository that Ankra syncs. See [GitOps](/concepts/gitops).
-- **Terraform without the provider**: call `ankra cluster apply` from a `terraform_data` resource with a `local-exec` provisioner, if the rest of your stack must stay in one Terraform run.
+If a cluster with the same `cluster_name` already exists, creating the resource adopts it: Ankra updates that cluster with your configuration and Terraform manages it from then on. Because the agent command is only issued on first registration, `helm_command` is empty for an adopted cluster, and Terraform prints a warning saying so. Copy the command from the Ankra UI if you need it.
 
-Whichever you pick, keep each cluster managed from one place only, so two tools do not overwrite each other's changes.
+`terraform destroy` deletes the cluster from Ankra.
+
+## List clusters
+
+```hcl
+data "ankra_clusters" "all" {}
+
+output "cluster_names" {
+  value = [for cluster in data.ankra_clusters.all.clusters : cluster.name]
+}
+```
+
+Each entry has `id` and `name`.
+
+## Import existing clusters
+
+Every resource imports by Ankra cluster ID:
+
+```bash
+terraform import ankra_cluster.prod <cluster-id>
+terraform import ankra_hetzner_cluster.dev <cluster-id>
+```
+
+After the import, write a configuration that matches the cluster and run `terraform plan`. On the cloud resources a mismatch in any provisioning argument plans a replacement, so check the plan before you apply.
+
+## Readiness and timeouts
+
+| Resource | Waits for | Default timeouts |
+|---|---|---|
+| Cloud resources | The cluster to reach `running`. Set `wait_for_ready = false` to return as soon as Ankra accepts the request. | `create` 60 minutes, `delete` 30 minutes |
+| `ankra_cluster` | Registration. Set `wait_for_online = true` to also wait for the agent to check in, which only happens after someone runs `helm_command`. | `create` 60 minutes, `update` 20 minutes |
+
+Keep the wait on when anything in the same plan uses the cluster, such as a kubeconfig, a `kubernetes` provider or a module, because provisioning runs in the background. The cluster ID is saved to state before the wait starts, so a timeout reports how far the cluster got without losing track of it.
+
+Every read refreshes `state` and `kind`, so a cluster stopped or deleted outside Terraform shows up in the next plan. A cluster deleted outside Terraform is removed from state.
+
+## Known limits
+
+- **Changing `github_repository` or `github_branch`** on an existing `ankra_cluster` fails with a 409 error. Ankra refuses to move a cluster to a different GitOps source until the move is acknowledged, and the provider has no argument for that yet. Make the move outside Terraform as described under `spec.git_repository` in the [ImportCluster reference](/reference/importcluster), then update your configuration to match.
+- **`helm_command` is empty** for an adopted cluster, and when Ankra queued the import instead of running it.
+- **Resizes made outside Terraform are not detected.** Ankra's cluster listing does not include node counts or sizes, so a plan cannot see them.
+- **No managed Kubernetes and no node groups.** See [Resources and data sources](#resources-and-data-sources).
+
+Keep each cluster managed from one place, so Terraform, the CLI and the UI do not overwrite each other's changes.
+
+## Upgrade from 0.1.x
+
+0.1.6 cannot create or update a cluster against the current Ankra API, so upgrade before you use the provider. Upgrade to 0.2.1 rather than 0.2.0: 0.2.0 refuses a configuration that sets the token only on each resource, which is how 0.1.x was configured. Before you run `terraform init -upgrade`:
+
+1. **Pin `distribution` and `cni` on cloud resources.** Both now default to `kubeadm` and `cilium`, and both force replacement. If a cluster was created with the old k3s and flannel defaults, add `distribution = "k3s"` and `cni = "flannel"` first, or the next plan replaces it.
+2. **Use Terraform 1.0 or newer.** The provider now runs on Terraform plugin protocol 6.
+3. **Move the token to the provider.** Set `token` on the provider block or `ANKRA_TOKEN`. The per-resource `ankra_token` still works but is deprecated, and changing it no longer replaces the cluster.
+4. **Update add-ons.** Replace `repository_url` with `registry_url` (the old name still works) and add `registry_name`. Write `job_configuration` as `jsonencode({ ... })`. `configuration_type` is ignored.
+5. **Update `parents`.** Use `"manifest:<name>"` or `"addon:<name>"`, or a bare name that matches exactly one member of the resource.
+6. **Rotate agent tokens printed by 0.1.x.** `helm_command` contains a live agent token and 0.1.x did not mark it sensitive. If a plan or CI log printed it, rotate that token.
+
+Then run `terraform plan` and check it reports no replacement you did not expect.
+
+The full list of changes is in the provider's [changelog](https://github.com/ankraio/terraform-provider-ankra/blob/main/CHANGELOG.md).
+
+## Next steps
+
+Create an [API token](/reference/tokens), store your [cloud credential](/platform/credentials), and add the provider block above to your configuration.
