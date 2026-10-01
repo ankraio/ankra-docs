@@ -129,7 +129,7 @@ A healthy application robot comes back enabled, with `expires_at: -1` and exactl
 
 The robots above are Ankra's: one push robot per application, and the organisation's `ankra-harbor-ci` and `ankra-harbor-pull` logins. For anything that logs in to your project without Ankra in the loop - a CI system you run yourself, a laptop pushing an image by hand, a cluster Ankra does not manage pulling from the project - create a robot of your own.
 
-A robot is a named login bound to **one project**: your organisation's. It is a project-level robot on the registry, so whatever it is allowed to do, it does it on that project and reaches nothing else on the registry. Its secret is shown exactly once, when it is created or rotated. The login is also stored as the managed registry credential `ankra-harbor-robot-<name>`, so clusters and applications can reference it like any other registry credential; it cannot be edited or deleted through the generic credential lanes, only revoked here.
+A robot is a named login bound to **one project**: your organisation's own, unless you [pick another](#scoping-a-robot-to-one-project). It is a project-level robot on the registry, so whatever it is allowed to do, it does it on that project and reaches nothing else on the registry. Its secret is shown exactly once, when it is created or rotated. The login is also stored as the managed registry credential `ankra-harbor-robot-<name>`, so clusters and applications can reference it like any other registry credential; it cannot be edited or deleted through the generic credential lanes, only revoked here.
 
 ```bash
 # Mint one. The secret is printed once, with the docker login that uses it.
@@ -155,7 +155,7 @@ ankra registry robots delete jenkins --yes
 | Field | Value |
 |---|---|
 | **Login** | `robot$org-<organisation-id>+user-<name>` |
-| **Project** | Your organisation's project, and only that one |
+| **Project** | One project: your organisation's own, or an [extra project](#scoping-a-robot-to-one-project) you pick |
 | **Rights** | `push` = push and pull; `pull` = pull only; or your own list of permissions |
 | **Expiry** | Never, unless you set one when creating it |
 | **Credential** | `ankra-harbor-robot-<name>`, managed, revoked with the robot |
@@ -196,6 +196,37 @@ Every permission is a right on the **content** of your project. None of them adm
 Because some of these permissions delete images, creating a robot with any permission other than pull and push needs the `credentials.reveal` permission as well as `credentials.write`. Administrators and owners hold both; a preset robot, or one that lists only pull and push, needs only `credentials.write`.
 
 `--expires-in-days` is enforced by the registry: after that many days the login stops working. Rotating a robot gives it a new secret and never more time, so an expired robot is revoked and created again rather than rotated.
+
+### Scoping a robot to one project
+
+Everything your organisation publishes lands in one registry project, so a robot bound to it can reach all of it. To give a login less, keep some images apart: create an extra project, push those images there, and bind the robot to that project. A robot reaches the one project it is bound to and nothing else on the registry.
+
+<CliVersion since="0.22.0" command="registry projects" />
+
+```bash
+# Your projects: your organisation's own is called default
+ankra registry projects list
+
+# An extra project for what the staging pipeline builds
+ankra registry projects create staging
+
+# A robot that can push and pull there, and nowhere else
+ankra registry robots create staging-ci --project staging
+```
+
+`ankra registry projects list` prints where to push for each project. An extra project named `staging` is `org-<organisation-id>-staging` on the registry, so its images are `<registry host>/org-<organisation-id>-staging/<repository>`.
+
+| | |
+|---|---|
+| **Names** | 2 to 30 lower-case letters, digits and hyphens. `default` is your organisation's own project |
+| **How many** | Up to 5 extra projects per organisation |
+| **Settings** | Private, with the same scan policy, retention policy and storage quota as your own project |
+| **Robots** | One project per robot. A job that needs two projects uses two robots |
+| **Permissions** | Listing needs `credentials.read`, creating `credentials.write`, deleting `credentials.delete` |
+
+Deleting a project never deletes anything else on the way. `ankra registry projects delete staging` is refused while the project still holds repositories, and while robot accounts are still bound to it: delete the repositories from the registry and revoke the robots first. Your organisation's own project cannot be deleted.
+
+Ankra's own lanes keep using your organisation's own project: applications build into it, and clusters pull from it with the `pull` robot. An extra project is for what you push yourself, and a cluster pulls from it with a robot you bind to it, referenced through its credential `ankra-harbor-robot-<name>`.
 
 ### Seeing every robot, including Ankra's
 
