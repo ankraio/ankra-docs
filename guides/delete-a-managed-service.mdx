@@ -1,0 +1,181 @@
+---
+title: Delete a Managed Service
+description: Delete a managed service through a reviewed plan - acknowledge the environments that lose it and its data, check exactly what is removed and kept, type its name to confirm, then follow the deletion to its receipt.
+tag: "Closed Beta"
+---
+
+<Warning>
+**Closed beta.** Deleting a service is part of [Managed services](/concepts/managed-services), which is in closed beta and enabled per organisation on request. [Contact support](/platform/support) to have it turned on for your organisation.
+</Warning>
+
+Deleting a managed service removes its stack from the cluster, then deletes its namespace with the data in it. It takes two steps: you acknowledge what the deletion does, Ankra prepares a plan of exactly what is removed and kept, and you confirm that plan by typing the service's name. Nothing is deleted until you confirm.
+
+<Warning>
+**Deleting a service deletes its data, and it cannot be undone.** The service's namespace is deleted with every volume claim and Secret in it, including the credentials the service generated, and anything else placed in that namespace, even objects Ankra did not create. No export is made first. Copy out anything you need before you confirm.
+</Warning>
+
+---
+
+## Prerequisites
+
+- **The installation has finished.** A service whose status is **Installation requested** or **Deployment in progress** cannot be deleted yet. A service whose installation or deployment needs attention can be.
+- **Your role allows it:**
+
+| Permission | Where |
+|------------|-------|
+| `applications.deploy` | Your organisation |
+| `clusters.operate`, `stacks.delete` and `clusters.read` | The cluster the service runs on |
+| `clusters.read` | The cluster of every application environment the service serves |
+
+The built-in `owner`, `admin` and `operator` roles hold all of them. Without them the service's page shows no **Delete service** section, and the deletion page says **Your role cannot delete this service.** See [Roles and access](/guides/roles-and-access).
+
+---
+
+## What is removed and what is kept
+
+| Removed | Kept |
+|---------|------|
+| The service's stack and every member of it | Shared operators the service needed, such as the CloudNativePG operator (stack `cloudnative-pg`), because other services may use them |
+| The service's namespace, which is the service name, with every volume claim and Secret in it | Restore points already taken, in their backup vault, until the vault's retention removes them |
+| The service's link to each application environment it serves | Volumes on a StorageClass with reclaim policy `Retain`: they stay released, with their data, until you remove them |
+| | The applications themselves, and anything in their namespaces |
+| | The service's record in **My services**, as history |
+
+The volumes behind the deleted claims are erased where the StorageClass reclaims them with reclaim policy `Delete`, the usual default.
+
+Ankra never put the service's credentials into your application namespaces, so deleting the service removes nothing there. A Secret you copied into an application's namespace yourself, as in [Wire it into an application](/guides/connect-to-a-managed-service#wire-it-into-an-application), stays until you delete it. Applications still configured with the service's address lose their connection.
+
+---
+
+## Delete the service
+
+<Steps>
+  <Step title="Open the service">
+    In the new Ankra portal, open **Managed services**, then **My services**, and choose the service. The **Delete service** section is at the bottom of its page. Choose **Delete service**.
+  </Step>
+  <Step title="Acknowledge what the deletion does">
+    Under **Environments that lose this service**, tick each application environment the service serves. Each one stops using the service; the application itself is not changed.
+
+    Then tick **I understand that deleting `<service>` deletes its data and generated credentials, and that no export is made first.**
+
+    Choose **Review deletion**. Reviewing prepares a plan. It deletes nothing.
+  </Step>
+  <Step title="Review the plan">
+    The plan is what the platform resolved for this service, and what the deletion will do:
+
+    - **Service**, **Cluster** and **Namespace deleted**.
+    - **Removed from the cluster**: the stack, and each member with the namespace it deploys into.
+    - **Environments that lose it**: each application environment the service serves.
+    - **Kept**: shared stacks the service needed, such as the CloudNativePG operator.
+    - **What happens to the data**: the platform's statement of what is deleted, including whether volumes on a `Retain` StorageClass stay behind.
+
+    If nothing was ever deployed for the service, the plan says so: deleting it then removes nothing on the cluster and only releases its name.
+  </Step>
+  <Step title="Type the name and confirm">
+    Type the service's name exactly in **Type `<service>` to confirm**, then choose **Delete service**. Confirm within the review window, **10 minutes** after the plan was prepared; the page shows when it ends. When the window passes, **Review again** prepares a fresh plan for the same acknowledgements.
+  </Step>
+</Steps>
+
+**Start over** returns to the first step. A plan you do not confirm expires on its own and deletes nothing. Each person can hold at most 10 deletion reviews waiting for confirmation, and each organisation 50.
+
+---
+
+## Follow the deletion
+
+After you confirm, the service's page shows **Deletion confirmed.** and the deletion's progress, one step at a time:
+
+1. **Removing the service's stack**
+2. **Waiting for the cluster to remove the stack**: Ankra waits up to an hour for the cluster's agent to report every member removed.
+3. **Deleting the service's namespace and its data**: Ankra first checks that no other Ankra-managed workload deploys into the namespace, then deletes it and waits up to 30 minutes to see it gone.
+
+**My services** shows the service as **Deleting**. **View cluster operations** opens the cluster's operations with the detail. The service's health and connection details are no longer shown once the deletion starts.
+
+---
+
+## Verify
+
+When the namespace is gone, the page becomes a **Service deleted** receipt with the status **Deleted**: the stack was removed, the namespace was deleted and seen gone from the cluster, and the name was released. The receipt lists what is kept, and **My services** shows the service as **Retired**.
+
+To check the cluster yourself (see [Kubeconfig](/guides/kubeconfig) for access):
+
+```bash
+kubectl get namespace <service>
+```
+
+The answer is `NotFound`. On a StorageClass with reclaim policy `Retain`, the service's volumes are left with status `Released`. Delete them once you no longer need their data:
+
+```bash
+kubectl get pv
+```
+
+The name is free again. A new service set up under the same name on the same cluster generates new credentials and starts with none of the old data.
+
+---
+
+## When a deletion stops short
+
+Only **Deleted** removes the service. Any other outcome leaves the service and its name in place, says why under **What happened**, and the **Delete service** section offers **Review the deletion again**.
+
+| Outcome | What it means | What to do |
+|---------|---------------|------------|
+| **Deletion did not finish** | Removing a member of the service's stack failed on the cluster, or did not finish within an hour. The data may still be there. | Ankra keeps retrying the removal. Check the cluster's operations; once the members are gone, review the deletion again. It continues from where the stack is. |
+| **Data not confirmed deleted** | The stack is gone, but the namespace was not deleted: another Ankra-managed workload deploys into it (the reason names it), or the deletion was not accepted or not seen finished within 30 minutes. The data is still on the cluster. | Move the named workload out of the namespace, or bring the cluster's agent back online. A namespace stuck in `Terminating` is usually waiting on a finalizer. Then review the deletion again. |
+| **Deletion stopped** | The person who confirmed lost the permissions above, or the stack changed outside Managed services after the review. Nothing further was removed. | Review the deletion again. |
+| **Deletion interrupted** | The deletion's operation was cancelled or timed out. | Review the deletion again. |
+
+---
+
+## A service's stack is deleted through the service
+
+The service owns its stack. Deleting the stack directly - in the portal, through the API, with `ankra cluster stacks delete` or by asking the AI Assistant - is refused with:
+
+```text
+Stack '<service>' belongs to managed service '<service>'; retire the service instead of deleting its stack.
+```
+
+Delete the service instead, as above.
+
+<Note>
+Removing a service's stack from the cluster's GitOps repository is not refused yet. It removes the service's deployment while the service and its name stay in **My services**. Delete the service from its page instead.
+</Note>
+
+---
+
+## Delete through the API
+
+The API calls a deletion a **retirement**. It takes the same two steps, with an [API token](/api-reference/introduction) whose holder has the permissions above:
+
+1. Read the service with [Get a managed service instance](/api-reference/services/get-a-managed-service-instance) for its `generation` and the `id` of each of its `consumers`.
+2. [Prepare a managed-service retirement review](/api-reference/services/prepare-a-managed-service-retirement-review) with `expected_generation`, `disconnect_consumer_ids` (every consumer id, each once) and `acknowledge_data_loss: true`. The answer carries the plan, its `digest` and its `expires_at`, 10 minutes later. Nothing changes on the cluster.
+3. [Confirm a managed-service retirement by its digest](/api-reference/services/confirm-a-managed-service-retirement-by-its-digest) with that `digest`. Confirming again with the same digest returns the same receipt, never a second deletion.
+4. Follow `retirement` on the service, or [Get a managed-service retirement](/api-reference/services/get-a-managed-service-retirement): its `phase` while it runs, then its `outcome` and `reason`. Only the outcome `retired` deleted the service.
+
+---
+
+## Troubleshooting
+
+| What you see | Cause | Remedy |
+|--------------|-------|--------|
+| `You can delete this service once its installation has finished.` | The installation or its deployment is still running | Wait until **My services** shows the service out of **Installation requested** and **Deployment in progress** |
+| `Your role cannot delete this service.` | You lack one of the [permissions](#prerequisites), on the service's cluster or an environment's cluster | Ask an administrator for access |
+| `This review has expired.` | The 10-minute window passed | **Review again** |
+| `Something this deletion covers changed after you reviewed it.` or `The service changed since this page read it.` | The plan no longer matches the service | **Review again** |
+| `The environments this service serves changed.` | An environment started or stopped using the service after you acknowledged | **Start over** and acknowledge the current environments |
+| `The service's stack was changed outside Managed services` | The stack was renamed or replaced, so Ankra cannot tell it is still the service's own | Give the stack the service's name again, then review the deletion again |
+| `Part of the service's stack deploys outside the service's own namespace` | A member added to the stack deploys into another namespace, or names none, so deleting the service's namespace would leave data behind | Remove that member from the stack, or deploy it into the service's namespace, then review again |
+| `You have too many deletion reviews waiting.` | 10 reviews of yours, or 50 in the organisation, are waiting | Confirm one, or let them expire after 10 minutes |
+| `We could not tell whether the review was prepared.` | The answer to **Review deletion** was lost | A review may be waiting. It expires within 10 minutes and deletes nothing. Review the deletion again when you are ready |
+| `Ankra cannot delete services on this cluster right now.` | Ankra is not starting operations on the service's cluster, for example shortly after a force stop | Try again later. Nothing was deleted |
+
+---
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Managed services" icon="database" href="/concepts/managed-services">
+    How services run, their health and readiness, and their current limits.
+  </Card>
+  <Card title="Set up a managed service" icon="rocket" href="/guides/set-up-a-managed-service">
+    Set up a service again, under the same name or a new one.
+  </Card>
+</CardGroup>
