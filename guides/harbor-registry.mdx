@@ -129,7 +129,7 @@ A healthy application robot comes back enabled, with `expires_at: -1` and exactl
 
 The robots above are Ankra's: one push robot per application, and the organisation's `ankra-harbor-ci` and `ankra-harbor-pull` logins. For anything that logs in to your project without Ankra in the loop - a CI system you run yourself, a laptop pushing an image by hand, a cluster Ankra does not manage pulling from the project - create a robot of your own.
 
-A robot is a named login with **push** (push and pull) or **pull** rights on your organisation's project and nothing else. Its secret is shown exactly once, when it is created or rotated. The login is also stored as the managed registry credential `ankra-harbor-robot-<name>`, so clusters and applications can reference it like any other registry credential; it cannot be edited or deleted through the generic credential lanes, only revoked here.
+A robot is a named login bound to **one project**: your organisation's. It is a project-level robot on the registry, so whatever it is allowed to do, it does it on that project and reaches nothing else on the registry. Its secret is shown exactly once, when it is created or rotated. The login is also stored as the managed registry credential `ankra-harbor-robot-<name>`, so clusters and applications can reference it like any other registry credential; it cannot be edited or deleted through the generic credential lanes, only revoked here.
 
 ```bash
 # Mint one. The secret is printed once, with the docker login that uses it.
@@ -155,11 +155,69 @@ ankra registry robots delete jenkins --yes
 | Field | Value |
 |---|---|
 | **Login** | `robot$org-<organisation-id>+user-<name>` |
-| **Rights** | `push` = push and pull on your project; `pull` = pull only |
-| **Expiry** | Never; rotate or revoke it yourself |
+| **Project** | Your organisation's project, and only that one |
+| **Rights** | `push` = push and pull; `pull` = pull only; or your own list of permissions |
+| **Expiry** | Never, unless you set one when creating it |
 | **Credential** | `ankra-harbor-robot-<name>`, managed, revoked with the robot |
 
-On the API the same lives at `/api/v1/org/registry-robots` (`POST` create, `GET` list, `GET`/`DELETE` `/{name}`, `POST /{name}/rotate`); creating and rotating need `credentials.write`, revoking `credentials.delete`. Names are 2 to 32 lower-case letters, digits and hyphens.
+On the API the same lives at `/api/v1/org/registry-robots`; creating and rotating need `credentials.write`, revoking `credentials.delete`. Names are 2 to 32 lower-case letters, digits and hyphens.
+
+### Exactly the permissions a job needs
+
+Push-and-pull fits a build and pull fits a cluster. A cleanup job that deletes old artifacts, a release job that moves a tag, or a scanner that reads reports needs something else, and should not be handed a login that can also push. State the permissions instead of a scope:
+
+<CliVersion since="0.22.0" command="registry robots create --permission" />
+
+```bash
+# What can be granted
+ankra registry robots permissions
+
+# A cleanup job: read what is there, delete what is old, nothing else
+ankra registry robots create cleanup \
+  --permission repository:pull,artifact:list,artifact:delete
+
+# A contractor's pull login that stops working after 30 days
+ankra registry robots create contractor --scope pull --expires-in-days 30
+```
+
+| Permission | Allows |
+|---|---|
+| `repository:pull` | Pulling images and charts |
+| `repository:push` | Pushing images and charts. Pull comes with it, because a client pushing asks the registry for both |
+| `repository:list`, `repository:read` | Listing the project's repositories and reading one through the registry API |
+| `repository:delete` | Deleting a whole repository and every artifact in it |
+| `artifact:list`, `artifact:read` | Listing a repository's artifacts and reading one: digest, size, labels, scan summary |
+| `artifact:delete` | Deleting artifacts |
+| `tag:list`, `tag:create`, `tag:delete` | Listing tags, adding a tag to an artifact that is already pushed, and removing one |
+| `scan:create`, `scan:read` | Starting a vulnerability scan and reading its report |
+
+Every permission is a right on the **content** of your project. None of them administers the project - its members, robots, quota or retention stay with Ankra - and none of them reaches another project. `--scope` and `--permission` are alternatives; stating both is refused.
+
+Because some of these permissions delete images, creating a robot with any permission other than pull and push needs the `credentials.reveal` permission as well as `credentials.write`. Administrators and owners hold both; a preset robot, or one that lists only pull and push, needs only `credentials.write`.
+
+`--expires-in-days` is enforced by the registry: after that many days the login stops working. Rotating a robot gives it a new secret and never more time, so an expired robot is revoked and created again rather than rotated.
+
+### Seeing every robot, including Ankra's
+
+`ankra registry robots list` and the **Registry robots** page list every login your project honours, not only the ones you created: yours first, then the ones Ankra manages.
+
+| Kind | Robots | Who rotates it |
+|---|---|---|
+| `user` | The ones you created | You, with `robots rotate` |
+| `organisation` | `ci` (push and pull, behind `ankra-harbor-ci`) and `pull` (behind `ankra-harbor-pull`) | Ankra |
+| `application` | One push robot per application, on the registry that application publishes to | Ankra, or you with `ankra application registry robot rotate <application>` |
+
+`--kind` narrows the listing to one kind, or to `managed`, which is shorthand for everything Ankra minted: the `organisation` and `application` robots together.
+
+```bash
+ankra registry robots list                      # everything
+ankra registry robots list --kind user          # only yours
+ankra registry robots list --kind managed       # organisation and application robots
+ankra registry robots list --kind application   # one push robot per application
+ankra registry robots get ci
+```
+
+Managed robots are read-only here. Ankra hands each one's secret to the builds and clusters that use it, so rotating or revoking one from this lane would strand them; `rotate` and `delete` refuse a managed robot and say so. An application robot minted on a registry you run yourself shows that registry's host and project.
 
 ## Pull secrets in your clusters
 
