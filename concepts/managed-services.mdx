@@ -5,10 +5,10 @@ tag: "Closed Beta"
 ---
 
 <Warning>
-**Closed beta.** Managed services are in closed beta. They are part of the new Ankra portal and are enabled per organisation on request. Ankra does not verify that a service is ready yet, so check it yourself before you rely on it. [Contact support](/platform/support) to have managed services turned on for your organisation.
+**Closed beta.** Managed services are in closed beta. They are part of the new Ankra portal and are enabled per organisation on request. Ankra verifies readiness only for PostgreSQL, so check any other service yourself before you rely on it. [Contact support](/platform/support) to have managed services turned on for your organisation.
 </Warning>
 
-A managed service is a backing service your applications use, such as a database, a cache or a queue, set up from a package Ankra publishes. You choose the application environments that will use it, the cluster it runs on and its size. Ankra prepares a plan from those choices, and nothing is installed until you confirm it. Ankra then installs the service on your cluster and shows its progress under **Managed services**.
+A managed service is a backing service your applications use, such as a database, a cache or a queue, set up from a package Ankra publishes. You choose the application environments that will use it, the cluster it runs on and its size. Ankra prepares a plan from those choices, and nothing is installed until you confirm it. Ankra then installs the service on your cluster and shows its progress, its health and how to connect to it under **Managed services**. When you no longer need a service, you delete it through a reviewed plan in the same place.
 
 ## The services
 
@@ -35,9 +35,45 @@ Every service in the catalogue runs on **Your infrastructure**: Ankra installs i
 ## How a service runs
 
 - **One stack, one namespace.** Each service is deployed as a stack named after the service, into a namespace of the same name. Several services can share a cluster, including several of the same kind.
-- **Credentials are generated in the cluster.** When a service is first installed, it generates its own password or keys and keeps them in a Kubernetes Secret in its namespace. Every later apply reuses them. Ankra never sees or stores the values.
+- **The service owns its stack.** Deleting the stack on its own is refused. To remove the service, [delete it](/guides/delete-a-managed-service): that removes the stack and then deletes the namespace with its data, after you review the plan.
+- **Credentials are generated in the cluster.** When a service is first installed, it generates its own password or keys and keeps them in a Kubernetes Secret in its namespace. Every later apply reuses them. Ankra never sees or stores the values, and deleting the service deletes them with its namespace.
 - **Cluster-internal only.** Nothing is exposed outside the cluster. Applications reach the service at fixed in-cluster addresses; see [Connect to a Managed Service](/guides/connect-to-a-managed-service).
 - **Native deployment engine.** The credentials are generated with a Helm lookup against the live cluster, which only Ankra's [native deployment engine](/concepts/deployment-engines) evaluates. On an ArgoCD cluster every sync would generate new credentials under running applications, so Ankra only places services on native-engine clusters.
+
+## Health and readiness
+
+Ankra reports two things about a running service, and they answer different questions: whether it is running as planned (health), and whether a client can connect to it (readiness).
+
+### Health
+
+Ankra observes each service about once a minute from its own synced view of the service's cluster: the service's workload against the size you chose, the Kubernetes Service its addresses name, the credentials Secret with every key the connection details list, and the stack that owns it. It never reads the Secret's values. Each observation stands for five minutes. [Health checks](/reference/managed-services#health-checks) lists what is checked for each service.
+
+| Health | In the portal | Meaning |
+|--------|---------------|---------|
+| `serving` | **Serving** | Every check passed. |
+| `progressing` | **Not serving yet** | A check has not passed while the deployment is still being applied, or within the first minutes after it finished: 10 minutes for PostgreSQL and OpenSearch, 5 for the other services. |
+| `degraded` | **Service degraded** | A check failed after that window, a member of the stack failed to apply or is being removed, or the stack that owns the service is gone or being removed. The portal shows the reason. |
+| `unknown` | **Health unknown** | Nothing failed, but Ankra could not see enough of the cluster to judge: the cluster's agent is offline, or Ankra's view of a resource type on the cluster is more than 15 minutes old. An observation older than five minutes also reads unknown. |
+
+Health describes the running service, not the operation that deployed it: a failed deployment whose workloads all run reads serving, and one that left a workload missing reads degraded at once. A cluster that is offline reads unknown, never degraded.
+
+In the portal, each service in **My services** carries a **Health** badge, and the service's page has a **Service health** section with the state, when it was observed and what decided it. Until Ankra has observed the service, the section reads **Not observed**. Health is not shown for a deleted service or while a service is being deleted.
+
+### Readiness
+
+Health does not prove that your applications can connect. A serving PostgreSQL service has a ready primary and its credentials Secret, but that does not show a client can reach it and log in. Readiness does.
+
+For PostgreSQL, Ankra checks readiness about every five minutes. The cluster's agent starts a short-lived pod in the service's namespace that connects to the read-write address as `app`, with the password taken from the `postgresql-app` Secret by reference, and runs `SELECT 1`. The password never leaves the cluster, and Ankra keeps no log of the check. A result stands for 15 minutes.
+
+| Readiness | Meaning |
+|-----------|---------|
+| `verifying` | No check has passed yet. None has run, or the latest failed or could not run while the service was still deploying, or within 10 minutes after its deployment finished. |
+| `ready` | A check passed within the last 15 minutes. |
+| `degraded` | A check ran and failed after the service had its chance to start. Once a check has passed, a failure reads degraded straight away. |
+| `stale` | Readiness cannot be established right now. The check could not run - no agent, the cluster unavailable, or the pod refused or not finishing - or the last result is more than 15 minutes old. A check that could not run never reads as a failure, and the last result stands until it expires. |
+| `unverified` | No check covers the service. Every service other than PostgreSQL reads unverified. |
+
+Readiness is reported on the service in the API, as `readiness` and `readiness_check` on [Get a managed service instance](/api-reference/services/get-a-managed-service-instance). The portal does not show it yet. Check any other service yourself before you rely on it: see [Check that the service answers](/guides/connect-to-a-managed-service#check-that-the-service-answers).
 
 ## Data policies
 
@@ -50,16 +86,17 @@ The policy decides where a service may run:
 
 ## Limits and good to know
 
-- **Readiness is not verified.** When the deployment finishes, a service shows **Verification needed**, and that is as far as it goes today. A PostgreSQL service can report its deployment finished 30 to 100 seconds before the database accepts connections.
+- **Readiness is verified only for PostgreSQL, and shown only in the API.** Every other service stays unverified, and in the portal a finished deployment reads **Verification needed**. A PostgreSQL service can report its deployment finished 30 to 100 seconds before the database accepts connections; its readiness reads `verifying` until a check passes.
+- **The PostgreSQL readiness check needs a pod it can start.** The check pod uses the `postgres:16-alpine` image from Docker Hub and sets no security context. A namespace that enforces the `restricted` Pod Security Standard refuses it, and a cluster that cannot pull the image in time cannot run it: readiness then reads `stale`. On a cluster whose DNS domain is not `cluster.local` the check fails, as the published addresses do.
 - **Credentials are not delivered to your applications.** Ankra shows where the credentials are, and applications in other namespaces must be given the values by you. Ankra will deliver credentials into application environments in a later release.
 - **No backups.** Ankra does not back these services up yet. Do not keep data you cannot recreate in them without a backup of your own.
-- **Settings are fixed after setup.** Changing, upgrading, recovering or deleting a service from **Managed services** is not available yet.
+- **Settings are fixed after setup.** Changing, upgrading or recovering a service from **Managed services** is not available yet. You can [delete a service](/guides/delete-a-managed-service) and set it up again, which starts it with new credentials and none of its data.
 - **NATS runs a single server.** The `nats` package has no clustered option yet.
-- **OpenSearch runs a single node.** An index created with replicas stays yellow. To create an OpenSearch service again under a name you used before on the same cluster, delete the old service's namespace first: the old data volume rejects the new password.
+- **OpenSearch runs a single node.** An index created with replicas stays yellow.
 - **SeaweedFS keeps its data on one volume.** It runs as a single pod and is unavailable while that pod restarts, which happens once, for about 40 seconds, the first time Ankra reconciles it after installation.
 
 <Warning>
-**Removing a SeaweedFS service's stack deletes its data immediately.** Its volume is released with the stack, and every object in it goes at once. Export anything you need first.
+**Deleting a service deletes its data.** Its namespace is deleted with every volume claim and Secret in it, and no export is made first. A SeaweedFS service's volume goes with its stack, the first thing a deletion removes, so its objects can be gone even when the deletion then stops short. Export anything you need first. See [Delete a Managed Service](/guides/delete-a-managed-service).
 </Warning>
 
 ## Related
@@ -71,8 +108,11 @@ The policy decides where a service may run:
   <Card title="Connect to a managed service" icon="plug" href="/guides/connect-to-a-managed-service">
     Addresses, credential Secrets, and wiring them into an application.
   </Card>
+  <Card title="Delete a managed service" icon="trash" href="/guides/delete-a-managed-service">
+    Review what is removed and kept, confirm, and follow the deletion.
+  </Card>
   <Card title="Managed service settings" icon="sliders" href="/reference/managed-services">
-    Every setting of each service, with its range and default.
+    Every setting of each service, and the health and readiness checks.
   </Card>
   <Card title="Applications" icon="cube" href="/concepts/applications">
     The applications whose environments use a service.
