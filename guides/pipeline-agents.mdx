@@ -17,7 +17,7 @@ Your CI already has the schedule, the secrets and the logs. What it lacks is an 
   bash <(curl -sL https://github.com/ankraio/ankra-cli/releases/latest/download/install.sh)
   ```
 
-`ankra chat` prints the answer on standard output and the conversation ID on standard error, so redirecting standard output captures only the answer.
+`ankra chat` prints the answer on standard output and the conversation ID on standard error, so redirecting standard output captures only the answer. To parse the answer, the tools the AI ran and any change it proposed, add `-o json` - see [Parse the answer as JSON](#parse-the-answer-as-json).
 
 ---
 
@@ -125,6 +125,56 @@ jobs:
 ```
 
 Without `--cluster`, `ankra chat` answers across the whole organisation.
+
+---
+
+## Parse the answer as JSON
+
+<CliVersion since="0.21.0" command="chat -o json" />
+
+With `-o json` (or `-o yaml`), `ankra chat "<question>"` prints one document on standard output when the turn ends, instead of streaming the answer. Status lines and notices go to standard error, so standard output is only the document. The health check above, with a parsed result:
+
+```bash
+set -uo pipefail
+
+ankra chat --mode ask -o json \
+  "Check every cluster. Reply with the single word OK if all are healthy, otherwise a short summary of what is degraded and why." \
+  > result.json
+status=$?
+
+if [ ! -s result.json ]; then
+  # The platform refused to start the turn (for example a rejected token): no document, the exit code says why.
+  echo "ankra chat did not start (exit $status)" >&2
+  exit "$status"
+fi
+
+answer=$(jq -r '.answer' result.json)
+error=$(jq -r '.error // empty' result.json)
+failed_tools=$(jq -r '[.tool_calls[] | select(.success == false) | .tool_name] | join(", ")' result.json)
+
+if [ -n "$error" ]; then
+  echo "The turn failed: $error" >&2
+  exit 1
+fi
+if [ "$(echo "$answer" | tr -d '[:space:]')" != "OK" ]; then
+  curl -sS -X POST "$SLACK_WEBHOOK_URL" -H 'Content-Type: application/json' \
+    -d "$(jq -n --arg t ":warning: $answer" '{text: $t}')"
+fi
+[ -z "$failed_tools" ] || echo "Tools that failed during the check: $failed_tools" >&2
+```
+
+| Field | Meaning |
+|---|---|
+| `answer` | The AI's answer as text. |
+| `error` | Present when the turn failed, was cancelled or expired. The command then exits non-zero after printing the document. |
+| `conversation_id`, `continuable` | Pass the ID to `--conversation` to ask a follow-up, when `continuable` is `true`. |
+| `session_id` | The chat session the platform opened. |
+| `mode` | The safety mode the turn ran in: `ask`, `agent` or `plan`. |
+| `cluster_id`, `cluster_name` | The cluster the turn was scoped to. `cluster_id` is `null` for an organisation-wide question. |
+| `tool_calls` | The tools the AI ran, in order: `tool_name`, `tool_call_id`, `success`, `status`, `execution_time_ms`, and `error`, `error_class` and `error_code` when one failed. `success` is `null` for a call that did not finish, and for a proposed change, whose `status` is `pending_confirmation`. |
+| `pending_actions` | Changes the AI proposed that have **not** run: `action_id`, `tool_name`, `description`, `parameters`, `risk_level`, `reversible`, `created_at`, `expires_in_seconds`. |
+
+A turn that starts and then fails still prints the document, with `error` set, and exits non-zero. When the platform refuses to start the turn, nothing is printed on standard output and the command exits with that error's [exit code](/reference/cli) (`6` for a rejected token, `3` for an unknown cluster). `-o` works for a one-shot question only, not for interactive chat.
 
 ---
 
