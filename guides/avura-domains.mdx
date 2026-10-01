@@ -1,0 +1,150 @@
+---
+title: Use Avura domains with Ankra
+description: Connect an Avura workspace to its Ankra organisation, choose which Avura domains Ankra may use, then publish cluster hostnames, manage records and root generated cluster domains on those domains.
+---
+
+import { CliVersion } from "/snippets/cli-version.jsx";
+
+If your domains live in Avura, Ankra can use them directly: clusters publish Ingress hostnames into them, you edit their records from the Ankra dashboard, and one of them can become the root every generated cluster domain nests under. You connect once from Avura and choose, domain by domain, which ones Ankra may touch.
+
+<Note>
+This integration arrives with the Avura connection release of both products. If **Organisation** → **Settings** in Ankra has no **Avura** entry, or Avura's **Admin** → **General** page has no **Ankra Platform** card, it has not reached your organisation yet.
+</Note>
+
+## Prerequisites
+
+- **One login for both.** You sign in to Avura with **Continue with Ankra**, using the same account you use for Ankra. If you already have an Avura password account, link Ankra to it from **Settings** → **Security** → **Link Ankra account**. The Ankra email has to match your Avura email, and both have to be verified.
+- **An Avura workspace linked to the Ankra organisation.** When an Ankra organisation owner or admin signs in to Avura with Ankra for the first time, Avura creates a workspace for each organisation they administer and links it. An existing workspace is linked by its Avura owner from **Admin** → **General** → **Ankra Platform organisation**, which lists the Ankra organisations you administer that are not linked anywhere else. One workspace links to one organisation.
+- **Admin rights on both sides.** Connecting needs an Avura owner or admin who is also an admin of the linked Ankra organisation. Managing records, custom DNS zones and the root domain in Ankra needs an Ankra organisation admin; any member can view them.
+
+## Connect from Avura
+
+The connection is always made from Avura, never from Ankra.
+
+<Steps>
+  <Step title="Open the Ankra Platform card">
+    In Avura, go to **Admin** → **General** → **Ankra Platform**. The card shows which Ankra organisation the workspace is linked to.
+  </Step>
+  <Step title="Connect">
+    Click **Connect**. Avura creates a platform token for the workspace and hands it to the linked Ankra organisation, which checks it against Avura before saving it. If Ankra refuses, Avura discards the new token and shows why; a connection that was already working is left as it was.
+  </Step>
+  <Step title="Check it from Ankra">
+    In Ankra, **Organisation** → **Settings** → **Avura** now shows the linked Avura organisation, the status **connected**, how many domains are shared and when the connection was last verified. **Open Avura** takes you back to Avura's admin page.
+  </Step>
+</Steps>
+
+**Rotate connection** on the same Avura card replaces the platform token. Clusters already publishing through the connection keep working through a rotation.
+
+## Choose which domains Ankra can use
+
+Connecting shares nothing on its own. Every domain starts closed, and an Avura owner or admin opens each one:
+
+- In Avura's **Domains** list, turn on the **Ankra Platform** switch for the domain, or open the domain and use the **Use with Ankra Platform** card on its **Overview** tab.
+- Subdomains inherit the setting from the nearest parent that has it on, and show it as locked on.
+- Turning a domain off cuts Ankra off on its very next request, including the tokens clusters are already using to publish records in it. Anything in Ankra that relies on that domain stops updating until you turn it back on.
+- Moving a domain to another Avura organisation turns the setting off, so it never arrives already shared with that organisation's Ankra.
+
+## What Ankra can and cannot do
+
+The platform token Avura issues belongs to the workspace, not to a person. It holds no Avura role, so it keeps working when the admin who connected leaves, and it never appears in anyone's token list.
+
+On the domains you opened, and their subdomains, Ankra can:
+
+- list the domains and read their records
+- create, edit and delete records, and ask Avura to re-sync a zone
+- create subzones, and delete only the subzones it created inside a shared domain
+- mint tokens pinned to a single shared domain, which is what a cluster's external-dns receives
+
+Ankra cannot see any domain you did not open, delete a shared domain itself, add root domains, change a domain's sharing, or reach grants, mail, DNSSEC or Avura's own settings. Every other request with the platform token is refused.
+
+The platform token itself stays in Ankra's secret store and is never sent to a cluster. Each cluster gets its own token pinned to one domain, and revoking the connection revokes every token minted from it.
+
+## Serve an Avura domain from your clusters
+
+A shared Avura domain works as a [custom DNS zone](/concepts/applications#serving-a-zone-in-your-own-dns-account-from-every-cluster): Ankra runs an external-dns pinned to that zone on each cluster, and an Ingress on a hostname under it is published by the cluster that serves it. The certificate follows once the name resolves.
+
+<Steps>
+  <Step title="Add the domain">
+    Go to **Organisation** → **Settings** → **DNS records** → **Custom domains** and click **Add domain**.
+  </Step>
+  <Step title="Pick Avura">
+    Choose **Avura** as the provider. The domains Avura shares with Ankra appear as a list; pick one.
+  </Step>
+  <Step title="Choose the scope">
+    **All clusters** serves the zone from every cluster in the organisation, including clusters created later. **One cluster** serves it from the cluster you pick.
+  </Step>
+</Steps>
+
+The CLI does the same with the connection's credential, which is always named `avura`:
+
+<CliVersion since="0.13.0" />
+
+```bash
+ankra org custom-dns-zones add --zone example.dev --credential avura
+ankra cluster custom-dns-zones add my-cluster --zone example.dev --credential avura
+```
+
+A zone that Avura does not share with Ankra is refused, and so is a zone that overlaps the organisation's Custom Ankra domain (use a domain either as a custom DNS zone or as the root below, not both). **Remove** on the zone card (or `ankra org custom-dns-zones remove --zone example.dev`) withdraws the zone and revokes the token its clusters used. The records already in the zone are yours and stay where they are.
+
+## Manage records from Settings > Avura
+
+**Organisation** → **Settings** → **Avura** lists the shared domains. Select one to see its records; admins can add, edit and delete them.
+
+| Field | Rule |
+| --- | --- |
+| **Type** | A, AAAA, CAA, CNAME, MX, NS, SRV or TXT |
+| **Name** and **Value** | Required |
+| **TTL** | Blank for Avura's default, or a whole number of seconds from 60 to 604800 |
+
+A record's name and type are fixed once it exists, so editing changes its value and TTL only. If Avura refuses a change (a conflicting record, or Avura being briefly unavailable), the dialog stays open with the reason so you can fix it or retry.
+
+The changes are made in Avura, so Avura's own record list shows them straight away.
+
+## Root generated cluster domains on an Avura domain
+
+Every hostname Ankra generates, including each cluster's domain and the preview URLs built from it, nests under the organisation's [Custom Ankra domain](/platform/ai-workspaces#custom-ankra-domain), which is `ankra.cc` until you set one. A domain Avura shares with Ankra can be that root.
+
+Go to **AI** → **Settings** → **Workspaces**. With Avura connected, the **Custom Ankra domain** field suggests the top-level domains your Avura workspace shares with Ankra; click one to fill it in, or type a domain yourself, then save. From the CLI:
+
+```bash
+ankra org domain set example.dev
+```
+
+Ankra first asks your Avura organisation whether it shares the domain. When it does, Ankra provisions the organisation's zone and every cluster's zone in your Avura account, with your connection, and skips the nameserver check a root hosted by Ankra needs: Avura's own listing is the proof you hold the domain. The saved field then carries a **Hosted in your Avura** badge and says no nameserver change is needed. When Avura does not share the domain, it is treated as an ordinary custom Ankra domain and has to be delegated to Ankra's nameservers.
+
+- Ankra adopts the domain as the zone apex and never creates or deletes it. It creates a subzone per cluster under it and deletes only those subzones when a cluster domain is removed.
+- If Avura cannot be asked at that moment (it is unreachable, or the connection token was rejected), the change is refused and nothing is saved. Try again once the connection shows **connected**.
+- Switching from one root to another follows the same checklist as any root change: cluster domains and DNS records under the old root have to be removed first. See [the preview URL](/concepts/applications#the-preview-url) for the procedure. Zones under the old root are torn down in the account that created them.
+
+## Disconnect
+
+You can disconnect from either side. In Avura, **Disconnect** on the **Ankra Platform** card asks Ankra to drop the connection and then revokes the platform token and every token minted from it. In Ankra, admins can use **Disconnect** on **Organisation** → **Settings** → **Avura**.
+
+Ankra refuses to disconnect while something still depends on the connection:
+
+- a custom DNS zone still uses the `avura` credential, or
+- the Custom Ankra domain is an Avura domain from this connection.
+
+While generated cluster domains are rooted on an Avura domain, **Disconnect** on **Settings** → **Avura** is disabled and says why; move the Custom Ankra domain off Avura to enable it. When a custom DNS zone is what blocks it, the refusal points you to the DNS records page. Remove what depends on the connection first, then disconnect again. The same rule refuses reconnecting the organisation to a *different* Avura organisation while either is true; rotating the token within the same Avura organisation is always allowed.
+
+<Warning>
+When Ankra refuses or cannot be reached, Avura keeps the connection working and offers **Revoke anyway**. That revokes every platform token in Avura immediately, whatever Ankra says. Clusters stop publishing to your Avura domains and generated cluster domains on an Avura root stop updating until you connect again. Use it when you need to cut Ankra off now, not as the normal way out.
+</Warning>
+
+Unlinking the workspace from its Ankra organisation also revokes the platform tokens first.
+
+## Troubleshooting
+
+**Avura says your Ankra session expired.** Avura connects and disconnects with the Ankra sign-in stored from your last **Continue with Ankra**, and that sign-in expires. Sign out of Avura, sign in again with **Continue with Ankra**, and retry.
+
+**Avura refuses with a permission error, or the Ankra organisation is not offered.** You have to be an admin (or owner) of the linked Ankra organisation, and the membership has to be active. Ankra also refuses when your organisation requires multi-factor authentication and your account has not enrolled. Check the organisation on the **Ankra Platform organisation** card is the one you administer; linking an existing workspace lists only organisations where you are owner or admin and that are not linked to another workspace.
+
+**Link Ankra account fails.** The Ankra email and the Avura email must be the same address, and both must be verified. If signing in with Ankra sends you back with "an account already exists", sign in with your Avura password and link Ankra from **Settings** → **Security**.
+
+**Settings > Avura shows token rejected.** The platform token was revoked in Avura, or the workspace was unlinked. Connect again from Avura's **Ankra Platform** card.
+
+**Settings > Avura shows unavailable, or the shared domain count is Unknown.** Ankra could not reach Avura. Nothing is changed while it is unreachable: record changes and root domain changes are refused rather than half applied. When a record change reports that Avura's DNS server is unavailable, Ankra has already asked for a zone re-sync; refresh the page before retrying.
+
+**Avura says the Ankra Platform is unavailable.** Avura could not reach Ankra within its time limit. The previous connection state is kept, so retry later.
+
+**A domain is missing from the Avura list in Ankra.** Only domains with **Use with Ankra Platform** turned on are shared. Turn it on in Avura and refresh.
