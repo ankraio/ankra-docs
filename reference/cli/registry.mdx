@@ -14,19 +14,26 @@ mints the logins its own lanes use - the organisation's ci and pull robots, and
 one push robot per application - and these commands cover the robot accounts
 you need on top of that: a login for CI you run outside Ankra, a laptop
 pushing an image by hand, or a cluster Ankra does not manage pulling from the
-project.
+project. 'ankra registry robots list' shows both: yours, and the ones Ankra
+manages.
 
 ## ankra registry robots
 
 Create, list, rotate and revoke robot accounts on the organisation's registry
 project.
 
-A robot is a named login with push (push and pull) or pull rights on the
-organisation's project and nothing else. Its secret is shown once, when it is
-created or rotated; the login is also stored as the managed registry credential
-ankra-harbor-robot-&lt;name&gt;, so it can be referenced from clusters and
-applications like any other registry credential. Revoking a robot deletes it
-from the registry and drops that credential in one step.
+A robot is a named login bound to one registry project: it reaches the
+organisation's project and nothing else on the registry. It holds a preset -
+push (push and pull) or pull - or its own list of permissions, and can be set
+to expire. Its secret is shown once, when it is created or rotated; the login
+is also stored as the managed registry credential ankra-harbor-robot-&lt;name&gt;,
+so it can be referenced from clusters and applications like any other registry
+credential. Revoking a robot deletes it from the registry and drops that
+credential in one step.
+
+The robots Ankra mints for its own lanes (ci, pull, one per application) are
+listed too. They are managed: Ankra rotates them and hands the new secret to
+the builds and clusters that use it, so 'rotate' and 'delete' refuse them.
 
 ## ankra registry robots create
 
@@ -35,11 +42,25 @@ secret once.
 
 The name is 2 to 32 lower-case letters, digits and hyphens. The registry login
 becomes robot$&lt;project&gt;+user-&lt;name&gt;. `--scope` push (the default) grants push and
-pull; `--scope` pull grants pull only. The secret is printed exactly once, with
+pull; `--scope` pull grants pull only. For anything else - a cleanup job that
+deletes artifacts, a release job that moves tags, a scanner - grant exactly
+what it needs with `--permission`, repeated or comma-separated, instead of a
+scope; 'ankra registry robots permissions' lists what can be granted. Whatever
+it holds, the robot reaches the organisation's project and no other.
+`--expires-in-days` makes the registry stop honouring the robot after that many
+days; without it the robot never expires. The secret is printed exactly once, with
 a docker login command that reads it from stdin - copy it now, it is not stored
 anywhere you can read it back from. The secret is never put on a command line,
 where the shell history and 'ps' would keep it. Rotate it with 'ankra registry robots rotate' if it
 is lost or leaked.
+
+Creating a robot needs the credentials.write permission. A `--permission` list
+that reaches past repository:pull and repository:push (deleting artifacts,
+moving tags, and the like) also needs credentials.reveal. With `--permission` or
+`--expires-in-days` the CLI first checks that the platform offers them by
+reading the robot listing; a token without credentials.read skips that check,
+and if the robot then comes back broader or longer-lived than asked it is
+deleted again before its secret is shown.
 
 ```bash
 ankra registry robots create <name> [flags]
@@ -50,6 +71,8 @@ ankra registry robots create <name> [flags]
 ```bash
 ankra registry robots create jenkins --description "Jenkins on the office server"
   ankra registry robots create edge-cluster --scope pull
+  ankra registry robots create contractor --scope pull --expires-in-days 30
+  ankra registry robots create cleanup --permission repository:pull,artifact:list,artifact:delete
   ankra registry robots create jenkins -o json | jq -r .secret
 ```
 
@@ -58,7 +81,9 @@ ankra registry robots create jenkins --description "Jenkins on the office server
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--description` |   | What this robot is for (shown in the listing) |
+| `--expires-in-days` | `0` | Days until the registry stops honouring the robot (default: it never expires) |
 | `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+| `--permission` | `[]` | A permission to grant instead of a preset scope, written resource:action; repeat the flag or separate with commas ('ankra registry robots permissions' lists them) |
 | `--scope` | `push` | Rights on the project: push (push and pull) or pull |
 
 ## ankra registry robots delete
@@ -68,7 +93,7 @@ credential holding its login.
 
 Everything still logging in with the robot stops working, which is the point
 of a revoke. Prefer 'rotate' when the robot should keep working under a new
-secret.
+secret. A robot Ankra manages is refused: it is not yours to revoke.
 
 ```bash
 ankra registry robots delete <name> [flags]
@@ -89,9 +114,11 @@ ankra registry robots delete jenkins --yes
 
 ## ankra registry robots get
 
-Show one robot account: its registry login, scope, description, the managed
-credential holding its login, and when it was created and last rotated. The
-secret is never shown here; rotate the robot to get a new one.
+Show one robot account: its registry login, what it may do, the project it is
+bound to, the managed credential holding its login, and when it was created,
+last rotated and expires. One of your own robots is read by its name; one
+Ankra manages by the name the listing gives it (ci, pull, app-&lt;application id&gt;).
+The secret is never shown here; rotate the robot to get a new one.
 
 ```bash
 ankra registry robots get <name> [flags]
@@ -101,6 +128,7 @@ ankra registry robots get <name> [flags]
 
 ```bash
 ankra registry robots get jenkins
+  ankra registry robots get ci
 ```
 
 **Flags**
@@ -111,13 +139,17 @@ ankra registry robots get jenkins
 
 ## ankra registry robots list
 
-List the robot accounts created on the organisation's registry project.
+List every robot account the organisation holds on its registry project.
 
-Shows each robot's name, registry login, scope, description and when it was
-created and last rotated. Secrets are never listed. The robots Ankra mints for
-its own lanes (ci, pull, one per application) are not robots you created and
-are not listed here; they show up as managed credentials in
-'ankra credentials list'.
+Your own robots come first, then the ones Ankra manages: the organisation's ci
+and pull robots and one push robot per application. Each row shows the robot's
+kind, registry login, what it may do, the project it is bound to, when it
+expires, and when it was created and last rotated. Secrets are never listed.
+
+`--kind` narrows the listing: user (the ones you created), managed (everything
+Ankra minted), organisation (ci and pull) or application. Managed robots are
+shown so you can see every login that reaches the organisation's images; they
+are rotated by the lane that owns them, not from here.
 
 ```bash
 ankra registry robots list [flags]
@@ -127,7 +159,35 @@ ankra registry robots list [flags]
 
 ```bash
 ankra registry robots list
-  ankra registry robots list -o json
+  ankra registry robots list --kind user
+  ankra registry robots list --kind managed -o json
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--kind` | `all` | Which robots to list: all, user (yours), managed (Ankra's), organisation or application |
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+
+## ankra registry robots permissions
+
+List the permissions a robot account can be created with.
+
+Each one is a value for 'ankra registry robots create `--permission`'. They are
+all rights on the content of the organisation's own registry project - pulling,
+pushing, listing and deleting repositories and artifacts, managing tags,
+scanning - never on the project's settings or on any other project.
+
+```bash
+ankra registry robots permissions [flags]
+```
+
+**Examples**
+
+```bash
+ankra registry robots permissions
+  ankra registry robots permissions -o json
 ```
 
 **Flags**
@@ -143,8 +203,10 @@ Mint a new secret for a robot account and show it once.
 The previous secret stops working the moment the registry answers, which makes
 this the response to a leaked or lost secret. Update every place that logs in
 with the robot afterwards. A robot the registry no longer has is minted again
-under the same name and scope. Asks first, because a mistyped name would take
-another robot's consumers down; `--yes` skips the prompt for scripts.
+under the same name, with the same permissions and the rest of its lifetime. A
+rotation never extends a robot: one that has expired is refused, and so is a
+robot Ankra manages. Asks first, because a mistyped name would take another
+robot's consumers down; `--yes` skips the prompt for scripts.
 
 ```bash
 ankra registry robots rotate <name> [flags]

@@ -62,7 +62,7 @@ curl -X POST "https://platform.ankra.app/api/v1/org/clusters/<cluster-id>/cost/e
 
 | Field | Meaning |
 |-------|---------|
-| `node_groups` | The full set of node groups the draft runs: `name`, `count`, `vcpus`, `memory_gb`, `disk_gb` per node, and `spot` |
+| `node_groups` | The full set of node groups the draft runs: `name`, `count`, `vcpus`, `memory_gb`, `disk_gb` per node, and `spot`. Optional `gpus` (0 to 16 per node) and `gpu_model` (such as `L40S`): see [GPU node groups](#gpu-node-groups) |
 | `network` | Optional counts of `load_balancers`, `nat_gateways`, `gateways` and `flexible_ips`. Omit it to keep today's network resources |
 | `provider` | Optional. Prices the draft on another provider; it must be one of the response's `available_targets`. The cluster's own provider re-sizes the fleet in place |
 | `match` | `cheapest` (the default) or `like_for_like`. See [vCPU classes](#vcpu-classes) |
@@ -72,7 +72,7 @@ curl -X POST "https://platform.ankra.app/api/v1/org/clusters/<cluster-id>/cost/e
 | Field | Meaning |
 |-------|---------|
 | `baseline` | Today's configuration, priced |
-| `estimate` | The draft, priced: one line per node group with the size it was placed on and its `instance_class`, the provisioned `control_plane`, the network resources, and totals with a `coverage_incomplete` flag |
+| `estimate` | The draft, priced: one line per node group with the size it was placed on and its `instance_class`, the provisioned `control_plane`, the network resources, and totals with a `coverage_incomplete` flag. A line with GPUs also carries `gpus`, `gpu_model`, `instance_gpus` and `instance_gpu_model` |
 | `metered_monthly_cents` | Today's metered bill |
 | `predicted_monthly_cents` | The predicted bill: today's bill plus the priced difference. Withheld when an unpriced part differs between draft and today |
 | `delta_monthly_cents` | The change between the two |
@@ -84,13 +84,30 @@ curl -X POST "https://platform.ankra.app/api/v1/org/clusters/<cluster-id>/cost/e
 
 ---
 
+## GPU node groups
+
+A node group's `gpus` is how many GPUs each node needs. The baseline reads it from the size the group runs on, or from the GPUs its nodes advertise (`nvidia.com/gpu`, `amd.com/gpu`) where the size does not say.
+
+| Draft | Result |
+|-------|--------|
+| `gpus` omitted | The group keeps the GPUs of the baseline group with the same name |
+| `gpus` above 0 | The group is placed only on a size that carries at least that many GPUs |
+| `gpus` is 0 | The GPUs are dropped and the group is placed on a size without any |
+| `gpu_model` set | Sizes carrying that card are preferred. When none holds the group, it lands on another card and the line's `note` names it |
+
+A group without GPUs is never placed on a GPU size. Where the price book records no GPU sizes for the provider, a GPU group is unpriced and its `note` says so.
+
+On UpCloud every GPU plan in the price book is a size, read from the plan name (`GPU-8xCPU-64GB-1xL40S` is 8 vCPU, 64 GB and one L40S). GPU plans bundle no storage, so the group's `disk_gb` is priced as volume storage. UpCloud sells GPU spot capacity as separate `GPU-SPOT-` plans: a group with `spot` set lands on one where it fits and is priced at that plan's own rate.
+
+---
+
 ## Hyperscaler sizes
 
 When a draft or a [provider comparison](/platform/cloud-cost#compare-providers) is priced on AWS, Google Cloud or Azure, Ankra places each node group on a size from that provider's catalogue.
 
 | Provider | Sizes offered |
 |----------|---------------|
-| AWS | Every current-generation EC2 instance type with a published vCPU count, memory size and CPU architecture, except Apple Mac hosts. GPU, memory-optimised and burstable T types are included; T types count as shared-core |
+| AWS | Every current-generation EC2 instance type with a published vCPU count, memory size and CPU architecture, except Apple Mac hosts. GPU, memory-optimised and burstable T types are included; T types count as shared-core. The catalogue does not record which types carry GPUs, so a group that needs GPUs is not placed on any of them |
 | Google Cloud | Shapes are read from the machine type name (an `n2-standard-8` is 8 vCPU and 32 GB), so only the general-purpose and compute-optimised families are used. Accelerator, memory-optimised and HPC families, and the shared-core `e2-micro`, `e2-small` and `e2-medium`, are left out |
 | Azure | Shapes are read from the size name (a `Standard_D8s_v5` is 8 vCPU and 32 GB), so only the D (general-purpose), E (memory-optimised) and F (compute-optimised) series are used. B burstable, L, M, N and H series, confidential sizes, and sizes whose feature letters change the memory ratio are left out |
 

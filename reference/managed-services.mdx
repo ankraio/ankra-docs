@@ -1,6 +1,6 @@
 ---
 title: Managed Service Settings
-description: Every setting of the seven Ankra managed services, with its range, default and unit, and what it changes in the running service.
+description: Every setting of the seven Ankra managed services, with its range, default and unit, and what it changes in the running service - and what Ankra checks for each service's health and readiness.
 tag: "Closed Beta"
 ---
 
@@ -93,6 +93,46 @@ Package `victoria-metrics` 1.0.0: VictoriaMetrics 1.153, as a single server.
 | `memory_mib` | 256 to 16384 MiB | 512 | Memory for the server. VictoriaMetrics sizes its caches to 60% of it. |
 | `cpu_millicores` | 100 to 8000 | 250 | CPU request for the server. |
 
+## Health checks
+
+Ankra decides a service's [health](/concepts/managed-services#health) from these checks, read from its synced view of the service's cluster, in the service's namespace.
+
+| Service | Workload, ready against the plan | Kubernetes Service | Secret, with every key [the connection lists](/guides/connect-to-a-managed-service#addresses-and-secrets) |
+|---------|----------------------------------|--------------------|------------------------------|
+| PostgreSQL | CloudNativePG pods labelled `cnpg.io/cluster=postgresql`: the primary Ready, `instances` pods Ready, and one `Bound` volume claim per instance | `postgresql-rw` | `postgresql-app` |
+| Valkey | StatefulSet `valkey`, `1 + replicas` ready | `valkey` | `valkey-credentials` |
+| NATS | StatefulSet `nats`, `replicas` ready | `nats` | `nats-credentials` |
+| OpenSearch | StatefulSet `opensearch`, 1 ready | `opensearch` | `opensearch-credentials` |
+| SeaweedFS | Deployment `seaweedfs-all-in-one`, 1 available | `seaweedfs-all-in-one` | `seaweedfs-s3-secret` |
+| VictoriaLogs | StatefulSet `victoria-logs`, 1 ready | `victoria-logs` | `victoria-logs-credentials` |
+| VictoriaMetrics | StatefulSet `victoria-metrics`, 1 ready | `victoria-metrics` | `victoria-metrics-credentials` |
+
+Every service is also checked for the stack that owns it: a member that failed to apply or is being removed, or a stack that is gone or being removed, reads `degraded`.
+
+| Value | Applies to |
+|-------|------------|
+| About 1 minute | How often each service is observed |
+| 5 minutes | How long an observation stands before it reads `unknown` |
+| 15 minutes | How recent Ankra's view of a resource type on the cluster must be for a missing object to count as missing; older reads `unknown` |
+| 10 minutes (PostgreSQL, OpenSearch), 5 minutes (the others) | Grace window after a successful deployment, during which a failing check reads `progressing` |
+| 30 minutes | How long after its last write a stack member's apply still counts as in progress |
+
+## Readiness check
+
+Only PostgreSQL has a [readiness](/concepts/managed-services#readiness) check today. Every other service reads `unverified`. `<service>` stands for the service name.
+
+| Property | PostgreSQL |
+|----------|------------|
+| What runs | A pod started by the cluster's agent in the service's namespace, image `postgres:16-alpine`, labelled `app.kubernetes.io/name=ankra-postgres-connection-test`. It is deleted when it finishes. |
+| What it does | `psql -h postgresql-rw.<service>.svc.cluster.local -p 5432 -U app -d app -c "SELECT 1"` |
+| Credentials | The `password` key of the `postgresql-app` Secret, passed to the pod by reference. The value never leaves the cluster. |
+| Interval | About every 5 minutes, measured from the last attempt |
+| Result stands | 15 minutes |
+| Pod time limit | 60 seconds |
+| Grace window | 10 minutes after a successful deployment, while no check has passed yet |
+
+At most one check pod runs on a cluster at a time.
+
 ## Related
 
 <CardGroup cols={2}>
@@ -101,5 +141,8 @@ Package `victoria-metrics` 1.0.0: VictoriaMetrics 1.153, as a single server.
   </Card>
   <Card title="Connect to a managed service" icon="plug" href="/guides/connect-to-a-managed-service">
     Addresses and credentials for each service.
+  </Card>
+  <Card title="Managed services" icon="database" href="/concepts/managed-services#health-and-readiness">
+    What each health and readiness state means.
   </Card>
 </CardGroup>
