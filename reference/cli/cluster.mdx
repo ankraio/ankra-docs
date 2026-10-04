@@ -373,6 +373,12 @@ The cluster agent runs Ankra Pipelines steps itself, and these settings
 size that: how many steps it runs at once, and the storage class its step
 workspaces are carved from.
 
+The worker count is the agent's CI slots: each slot is one pipeline step the
+agent watches at a time, not a node. The nodes those steps run on come from
+the cluster's node group autoscaler ('ankra cluster node-group autoscaling
+get'), so a cluster whose steps wait for a slot needs more workers, and one
+whose step pods sit Pending needs more nodes.
+
 Both are stored on the platform, so every install or upgrade command Ankra
 generates for this cluster carries them - unlike a hand-run
 'helm upgrade `--set` ci_worker_count=...', which the next agent upgrade
@@ -415,11 +421,17 @@ its agent and everything else it does. `--storage-class` is only sent when you
 pass it, so setting the worker count alone keeps the storage class already
 stored; pass an empty value to fall back to the cluster's default class.
 
+`--workers` is the agent's CI slots: how many pipeline steps it watches at
+once. A slot is not a node; the nodes steps run on come from the cluster's
+node group autoscaler. Agents that support live resize accept up to 128
+workers, older agents up to 32.
+
 The write always stores the values. Whether they reach the agent now depends
-on the agent: an online agent new enough to accept chart values re-renders
-its release immediately, an older one picks them up at its next upgrade, and
-an offline one when it reconnects. The command says which of the three
-happened.
+on the agent: an agent that supports live resize takes a new worker count on
+its next job pull without restarting, an online agent new enough to accept
+chart values re-renders its release immediately, an older one picks them up
+at its next upgrade, and an offline one when it reconnects. The command says
+which happened.
 
 ```bash
 ankra cluster agent ci set [flags]
@@ -439,7 +451,7 @@ ankra cluster agent ci set --workers 2
 |------|---------|-------------|
 | `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
 | `--storage-class` |   | Storage class for pipeline step workspaces; pass empty to use the cluster default (omit the flag to keep the stored value) |
-| `--workers` | `0` | Number of pipeline steps the agent runs at once (0 disables the scheduler) |
+| `--workers` | `0` | CI slots: pipeline steps the agent watches at once, not nodes (nodes come from the node group autoscaler); up to 128 on agents that support live resize, 32 otherwise; 0 disables the scheduler |
 
 ## ankra cluster agent status
 
@@ -3092,11 +3104,19 @@ deployed, the values it was installed with and the chart's notes.
 '-o values' prints only the values the release was installed with, as YAML:
 edit that file and hand it back to 'cluster helm upgrade `--values`'.
 
+Passwords, tokens and keys in a release's values, the Secrets it renders and
+its notes are shown as [REDACTED:...] placeholders. '`--reveal`' asks for them in
+plaintext: that needs the kubernetes.secrets_reveal permission on the cluster,
+and each reveal is written to the audit log. An upgrade whose values file still
+holds a placeholder is refused, so reveal before you edit a release that has
+credentials.
+
 Examples:
 
 ```bash
 ankra cluster helm get traefik -n traefik
 ankra cluster helm get traefik -n traefik -o values > traefik-values.yaml
+ankra cluster helm get postgres -n data -o values --reveal > postgres-values.yaml
 ```
 
 ```bash
@@ -3109,6 +3129,7 @@ ankra cluster helm get <release_name> [flags]
 |------|---------|-------------|
 | `-n`, `--namespace` |   | Kubernetes namespace (required) |
 | `-o`, `--output` | `table` | Output format: table, json, yaml, values |
+| `--reveal` | `false` | Show credential values in plaintext (needs kubernetes.secrets_reveal; audited) |
 
 ## ankra cluster helm history
 
