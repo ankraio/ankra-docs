@@ -297,6 +297,50 @@ Deploying the result follows straight from what `publish` just did: an Ankra App
 So a manual build writes directly to the repository your Application deploys from. That is what it is for: it is the recovery route for when the pipeline itself is broken, which is exactly when the gated path is unavailable. Use it knowing the image has not been scanned or gated, and let the pipeline publish anything you intend to keep.
 </Note>
 
+### Which component a build belongs to
+
+A `kind: build` stage of an application's pipeline belongs to one of the application's components, and that decides where it pushes and where `publish` re-tags it. Ankra reads it in this order:
+
+1. **`build.component`**, when the stage declares it. The value is the name of a component the application records.
+2. **The stage name**, otherwise: a stage called `build-<component>` belongs to that component.
+3. **The application's one component**, for a single-component application, whatever the stage is called.
+
+Declare `build.component` when one component has more than one build, or when you want to name a stage for what it builds. A typical case is a component that ships both a container image and a release bundle:
+
+```yaml
+stages:
+  - name: build-portal          # release bundle for host deploys, attributed by its name
+    kind: build
+    build:
+      bundle:
+        path: dist/portal
+        manifest: deploy/portal/ankra-release.yaml
+  - name: build-portal-image    # container image for Kubernetes, attributed explicitly
+    kind: build
+    build:
+      component: portal
+      dockerfile: portal/Dockerfile
+      context: portal
+  - name: build-node-agent      # release bundle that belongs to no component
+    kind: build
+    build:
+      bundle:
+        path: dist/node-agent
+        manifest: deploy/node-agent/ankra-release.yaml
+```
+
+Each stage pushes to its own repository, so an image and a bundle of the same commit never overwrite each other's `sha-<7>` tag:
+
+| The stage builds | It publishes to |
+| --- | --- |
+| an image of a component | the component's repository, `<application>/<component>` |
+| a release bundle of a component | the component's bundle repository, `<application>/<component>-bundle` |
+| a release bundle that belongs to no component | `<repository>/<stage suffix>`, for example `<repository>/node-agent` |
+
+An image has to belong to a component, because a deploy of the application only reads component repositories. A pipeline that declares no `build.component` anywhere keeps working exactly as before. In a repository with no linked application, `build.component` has no effect, and every stage still publishes as `<repository>/<stage suffix>`.
+
+`ankra pipeline validate` checks the stages against the application before a run. It reports a stage that belongs to no component, a `build.component` the application does not record, and two stages that would publish to the same repository. When a run reaches a stage it cannot attribute, the step concludes `step_refused`, and the message lists the components the application records.
+
 ### Newest commit wins
 
 A `concurrency.group` decides which runs serialise. `cancel_in_progress` decides what happens when a newer one arrives: with it, the new commit supersedes the run it replaces; without it, the new run waits for the older one to finish - and on a group that varies per branch, that is a branch queueing behind itself while the older commit's run keeps your step slots.
@@ -528,7 +572,7 @@ Three things have to hold for the fallback to build: `ci_build_fallback` reads `
 
 **What the lane refuses.** Ankra platform builders build what the in-cluster pod would have, from the same stage, but two things about a stage's layout have to be right, or the step concludes without a build and its sentence names the fix:
 
-- In a multi-component (monorepo) application, a build stage is attributed to its component by name alone: it must be called `build-<component>` for a component the application records. A stage that names no recorded component - a typo, a component renamed since the run was planned, or a hand-written `build` stage with no suffix - is refused as `platform_build_unavailable`, and the sentence lists the components the application knows. A single-component application's build stage may be called anything. A repository with no linked application is refused the same way, because it has nowhere to push whoever builds it.
+- In a multi-component (monorepo) application, a build stage must belong to a component the application records: either it declares `build.component`, or it is called `build-<component>` ([which component a build belongs to](#which-component-a-build-belongs-to)). A stage that does neither, or that declares a component the application does not record (a typo, or a component renamed since the run was planned), is refused as `platform_build_unavailable`, and the message lists the components the application knows. A single-component application's build stage may be called anything. A repository with no linked application is refused the same way, because it has nowhere to push whoever builds it.
 - Every `build_args` entry must carry a literal value, written `NAME=value`. In-cluster, a bare `NAME` lets BuildKit read the argument from the build pod's own environment; the platform builder has no such environment, so a bare entry is refused as `build_fallback_unsupported` rather than built silently without the argument.
 
 ## Logic is open, authority is closed
@@ -599,7 +643,7 @@ Beyond containment:
 
 Every failed step carries an error class, and the class decides whose failure it is.
 
-- **Yours, never retried automatically.** `step_failed` (the script exited non-zero), `step_refused` (the definition asked for something the policy or the renderer refuses - an image outside the allow-list, a missing script, too much compute, or a `build` step whose push target cannot be resolved: no application link, or a component with no resolvable registry), and `timeout`. A step that ran out of time did run; running it again is a retry policy to declare. The `retry:` block is validated and carried to the agent but not applied yet, so today a non-zero exit is final.
+- **Yours, never retried automatically.** `step_failed` (the script exited non-zero), `step_refused` (the definition asked for something the policy or the renderer refuses - an image outside the allow-list, a missing script, too much compute, or a `build` step whose push target cannot be resolved: no application link, a component with no resolvable registry, or a stage that belongs to no component of the application), and `timeout`. A step that ran out of time did run; running it again is a retry policy to declare. The `retry:` block is validated and carried to the agent but not applied yet, so today a non-zero exit is final.
 - **Ankra's, retried once.** `agent_infra` (the cluster could not create the namespace, bind the volume or pull the image), `worker_lost` (the agent claimed the step and stopped reporting), `result_malformed`, `agent_offline`, `agent_never_started` (no agent claimed the step inside its timeout - check that the cluster is connected and `ci_worker_count` is above zero), `build_runtime_confined` (below), `execution_vanished` and `stranded`. Each of these writes the next attempt instead of a conclusion, up to two attempts in total; the second failure concludes the step as `infra_error`, and the check run settles as `action_required` naming the class - Ankra failing never reads as your code failing.
 - **`build_runtime_confined`: your nodes confine the image builder, and no setting relaxes it.** A `build` stage runs rootless BuildKit in a pod that deliberately names **no** seccomp or AppArmor profile, because the Pod Security Baseline profile the `ankra-ci-build` namespace enforces forbids `Unconfined` - naming it would leave the pod refused by the very namespace admitting it. On a node whose runtime resolves "names none" to a *confining* profile - containerd on an Ubuntu host applying its default AppArmor profile, or a kubelet with seccomp defaulting applying `RuntimeDefault` - rootlesskit cannot make its mount namespace private, and the builder dies before BuildKit starts and before anything in your Dockerfile is read. The pod exits non-zero, so the agent reports it as your failure; it is not, and the settle loop re-classes it. **There is no cluster, organisation or pipeline setting that renders the build pod `Unconfined`**, and that is by design rather than an omission - nothing about a pod spec can defeat the node's own default from inside Baseline. The supported answer is [Ankra platform builders](#ankra-platform-builders), which takes two things: `ci_build_fallback: platform_builders`, which is the default, and the platform builds grant, which Ankra makes per organisation on request (that section says how to confirm it and how to ask). With both, the retry, and every later build on that cluster, is routed to Ankra platform builders and the step's `executor` records it. The verdict is remembered per cluster against the agent version and builder image it was observed under, so a cluster pays this failure once rather than on every run - and re-probes by itself when either moves. With the fallback set to `none` the build is refused instead, naming the containment and telling you to set the fallback or run the pipeline on a cluster whose runtime leaves the builder unconfined. With the fallback already `platform_builders` but the grant not yet made, the retry concludes `build_fallback_none` with a sentence saying Ankra's platform-operated build fallback is not enabled for this organisation yet: no setting of yours changes that, so ask Ankra for the grant, then re-run. Every other stage kind is unaffected: `checkout`, `test`, `scan` and `gate` run in-cluster on a confining node exactly as anywhere else.
 - **Ankra's, never retried.** `step_stranded` - a step still `pending` after its run has outlived the sum of every step's own `timeout` (capped at the same 6-hour ceiling one step is held to, plus a grace window). It concludes as `infra_error` with a sentence saying it never started and pointing at the cluster's agent and its `ci_worker_count`. A fresh attempt is not written, because it would face the identical exhausted budget; the value of the sweep is that the run concludes rather than sitting open forever. `report_unreadable` joins it: a `scan` step that concluded **successfully** but whose report Ankra could not download or parse is revised to `infra_error` carrying "Ankra could not read the *`<report>`* report this step produced, so its findings were not recorded." Ankra failing to read what a scanner said is not the same fact as the scanner having passed, so it is never recorded as clean. `report_unreadable` used to be what an organisation with no backup vault got on every scan step it ran; now that such an organisation's artifacts go to the [Ankra-managed default vault](#before-your-first-run), it means what it says - the object was never uploaded, or came back unparseable. The remaining causes are a run that had already spent its 2 GiB artifact budget before the report was due, and a vault whose bucket stopped answering. With no ready vault on either side, a `scan` step is refused before it runs instead, with error class `artifact_store_unavailable` and the sentence "This step's reports need a ready backup vault in the organisation, and there is none." A step that had already failed, timed out or hit `infra_error` keeps its own verdict - that is a more specific answer than this one.
