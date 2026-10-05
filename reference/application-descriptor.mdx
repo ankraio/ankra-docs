@@ -1,0 +1,183 @@
+---
+title: ankra.yaml reference
+description: Every key of .ankra/ankra.yaml, the application descriptor - metadata, the deploy options that drive the deploy form, and the components block that declares a monorepo's deployable apps.
+---
+
+`.ankra/ankra.yaml` is an [application's](/concepts/applications) descriptor. Ankra writes it into the setup pull request beside `.ankra/manifests/` and [`.ankra/pipeline.yaml`](/guides/pipeline-reference), and reads it back from the tracked branch on every analysis run, so what the file says in Git is what the application is:
+
+- **`metadata`** describes the application, in the shape of a Helm `Chart.yaml`.
+- **`options`** is the application's deploy-time contract: the inputs the deploy form asks for and the deploy endpoint validates.
+- **`components`** (optional) declares the application's deployable components, for a repository whose layout Ankra cannot infer correctly on its own.
+
+## Full example
+
+The descriptor of a repository with a Go API at the root, built from `deploy/docker/Dockerfile`, and a web app in `web/`:
+
+```yaml
+apiVersion: ankra.io/v1
+kind: Application
+metadata:
+  name: "my-app"
+  version: "0.1.0"
+  app_version: "0.1.0"
+  description: "API and web front end"
+  home: "https://example.com"
+  sources:
+    - "https://github.com/my-org/my-app"
+  keywords:
+    - "go"
+    - "nextjs"
+  maintainers:
+    - name: "my-org"
+      url: "https://github.com/my-org"
+options:
+  - name: "image_tag"
+    type: "string"
+    required: false
+    description: "Container image tag to deploy. Use an immutable tag such as sha-<commit> or a semver release, never 'latest'."
+  - name: "replicas"
+    type: "number"
+    default: "1"
+    required: false
+    description: "Number of pod replicas."
+components:
+  - name: api
+    subdir: ""
+    dockerfile: deploy/docker/Dockerfile
+    container_port: 8080
+  - name: web
+    subdir: web
+    container_port: 3000
+```
+
+A generated descriptor lists all thirteen default options (below); the example shows two to stay short.
+
+## Top-level keys
+
+| Key | Type | Default | Meaning |
+|-----|------|---------|---------|
+| `apiVersion` | string | required | `ankra.io/v1`. It is group-qualified so that nothing walking `.ankra/` can mistake the file for an ArgoCD `Application`. |
+| `kind` | string | required | `Application` |
+| `metadata` | block | required | See [Metadata](#metadata). `metadata.name` is required. |
+| `options` | list | none | The deploy options - see [Options](#options) |
+| `components` | list | none | The declared components - see [Components](#components) |
+
+Any other top-level key is ignored.
+
+A descriptor with the wrong `apiVersion` or `kind`, an `options` value that is not a list, or an option without a name does not parse. Ankra reports the parse failure on the run and reads nothing from the file: the deploy options stay as they were, and so do the recorded components.
+
+Keep the file at `.ankra/ankra.yaml`, outside `.ankra/manifests/`: the files in that directory are the manifests a deploy applies to the cluster.
+
+## Metadata
+
+Every field except `name` is optional. Ankra fills them from the repository's GitHub metadata when it generates the file and leaves out the ones it could not read.
+
+| Key | Type | Meaning |
+|-----|------|---------|
+| `name` | string | The application's name. Required. |
+| `version` | string | The descriptor's version. Generated as `0.1.0`. |
+| `app_version` | string | The version of the application it describes. Generated as `0.1.0`. |
+| `description` | string | One line about the application. Generated from the repository description. |
+| `license` | string | The licence identifier. |
+| `home` | string | The project's home page. |
+| `icon` | string | An image URL. Generated from the repository owner's avatar. |
+| `sources` | list of strings | Source repository URLs. |
+| `keywords` | list of strings | Generated from the repository topics. |
+| `maintainers` | list | Each entry has `name`, `url` and `email`. |
+
+When you [publish the application as an add-on](/platform/application-addons), the descriptor travels with the manifests into the add-on version.
+
+## Options
+
+`options` is the application's deploy contract. The deploy form renders one input per option, the deploy endpoint validates the values against it, and a manifest under `.ankra/manifests/` reads a value as `${{ ankra.<name> }}`.
+
+| Key | Type | Meaning |
+|-----|------|---------|
+| `name` | string | Required. Letters, digits and underscores only, so the option can be referenced as `${{ ankra.<name> }}`. A name used twice keeps its first entry. |
+| `type` | string | `string`, `number` or `boolean`. Any other value is read as `string`. |
+| `default` | scalar | The default value. `default: 3` and `default: "3"` mean the same thing. Leave the key out for no default, which is different from an empty-string default. |
+| `required` | boolean | Whether a deploy must supply a value. `"true"` as a string is read as `true`. |
+| `description` | string | The help text the deploy form shows. |
+
+A non-empty `options` list replaces the application's stored contract on the next analysis run, so editing the list in Git and running setup again changes the deploy form. An empty or absent list keeps the contract Ankra generated: there is no way to declare a deliberately empty contract.
+
+### Default options
+
+A generated descriptor declares these thirteen options. `target_port` defaults to the port the analysis detected.
+
+| Option | Type | Default | Meaning |
+|--------|------|---------|---------|
+| `image_tag` | string | none | Container image tag to deploy. Use an immutable tag such as `sha-<commit>` or a semver release, never `latest`. |
+| `replicas` | number | `1` | Number of pod replicas. |
+| `target_port` | number | detected | Container port the application listens on. |
+| `cpu_request` | string | `100m` | CPU request per pod. |
+| `cpu_limit` | string | `500m` | CPU limit per pod. |
+| `memory_request` | string | `128Mi` | Memory request per pod. |
+| `memory_limit` | string | `512Mi` | Memory limit per pod. |
+| `ingress_enabled` | boolean | `false` | Expose the service through an Ingress. |
+| `ingress_host` | string | `""` | Ingress hostname, required when the Ingress is enabled. |
+| `ingress_class` | string | `""` | IngressClass name, for example `traefik`. Empty uses the cluster's default IngressClass. |
+| `ingress_extra_hosts` | string | `""` | Comma-separated extra hostnames the Ingress also serves, each with its own rule and TLS host beside `ingress_host`. At most 5. |
+| `env_from_secrets` | string | `""` | Comma-separated names of Secrets in the application's namespace whose keys become environment variables. |
+| `ingress_tls_issuer` | string | `letsencrypt-prod` | cert-manager ClusterIssuer that mints the Ingress certificate. Empty serves plain HTTP. Ankra checks the name against the target cluster at deploy time. |
+
+An application with a detected database carries that database's sizing options as well.
+
+## Components
+
+`components` declares the application's deployable components. Without it, Ankra infers them from the repository (see [Monorepos](/concepts/applications#monorepos)). Inference cannot see every layout: a repository whose API builds from `deploy/docker/Dockerfile` at the root and whose web app sits in `web/` reads as one app, because detection needs two subdirectory Dockerfiles and ignores `deploy/`. The declaration is how such a repository states its components.
+
+| Key | Type | Default | Meaning |
+|-----|------|---------|---------|
+| `name` | string | required | The component's name. It names the component's image repository, `<repository>/<name>`, and its `build-<name>` pipeline stage, so it is lower-case letters and digits joined by hyphens or periods. |
+| `subdir` | string | `""` | The component's build context, relative to the repository root. `""` is the root. Alias: `app_subdir`. |
+| `dockerfile` | string | resolved from the tree | The repository path the component builds from. |
+| `container_port` | number | the analysed port | The port the component listens on, 1 to 65535. Alias: `port`. |
+
+`subdir` and `dockerfile` are both paths from the repository root, like `context` and `dockerfile` in a [pipeline build stage](/guides/pipeline-reference#where-a-builds-paths-are-resolved-from). Neither may be absolute or contain `..`.
+
+### The declaration outranks inference
+
+Ankra decides an application's components in this order, and the first signal that holds wins:
+
+1. The `components` block of `.ankra/ankra.yaml`.
+2. The per-component build workflows the repository already carries.
+3. The apps the analysis proposed on this run.
+4. The repository's structure.
+
+So a declaration outranks the existing workflows, the AI proposal and structural detection. It is also the only signal that can remove a component: when inference finds fewer components than a monorepo already records, Ankra keeps the recorded ones, because finding less is not evidence that a component is gone. To drop a component, declare the ones you keep.
+
+A declaration of one component at the repository root is a single-app application, and the component takes the repository's name.
+
+### A declaration Ankra cannot honour
+
+The block is validated on its own and is refused as a whole, never partly applied. Ankra refuses it when:
+
+- `components` is not a list, or is an empty list (remove the key instead to let Ankra infer)
+- an entry is not a mapping, has no `name`, or has a key other than `name`, `subdir`, `app_subdir`, `dockerfile`, `container_port` and `port`
+- a name is not lower-case letters and digits joined by hyphens or periods
+- two entries share a name, or build from the same `subdir`
+- an entry sets both `subdir` and `app_subdir`, or both `container_port` and `port`, to different values
+- a path is absolute or leaves the repository with `..`
+- a port is not a number from 1 to 65535
+
+A refused declaration is reported as the failed setup task `read_declared_components`, with the reason, in the application's jobs. The run keeps the components the application already records rather than inferring new ones over a declaration it could not read, and the deploy options are still read from the same file. Fix the block and reconcile the application. A successful read reports the same task as `Using the 2 component(s) declared in .ankra/ankra.yaml: api, web`.
+
+A declared `dockerfile` that the repository does not contain is reported rather than built, and Ankra does not generate a Dockerfile over it.
+
+When Ankra rewrites the descriptor, for example to change the generated options, it copies your `components` block back exactly as you wrote it, refused or not.
+
+### Declared components and the pipeline
+
+Each declared component gets its own build in `.ankra/pipeline.yaml`, attributed by its `build-<component>` stage name or by [`build.component`](/guides/ankra-pipelines#which-component-a-build-belongs-to). `ankra pipeline validate` reports two `kind: build` stages that publish to the same repository as a fatal `pipeline_build_component:` finding when both always run, because each run's commit tag would be overwritten by whichever stage publishes last. When at least one of them runs only under a condition (`if`, `when` or `matrix`, or an `on_failure` or `finally` stage), the finding is a warning. See [Validation](/guides/pipeline-reference#validation).
+
+## Related
+
+<CardGroup cols={2}>
+  <Card title="Applications" icon="cube" href="/concepts/applications">
+    How Ankra analyses a repository, generates its packaging and deploys it.
+  </Card>
+  <Card title="pipeline.yaml reference" icon="diagram-project" href="/guides/pipeline-reference">
+    Every key of the pipeline definition that sits beside the descriptor.
+  </Card>
+</CardGroup>
