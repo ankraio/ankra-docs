@@ -507,7 +507,7 @@ How much pipeline work runs at once is decided by two organisation limits and on
 | `ci_max_parallel_steps` | Steps of **one run** in flight at once | `8` | 1 to 256 | `ankra org ci-settings get` | `ankra org ci-settings set --max-parallel-steps N` |
 | `ci_worker_count` | CI slots: steps the CI cluster's agent runs at once, across every run on that cluster | `0` (pipelines off) | 0 to 128 (0 to 32 on older agents) | `ankra cluster agent ci get --cluster <name>` | `ankra cluster agent ci set --workers N --cluster <name>` |
 
-The two organisation limits need an organisation administrator, and the portal's **Pipelines** settings page edits both. The run limit is the one that caps throughput: every run past it waits as `queued`. The step limit only shapes how wide one run fans out. It is not an organisation-wide total (it was until 14 September 2026), so raising it never drains a queue of other runs.
+The two organisation limits need an organisation administrator, and the portal's **Pipelines** settings page edits both. The same page edits the pipeline cluster's CI slots and workspace storage class in its **Workers and step placement** card. The run limit is the one that caps throughput: every run past it waits as `queued`. The step limit only shapes how wide one run fans out. It is not an organisation-wide total (it was until 14 September 2026), so raising it never drains a queue of other runs.
 
 **A CI slot is not a node.** A slot is one step the agent on the CI cluster watches at once, from the moment it creates the step's Job until the step concludes. Nodes are a separate question, answered by the cluster's node-group autoscaler: when steps ask for more CPU and memory than the current nodes have free, it adds nodes, up to the group's autoscaling maximum. So the slot count is how many steps may be live, and the node group is whether there is room to place them. A cluster with plenty of slots and a node group at its maximum still queues, and so does a large node group behind a small slot count.
 
@@ -550,6 +550,35 @@ To raise capacity, change the limit that is full:
 - **Steps are slow to start although slots are free.** The cluster has no room for the pods: raise the node group's autoscaling maximum (`ankra cluster node-group autoscaling get` shows it), or use larger nodes. More slots without more nodes only means more steps waiting for a node.
 
 Ankra also watches every pipeline cluster for you. When a cluster's steps in flight have stayed at or above its CI slots for fifteen minutes, Ankra raises a saturation alert for that cluster: pipelines there are queueing for slots while everything else reads healthy. The remedy is the same as above, more slots, or a larger node group maximum when the nodes are what is full.
+
+### Step placement
+
+By default a pipeline pod runs on any node of the CI cluster that will take it. To keep CI on nodes of its own, for example a dedicated node group tainted so nothing else lands there, give the cluster a **step placement**:
+
+```bash
+ankra cluster agent ci set --cluster so-upcloud-infrastructure --node-group pipelines
+```
+
+Every pipeline pod of that cluster then carries it: the step pods, their cache restore and save helpers, the artifact uploader, and image builds in `ankra-ci-build`. Naming a node group is enough on a cluster Ankra built: the pods select the group's nodes by the `ankra.cloud/node-group` label every node Ankra spawns carries (or by the labels the group declares, on a group from before that label), and tolerate every taint the group has. A group the cluster does not have is refused, and the refusal lists the groups it does have. On a cluster without Ankra node groups, name the nodes yourself:
+
+```bash
+ankra cluster agent ci set --node-selector pool=ci --toleration dedicated=ci:NoSchedule
+```
+
+`--node-selector key=value` and `--toleration key[=value]:Effect` repeat, and add to `--node-group` when you give both. A toleration without a value tolerates any value of the key; the effect is `NoSchedule`, `PreferNoSchedule` or `NoExecute`.
+
+| Mode | What the pods do |
+|------|------------------|
+| `required` (default) | Run only on nodes carrying the selector. When none has room they wait, and the group's autoscaler adds a node if it can. |
+| `preferred` | Favour those nodes, and run elsewhere when they have no room. The tolerations are carried either way, so the group's nodes stay open to them. |
+
+Set the mode with `--placement required|preferred`, and remove the placement with `--clear-placement`. A placement flag replaces the whole placement; the worker count and storage class are left alone, and `--workers` is not needed to change only the placement. The change applies to the next step Ankra sends the cluster, with no agent restart. `ankra cluster agent ci get` prints the placement and how many Ready nodes it admits right now, so a placement no node matches is visible before a run waits on it. The portal's **Workers and step placement** card on the **Pipelines** settings page edits the same setting, with the cluster's node groups to choose from.
+
+The placement is set by whoever may manage the cluster's agent, outside any pipeline definition, so it needs no [authority approval](#logic-is-open-authority-is-closed) and is not held to the pipeline policy's node selector and toleration allow-lists - those bound what a pipeline's own `runs_on` may ask for. A stage's `runs_on` still applies on top of it: its node selector is merged with a `required` placement's, and a stage asking for a different value of a key the placement sets is refused before it runs, naming both. On a cluster where a Kyverno or Gatekeeper policy mutated pipeline pods onto a dedicated group, the placement replaces that policy, and unlike it also covers the helper pods.
+
+To create such a group, `ankra cluster node-group add <cluster> --name pipelines --instance-type <type> --taints dedicated=ci:NoSchedule` taints it from its first node.
+
+An agent that predates the placement ignores it and places pods by each stage's own `runs_on` alone, so upgrade the cluster's agent (`ankra cluster agent upgrade`) before relying on it.
 
 ### Ankra platform builders
 
