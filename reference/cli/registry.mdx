@@ -21,6 +21,10 @@ A robot account is bound to one registry project. 'ankra registry projects'
 creates extra projects beside the organisation's own, so a robot can be given
 access to only what is kept in one of them.
 
+Every project has a storage limit; a full one refuses every push. 'ankra
+registry storage' shows how full it is, what fills it, the image retention
+policy that frees it, and asks Ankra for more.
+
 ## ankra registry projects
 
 Create, list and delete the organisation's registry projects.
@@ -96,6 +100,12 @@ List the organisation's registry projects: its own (default) first, then the
 extra ones, each with the path images are pushed under, how many repositories
 it holds and how many of your robot accounts are bound to it.
 
+With `--registry` and `--admin-credential` it lists the projects of a Harbor your
+organisation runs itself instead, as that credential sees them - the names to
+bind a robot to with 'ankra registry robots create &lt;name&gt; `--registry` ...
+`--project` &lt;project&gt;'. That listing acts as the admin credential, so it needs
+credentials.reveal.
+
 ```bash
 ankra registry projects list [flags]
 ```
@@ -105,13 +115,16 @@ ankra registry projects list [flags]
 ```bash
 ankra registry projects list
   ankra registry projects list -o json
+  ankra registry projects list --registry smartoptics-harbor --admin-credential smartoptics-harbor-robot-admin
 ```
 
 **Flags**
 
 | Flag | Default | Description |
 |------|---------|-------------|
+| `--admin-credential` |   | With `--registry`: the organisation's registry credential that may manage robot accounts on that registry |
 | `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+| `--registry` |   | An integrated OCI registry entry - a Harbor your organisation runs - instead of the Ankra registry ('ankra helm registries list' shows them) |
 
 ## ankra registry robots
 
@@ -146,8 +159,20 @@ it holds, the robot reaches the organisation's project and no other.
 `--expires-in-days` makes the registry stop honouring the robot after that many
 days; without it the robot never expires. `--project` binds the robot to one of
 the organisation's extra registry projects instead of its own ('ankra registry
-projects list' shows them); it then reaches that project and nothing else. The
-secret is printed exactly once, with
+projects list' shows them); it then reaches that project and nothing else.
+
+`--registry` creates the robot on a Harbor your organisation runs itself instead:
+name the OCI registry entry it is integrated as ('ankra helm registries list'
+shows them) and, with `--admin-credential`, a registry credential of the organisation
+that may manage robot accounts there (project administrator on the project).
+Ankra acts on that registry only with that credential, never its own; a robot
+login Ankra manages cannot be used. `--project` is required there: the one
+project of that registry the robot is bound to, such as collectorcharts, and
+the only one it reaches ('ankra registry projects list `--registry` ...
+`--admin-credential` ...' shows them). Rotate, delete, get and list work the
+same afterwards.
+
+The secret is printed exactly once, with
 a docker login command that reads it from stdin - copy it now, it is not stored
 anywhere you can read it back from. The secret is never put on a command line,
 where the shell history and 'ps' would keep it. Rotate it with 'ankra registry robots rotate' if it
@@ -155,7 +180,9 @@ is lost or leaked.
 
 Creating a robot needs the credentials.write permission. A `--permission` list
 that reaches past repository:pull and repository:push (deleting artifacts,
-moving tags, and the like) also needs credentials.reveal. With `--permission` or
+moving tags, and the like) also needs credentials.reveal, and so does a robot on
+an integrated registry (`--registry`), which is minted by acting as the admin
+credential. With `--permission` or
 `--expires-in-days` the CLI first checks that the platform offers them by
 reading the robot listing, and with `--project` that the organisation has the
 project; a token without credentials.read skips those checks, and if the
@@ -174,6 +201,8 @@ ankra registry robots create jenkins --description "Jenkins on the office server
   ankra registry robots create contractor --scope pull --expires-in-days 30
   ankra registry robots create cleanup --permission repository:pull,artifact:list,artifact:delete
   ankra registry robots create staging-ci --project staging
+  ankra registry robots create jenkins --registry smartoptics-harbor \
+    --admin-credential smartoptics-harbor-robot-admin --project smart-hub-images
   ankra registry robots create jenkins -o json | jq -r .secret
 ```
 
@@ -181,11 +210,13 @@ ankra registry robots create jenkins --description "Jenkins on the office server
 
 | Flag | Default | Description |
 |------|---------|-------------|
+| `--admin-credential` |   | With `--registry`: the organisation's registry credential that may manage robot accounts on that registry |
 | `--description` |   | What this robot is for (shown in the listing) |
 | `--expires-in-days` | `0` | Days until the registry stops honouring the robot (default: it never expires) |
 | `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
 | `--permission` | `[]` | A permission to grant instead of a preset scope, written resource:action; repeat the flag or separate with commas ('ankra registry robots permissions' lists them) |
 | `--project` |   | The registry project to bind the robot to (default: the organisation's own; 'ankra registry projects list' shows the others) |
+| `--registry` |   | An integrated OCI registry entry - a Harbor your organisation runs - instead of the Ankra registry ('ankra helm registries list' shows them) |
 | `--scope` | `push` | Rights on the project: push (push and pull) or pull |
 
 ## ankra registry robots delete
@@ -327,4 +358,315 @@ ankra registry robots rotate jenkins
 |------|---------|-------------|
 | `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
 | `-y`, `--yes` | `false` | Skip the confirmation prompt |
+
+## ankra registry storage
+
+See how full the organisation's registry is, free space, or ask for more.
+
+Every registry project has a storage limit (50 GiB by default). Once a project
+is full the registry refuses every image push to it, so builds stop
+publishing. Run on its own, this shows the usage against the limit for each
+project.
+
+```bash
+ankra registry storage                      usage against the limit
+ankra registry storage repositories         what takes the space, largest first
+ankra registry storage retention            the image retention policy
+ankra registry storage retention set ...    keep fewer or more images
+ankra registry storage retention run        clean up now instead of at the daily run
+ankra registry storage request ...          ask Ankra for a bigger limit
+```
+
+```bash
+ankra registry storage [flags]
+```
+
+**Examples**
+
+```bash
+ankra registry storage
+  ankra registry storage -o json
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+
+## ankra registry storage repositories
+
+Show which repositories take the registry space, largest first.
+
+Repositories under ankra-ci/ hold the images Ankra builds and scans in CI, one
+per pipeline run and pull request; they are usually what fills the registry.
+The others hold the images your applications publish. The Retention column
+names the rule that governs each repository, or the organisation policy.
+
+Sizes are approximate: a layer shared by several images is counted for each of
+them, so use the sizes to rank repositories, not to add up to the usage. This
+reads every image in the registry and can take a while.
+
+```bash
+ankra registry storage repositories [flags]
+```
+
+**Examples**
+
+```bash
+ankra registry storage repositories
+  ankra registry storage repositories --limit 0 -o json
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--limit` | `20` | How many repositories to show, largest first (0 shows all) |
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+
+## ankra registry storage request
+
+Ask Ankra for a bigger registry storage limit. `--size` is the limit you need
+for each registry project, in GiB (more than today's, at most 10240); `--reason`
+says why. The Ankra team reviews the request and you are notified when it is
+decided; once approved the registry applies the new limit within about 5
+minutes. 'ankra org limits list' shows the request's state.
+
+```bash
+ankra registry storage request [flags]
+```
+
+**Examples**
+
+```bash
+ankra registry storage request --size 100 --reason "Three services now publish nightly images"
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+| `--reason` |   | Why the organisation needs it (required) |
+| `--size` | `0` | The storage limit you need for each registry project, in GiB |
+
+## ankra registry storage retention
+
+Show or change the image retention policy: which images the registry keeps.
+
+An image is kept when it was pushed within the policy's days, or is among the
+newest images of its repository; everything else is deleted when retention
+runs (daily). The newest image of every repository is never deleted. Deleted
+images free their space at the registry's next garbage collection (weekly).
+
+The organisation policy governs every repository. A rule replaces it for the
+repositories its pattern matches - for example a shorter one for CI images:
+
+```bash
+ankra registry storage retention rule add 'ankra-ci/**' --keep-days 7 --keep-latest 2
+```
+
+Patterns are lower-case letters, digits and . _ / - with * matching within
+one path segment and ** across segments; braces and commas are not accepted,
+so write one rule per pattern.
+
+```bash
+ankra registry storage retention [flags]
+```
+
+**Examples**
+
+```bash
+ankra registry storage retention
+  ankra registry storage retention -o json
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+
+## ankra registry storage retention rule
+
+Add, remove and list retention rules. A rule replaces the organisation policy
+for the repositories its pattern matches. Patterns are lower-case letters,
+digits and . _ / - with * matching within one path segment and ** across
+segments; braces and commas are not accepted, so write one rule per pattern.
+'**' alone is the organisation policy itself ('retention set').
+
+A rule needs an organisation policy that keeps something: when the policy in
+force keeps nothing, the platform refuses rules until one is set with
+'ankra registry storage retention set'.
+
+## ankra registry storage retention rule add
+
+Add a retention rule for the repositories a pattern matches, or change the rule
+already stored for that pattern.
+
+`--keep-days` and `--keep-latest` work as in 'retention set'; a flag not passed
+takes the existing rule's value, or the organisation policy's for a new rule.
+`--application` ties the rule to an application, so it shows with it.
+
+A rule that keeps fewer images than what governs those repositories now asks
+first; `--yes` skips the prompt. Quote the pattern so the shell does not expand
+it.
+
+```bash
+ankra registry storage retention rule add <pattern> [flags]
+```
+
+**Examples**
+
+```bash
+ankra registry storage retention rule add 'ankra-ci/**' --keep-days 7 --keep-latest 2
+  ankra registry storage retention rule add 'investor-update/*' --keep-latest 10 --application <id>
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--application` |   | The application the rule belongs to (its id) |
+| `--keep-days` | `0` | Keep every image pushed in this many days (0 turns it off) |
+| `--keep-latest` | `0` | Always keep this many newest images of each matching repository (at least 1) |
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+| `-y`, `--yes` | `false` | Skip the confirmation prompt when the rule keeps fewer images |
+
+## ankra registry storage retention rule list
+
+List the retention rules
+
+```bash
+ankra registry storage retention rule list [flags]
+```
+
+**Examples**
+
+```bash
+ankra registry storage retention rule list
+  ankra registry storage retention rule list -o json
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+
+## ankra registry storage retention rule remove
+
+Remove the retention rule for a pattern; the repositories it matched follow the
+organisation policy again. When that policy keeps fewer images than the rule
+did, it asks first; `--yes` skips the prompt.
+
+```bash
+ankra registry storage retention rule remove <pattern> [flags]
+```
+
+**Examples**
+
+```bash
+ankra registry storage retention rule remove 'ankra-ci/**'
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+| `-y`, `--yes` | `false` | Skip the confirmation prompt when the organisation policy keeps fewer images |
+
+## ankra registry storage retention run
+
+Start the retention cleanup now instead of at its daily time: images the policy
+does not keep are deleted. The space they held is freed at the registry's next
+garbage collection (weekly), not at once.
+
+```bash
+ankra registry storage retention run [flags]
+```
+
+**Examples**
+
+```bash
+ankra registry storage retention run
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+
+## ankra registry storage retention set
+
+Change the organisation retention policy: the one every repository without a
+rule follows.
+
+`--keep-days` keeps every image pushed in that many days (0 turns it off, so
+only the newest are kept); `--keep-latest` always keeps that many newest images
+of each repository (at least 1). A flag not passed keeps its current value.
+`--reset` goes back to the platform default. Rules are not touched.
+
+A change that keeps fewer images asks first, because what it no longer keeps
+is deleted at the next retention run; `--yes` skips the prompt.
+
+```bash
+ankra registry storage retention set [flags]
+```
+
+**Examples**
+
+```bash
+ankra registry storage retention set --keep-days 14
+  ankra registry storage retention set --keep-days 7 --keep-latest 2 --yes
+  ankra registry storage retention set --reset
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--keep-days` | `0` | Keep every image pushed in this many days (0 turns it off) |
+| `--keep-latest` | `0` | Always keep this many newest images of each repository (at least 1) |
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+| `--reset` | `false` | Go back to the platform default policy |
+| `-y`, `--yes` | `false` | Skip the confirmation prompt when the change keeps fewer images |
+
+## ankra registry storage retention show
+
+Show the image retention policy
+
+```bash
+ankra registry storage retention show [flags]
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+
+## ankra registry storage show
+
+Show the registry storage usage against the limit
+
+```bash
+ankra registry storage show [flags]
+```
+
+**Examples**
+
+```bash
+ankra registry storage show
+  ankra registry storage show -o json
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
 
