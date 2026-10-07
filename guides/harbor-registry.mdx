@@ -18,7 +18,7 @@ Ankra talks to your Harbor with [registry credentials](/platform/credentials/reg
 | Credential | Declared as | What Ankra does with it | Rights it needs |
 | --- | --- | --- | --- |
 | **Read / pull** | `credential_name` (`--credential`) | Reads published tags for publish readiness, the deploy gate, image listings and demos, and builds the `dockerconfigjson` pull secret every cluster uses | Pull and read on the project: `repository` pull/list/read, `artifact` list/read, `tag` list, `project` read |
-| **Project administrator** | `admin_credential_name` (`--admin-credential`) | Checks that the declared project exists and creates it when it does not; mints, rotates and revokes the application's own push robot | Project administrator on the project (`project` read, `robot` create/read/list/delete). To let Ankra create a missing project as well: a Harbor **user** when Harbor's *Project creation* setting is *Everyone*, or a **system** robot granted `project` create |
+| **Project administrator** | `admin_credential_name` (`--admin-credential`) | Checks that the declared project exists and creates it when it does not; mints, rotates and revokes the application's own push robot | A **system** robot with the permission set below, or a Harbor **user** with Project Admin on the project (which can create projects only when Harbor's *Project creation* setting is *Everyone*) |
 
 <Warning>
 The read credential is what makes a declaration usable rather than merely descriptive. Without one, Ankra records where the images live but cannot read their tags or pull them - so publish readiness, the demo build check and the deploy gate all keep reporting the application as never built, while it publishes healthily to a registry Ankra simply cannot see. It is also what the cluster pull secret is built from: declare a registry with no read credential and no pull secret is created at all.
@@ -35,11 +35,23 @@ The read credential is what makes a declaration usable rather than merely descri
 Ankra publishes into the project the declaration's `oci://<host>/<project>` names. With an `admin_credential_name` it checks the project exists when you declare it, and creates it if it does not - private, or public with `--project-public` - when that credential may create projects. A credential that may not is refused with the project and host named, so a declaration no build could publish to is never accepted. Without an admin credential nothing is checked: create the project yourself, and decide whether it is public or private - Ankra works with either, and a private project is why the pull secret exists.
 </Step>
 
-<Step title="Give the project-administrator credential a Harbor user">
-Make the account behind `admin_credential_name` a **Harbor user** with the **Project Admin** role on the project, and store it as a registry credential in Ankra.
+<Step title="Mint the project-administrator credential">
+The account behind `admin_credential_name` is what Ankra checks and creates projects with, and mints robots with. A **system-level robot** is the tidiest; this is the minimal set that does everything Ankra asks of it, by level:
+
+| Level | Resource | Actions | Used for |
+| --- | --- | --- | --- |
+| System (`/`) | `project` | `list`, `create` | Checking whether the declared project exists (the listing filtered by name) and creating it when it does not |
+| System (`/`) | `robot` | `create`, `read`, `list`, `delete` | Minting, probing and revoking the application's push robot |
+| Project (`*`) | `project` | `read` | Reading a project Ankra can already see |
+| Project (`*`) | `repository` | `push`, `pull`, `list`, `read` | Publishing and reading images |
+| Project (`*`) | `artifact` | `create`, `read`, `list` | Re-tagging the published digest |
+| Project (`*`) | `tag` | `create`, `list` | The `sha-<7>` tag and any `publish.tags` |
+| Project (`*`) | `robot` | `create`, `read`, `list`, `delete` | Robot accounts on the project |
+
+Harbor refuses `project:read` on a system robot (`bad request permission: project:read`), and project-level read on `*` covers only projects that exist. Ankra therefore checks a project it cannot read by listing projects by name, which system `project:list` covers; a name the listing lacks is created with `project:create`. Store the robot as a registry credential in Ankra.
 
 <Warning>
-A project-scoped **robot** cannot administer robots. Harbor's project-level robot permission set has no `robot` create/update/delete, so a declaration whose `admin_credential_name` points at an ordinary project robot fails to mint the application's robot - with a permission error from Harbor, not from Ankra. Use a Harbor user with Project Admin, or a **system**-level robot granted the robot-account permissions.
+A **project-scoped** robot cannot administer robots: Harbor's project-level robot permission set has no `robot` create/update/delete, so a declaration whose `admin_credential_name` points at an ordinary project robot fails to mint the application's robot - with a permission error from Harbor, not from Ankra. A Harbor **user** with Project Admin works for an existing project, and can create a missing one only when Harbor's *Project creation* setting is *Everyone*.
 </Warning>
 </Step>
 
@@ -336,6 +348,7 @@ The Secret is built from the declaration's **read** credential, at the declared 
 | --- | --- | --- |
 | `robot ensure` fails with a Harbor permission error | `admin_credential_name` points at a project-scoped robot, which cannot administer robots | Use a Harbor user with Project Admin, or a system robot with robot permissions |
 | `registry set` is refused: `The project 'x' does not exist on 'host', and the registry credential ... may not create it` | The project is missing and the admin credential has no project-creation right | Create the project in Harbor and make the credential its Project Admin, or allow the credential to create projects (a user under *Project creation: Everyone*, or a system robot with `project` create) |
+| `registry set` is refused: `... may not read or list projects on 'host', so the project 'x' could not be checked` | The admin credential has neither project read on `x` nor system-level `project:list` | Grant the robot system `project` list (and create), as in the permission table above |
 | `registry set` is refused: `The project 'x' exists on 'host' but the registry credential ... cannot see it` | The project is private and the admin credential is not a member of it | Make the credential a Project Admin of that project |
 | A build fails at the push with `project x not found`, and the declaration was set without `--admin-credential` | The project was never checked, because nothing could check it | Create the project, or redeclare with `--admin-credential` so Ankra checks or creates it |
 | Publish readiness says the application never published, but images are in Harbor | No read credential on the declaration, or the credential cannot see the project | Name a read credential with project read + repository list/read |
