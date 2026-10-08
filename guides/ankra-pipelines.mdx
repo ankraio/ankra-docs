@@ -527,7 +527,7 @@ Ankra Pipelines is landing in pieces, and this page is honest about the line. Ev
 | `ci_max_parallel_steps` | `8` | Steps of **one run** in flight at once (1 to 256). It is not an organisation-wide total; see [Capacity and concurrency](#capacity-and-concurrency). |
 | `ci_allowed_image_prefixes` | empty | Image prefixes a step may name, matched at a path boundary (up to 50 prefixes of up to 200 characters). Empty means images are not checked, and each run records that. |
 | `ci_artifact_retention_days` | `30` | How long step logs and artifacts are kept (1 to 365). |
-| `ci_cache_retention_days` | `14` | How long an unused cache volume is kept (1 to 365). |
+| `ci_cache_retention_days` | `14` | How long a cache nothing restored is kept (1 to 365). |
 | `ci_run_retention_days` | `90` | How long a concluded run and its steps are kept (7 to 365 - a longer floor than artifacts and caches, because run history is what a person reads back after the fact). An hourly sweep deletes past the window; it never removes a live run, a repository's newest concluded run, or a run whose artifacts the vault still holds. |
 | `ci_image_gate` | `app` | Which image findings block a `publish`: `app` blocks on fixable CRITICAL and HIGH findings in your own dependencies, `all` also on what the base image carries, `off` on nothing - the scan still runs and still reports either way. Only the built image is gated: what Trivy finds scanning the checkout itself (`trivy-fs.json`, a lockfile entry or a build tool) is recorded and reported but never blocks a publish, because it is not in the image. A `gate` stage's own `with:` may only move this stricter for its one pipeline, never looser. |
 | `ci_ignore_unfixed` | `true` | Whether a finding with no published fix is excluded from blocking the gate - Trivy's own lenient default. Set it `false` and every unfixed finding keeps blocking whatever any pipeline asks for: like the two settings above, a `gate` stage's own `with.ignore_unfixed` may only move toward the strict direction from here, never back. |
@@ -661,7 +661,7 @@ Anyone who can push can change what a pipeline *does*: add stages, rewrite scrip
 - `defaults.network` and a stage's `network` when it is above `egress-https`.
 - `runs_on` on every stage - cluster, node selector, tolerations, runtime class - and the whole of `resources`: `gpu`, `cpu` and `memory`, so a head cannot ask for far more compute than the organisation meant to grant.
 - A stage's `timeout`, so a head cannot remove its own or the trusted definition's and let a step run far past what was approved.
-- A stage's `cache` block - `key`, `paths`, `size` and `restore_keys` - which decides whose earlier output is restored into this run's workspace.
+- A stage's `cache` block - `key`, `paths`, `size`, `restore_keys` and `fallback` - which decides whose earlier output is restored into this run's workspace.
 - A stage's `with:` block, which is where a `gate` stage's own scan-tool configuration lives.
 - The `services` block - each sidecar's image, environment and ports.
 - A `gate` stage's approval roles and required stages, an `approval` stage's roles and minimum approvals, an `agent` stage in `agent` mode and its tool profile, a `webhook` stage's URL, an `external` stage's provider and workflow.
@@ -772,8 +772,8 @@ A run also records the protected authority it executed under, as `authority_stat
 | Step compute | Default 500m CPU and 1Gi memory; at most 8 cores, 32 GiB and 4 GPUs. A step reserves half its CPU (at least 100m, or the whole figure when that is 100m or less) and all of its memory, and may use CPU up to the declared figure |
 | `shm_size` | 64Mi unless the stage sets it |
 | Workspace | One volume per run, shared by every step; `rwo` pins every step of the run to the node its volume is attached to. `rwx` is refused at dispatch today: the claim must name a StorageClass that serves it, and nothing sets one yet |
-| Caches | One volume per cache path, 5Gi each, keyed by (repository, cluster, key, path, trust) so the same key resolves to the same volume across runs of the same trust scope; `restore_keys` prefixes fall back to the most recently used matching volume inside that scope. A restricted fork run resolves none |
-| Fork budgets | A restricted fork run: at most 8 matrix legs per stage, a 60-minute step timeout, 2 CPU and 4Gi per step, no sidecar services, no cache volumes, and 256 MiB of artifacts and logs for the whole run |
+| Caches | Each cache path is kept per repository and trust scope, restored before a step and saved after it succeeds; at most 4 GiB per saved path and 10 GiB per repository, least recently used first. On an agent without cache archives, one 5Gi volume per path, or nothing with `fallback: none`. A restricted fork run and a tag run get none. See [Caches](/guides/pipeline-reference#caches) |
+| Fork budgets | A restricted fork run: at most 8 matrix legs per stage, a 60-minute step timeout, 2 CPU and 4Gi per step, no sidecar services, no shared caches, and 256 MiB of artifacts and logs for the whole run |
 | Parallelism | 16 runs per organisation and 8 steps per run at once by default, up to 64 and 256; the CI cluster's agent runs at most `ci_worker_count` steps at once (0 to 128, or 0 to 32 on older agents); org-fair claiming; a step waiting for a CI slot does not use up its timeout |
 | Artifacts | 512 MiB per object, 2 GiB per run, 20 uploads per step; download links are valid for 5 minutes |
 | Retention | Artifacts and step logs 30 days by default (1 to 365), caches 14 days (1 to 365), concluded runs 90 days (7 to 365) |

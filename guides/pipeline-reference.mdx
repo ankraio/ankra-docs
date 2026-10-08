@@ -47,7 +47,7 @@ A pipeline mistakenly committed under `.ankra/manifests/` is refused by the mani
 | `defaults.image` | string | none | The image of every stage that names none |
 | `defaults.timeout` | duration | 30 minutes | The timeout of every stage that names none, for example `"15m"` |
 | `defaults.resources` | block | 500m CPU, 1Gi memory | `cpu`, `memory`, `gpu` for every stage that names none |
-| `defaults.cache` | list | none | Cache volumes mounted into every stage |
+| `defaults.cache` | list | none | [Caches](#caches) every stage declares unless it declares its own |
 | `defaults.working_directory` | string | the workspace root | Working directory of every stage that names none |
 | `defaults.network` | tier | the kind's default | Network tier of every stage that names none, in place of that kind's own default - so `defaults.network: "none"` denies egress to a `build` or a `scan` stage that names no tier of its own, and does it quietly, because the validator's warning reads a stage's own declaration rather than this one. A value above `egress-https` is a protected section. |
 | `defaults.env` | map | none | Environment variables for every stage |
@@ -68,7 +68,7 @@ Stage names must be unique across `stages`, `on_failure` and `finally`, because 
 | Key | Fields | Fires on |
 |-----|--------|----------|
 | `on.push` | `branches`, `paths` | A push to a matching branch whose changed files match `paths`. Empty `branches` matches every branch; empty `paths` matches every change. |
-| `on.pull_request` | `branches`, `paths`, `fork_policy` | A pull request opened, synchronised or reopened against a matching **base** branch. `fork_policy` is `none` (refuse), `read_only` (the default: no secrets, no credentials, no identity beyond reading the run) or `trusted`; it is a protected section. A run that ends up restricted is also budget-clamped - at most 8 matrix legs per stage, a 60-minute step timeout, 2 CPU and 4Gi per step, no sidecar services, no cache volumes and 256 MiB of artifacts and logs per run - and the clamps are applied to the plan, so what a reviewer reads is what executes. See [Forks](/guides/ankra-pipelines#what-a-step-runs-as). |
+| `on.pull_request` | `branches`, `paths`, `fork_policy` | A pull request opened, synchronised or reopened against a matching **base** branch. `fork_policy` is `none` (refuse), `read_only` (the default: no secrets, no credentials, no identity beyond reading the run) or `trusted`; it is a protected section. A run that ends up restricted is also budget-clamped - at most 8 matrix legs per stage, a 60-minute step timeout, 2 CPU and 4Gi per step, no sidecar services, no shared caches and 256 MiB of artifacts and logs per run - and the clamps are applied to the plan, so what a reviewer reads is what executes. See [Forks](/guides/ankra-pipelines#what-a-step-runs-as). |
 | `on.tag` | `patterns` | A pushed tag matching one of the glob patterns |
 | `on.schedule` | list of `cron`, `branch`, `stages` | A five-field cron expression, numeric fields only (`MON` and `JAN` are refused, because the scheduler evaluates the fields numerically). `branch` defaults to the repository's default branch; `stages` restricts the run to a subset, which is how a nightly runs only the expensive suites. Schedules fire from a stored watermark, through the same trigger every push and pull request uses. |
 | `on.manual` | `inputs` | A dispatch from the CLI or the API with the declared inputs |
@@ -149,7 +149,7 @@ A block for an event the pipeline's `on:` does not trigger on, or that the stage
 | `services` | list | none | Names from the `services` block this stage reaches |
 | `env` | map | none | Environment variables; names beginning `ANKRA_`, `PATH` and the loader variables, and the builder's own `BUILDKIT*`, `BUILDCTL`, `ROOTLESSKIT` and `DOCKER_CONFIG` are refused |
 | `secrets` | list | none | Names from the `secrets` block this stage may read |
-| `cache` | list | `defaults.cache` | `key` (expressions allowed, typically `hashFiles`) and `paths` under the workspace; one 5Gi volume per path, keyed by (repository, cluster, key, path, trust) so the same key resolves to the same volume across runs of the same trust scope. Trust is `default_branch` for a run on the repository's own default branch and `branch` for every other run - a feature branch, a pull request, a dispatch of a non-default ref - and the two never share a volume. `restore_keys` is an ordered list of prefixes a miss on `key` falls back to, restoring the most recently used matching volume in the same scope instead of starting cold - GitHub Actions' own cache semantics. A restricted fork run resolves no shared volume at all: each declared cache becomes a pod-lifetime volume and the step records `pipeline_caches: "caches are not shared with fork runs"`. A tag run, or a rerun of one, resolves no shared volume either and records `pipeline_caches: "caches are not shared with tag runs"`: it is not a run of the default branch, and a release should not start from files another branch's run left, so it starts cold. A volume nothing resolves to for `ci_cache_retention_days` is reaped, unchanged by trust scoping. `size` is held to the organisation policy's `max_cache_size`. The whole block is protected - a cache decides whose earlier output lands in this run's workspace. |
+| `cache` | list | `defaults.cache` | `key` (expressions allowed, typically `hashFiles`), `paths` under the workspace, optional `restore_keys` (an ordered list of key prefixes), `size` and `fallback` (`volume` or `none`). Each path is restored before the step and saved after it succeeds, scoped to the repository and to the trust of the run. See [Caches](#caches) for how keys are computed, what restores, what saves and how long it is kept. A restricted fork run and a tag run get no shared cache. `size` is held to the organisation policy's `max_cache_size`. The whole block is protected - a cache decides whose earlier output lands in this run's workspace. |
 | `artifacts` | list | none | `name`, `paths` and optional `retention_days` (zero takes the organisation default). Every artifact is a presigned upload into the organisation's oldest ready [backup vault](/concepts/backup-vaults) - or, for an organisation that has none, into the Ankra-managed default vault, under a key prefix of its own. The step's execution says which: `pipeline_artifacts: "granted"` or `"granted (Ankra-managed default vault)"`. Only with no ready vault on either side is the step dispatched with no upload grants, recording `pipeline_artifacts: "unavailable: …"`. [Bringing your own vault](/guides/ankra-pipelines#before-your-first-run) decides where the objects live, not whether they are collected. |
 | `test_results` | list | none | `format` (`junit`, `go-test`, `pytest` or `playwright`) and `path`. Validated and carried to the agent; not ingested anywhere yet - there is no reader for the report this points at, so it has no effect on the run, the check run, or the pull request review today. |
 | `outputs` | map | none | The names the stage writes to `$ANKRA_OUTPUT`, read back onto the step |
@@ -178,6 +178,44 @@ Those three cannot do their only job inside the cluster. `checkout` clones the r
 
 An explicit `network: "none"` on one of the three is still honoured - a pipeline that asks for no egress gets no egress - and the validator raises a `pipeline_network:` **warning** naming what that stage will no longer be able to do, rather than widening the tier back.
 
+### Caches
+
+A stage's `cache` block keeps directories of the workspace from one run to the next: a package store, a module cache, a build cache. Each declared path is kept on its own, under the cache's key.
+
+```yaml
+cache:
+  - key: "pnpm-${{ hashFiles('pnpm-lock.yaml') }}"
+    paths: [".ankra-node-cache/pnpm-store"]
+    restore_keys: ["pnpm-"]
+    fallback: "none"
+```
+
+**The key is computed after checkout.** A `${{ hashFiles('...') }}` block becomes the SHA-256 of the files it matches, read in the stage's `working_directory`, so a key over a lock file changes exactly when the lock file does. A pattern is relative and `/`-separated: every directory is a literal name, at most one `**` may stand immediately before the file name, and the file name may use `*`. `hashFiles('pnpm-lock.yaml')`, `hashFiles('go.mod', 'go.sum')` and `hashFiles('**/go.sum')` all work; `hashFiles('**/src/go.sum')`, with a directory after the `**`, and `hashFiles('../go.sum')` do not. One call takes up to eight patterns, and files under `.git` are never hashed. A key the platform cannot read this way is used as written, as one fixed key, and the step's `pipeline_caches` note says so. A `hashFiles` that matches no file adds nothing to the key.
+
+**Restore, before the step.** The exact key wins. Without it, each `restore_keys` prefix is tried in the order written, and the newest stored entry whose key starts with it is restored. A run on the repository's default branch restores only what default-branch runs saved. Any other run - a feature branch, a pull request, a manual run of another ref - looks in its own scope first and then at the default branch's, so a pull request starts warm from main, while nothing a branch saved ever reaches a default-branch run. A restricted fork run and a tag run, or a rerun of one, get no shared cache at all: every declared path starts empty, and the step's `pipeline_caches` note says `caches are not shared with fork runs` or `caches are not shared with tag runs`.
+
+**Save, after the step succeeds.** A step that failed, was cancelled or timed out saves nothing. A key with a `hashFiles` block is saved once: when the exact key was restored, the content is already stored. A key with no `hashFiles` is saved again after every successful step, and the newest save of it wins. A run saves only into its own scope.
+
+**How long it is kept.** An entry nothing restored for `ci_cache_retention_days` (default 14) is removed. Each repository keeps at most 10 GiB of saved caches across both scopes, and the least recently used go first past that; one saved path may be up to 4 GiB, and a larger one is not kept. There is no purge: change the key (`pnpm-v2-...`) to start over, and the old entries age out.
+
+**`fallback`, on an older agent.** Caches are archives on a cluster whose Ankra agent supports them. On an agent that does not, a cache with `fallback: volume` - the default - is one 5Gi volume per path, shared by every run of the same trust scope on that cluster, with the key used as written rather than hashed; a cache with `fallback: none` gets an empty directory for the step instead, and the step's `pipeline_caches` note says so. A shared volume can be attached to one node at a time, so `none` is the safer choice for a cache that is only an optimisation: two overlapping runs on two nodes do not wait on each other's volume. `size` sizes that volume and is not used by archives.
+
+**What Ankra generates.** The `.ankra/pipeline.yaml` a new application's setup pull request commits declares its test stage's package caches this way, with `fallback: "none"`, in directories under `.ankra-` that the scan step skips, and points the toolchain at them through the stage's `env`. A pipeline you already committed is never rewritten; copy the block into it to get the same.
+
+| Toolchain | Key | Paths |
+| --- | --- | --- |
+| pnpm | `pnpm-${{ hashFiles('pnpm-lock.yaml') }}` | `.ankra-node-cache/pnpm-store`, `.ankra-node-cache/corepack` |
+| Yarn | `yarn-${{ hashFiles('yarn.lock') }}` | `.ankra-node-cache/yarn`, `.ankra-node-cache/yarn-global`, `.ankra-node-cache/corepack` |
+| npm | `npm-${{ hashFiles('package-lock.json') }}` | `.ankra-node-cache/npm` |
+| Go | `go-${{ hashFiles('go.mod', 'go.sum') }}` | `.ankra-go/mod`, `.ankra-go/cache` |
+| uv | `uv-${{ hashFiles('uv.lock') }}` | `.ankra-python-cache/uv` |
+| Poetry | `poetry-${{ hashFiles('poetry.lock') }}` | `.ankra-python-cache/pip`, `.ankra-python-cache/poetry/cache`, `.ankra-python-cache/poetry/artifacts` |
+| Pipenv | `pipenv-${{ hashFiles('Pipfile.lock') }}` | `.ankra-python-cache/pip`, `.ankra-python-cache/pipenv` |
+| pip | `pip-${{ hashFiles('requirements.txt') }}` | `.ankra-python-cache/pip` |
+| Rust | `cargo-registry-${{ hashFiles('Cargo.toml', 'Cargo.lock') }}` and `cargo-target-` the same | `.ankra-cargo/home/registry`, `.ankra-cargo/home/git`; `.ankra-cargo/target` |
+
+Each key's `restore_keys` is its own prefix (`pnpm-`, `go-`, ...). In a monorepo each component's directories carry the component's directory (`.ankra-node-cache-web/...` for `web/`), because its test stage runs beside its siblings'. A Rust component gets a test stage when it commits integration tests under `tests/` and pins no toolchain file.
+
 ### What a step reports about its caches
 
 On a cluster whose agent stores caches as archives in the organisation's vault, each step records one result for all its caches and one entry per cache. `ankra pipeline get` shows the result in the **CACHE** column, and `ankra pipeline get <run> --step <key>` prints the per-cache table. The portal's run timeline shows the same as a chip on the step.
@@ -188,7 +226,7 @@ On a cluster whose agent stores caches as archives in the organisation's vault, 
 | `partial` | Some caches were restored and others were not |
 | `restore_failed` | No cache was restored and at least one restore failed, so the step ran cold because something broke |
 | `miss` | Nothing was stored yet for any declared cache |
-| `disabled` | The cluster has no StorageClass to back a cache volume |
+| `disabled` | No cache was shared with the step: the cluster has no StorageClass to back a cache volume, or every cache declares `fallback: none` on an agent that does not keep archives |
 | `unknown` | Nothing was reported, or the report could not be read. Never read it as a miss |
 
 Each cache has an outcome (`hit`, `restored`, `miss` or `failed`), the bytes downloaded, the time taken, whether the step saved a new archive, and a reason:
