@@ -341,6 +341,53 @@ An image has to belong to a component, because a deploy of the application only 
 
 `ankra pipeline validate` checks the stages against the application before a run. It reports a stage that belongs to no component, a `build.component` the application does not record, and two stages that would publish to the same repository. That last finding is fatal when both stages always run, because each run's commit tag would be overwritten by whichever stage publishes last, and a warning when one of them runs only under a condition. The components an application records come from its [`.ankra/ankra.yaml`](/reference/application-descriptor#components) when it declares them. When a run reaches a stage it cannot attribute, the step concludes `step_refused`, and the message lists the components the application records.
 
+### Monorepo: PR-only checks, full builds on push
+
+A monorepo usually wants a pull request to check only the components it touches, while a push to the default branch builds everything. Write **one stage per component**, and give each stage an [event-scoped `when`](/guides/pipeline-reference#event-scoped-filters) block: the pull request filters on paths, and the push does not. Do not duplicate stages per event.
+
+```yaml
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+stages:
+  - name: checkout
+    kind: checkout
+  - name: test-web
+    kind: run
+    image: node:22
+    run: pnpm -C web test
+    needs: [checkout]
+    when:
+      pull_request:
+        paths: ["web/**", "packages/ui/**", ".ankra/**"]
+      push: {}
+  - name: test-api
+    kind: run
+    image: golang:1.26
+    run: go test ./...
+    working_directory: api
+    needs: [checkout]
+    when:
+      pull_request:
+        paths: ["api/**", "go.work", ".ankra/**"]
+      push: {}
+  - name: report
+    kind: run
+    image: alpine:3
+    run: ./scripts/summarise.sh
+    needs: [test-web, test-api]
+    if: always()
+```
+
+A pull request that touches only `web/` runs `checkout` and `test-web`. `test-api` is skipped as `path_filter` and recorded as skipped on the run. A push to `main` runs every stage. Put the pipeline file (`.ankra/**`) in each list so a change to the pipeline checks everything it touches.
+
+- A pull request's changed files are read from your provider when the run is triggered, up to 300 paths. When they cannot be read, or the change is larger than that, no stage is skipped for its paths, and the run's `paths_unverified` says why.
+- A stage that needs a component stage keeps the usual rule: it is skipped when that stage is left out. To run it anyway, name the stage in [`skippable_needs`](/guides/pipeline-reference#fields-common-to-every-stage), so it waits on what the skipped stage waited on, or give it an `if:` with a status function such as `always()` (above), so its condition decides and `needs.test-api.result` reads `skipped`.
+- Check the shape before you commit it. `ankra pipeline validate --changed-file web/app.ts` prints each stage against push and pull request, so you can see the plan for that change.
+
 ### Newest commit wins
 
 A `concurrency.group` decides which runs serialise. `cancel_in_progress` decides what happens when a newer one arrives: with it, the new commit supersedes the run it replaces; without it, the new run waits for the older one to finish - and on a group that varies per branch, that is a branch queueing behind itself while the older commit's run keeps your step slots.
@@ -507,7 +554,7 @@ How much pipeline work runs at once is decided by two organisation limits and on
 | `ci_max_parallel_steps` | Steps of **one run** in flight at once | `8` | 1 to 256 | `ankra org ci-settings get` | `ankra org ci-settings set --max-parallel-steps N` |
 | `ci_worker_count` | CI slots: steps the CI cluster's agent runs at once, across every run on that cluster | `0` (pipelines off) | 0 to 128 (0 to 32 on older agents) | `ankra cluster agent ci get --cluster <name>` | `ankra cluster agent ci set --workers N --cluster <name>` |
 
-The two organisation limits need an organisation administrator, and the portal's **Pipelines** settings page edits both. The run limit is the one that caps throughput: every run past it waits as `queued`. The step limit only shapes how wide one run fans out. It is not an organisation-wide total (it was until 14 September 2026), so raising it never drains a queue of other runs.
+The two organisation limits need an organisation administrator, and the portal's **Pipelines** settings page edits both. The same page edits the pipeline cluster's CI slots and workspace storage class in its **Workers and step placement** card. The run limit is the one that caps throughput: every run past it waits as `queued`. The step limit only shapes how wide one run fans out. It is not an organisation-wide total (it was until 14 September 2026), so raising it never drains a queue of other runs.
 
 **A CI slot is not a node.** A slot is one step the agent on the CI cluster watches at once, from the moment it creates the step's Job until the step concludes. Nodes are a separate question, answered by the cluster's node-group autoscaler: when steps ask for more CPU and memory than the current nodes have free, it adds nodes, up to the group's autoscaling maximum. So the slot count is how many steps may be live, and the node group is whether there is room to place them. A cluster with plenty of slots and a node group at its maximum still queues, and so does a large node group behind a small slot count.
 
@@ -515,7 +562,7 @@ The two organisation limits need an organisation administrator, and the portal's
 
 **Ankra does not over-fill a cluster.** Ankra stops handing a cluster steps once its agent has as many in flight as it has slots, so the extra steps wait in Ankra's own queue, where organisations are served fairly and the run can say why it is waiting. Time spent waiting for a slot is not time spent running: a step's timeout starts when the agent begins it, and the step's duration on the run page and in `ankra pipeline get` counts from the same moment. The run page shows the wait separately as the step's queue wait, and `ankra pipeline get` prints it beside the step.
 
-**Steps of one run share a node.** A run's workspace is one `rwo` volume (see [Limits and defaults](#limits-and-defaults)), so the steps of one run that execute at the same time land on the node it is attached to. That node's free CPU and memory against what each step reserves is a physical limit of its own: more nodes elsewhere do not widen one run, while a larger node does, and so does a stage that declares what it needs rather than a round number. When a run fans out, its first step prefers the emptiest node so its siblings have room beside it.
+**Steps of one run share a node.** A run's workspace is one `rwo` volume (see [Limits and defaults](#limits-and-defaults)), so every step of one run, and the helpers that restore and save its caches and upload its artifacts, is pinned to the node that volume is attached to. A step that cannot fit there waits for its siblings to finish and is then queued again, rather than landing on another node and waiting for the volume to detach and re-attach. When the node is gone, cordoned or not Ready the pin is dropped and the step log says so; when a step does wait on a volume held by another node, its log names that node. That node's free CPU and memory against what each step reserves is a physical limit of its own: more nodes elsewhere do not widen one run, while a larger node does, and so does a stage that declares what it needs rather than a round number. When a run fans out, its first step prefers the emptiest node so its siblings have room beside it.
 
 A step reserves half of its `resources.cpu` and all of its `resources.memory` (250m and 1Gi when the stage sets no `resources`). The CPU figure is a ceiling the step grows into while its node has CPU free, so a lint step that declares two cores and uses a fraction of one does not keep a build off the node; when every step on a node is busy at once, the node's CPU is shared in proportion to what the stages declared and the steps run slower instead of waiting. Memory is different: a node cannot take memory back from a running step without killing it, so each step's memory is set aside in full, and on most nodes memory is what decides how many steps fit. A stage whose `memory` is padded costs you a step's worth of concurrency; one whose `memory` is too low is killed with exit status 137.
 
@@ -550,6 +597,35 @@ To raise capacity, change the limit that is full:
 - **Steps are slow to start although slots are free.** The cluster has no room for the pods: raise the node group's autoscaling maximum (`ankra cluster node-group autoscaling get` shows it), or use larger nodes. More slots without more nodes only means more steps waiting for a node.
 
 Ankra also watches every pipeline cluster for you. When a cluster's steps in flight have stayed at or above its CI slots for fifteen minutes, Ankra raises a saturation alert for that cluster: pipelines there are queueing for slots while everything else reads healthy. The remedy is the same as above, more slots, or a larger node group maximum when the nodes are what is full.
+
+### Step placement
+
+By default a pipeline pod runs on any node of the CI cluster that will take it. To keep CI on nodes of its own, for example a dedicated node group tainted so nothing else lands there, give the cluster a **step placement**:
+
+```bash
+ankra cluster agent ci set --cluster so-upcloud-infrastructure --node-group pipelines
+```
+
+Every pipeline pod of that cluster then carries it: the step pods, their cache restore and save helpers, the artifact uploader, and image builds in `ankra-ci-build`. Naming a node group is enough on a cluster Ankra built: the pods select the group's nodes by the `ankra.cloud/node-group` label every node Ankra spawns carries (or by the labels the group declares, on a group from before that label), and tolerate every taint the group has. A group the cluster does not have is refused, and the refusal lists the groups it does have. On a cluster without Ankra node groups, name the nodes yourself:
+
+```bash
+ankra cluster agent ci set --node-selector pool=ci --toleration dedicated=ci:NoSchedule
+```
+
+`--node-selector key=value` and `--toleration key[=value]:Effect` repeat, and add to `--node-group` when you give both. A toleration without a value tolerates any value of the key; the effect is `NoSchedule`, `PreferNoSchedule` or `NoExecute`.
+
+| Mode | What the pods do |
+|------|------------------|
+| `required` (default) | Run only on nodes carrying the selector. When none has room they wait, and the group's autoscaler adds a node if it can. |
+| `preferred` | Favour those nodes, and run elsewhere when they have no room. The tolerations are carried either way, so the group's nodes stay open to them. |
+
+Set the mode with `--placement required|preferred`, and remove the placement with `--clear-placement`. A placement flag replaces the whole placement; the worker count and storage class are left alone, and `--workers` is not needed to change only the placement. The change applies to the next step Ankra sends the cluster, with no agent restart. `ankra cluster agent ci get` prints the placement and how many Ready nodes it admits right now, so a placement no node matches is visible before a run waits on it. The portal's **Workers and step placement** card on the **Pipelines** settings page edits the same setting, with the cluster's node groups to choose from.
+
+The placement is set by whoever may manage the cluster's agent, outside any pipeline definition, so it needs no [authority approval](#logic-is-open-authority-is-closed) and is not held to the pipeline policy's node selector and toleration allow-lists - those bound what a pipeline's own `runs_on` may ask for. A stage's `runs_on` still applies on top of it: its node selector is merged with a `required` placement's, and a stage asking for a different value of a key the placement sets is refused before it runs, naming both. On a cluster where a Kyverno or Gatekeeper policy mutated pipeline pods onto a dedicated group, the placement replaces that policy, and unlike it also covers the helper pods.
+
+To create such a group, `ankra cluster node-group add <cluster> --name pipelines --instance-type <type> --taints dedicated=ci:NoSchedule` taints it from its first node.
+
+An agent that predates the placement ignores it and places pods by each stage's own `runs_on` alone, so upgrade the cluster's agent (`ankra cluster agent upgrade`) before relying on it.
 
 ### Ankra platform builders
 
@@ -695,7 +771,7 @@ A run also records the protected authority it executed under, as `authority_stat
 | Matrix | At most 64 legs per stage after exclusions; a larger matrix is refused, not truncated |
 | Step compute | Default 500m CPU and 1Gi memory; at most 8 cores, 32 GiB and 4 GPUs. A step reserves half its CPU (at least 100m, or the whole figure when that is 100m or less) and all of its memory, and may use CPU up to the declared figure |
 | `shm_size` | 64Mi unless the stage sets it |
-| Workspace | One volume per run, shared by every step; `rwo` pins the run to one node. `rwx` is refused at dispatch today: the claim must name a StorageClass that serves it, and nothing sets one yet |
+| Workspace | One volume per run, shared by every step; `rwo` pins every step of the run to the node its volume is attached to. `rwx` is refused at dispatch today: the claim must name a StorageClass that serves it, and nothing sets one yet |
 | Caches | One volume per cache path, 5Gi each, keyed by (repository, cluster, key, path, trust) so the same key resolves to the same volume across runs of the same trust scope; `restore_keys` prefixes fall back to the most recently used matching volume inside that scope. A restricted fork run resolves none |
 | Fork budgets | A restricted fork run: at most 8 matrix legs per stage, a 60-minute step timeout, 2 CPU and 4Gi per step, no sidecar services, no cache volumes, and 256 MiB of artifacts and logs for the whole run |
 | Parallelism | 16 runs per organisation and 8 steps per run at once by default, up to 64 and 256; the CI cluster's agent runs at most `ci_worker_count` steps at once (0 to 128, or 0 to 32 on older agents); org-fair claiming; a step waiting for a CI slot does not use up its timeout |
