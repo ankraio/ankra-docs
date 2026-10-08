@@ -384,11 +384,17 @@ generates for this cluster carries them - unlike a hand-run
 'helm upgrade `--set` ci_worker_count=...', which the next agent upgrade
 renders away again.
 
+The placement says which nodes every pipeline pod runs on - step pods, their
+cache and artifact helpers, and image builds - so CI can live on a dedicated,
+tainted node group without editing any pipeline's runs_on.
+
 ## ankra cluster agent ci get
 
-Show the stored worker count and storage class, the agent version that has
-to honour them, whether that agent currently advertises it can run pipeline
-steps, and how the last write was applied.
+Show the stored worker count, storage class and placement, the agent version
+that has to honour them, whether that agent currently advertises it can run
+pipeline steps, and how the last write was applied. The placement block names
+the node group, node selector, tolerations and mode, and how many Ready nodes
+it admits right now.
 
 An agent that has not yet re-rendered its release reports pipeline steps as
 not advertised even with a non-zero worker count stored: the capability is
@@ -413,8 +419,8 @@ ankra cluster agent ci get
 
 ## ankra cluster agent ci set
 
-Store how many pipeline steps this cluster's agent runs at once, and
-optionally the storage class its step workspaces are carved from.
+Store how many pipeline steps this cluster's agent runs at once, the storage
+class its step workspaces are carved from, and where its pipeline pods run.
 
 `--workers` 0 disables the agent's pipeline-step scheduler; the cluster keeps
 its agent and everything else it does. `--storage-class` is only sent when you
@@ -433,6 +439,20 @@ chart values re-renders its release immediately, an older one picks them up
 at its next upgrade, and an offline one when it reconnects. The command says
 which happened.
 
+Placement puts every pipeline pod of the cluster - step pods, their cache and
+artifact helpers, and image builds - on chosen nodes. `--node-group` names one
+of the cluster's Ankra node groups: the platform selects its nodes by the
+ankra.cloud/node-group label (or the labels the group declares) and tolerates
+every taint the group carries, so a dedicated, tainted pool needs nothing
+else. `--node-selector` and `--toleration` add to it, or stand alone on a cluster
+without Ankra node groups. `--placement` required (the default) keeps pods on
+those nodes; preferred favours them and lets pods run elsewhere when they have
+no room, and still carries the tolerations. The placement is replaced whole by
+any placement flag, applies to the next step dispatched with no agent restart,
+and is never held to the organisation's runs_on allow-lists. `--clear-placement`
+removes it. `--workers` is optional when only the storage class or the placement
+changes.
+
 ```bash
 ankra cluster agent ci set [flags]
 ```
@@ -443,14 +463,22 @@ ankra cluster agent ci set [flags]
 ankra cluster agent ci set --workers 2
   ankra cluster agent ci set --workers 4 --storage-class proxmox-csi
   ankra cluster agent ci set --workers 0 --cluster edge-01
+  ankra cluster agent ci set --node-group pipelines
+  ankra cluster agent ci set --node-selector pool=ci --toleration dedicated=ci:NoSchedule --placement preferred
+  ankra cluster agent ci set --clear-placement
 ```
 
 **Flags**
 
 | Flag | Default | Description |
 |------|---------|-------------|
+| `--clear-placement` | `false` | Remove the cluster's CI placement |
+| `--node-group` |   | Run every pipeline pod on this Ankra node group: selects its nodes and tolerates its taints |
+| `--node-selector` | `[]` | Node label every pipeline pod selects, as key=value (repeatable) |
 | `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+| `--placement` |   | Placement mode: required (default) keeps pipeline pods on the selected nodes, preferred favours them |
 | `--storage-class` |   | Storage class for pipeline step workspaces; pass empty to use the cluster default (omit the flag to keep the stored value) |
+| `--toleration` | `[]` | Taint every pipeline pod tolerates, as key[=value]:Effect with Effect NoSchedule, PreferNoSchedule or NoExecute (repeatable) |
 | `--workers` | `0` | CI slots: pipeline steps the agent watches at once, not nodes (nodes come from the node group autoscaler); up to 128 on agents that support live resize, 32 otherwise; 0 disables the scheduler |
 
 ## ankra cluster agent status
@@ -4786,8 +4814,10 @@ ankra cluster node-group add <cluster_id|name> [flags]
 | `--availability-zone` |   | Pin every node of the group to one availability zone, on OVH 3-AZ regions (e.g. eu-west-par-b). See 'ankra cluster ovh regions `--with-zones`'. Pin the group when it runs zonal storage: an OVH volume cannot attach from another zone. Omitted on a zone-spread cluster, each node takes the zone with the fewest instances cluster-wide, so a one-node group lands wherever the cluster is thinnest, not where its name suggests; on a cluster with no zone pool OVH chooses |
 | `--count` | `1` | Number of nodes |
 | `--instance-type` |   | Server type / flavor / plan for nodes (required) |
+| `--labels` |   | Comma-separated key=value labels every node of the group carries, from its first boot |
 | `--name` |   | Node group name (required) |
 | `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+| `--taints` |   | Comma-separated key=value:Effect taints every node of the group registers with (value optional, effect defaults to NoSchedule); a tainted group runs only pods that tolerate them, such as pipeline pods placed with 'ankra cluster agent ci set `--node-group`' |
 | `--timeout` | `10m0s` | Maximum time to wait when `--wait` is set |
 | `--user-data-file` |   | Path to a cloud-init user-data file for the group (OVH clusters only). Applied verbatim at first boot by every instance the group ever creates, replacements included; Ankra sends no cloud-init of its own, so the document is not merged with anything. Max 65535 bytes. Use for provision-time disk layouts, e.g. carving a partition for LUKS before growpart runs |
 | `--wait` | `false` | Wait for the operation to finish and report success or failure (default: submit and return immediately) |
