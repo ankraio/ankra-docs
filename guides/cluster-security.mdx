@@ -246,7 +246,7 @@ From the terminal, `ankra security sbom`, `ankra security sbom images`, `ankra s
 
 Organisation-wide disposition rules: active, expiring, fix-available, mitigated, unmatched, expired, and revoked. Edit, renew, or soft-revoke with a fresh server-side match preview.
 
-**From the CLI and MCP.** `ankra security dispositions` lists the policies (`--status` and `--disposition` repeatable, `--sort updated_at`), `ankra security dispositions preview --occurrence <id> --disposition accepted_risk` shows what a decision would cover, `ankra security dispositions create --occurrence <id> --disposition acknowledged|accepted_risk --reason "…" [--expires-at 2026-12-31] [--expire-when-fix-available]` writes it after printing that preview and asking (`--yes` skips the prompt), and `update <policy-id>` / `revoke <policy-id> --reason "…"` carry the lifecycle. From chat or the MCP server the tools are `list_security_dispositions`, `preview_security_disposition`, `create_security_disposition`, `update_security_disposition` and `revoke_security_disposition`; the three writes are confirmed before they run and re-check `security.triage` or `security.manage` exactly as the portal does.
+**From the CLI and MCP.** `ankra security dispositions` lists the policies (`--status` and `--disposition` repeatable, `--sort updated_at`), `ankra security dispositions preview --occurrence <id> --disposition accepted_risk` shows what a decision would cover, `ankra security dispositions create --occurrence <id> --disposition acknowledged|accepted_risk --reason "…" [--expires-at 2026-12-31] [--expire-when-fix-available]` writes it after printing that preview and asking (`--yes` skips the prompt), `--scope workload` or `--scope image` on either records it for a finding no add-on owns (see [what a disposition is pinned to](#what-a-disposition-is-pinned-to)), and `update <policy-id>` / `revoke <policy-id> --reason "…"` carry the lifecycle. From chat or the MCP server the tools are `list_security_dispositions`, `preview_security_disposition`, `create_security_disposition`, `update_security_disposition` and `revoke_security_disposition`; the three writes are confirmed before they run and re-check `security.triage` or `security.manage` exactly as the portal does.
 
 ### Network Exposure
 
@@ -354,7 +354,7 @@ Cluster-scoped and ambiguous reports are **not** attributed to an add-on. The pa
 
 ## Acknowledge vs accept risk
 
-Two distinct dispositions are available for organisation-scoped add-on findings (for example, Grafana across every cluster):
+Two distinct dispositions are available for a finding:
 
 | Disposition | Effect |
 |-------------|--------|
@@ -368,7 +368,27 @@ Accepted risk requires:
 - A review deadline, maximum one year
 - Optionally, automatic expiry when a fix becomes available
 
-Matching uses a deterministic selector: organisation + add-on slug + CVE + package type + package name. Creation always shows a server preview of affected findings, clusters, ambiguous exclusions, and the observed→actionable count change. Policies are never hard-deleted; they can be revoked, expire, mitigate when no matches remain, or reopen if findings return.
+Matching uses a deterministic selector: organisation + CVE + package type + package name + what the disposition is pinned to. Creation always shows a server preview of affected findings, clusters, ambiguous exclusions, and the observed→actionable count change. Policies are never hard-deleted; they can be revoked, expire, mitigate when no matches remain, or reopen if findings return.
+
+### What a disposition is pinned to
+
+A disposition is created from one occurrence of a finding, and its scope decides what it covers:
+
+| Scope | Covers | Needs |
+|-------|--------|-------|
+| `organisation_addon` (default) | The add-on the occurrence belongs to, on every cluster (for example, Grafana across the fleet) | The occurrence attributed to an add-on with high confidence |
+| `workload` | The one workload it was seen in: cluster, kind, namespace and name | A workload recorded on the occurrence |
+| `image` | The image digest it was seen in, wherever that image runs | An image digest recorded on the occurrence |
+
+Some images belong to no add-on: pods an operator creates from a custom resource (a CloudNativePG `Cluster`, for example), workloads from plain manifests, control-plane pods, and charts the add-on catalogue does not know. The default scope refuses those, and the refusal names the two scopes that work. Use `workload` to decide for one place, or `image` to decide once for an image that runs in several namespaces or clusters:
+
+```bash
+ankra security dispositions preview --occurrence <id> --scope workload --disposition accepted_risk
+ankra security dispositions create --occurrence <id> --scope image --disposition accepted_risk \
+  --reason "No upstream fix; reviewed" --expires-at 2026-12-31
+```
+
+An image-scoped disposition follows the digest, so it stops matching when the image is rebuilt or upgraded and the finding returns for a fresh decision. From chat or the MCP server, pass the same `scope` to `preview_security_disposition` and `create_security_disposition`.
 
 <Warning>
 Expiry or fix availability can make findings actionable again and may fire threshold alerts. It does **not** emit a false “new CVE discovered” notification — “new” means newly observed in raw scan data **and** currently actionable.
