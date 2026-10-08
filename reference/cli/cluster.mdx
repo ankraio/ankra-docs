@@ -1667,15 +1667,16 @@ ankra cluster cordon <node>
 
 ## ankra cluster custom-dns-zones
 
-Declare, list, and withdraw the DNS zones a cluster serves with the
-organisation's own external-dns webhook credential, alongside the generated
-domain Ankra serves itself.
+Declare, list, and withdraw the DNS zones a cluster serves with one of the
+organisation's own DNS credentials - an external-dns webhook credential or a
+Cloudflare credential - alongside the generated domain Ankra serves itself.
 
 The external-dns Ankra manages publishes only under the cluster's generated
 subdomain: its credential is scoped to that zone by the DNS provider, so
 ingress hostnames on your own zones are dropped silently. Declaring a zone
 here has Ankra render and reconcile a separate external-dns for it, using a
-DNS credential you supply ('ankra org dns credentials'). Each controller is
+credential you supply ('ankra org dns credentials', or 'ankra org cloudflare
+connect' for a Cloudflare zone). Each controller is
 pinned to exactly its zone with its own record ownership, so it can never
 fight Ankra's controller or another cluster's.
 
@@ -1695,10 +1696,27 @@ Declare a zone the cluster also serves, with the DNS credential that can
 publish into it. Ankra renders an external-dns for the zone on the next
 reconciler pass, scoped to exactly that zone.
 
-Refused when the zone is not a domain name, when the organisation has no DNS
-credential of that name, or when the zone overlaps the generated domain Ankra
-already serves for this cluster - that would put a second controller on names
-Ankra's own external-dns publishes.
+Use `--cloudflare-credential` for a zone hosted at Cloudflare: it names an
+organisation Cloudflare credential ('ankra org cloudflare connect') and the
+zone is published by external-dns's native Cloudflare provider. Before storing
+anything Ankra checks with Cloudflare that the credential's token can reach the
+zone with DNS edit. That controller runs upsert-only: it creates and updates
+only the records it owns and never changes or deletes a record someone else
+made, so hand-made records in the zone are safe. Opt an Ingress host into
+Cloudflare's proxy with the external-dns.alpha.kubernetes.io/cloudflare-proxied
+annotation.
+
+```bash
+ankra cluster custom-dns-zones add prod --zone ankra.cloud --cloudflare-credential ankra-cloudflare
+ankra cluster custom-dns-zones add prod --zone launch.example.com --credential example-dns
+```
+
+Refused when the zone is not a domain name, when the organisation has no
+credential of that name (or, with `--cloudflare-credential`, no Cloudflare
+credential of that name), when a Cloudflare token cannot reach the zone or may
+not edit its DNS, or when the zone overlaps the generated domain Ankra already
+serves for this cluster - that would put a second controller on names Ankra's
+own external-dns publishes.
 
 ```bash
 ankra cluster custom-dns-zones add <cluster> [flags]
@@ -1708,7 +1726,8 @@ ankra cluster custom-dns-zones add <cluster> [flags]
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--credential` |   | Name of the organisation DNS credential that publishes into the zone (required) |
+| `--cloudflare-credential` |   | Name of the organisation Cloudflare credential that publishes into the zone with the native Cloudflare provider |
+| `--credential` |   | Name of the organisation credential that publishes into the zone, of whichever kind (this or `--cloudflare-credential` is required) |
 | `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
 | `--zone` |   | Zone to declare, e.g. launch.example.com (required) |
 
@@ -3072,7 +3091,100 @@ ankra cluster get storageclasses [name] [flags]
 
 ## ankra cluster gitops
 
-Commands for inspecting which GitOps repository a cluster syncs from.
+Commands for inspecting which GitOps repository a cluster syncs from, and for
+listing and resolving the merge conflicts that pause its sync.
+
+## ankra cluster gitops conflicts
+
+A GitOps merge conflict is a resource that changed both in the cluster's GitOps
+repository and on the platform (in the portal, the CLI or the API) since the two
+last agreed. Ankra does not pick a side on its own: while any conflict is
+undecided, GitOps sync applies nothing from Git, including commits pushed since.
+
+'list' shows the open conflicts. 'resolve' records which side to keep, for one
+conflict or for all of them, and the next sync applies it:
+
+```text
+--keep git      keep the repository's version; the platform's version is
+                overwritten and the cluster is updated to match Git.
+--keep cluster  keep the platform's version; it is pushed back to the
+                repository, over the change made there.
+```
+
+## ankra cluster gitops conflicts list
+
+List the cluster's open GitOps merge conflicts: the resource key of each, how
+Git and the cluster each changed it (added, modified or removed), when it was
+detected, and whether a resolution is already recorded and waiting for the next
+sync to apply it.
+
+If no cluster name is provided, uses the `--cluster` flag or the currently
+selected cluster. -o json|yaml prints the platform's answer as it is.
+
+```bash
+ankra cluster gitops conflicts list [cluster_name] [flags]
+```
+
+**Examples**
+
+```bash
+ankra cluster gitops conflicts list
+  ankra cluster gitops conflicts list prod
+  ankra cluster gitops conflicts list prod -o json
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+
+## ankra cluster gitops conflicts resolve
+
+Record which side of a GitOps merge conflict to keep, for one conflict (by its
+resource key, as 'ankra cluster gitops conflicts list' prints it) or for every
+open conflict with `--all`. The next sync applies the choice and clears the
+conflict; resolve triggers that sync.
+
+`--keep` is required, because either side discards the other:
+
+```text
+--keep git      keep the repository's version. The platform's version of the
+                resource is overwritten and the cluster is updated to match Git.
+--keep cluster  keep the platform's version. It is pushed back to the
+                repository, over the change made there.
+```
+
+resolve lists what it is about to resolve and what each choice discards, then
+asks for confirmation. `--yes` skips the question; without a terminal to ask on
+(a script, CI) it is required. With `--all`, every conflict open when the platform
+receives the request is resolved the same way, including one detected after the
+list was shown.
+
+Resolving needs permission to change the cluster's configuration
+(clusters.write). The cluster is the `--cluster` flag or the currently selected
+cluster.
+
+```bash
+ankra cluster gitops conflicts resolve [resource_key] [flags]
+```
+
+**Examples**
+
+```bash
+ankra cluster gitops conflicts resolve stack:web/addon:nginx --keep git
+  ankra cluster gitops conflicts resolve --all --keep cluster --cluster prod
+  ankra cluster gitops conflicts resolve --all --keep git --yes -o json
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--all` | `false` | Resolve every open conflict on the cluster |
+| `--keep` |   | Which side to keep: 'git' (the repository's version) or 'cluster' (the platform's version, pushed to the repository) |
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+| `-y`, `--yes` | `false` | Skip the confirmation prompt (required when stdin is not a terminal) |
 
 ## ankra cluster gitops status
 
@@ -3816,6 +3928,110 @@ ankra cluster logs [pod_name] [flags]
 | `--since` | `0` | Seconds of logs to retrieve |
 | `--tail` | `0` | Number of lines from the end of the logs |
 
+## ankra cluster logs-ship
+
+Ankra can keep a cluster's container logs in its hosted log store, so they can
+be read from Ankra with no logging stack of your own to run or connect.
+
+Shipping is opt-in per cluster and off by default: no log content leaves the
+cluster until a member with permission to change cluster settings
+(clusters.write) turns it on, here or in the cluster's settings in the portal.
+While it is on, the cluster's agent sends the log lines of every running
+container to Ankra's hosted log store, where they are kept for 7 days and can
+be read by the members of your organisation. 'disable' stops it at any time.
+
+The agent picks the switch up at its next check-in. An agent too old to follow
+it does not, and 'status' says so.
+
+**Examples**
+
+```bash
+ankra cluster logs-ship status
+  ankra cluster logs-ship enable --cluster prod
+  ankra cluster logs-ship enable --cluster prod --yes
+  ankra cluster logs-ship disable --cluster prod
+```
+
+## ankra cluster logs-ship disable
+
+Turn hosted log shipping off for the cluster. The agent stops sending log lines
+at its next check-in. Nothing is sent by turning it off, so this does not ask
+for confirmation.
+
+```bash
+ankra cluster logs-ship disable [flags]
+```
+
+**Examples**
+
+```bash
+ankra cluster logs-ship disable
+  ankra cluster logs-ship disable --cluster prod -o json
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+
+## ankra cluster logs-ship enable
+
+Turn hosted log shipping on for the cluster. The log lines of every running
+container in the cluster are sent to Ankra's hosted log store, where they are
+kept for 7 days and can be read by the members of your organisation. Turn it
+off any time with 'ankra cluster logs-ship disable'.
+
+Because log content leaves the cluster, enable says what is sent and asks for
+confirmation first. `--yes` skips the question; without a terminal to ask on
+(a script, CI) it is required.
+
+If Ankra has not turned hosted logging on for the platform yet, the switch is
+stored and nothing ships until it does.
+
+```bash
+ankra cluster logs-ship enable [flags]
+```
+
+**Examples**
+
+```bash
+ankra cluster logs-ship enable
+  ankra cluster logs-ship enable --cluster prod --yes
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+| `-y`, `--yes` | `false` | Skip the confirmation prompt (required when stdin is not a terminal) |
+
+## ankra cluster logs-ship status
+
+Show whether the cluster ships its logs to Ankra's hosted log store, whether
+hosted logging is available on this platform yet, whether the cluster's agent
+is new enough to follow the switch, and when the switch was last changed.
+
+-o json prints the platform's answer as it is.
+
+```bash
+ankra cluster logs-ship status [flags]
+```
+
+**Examples**
+
+```bash
+ankra cluster logs-ship status
+  ankra cluster logs-ship status --cluster prod -o json
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+
 ## ankra cluster managed
 
 Create, delete, stop and start, scale node pools, and upgrade cloud-managed Kubernetes clusters on DOKS, UpCloud UKS, GKE, OVH MKS, AKS, EKS, Scaleway Kapsule, and Ankra Cloud Kubernetes.
@@ -3835,7 +4051,8 @@ ankra cluster managed create [flags]
 | `--autoscaling` | `false` | Enable autoscaling for the initial node pool |
 | `--autoscaling-max` | `0` | Maximum node count while autoscaling (requires `--autoscaling`) |
 | `--autoscaling-min` | `0` | Minimum node count while autoscaling (requires `--autoscaling`) |
-| `--credential-id` |   | Cloud credential ID |
+| `--credential-id` |   | Cloud credential ID (optional with `--provider` ankracloud_k8s: Ankra uses the organisation's built-in Ankra Cloud credential) |
+| `--dev-cluster` | `false` | Ankra Cloud Kubernetes: create a dev cluster, one server that is control plane, node, load balancer and gateway, sized by `--node-pool-size` (development only, no control-plane fee) |
 | `--gitops-branch` | `master` | GitOps branch (optional) |
 | `--gitops-credential-name` |   | GitOps credential name (optional) |
 | `--gitops-repository` |   | GitOps repository URL (optional) |
@@ -6722,6 +6939,13 @@ itself crash-consistent, and there is no third answer.
 The live read of the database operators can come back unavailable - no relay,
 or an offline agent - in which case the command says so rather than presenting
 a partial inventory as the whole truth.
+
+Only data a member of the stack owns is listed as the stack's, and each asset
+says why it is: the member that owns it, or a namespace only this stack uses.
+Data the sweep of the stack's namespaces finds that no member owns - another
+stack's database in a shared namespace, an orphan claim - is listed separately
+as not owned by this stack (unattributed). Unattributed data is never captured
+or restored as this stack's, and the requested total does not count it.
 
 Example:
 

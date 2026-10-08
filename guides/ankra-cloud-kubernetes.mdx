@@ -21,6 +21,25 @@ An **Ankra Cloud credential** stored in Ankra - the same credential the self-man
 
 GitOps is optional: connect a repository at creation and Ankra commits the cluster's stack definitions to Git.
 
+## Choosing a control plane
+
+A cluster comes in one of three shapes. You choose when you create it, and the choice cannot be changed afterwards.
+
+| | Production control plane | Development control plane | Dev cluster |
+|---|---|---|---|
+| Control plane | Three replicas, run by the Ankra team | One replica, run by the Ankra team | k3s on the cluster's one server |
+| Highly available | Yes | No | No |
+| Control-plane fee | €40 a month per cluster | None | None |
+| Nodes | Node pools, billed as servers | Node pools, billed as servers | One server, billed as a server |
+| Autoscaling | Yes | Yes | No |
+| Use it for | Anything that must stay up | Development, test and preview environments | A small cluster to try something on |
+
+The **production** control plane is the default. Its three replicas keep the Kubernetes API available through an upgrade or the loss of a host node.
+
+The **development** control plane has no fee of its own: you pay for the nodes only. It is not for production. With one replica, an upgrade or a host node failure interrupts the Kubernetes API while the control plane restarts, and you cannot deploy or change anything until it is back.
+
+A **dev cluster** is a different shape, described in [Dev clusters](#dev-clusters).
+
 ## Creating a cluster
 
 <Tabs>
@@ -36,7 +55,7 @@ GitOps is optional: connect a repository at creation and Ankra commits the clust
         Define one or more node pools: name, plan (with live pricing), count, labels and taints, and optionally autoscaling bounds.
       </Step>
       <Step title="Kubernetes">
-        Pick a Kubernetes version or keep Ankra Cloud's default. The cost summary includes the control-plane fee Ankra Cloud publishes with its versions.
+        Pick a Kubernetes version or keep Ankra Cloud's default, and choose the control plane: production or development. Production is selected to begin with. The cost summary's control-plane row shows the fee of the one you chose, which is none for development.
       </Step>
       <Step title="GitOps (optional) & Create">
         Optionally connect a Git repository, then create. Ankra runs the preflight checks, creates the cluster, fetches a kubeconfig, and installs the Ankra Agent.
@@ -59,7 +78,39 @@ GitOps is optional: connect a repository at creation and Ankra commits the clust
       }'
     ```
 
-    `location` is the Ankra Cloud zone and `size` is the plan name. `GET /api/v1/clusters/managed/ankracloud_k8s/options?credential_id=<id>` lists the zones, versions, plans and the control-plane fee.
+    `location` is the Ankra Cloud zone and `size` is the plan name. This request creates a production control plane. For a development one, add `"ankracloud_k8s": {"control_plane": "development"}` to the body.
+
+    `GET /api/v1/clusters/managed/ankracloud_k8s/options?credential_id=<id>` lists the zones, versions and plans, and the control planes on offer in `control_planes`, each with its replica count and monthly fee.
+  </Tab>
+  <Tab title="CLI">
+
+    <CliVersion since="0.24.0" command="cluster managed create --provider ankracloud_k8s" />
+
+    ```bash
+    ankra cluster managed create \
+      --provider ankracloud_k8s \
+      --name my-cluster \
+      --credential-id <ankra-cloud-credential-id> \
+      --location de-fsn1 \
+      --node-pool-name workers \
+      --node-pool-size <plan> \
+      --node-pool-count 2
+    ```
+
+    This creates a production control plane. `--control-plane development` asks for a development one:
+
+    ```bash
+    ankra cluster managed create \
+      --provider ankracloud_k8s \
+      --name my-test-cluster \
+      --credential-id <ankra-cloud-credential-id> \
+      --location de-fsn1 \
+      --node-pool-size <plan> \
+      --node-pool-count 2 \
+      --control-plane development
+    ```
+
+    `--control-plane` needs a CLI release that has the flag. Run `ankra cluster managed create --help`: if the flag is not listed, upgrade the CLI, or create the cluster from the portal or the API.
   </Tab>
 </Tabs>
 
@@ -71,7 +122,9 @@ Every option is optional and goes in an `ankracloud_k8s` block on the create req
 |-------|---------|-------------|
 | `private_network_id` | | An existing Ankra Cloud private network the nodes join |
 | `network_cidr` | `10.100.0.0/24` | The RFC 1918 range of the network Ankra creates when `private_network_id` is not set |
-| `public_ipv4` | `true` | Give the cluster's API endpoint a public IPv4 address, at €3 a month. The endpoint is IPv6 otherwise, and Ankra installs the agent over IPv4 |
+| `public_ipv4` | `true` | Give the cluster's API endpoint a public IPv4 address, at €4 a month. The endpoint is IPv6 otherwise, and Ankra installs the agent over IPv4 |
+| `control_plane` | `production` | `production` or `development`. See [Choosing a control plane](#choosing-a-control-plane). Any other value is refused, and so is `control_plane` together with `dev_cluster` |
+| `dev_cluster` | `false` | Create a [dev cluster](#dev-clusters) on one server instead of a cluster with a managed control plane |
 
 Without `private_network_id`, Ankra creates a network named `ankra-<cluster-name>` and deletes it again when the cluster is deleted. A network you named is never deleted.
 
@@ -86,6 +139,27 @@ Without `private_network_id`, Ankra creates a network named `ankra-<cluster-name
 | Nodes per pool | 0 to 100 |
 
 Preflight checks the name, zone, version and every pool's plan, and counts the account's live clusters, so a sixth cluster is refused before anything is created.
+
+The control plane is chosen when the cluster is created and cannot be changed afterwards. To move from development to production, or back, create a new cluster and redeploy your workloads to it.
+
+## Dev clusters
+
+A dev cluster is one Ankra Cloud server running k3s. That server is the control plane, the only node and the cluster's own network edge, so there is no managed control plane and no control-plane fee: you pay for the one server at its plan price. It cannot autoscale and it joins no private network. Use it to try something out, not to run anything that has to stay up.
+
+Create one from the same **Create Cluster** dialog by picking the dev cluster option and a plan for its server, or from the CLI:
+
+<CliVersion since="0.24.0" command="cluster managed create --dev-cluster" />
+
+```bash
+ankra cluster managed create \
+  --provider ankracloud_k8s \
+  --name my-dev-cluster \
+  --location de-fsn1 \
+  --node-pool-size <plan> \
+  --dev-cluster
+```
+
+`--node-pool-size` is the plan of the one server. `--dev-cluster` is refused together with `--autoscaling`, `--network-cidr`, `--private-network-id`, a `--node-pool-count` other than 1, and `--control-plane`.
 
 ## How Ankra connects
 
@@ -117,7 +191,13 @@ See [Accessing Clusters with kubectl](/guides/kubeconfig).
 
 ## Cost
 
-Nodes are billed by Ankra Cloud at their plan price, plus a monthly control-plane fee per cluster that Ankra Cloud publishes with its Kubernetes versions. The wizard reads the fee live and includes it in the cost summary. A public IPv4 address on the API endpoint costs €3 a month.
+What a cluster costs depends on its control plane:
+
+- **Production control plane**: €40 a month per cluster, for three replicas that keep the Kubernetes API highly available.
+- **Development control plane**: no control-plane fee. You pay for the nodes only. It runs one replica and is not for production, because an upgrade or a host node failure interrupts the Kubernetes API while it restarts.
+- **Dev cluster**: no control-plane fee. You pay for its one server.
+
+Nodes are billed by Ankra Cloud as servers, at their plan price, whichever control plane you choose. A public IPv4 address on the API endpoint costs €4 a month on top, on both control planes. The wizard reads the fees live from Ankra Cloud and includes them in the cost summary.
 
 ## Importing an existing cluster
 
