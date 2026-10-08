@@ -1,0 +1,168 @@
+---
+title: Usage
+description: See what your organisation used of Ankra - worker vCPU-hours, playgrounds, managed services, hosted logs and metrics, and AI - per period, how completely each was measured, and what it costs.
+---
+
+import { CliVersion } from "/snippets/cli-version.jsx";
+
+Ankra records what your organisation uses of every metered part of the platform in one usage report: worker vCPU-hours, playgrounds, managed services, Ankra hosted logs and metrics, and AI. You can read it per month or per day, and split it by cluster, by application or by managed service.
+
+Usage is tracked now and charged later. Managed services and Ankra hosted logs and metrics are **included during the pilot**: Ankra publishes no rate for them and charges nothing. Ankra charges for a meter only once it publishes a rate for it (Terms of Service clause 8.8). Worker vCPU and playgrounds are billed as [Billing & Usage](/platform/billing) describes, and the report shows what that billing makes of them.
+
+<Note>
+The billing page in the portal shows worker vCPU usage. The other meters are read with the CLI, the API or the AI Assistant, as described below.
+</Note>
+
+---
+
+## What is measured
+
+| Meter | Unit | What it counts | Price |
+|-------|------|----------------|-------|
+| `worker_vcpu_hours` | vCPU-hours | Each hour, a cluster's worker vCPUs as last measured that hour | Your [plan's rate](/platform/billing#how-billing-is-calculated) |
+| `playground_seconds` | seconds | Time an ordered [playground](/guides/cluster-sandbox) was usable | Its monthly price, pro-rated |
+| `service_instance_seconds` | seconds | Time a [managed service](/concepts/managed-services) was deployed, from its deployment until it was deleted, while Ankra could see its cluster | Included during the pilot |
+| `service_storage_byte_hours` | byte-hours | Storage requested by the bound volume claims in a managed service's namespace, held over time | Included during the pilot |
+| `hosted_logs_ingested_bytes` | bytes | Log bytes [Ankra hosted logs](/guides/hosted-logs) accepted | Included during the pilot |
+| `hosted_logs_ingested_lines` | lines | Log lines Ankra hosted logs accepted | Included during the pilot |
+| `hosted_metrics_samples` | samples | Samples Ankra hosted metrics accepted | Included during the pilot |
+| `hosted_metrics_active_series` | series-hours | Each hour, the distinct series a cluster had | Included during the pilot |
+| `ai_requests` | requests | AI model requests, on Ankra's key or your own | No per-unit rate: see [Models and Cost](/platform/ai-provider#usage-and-the-free-allowance) |
+| `ai_input_tokens`, `ai_output_tokens` | tokens | The tokens those requests sent and received | No per-unit rate |
+
+A level measured each hour (vCPUs, active series, bytes of storage) adds up to unit-hours over a period: 10 GB held for a day is 240 GB-hours.
+
+---
+
+## Read your usage
+
+### With the CLI
+
+<CliVersion since="0.27.0" />
+
+```bash
+ankra org usage
+```
+
+With no options, this reads the current month so far, one line per meter. The table shows quantities in units a person reads (GB, hours, thousands separators) and a legend for every marker it uses.
+
+| Option | What it does |
+|--------|--------------|
+| `--period this-month` or `last-month` | A ready-made window |
+| `--from <YYYY-MM-DD>` and `--to <YYYY-MM-DD>` | Any window: the first day, and the day after the last one |
+| `--granularity day` | One line per day instead of per calendar month |
+| `--group-by cluster`, `application` or `instance` | Split each meter by what used it: see [Split it by what used it](#split-it-by-what-used-it) |
+| `-o json` or `-o yaml` | The report as the API answers it: raw quantities with their unit, and `null` where nothing was measured |
+
+```bash
+ankra org usage --period last-month
+ankra org usage --from 2026-09-01 --to 2026-10-01 --granularity day
+ankra org usage --group-by application
+ankra org usage --group-by instance -o json
+```
+
+### With the API
+
+The same report is served at `/api/v1/org/billing/usage`, with the window and grouping as query parameters:
+
+```bash
+curl -H "Authorization: Bearer <your-token>" \
+  "https://platform.ankra.app/api/v1/org/billing/usage?from=2026-09-01&to=2026-10-01&group_by=cluster"
+```
+
+Two narrower reads take the same `from`, `to` and `granularity` parameters and answer one line per managed service and period: `/api/v1/org/service-admission/instances/{instance_id}/usage` for one service, and `/api/v1/org/service-admission/applications/{application_id}/usage` for the services one application uses.
+
+A parameter the platform refuses answers `422`, naming the parameter.
+
+### With the AI Assistant
+
+The [AI Assistant](/platform/ai-assistant) reads the same report. Ask it, for example: *Which managed services used the most storage last month?*
+
+---
+
+## The window
+
+- **Days are UTC.** `from` is the first day read and `to` is the day after the last one, so `--from 2026-09-01 --to 2026-10-01` reads all of September.
+- **The default is this month so far**: from the first day of the current month to now.
+- **At most 93 days per read.** Read a longer stretch in parts. Usage is kept for 400 days.
+- **Periods are calendar months or UTC days**, cut to the window at either end.
+- **The current period ends now.** Usage that has not happened is not reported, and the last hours of the current period are usually still being counted.
+
+---
+
+## How a line reads
+
+Each line is one meter, over one period, for one group. It carries its quantity, how completely that quantity was measured, and what it costs.
+
+### Coverage
+
+| Coverage | Meaning | In the CLI |
+|----------|---------|------------|
+| `complete` | Every hour of the period was measured (every day, for AI usage). The quantity is exact. | The quantity |
+| `partial` | Some hours were not measured, or are still being counted. The quantity is a lower bound. | `>=` before the quantity |
+| `unknown` | No hour was measured: for example, a managed service whose cluster was offline throughout. The quantity is `null`. | `not measured` |
+
+Unknown is not zero. A period nobody measured is reported as unknown, never as 0, so a missing measurement never looks like nothing was used.
+
+### Price
+
+| Price state | Meaning | In the CLI |
+|-------------|---------|------------|
+| `included` | Ankra publishes no rate for this meter and charges nothing for it during the pilot. | `included (pilot)` |
+| `priced` | A published rate applies. `amount_minor` is what it makes the quantity cost, in euro cents, as the invoice applies it. | The amount in EUR |
+| `unpriced` | No rate applies to the line as it is. `price_basis` says why. | The reason |
+
+`price_basis` says what the price state rests on:
+
+| `price_basis` | Meaning | In the CLI |
+|---------------|---------|------------|
+| `pilot` | Included during the managed services pilot | `included (pilot)` |
+| `plan_rate` | Your plan's per-vCPU-hour rate, after its free allowance and annual discount | The amount |
+| `price_of_record` | A playground's monthly price recorded when it was ordered, pro-rated over the calendar month | The amount |
+| `flat_fee` | Your plan bills a flat monthly fee that covers vCPU usage | `covered by the plan's flat fee` |
+| `not_invoiced` | Your plan is not invoiced | `plan not invoiced` |
+| `no_rate` | No per-unit rate is published, as for AI usage | `no rate published` |
+| `organisation_total` | Split by cluster: your plan rates the organisation's vCPU total each hour, so one cluster's share has no price of its own | `priced on the organisation total` |
+| `other_currency` | The playground's recorded price is not in euros | `price not in EUR` |
+
+---
+
+## Split it by what used it
+
+| Grouping | One line per meter and period for | Meters that stay one organisation line |
+|----------|-----------------------------------|----------------------------------------|
+| `meter` (default) | The whole organisation | - |
+| `cluster` | Each cluster | AI usage |
+| `application` | Each application a managed service serves | Every meter except the two managed service meters |
+| `instance` | Each managed service | Every meter except the two managed service meters |
+
+Grouped by meter, every meter has a line for every period, even when nothing was used. Grouped any other way, a group that used none of a meter in a period that was fully measured has no line.
+
+Grouped by application, a service counts toward the applications whose reviewed setup plan names them as consumers. A service that several applications use is counted in full under each of them and marked shared (`is_shared`), so **application lines do not add up to the organisation's total**. A service that no application uses has a line with no application. The CLI shows the application's name, and the same note under its table.
+
+Names are shown as they read now. Two groups with the same name, such as several playground clusters named `playground`, are told apart in the CLI by the start of their id.
+
+---
+
+## Who can read it
+
+Reading usage needs the `billing.read` permission, which every built-in role holds. The read for one managed service also needs access to that service, and the read for one application needs `applications.read`. See [Roles and access](/guides/roles-and-access).
+
+---
+
+## Related
+
+<CardGroup cols={2}>
+  <Card title="Billing & Usage" icon="credit-card" href="/platform/billing">
+    Plans, the vCPU allowance, invoices and playground prices.
+  </Card>
+  <Card title="Managed services" icon="database" href="/concepts/managed-services">
+    The services whose instance time and storage are metered.
+  </Card>
+  <Card title="Ankra hosted logs" icon="scroll" href="/guides/hosted-logs">
+    Turn on hosted logs for a cluster, and what it keeps.
+  </Card>
+  <Card title="Models and Cost" icon="sparkles" href="/platform/ai-provider">
+    The AI allowance and the daily AI spend cap.
+  </Card>
+</CardGroup>
