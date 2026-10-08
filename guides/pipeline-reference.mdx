@@ -76,7 +76,9 @@ Stage names must be unique across `stages`, `on_failure` and `finally`, because 
 
 A manual input has a `name` (letters, digits and underscores, so it can be addressed as `${{ inputs.<name> }}`), a `type` (`string`, the default, `boolean`, `number` or `choice`), an optional `default`, an `enum` (required for `choice`, and the default must be one of its values), `required` and `description`. A dispatch whose inputs do not match is refused with the planner's diagnostics and records nothing.
 
-A path filter is decided on the event's changed files, and never excludes a run when the diff could not be read or was truncated - a file the planner could not see is not a file that did not change; the run records that it passed on incomplete information.
+A path filter is decided on the event's changed files, and never excludes a run when the diff could not be read or was truncated - a file the planner could not see is not a file that did not change; the run records that it passed on incomplete information. A push carries its changed files in the delivery; a pull request's are read from the provider when the run is triggered (GitHub's pull request files, a GitLab merge request's diffs, Bitbucket's diffstat), up to 300 paths. The list is stored on the run, so the run is planned, admitted and dispatched against the same files, and a re-run reuses it. When a filter had to pass without a complete list, the run's `paths_unverified` says why: `provider_error` (the provider was asked and failed), `truncated` (more than 300 paths changed) or `unsupported_provider` (the provider or the event offers no list).
+
+The `on:` triggers decide whether a run starts at all, for the whole pipeline. To run one stage on a narrower set of changes for one event only - a component's checks on a pull request that touches it, but on every push - give the stage an [event-scoped `when`](#event-scoped-filters) block rather than a second trigger or a duplicate stage.
 
 ## Stages
 
@@ -102,6 +104,32 @@ Every stage has a `name` (lower-case letters, digits, dashes and underscores, st
 
 A stage whose kind has no executor on this build is reported twice, in the same words. The validator raises a **warning** under `pipeline_executor:` naming the stage, its kind and the wave that ships the executor - a warning rather than a fatal, deliberately, because refusing the document would stop every other stage in it from running too. The planner then skips exactly that stage with reason `kind_unavailable`, checked before every event-dependent filter because it is a static fact about the stage. The run therefore concludes on its own; before this it sat `pending` forever and `ankra pipeline cancel` was the only way to release its concurrency group.
 
+### Event-scoped filters
+
+A stage's `when` can name the event a filter belongs to. For the run's event, the stage's block for that event - `push`, `pull_request`, `tag`, `schedule` or `manual` - supplies the branches and paths, and the flat `when.branches` and `when.paths` do not apply to it at all; an empty block means that event is unfiltered. Events with no block keep the flat fields. `when.events` is unchanged and still has to include the event. A re-run is planned as its own `rerun` event, and an agent run as an `agent` event. Neither has a block, so both read the flat fields against the original run's stored change list: a stage filtered only by `when.pull_request.paths` runs on a re-run of that pull request. Give it flat `when.paths` as well if a re-run should keep the filter.
+
+```yaml
+stages:
+  - name: frontend
+    kind: run
+    image: node:22
+    run: pnpm test
+    when:
+      pull_request:
+        paths: ["frontend/**", ".ankra/**"]   # a pull request runs it only when frontend changes
+      push: {}                                 # every push runs it
+  - name: backend
+    kind: run
+    image: golang:1.26
+    run: go test ./...
+    when:
+      paths: ["backend/**"]                    # every event, unless it has a block
+      pull_request:
+        paths: ["backend/**", ".ankra/**"]
+```
+
+A block for an event the pipeline's `on:` does not trigger on, or that the stage's own `when.events` leaves out, can never apply and is a warning under `pipeline_trigger:`. Converted pipelines use these blocks: a GitHub Actions repository's workflows keep their own `on.pull_request.paths` and `on.push.paths` on their stages, and a GitLab rule whose `if:` tests `$CI_PIPELINE_SOURCE == "merge_request_event"` or `== "push"` becomes `when.pull_request` or `when.push`. The recipe for a monorepo is [PR-only checks, full builds on push](/guides/ankra-pipelines#monorepo-pr-only-checks-full-builds-on-push).
+
 ### Fields common to every stage
 
 | Field | Type | Default | Meaning |
@@ -111,9 +139,12 @@ A stage whose kind has no executor on this build is reported twice, in the same 
 | `with` | map | none | Inputs to `uses`, and where a `gate` stage's own image-gate configuration lives. Protected. |
 | `run` | string | none | The script; required on a `run` stage without `uses` |
 | `needs` | list | none | Stages this one waits for. Every name must exist and the graph must be acyclic. |
-| `skippable_needs` | list | none | The entries of `needs` this stage may run without. When a listed stage is left out because its own `when.paths` match no changed file, this stage waits on what that stage would have waited on instead of being skipped with it. When the listed stage runs, it is an ordinary need: this stage runs after it, and only if it succeeded. Any other reason the listed stage is skipped - a branch or event filter, a false `if`, the fork policy - still skips this stage. Every entry must also be in `needs`; an entry naming a stage without `when.paths` has no effect and is a warning. |
-| `if` | expression | none | Runs the stage only when the expression is true; see [Expressions](#expressions) |
-| `when.branches`, `when.paths`, `when.events` | lists | none | Filters on the event without an expression, decided before any expression context exists |
+| `skippable_needs` | list | none | The entries of `needs` this stage may run without. When a listed stage is left out because its own path filter (`when.paths`, or the [event block's](#event-scoped-filters) `paths` for this run's event) matches no changed file, this stage waits on what that stage would have waited on instead of being skipped with it. When the listed stage runs, it is an ordinary need: this stage runs after it, and only if it succeeded. Any other reason the listed stage is skipped - a branch or event filter, a false `if`, the fork policy - still skips this stage, unless this stage's own `if:` calls a status function (see `if`). Every entry must also be in `needs`; an entry naming a stage with no path filter has no effect and is a warning. |
+| `if` | expression | none | Runs the stage only when the expression is true; see [Expressions](#expressions). As in GitHub Actions, an `if:` that calls a status function - `always()`, `success()`, `failure()`, `cancelled()`, `skipped()` - replaces the implicit "every need succeeded": such a stage is not skipped because a need was left out of the run. It waits on the nearest stages behind that need that do run, and its condition decides at dispatch, where `needs.<stage>.result` reads `skipped` and `skipped()` is true. |
+| `when.branches`, `when.paths`, `when.events` | lists | none | Filters on the event without an expression, decided before any expression context exists. `branches` and `paths` apply to every event that has no [event block](#event-scoped-filters) of its own; `events` always applies |
+| `when.push`, `when.pull_request` | `branches`, `paths` | absent | The branch and path filter for that one event, in place of the flat fields; an empty block (`{}`) means the event is unfiltered. See [Event-scoped filters](#event-scoped-filters) |
+| `when.tag` | `patterns` | absent | The tag names this stage runs for on a tag push |
+| `when.schedule`, `when.manual` | none | absent | Accepted only empty: the event is unfiltered. `when.manual` covers an API dispatch too |
 | `matrix` | map | none | Axes (`name: [values]`) plus `include` and `exclude` lists, with GitHub Actions semantics; at most 64 legs after exclusions, and 8 on a restricted fork run, where the surviving legs are truncated in cross-product order with a `plan_fork_budget:` diagnostic. An axis may not be named `include` or `exclude`. |
 | `services` | list | none | Names from the `services` block this stage reaches |
 | `env` | map | none | Environment variables; names beginning `ANKRA_`, `PATH` and the loader variables, and the builder's own `BUILDKIT*`, `BUILDCTL`, `ROOTLESSKIT` and `DOCKER_CONFIG` are refused |
@@ -329,7 +360,12 @@ ankra pipeline validate --application my-service
 ankra pipeline validate path/to/pipeline.yaml --application my-service
 ```
 
-The command reads `.ankra/pipeline.yaml` (or the file you name), validates it, and plans it for a synthetic push to the default branch and a synthetic pull request, printing for each the steps that would run, the stages that would be skipped with their reason, and every diagnostic. Its exit code is non-zero when the severity is `fatal`. Without a file and without a stored definition there is nothing to validate. The same validator answers `POST …/pipeline/validate` on the API and the `cicd_validate_pipeline_yaml` tool in chat, which needs no repository at all.
+The command reads `.ankra/pipeline.yaml` (or the file you name), validates it, and plans it for a synthetic push to the default branch and a synthetic pull request - and a synthetic `v1.0.0` tag when the pipeline declares `on.tag` - printing for each the steps that would run, the stages that would be skipped with their reason, and every diagnostic, then a table of every stage against every event: `run`, or `skip` with the reason. A path filter cannot decide without a diff, so it passes with a diagnostic; `--changed-file <path>` (repeatable) plans the push and the pull request as if those files changed, so path filters - flat or [event-scoped](#event-scoped-filters) - decide for real (`changed_files` in the API body):
+
+```bash
+ankra pipeline validate --application my-service --changed-file frontend/app.ts --changed-file .ankra/pipeline.yaml
+```
+Its exit code is non-zero when the severity is `fatal`. Without a file and without a stored definition there is nothing to validate. The same validator answers `POST …/pipeline/validate` on the API and the `cicd_validate_pipeline_yaml` tool in chat, which needs no repository at all.
 
 Every planned step of that dry run carries the [network tier it resolved to](#the-tier-a-stage-gets-by-default) - `network` on each node of the DAG - so a definition that names no tier anywhere still says what each of its stages will be allowed to reach. The field is on the API's answer today; the CLI's own step line prints the step key, the stage and the kind only.
 
