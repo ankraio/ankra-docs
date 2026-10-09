@@ -45,7 +45,7 @@ This is the self-managed lane. If you want the Ankra team to run the control pla
     Choose **Create a dedicated network** (Ankra creates and owns the network and its router; the wizard proposes `10.64.0.0/20`) or **Use an existing network** in the zone. Pick the bastion plan, and optionally restrict **Bastion allowed IPs** to the CIDRs that may reach the bastion over SSH; empty allows any address. **Storage retention on teardown** decides whether persistent volumes are kept (the default) or deleted when the cluster is deprovisioned.
   </Step>
   <Step title="Compute">
-    Set the control-plane count (1, 3 or 5) and plan, then one or more worker node groups, each with its own plan, count, labels and taints. The cost summary prices every server from the live plan catalog, plus public IPv4. Storage, load balancers and transfer are not in the total.
+    Set the control-plane count (the wizard offers 1, 3 or 5; the API accepts any count from 1 to 9) and plan, then one or more worker node groups, each with its own plan, count, labels and taints. The cost summary prices every server from the live plan catalog, plus public IPv4. The router, storage, load balancers and transfer are not in the total; see [Cost](#cost).
   </Step>
   <Step title="Kubernetes">
     Choose the server template (default `debian-13`), the distribution and the Kubernetes version:
@@ -98,7 +98,7 @@ Plans are account-wide; list them, and the zones, templates and networks the wiz
 | `private_network_id` | | Adopt an existing network in the zone instead; mutually exclusive with `network_ip_range` |
 | `bastion_plan` | | Plan of the bastion server |
 | `bastion_allowed_ips` | any | IPv4 or IPv6 addresses or CIDRs allowed to reach the bastion over SSH |
-| `control_plane_count` | | 1 to 9 control-plane servers |
+| `control_plane_count` | | 1 to 9 control-plane servers. The wizard offers 1, 3 and 5 |
 | `control_plane_plan` | | Plan of the control-plane servers |
 | `worker_count`, `worker_plan` | | A single worker group; use `node_groups` (each with `name`, `instance_type`, `count`, labels and taints) for several |
 | `runtime_credential_id` | the provisioning credential | Ankra Cloud credential the in-cluster CCM and CSI use |
@@ -166,15 +166,24 @@ Every server Ankra creates carries the labels `platform.ankra.io/managed-by=ankr
 
 ### Cost
 
-Servers are billed by Ankra Cloud at their plan price. A public IPv4 address costs €4 a month per address; the bastion holds one, and the nodes hold none. IPv6 is not billed. Load balancers the cloud controller creates, persistent volumes and transfer are billed by Ankra Cloud on top and are not part of the wizard's estimate.
+Ankra Cloud bills the cluster's resources to your Ankra Cloud account. A cluster is made of:
+
+- **Servers** - the bastion, the control planes and the workers, each at its plan price.
+- **Public IPv4** - one address, held by the bastion. The nodes hold none, and IPv6 is not billed.
+- **The router with NAT** - one for each cluster, billed monthly while NAT is enabled.
+- **Load balancers** - the ones the cloud controller creates for `LoadBalancer` Services, the networking stack's Traefik included.
+- **Persistent volumes** - the storages the CSI driver provisions, by tier and size.
+- **Transfer** - outbound traffic beyond what each server includes.
+
+The wizard's estimate covers the servers and the public IPv4 address only. For the current price of every line, see [Billing](https://cloud.ankra.app/docs/billing) in the Ankra Cloud documentation.
 
 ---
 
 ## Cloud controller and storage
 
-After the Ankra Agent is installed, Ankra deploys the `ankracloud-cloud-provider` stack into `kube-system`: the `ankra-cloud-ccm` and `ankra-cloud-csi` charts, sharing the runtime credential's token through the Secret `ankra-cloud` (SOPS-encrypted when the stack is committed to Git). Every kubelet runs with `--cloud-provider=external`, and the controller links each node to its server as `ankracloud://<zone>/<server-id>`.
+After the Ankra Agent is installed, Ankra deploys the `ankracloud-cloud-provider` stack into `kube-system`: the `ankra-cloud-ccm` and `ankra-cloud-csi` charts, sharing the runtime credential's token through the Secret `ankra-cloud` (SOPS-encrypted when the stack is committed to Git). Every kubelet runs with `--cloud-provider=external`, and the controller links each node to its server as `ankracloud://<zone>/<server-id>`. The charts' own behaviour, values and annotations are documented by Ankra Cloud: [Kubernetes cloud controller manager](https://cloud.ankra.app/docs/kubernetes-ccm) and [Kubernetes CSI driver](https://cloud.ankra.app/docs/kubernetes-csi).
 
-**LoadBalancer Services.** `ankra-cloud-ccm` gives each Service of type `LoadBalancer` an Ankra Cloud load balancer on the cluster's private network, with the nodes' private addresses as members. The networking stack's Traefik uses one, with `externalTrafficPolicy: Local` so the client address is preserved.
+**LoadBalancer Services.** `ankra-cloud-ccm` gives each Service of type `LoadBalancer` an Ankra Cloud load balancer on the cluster's private network, with the nodes' private addresses as members. The networking stack's Traefik uses one, with `externalTrafficPolicy: Local` so the client address is preserved. Deleting the Service deletes its load balancer; Ankra itself never deletes one, so remove your `LoadBalancer` Services before you [terminate the cluster](#operate-it), or a load balancer still bound then stays in your Ankra Cloud account.
 
 **Persistent volumes.** `ankra-cloud-csi` provisions Ankra Cloud storages. It installs four StorageClasses:
 
