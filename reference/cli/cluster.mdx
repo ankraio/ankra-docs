@@ -22,7 +22,14 @@ through the Ankra gateway (the access used by 'ankra cluster kubeconfig' and
 'ankra cluster kube-token').
 
 Managing access requires organisation admin rights. Grants apply to one
-cluster and one organisation member, identified by email.
+cluster and one organisation member, identified by email. A grant can be
+time-boxed with `--expires` and carry a `--reason`; the organisation access
+policy ('ankra org access-policy') may require both.
+
+Break-glass: 'elevate' gives the caller itself time-boxed access, within the
+policy. It needs only the kube_access.elevate permission, so automation
+running as a service account can use it without being able to grant anyone
+else.
 
 Examples:
 
@@ -30,9 +37,49 @@ Examples:
 ankra cluster access list --cluster my-cluster
 ankra cluster access grant user@example.com --cluster my-cluster --role view
 ankra cluster access grant user@example.com --cluster my-cluster --role edit --namespace staging
+ankra cluster access grant user@example.com --cluster my-cluster --role admin --expires 4h --reason "maintenance window"
+ankra cluster access elevate --cluster my-cluster --role edit --expires 4h --reason "incident 4711"
 ankra cluster access revoke user@example.com --cluster my-cluster
 ankra cluster access revoke 6f1f9aca-2c3d-4e5f-8a9b-0c1d2e3f4a5b --cluster my-cluster
 ```
+
+## ankra cluster access elevate
+
+Give the identity this CLI runs as - you, or a service account's token -
+time-boxed access to a cluster through the kube gateway.
+
+This is break-glass within the organisation access policy: the access must
+end (`--expires`, at most the policy's limit or 4 hours) and needs a `--reason`,
+and it can never go above the policy's ceiling. It needs the
+kube_access.elevate permission, which grants nothing else: no access for
+anyone else, no standing access, and no way to change the policy. Running it
+again with a new `--expires` extends your own elevation; end it early with
+'ankra cluster access revoke &lt;grant-id&gt;'.
+
+Every elevation is recorded in the audit log and notifies the organisation's
+notification routes.
+
+```bash
+ankra cluster access elevate [flags]
+```
+
+**Examples**
+
+```bash
+ankra cluster access elevate --cluster prod --role edit --expires 4h --reason "incident 4711: restart the stuck rollout"
+  ankra cluster access elevate --cluster prod --role edit --namespace payments --expires 30m --reason "hotfix"
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--cluster` |   | Cluster name or ID (defaults to the selected cluster) |
+| `--expires` |   | When the access ends: a duration (30m, 4h) or an RFC 3339 time (required) |
+| `--namespace` |   | Limit the elevation to one namespace (default: cluster-wide) |
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+| `--reason` |   | Why the access is needed (required) |
+| `--role` | `edit` | Kubernetes role to elevate to: view, edit, admin, or cluster-admin |
 
 ## ankra cluster access grant
 
@@ -52,8 +99,10 @@ ankra cluster access grant <email> [flags]
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--cluster` |   | Cluster name or ID (defaults to the selected cluster) |
+| `--expires` |   | End the grant after a duration (30m, 4h, 7d) or at an RFC 3339 time (default: standing) |
 | `--namespace` |   | Limit the grant to one namespace (default: cluster-wide) |
 | `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+| `--reason` |   | Why the access is granted; recorded with the grant and in the audit log |
 | `--role` | `view` | Kubernetes role for the grant: view, edit, admin, or cluster-admin |
 
 ## ankra cluster access list
@@ -158,7 +207,7 @@ Each flag is applied to the addon's stored settings; anything you do not pass
 is left as it is. To replace the whole document instead, use
 'ankra cluster addons update &lt;addon&gt; -f settings.json'.
 
-Backup settings (closed beta) override the add-on's stack backup policy for
+Backup settings override the add-on's stack backup policy for
 this add-on only - use them for the one add-on in a protected stack that
 should be captured differently:
 
@@ -388,13 +437,25 @@ The placement says which nodes every pipeline pod runs on - step pods, their
 cache and artifact helpers, and image builds - so CI can live on a dedicated,
 tainted node group without editing any pipeline's runs_on.
 
+The run reservation decides whether a run first reserves the room its later
+steps need on its node, so another run's pods cannot take it between two
+steps: off (the default), shadow (sized and recorded, nothing held) or on.
+
+The image pre-pull decides whether the agent keeps the images the platform's
+own steps run in - the checkout's git client, the scanners, the rootless
+builder - pulled on every node pipeline steps can land on, so a node that
+just joined pulls them as it joins rather than while a step waits: off (the
+default) or on.
+
 ## ankra cluster agent ci get
 
 Show the stored worker count, storage class and placement, the agent version
 that has to honour them, whether that agent currently advertises it can run
 pipeline steps, and how the last write was applied. The placement block names
 the node group, node selector, tolerations and mode, and how many Ready nodes
-it admits right now.
+it admits right now. The run reservation and image pre-pull modes are shown
+with whether the agent advertises each; a platform that predates a setting
+shows neither of its lines.
 
 An agent that has not yet re-rendered its release reports pipeline steps as
 not advertised even with a non-zero worker count stored: the capability is
@@ -453,6 +514,27 @@ and is never held to the organisation's runs_on allow-lists. `--clear-placement`
 removes it. `--workers` is optional when only the storage class or the placement
 changes.
 
+`--run-reservation` off|shadow|on decides whether each run first reserves, on
+its node, the room its later steps will need, held by one placeholder pod per
+run, so another run's pods cannot take that room between two steps. off (every
+cluster's default) reserves nothing. shadow sizes each run's reservation and
+records it beside what its steps requested, and holds nothing: use it to check
+the estimate first. on holds it, which can add a node or keep one up while a
+run is between steps; it needs an agent that advertises run reservation, and
+until the agent does, on behaves as shadow. Like the placement it applies to
+the next step dispatched, with no agent restart, and off is the way back.
+
+`--image-prepull` off|on decides whether the agent keeps the platform's own
+step images (the checkout's git client, the trivy, checkov and semgrep
+scanners, the rootless builder) pulled on every node pipeline steps can land
+on, honouring the placement, with one DaemonSet in the agent's namespace. A
+node that just joined then pulls them as it joins instead of while a
+checkout, scan or build waits. The images are pinned by digest and follow
+the platform: a platform release that moves one moves the pre-pull with the
+next step dispatched. Each node keeps about 0.9 GB of images it would
+otherwise pull on demand. It needs an agent that advertises image pre-pull;
+off (the default) removes it with the next step dispatched.
+
 ```bash
 ankra cluster agent ci set [flags]
 ```
@@ -466,6 +548,8 @@ ankra cluster agent ci set --workers 2
   ankra cluster agent ci set --node-group pipelines
   ankra cluster agent ci set --node-selector pool=ci --toleration dedicated=ci:NoSchedule --placement preferred
   ankra cluster agent ci set --clear-placement
+  ankra cluster agent ci set --run-reservation shadow --cluster ci-01
+  ankra cluster agent ci set --image-prepull on --cluster ci-01
 ```
 
 **Flags**
@@ -473,10 +557,12 @@ ankra cluster agent ci set --workers 2
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--clear-placement` | `false` | Remove the cluster's CI placement |
+| `--image-prepull` |   | Image pre-pull: off (default) pulls the platform's step images on demand, on keeps them pulled on every node pipeline steps can land on |
 | `--node-group` |   | Run every pipeline pod on this Ankra node group: selects its nodes and tolerates its taints |
 | `--node-selector` | `[]` | Node label every pipeline pod selects, as key=value (repeatable) |
 | `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
 | `--placement` |   | Placement mode: required (default) keeps pipeline pods on the selected nodes, preferred favours them |
+| `--run-reservation` |   | Run reservation: off (default) reserves nothing, shadow sizes and records each run's reservation without holding it, on holds a run's room on its node between its steps |
 | `--storage-class` |   | Storage class for pipeline step workspaces; pass empty to use the cluster default (omit the flag to keep the stored value) |
 | `--toleration` | `[]` | Taint every pipeline pod tolerates, as key[=value]:Effect with Effect NoSchedule, PreferNoSchedule or NoExecute (repeatable) |
 | `--workers` | `0` | CI slots: pipeline steps the agent watches at once, not nodes (nodes come from the node group autoscaler); up to 128 on agents that support live resize, 32 otherwise; 0 disables the scheduler |
@@ -5208,6 +5294,12 @@ The resize power-cycles each node, and each is drained first, honouring its
 pods' PodDisruptionBudgets. `--force-drain` bypasses those budgets for that
 drain, so a node is resized even if its pods' disruption budget refuses the
 eviction. It applies to this request only.
+
+On UpCloud a plan is changed in place only within its plan family (STARTER,
+DEV, PREMIUM, GPU, or the unprefixed general-purpose plans such as 4xCPU-8GB).
+A new plan from another family replaces each node instead - drained, deleted
+and re-provisioned with the new plan - and the command says so. A control
+plane cannot be replaced that way, so a cross-family change there is refused.
 
 Examples:
 
