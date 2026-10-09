@@ -511,8 +511,46 @@ Ankra Pipelines is landing in pieces, and this page is honest about the line. Ev
 - **Merge-when-green and automatic disposition re-evaluation are GitHub only.** A GitLab or Bitbucket Cloud `merge when green` request is accepted and then refused, because neither provider adapter reports the capability to merge yet; a push to a GitLab or Bitbucket Cloud default branch that adds or removes `.ankra/pipeline.yaml` answers `insufficient evidence` rather than re-evaluating the application's pipeline source, because the raw-file read that evaluation needs has no GitLab or Bitbucket equivalent wired in yet.
 - **A dedicated log stream for pipeline output, on the agent side.** The platform half is in place: the `pipeline_output` JetStream stream exists with its own capacity and retention, the agent is granted publish on its own cluster's subject, dispatch renders that subject onto every step, and the log relay reads the dedicated stream first and falls back to the shared one. What has not shipped is the agent release that actually publishes there, so live output still rides the platform-wide `execution_output` stream until your cluster's agent is upgraded to a release carrying that change. Nothing about `ankra pipeline logs` or the check run changes when it does - the relay already reads either.
 - **Planning from the committed file is GitHub-only.** A GitLab or Bitbucket Cloud run plans from the stored definition permanently, because the bounded raw-file read the planner uses has no equivalent wired in for those providers yet; the run records `definition_source: stored` and says so in a diagnostic rather than pretending it read your commit.
-- **Annotations, metrics and ingested test results.** A step's stdout can already carry `$ANKRA_OUTPUT` key=value lines, read back onto the step; the equivalent for check-run annotations (`::ankra::notice file=…,line=…::msg`), custom metrics (`::ankra::metric name=…,value=…`) and a `test_results:` block's own report (see the [reference](/guides/pipeline-reference#fields-common-to-every-stage)) are none of them ingested anywhere yet - a declared `test_results:` validates and is carried to the agent, and nothing reads the report it points at.
+- **Annotations and metrics.** A step's stdout can already carry `$ANKRA_OUTPUT` key=value lines, read back onto the step; the equivalent for check-run annotations (`::ankra::notice file=…,line=…::msg`) and custom metrics (`::ankra::metric name=…,value=…`) is not ingested anywhere yet. Test reports are: see [Test results](#test-results).
 - Environments hydrated from restore points, verification stages, promotions with approvals, and canary rollouts - see [What comes next](#what-comes-next).
+
+## Test results
+
+A stage that runs tests can declare the reports its test command writes, and Ankra reads every test's outcome from them:
+
+```yaml
+  - name: "e2e"
+    kind: "run"
+    run: "pnpm test:e2e"
+    test_results:
+      - format: "junit"
+        path: "reports/junit"        # a file, or a directory of report files
+```
+
+After the step, the agent uploads each report to your organisation's [backup vault](/concepts/backup-vaults) like an artifact (named `ankra-tests.<n>.<format>` in the run's artifact list), and Ankra parses it. The step's own exit code stays its verdict: a report Ankra cannot read never fails or passes the step.
+
+**Formats.**
+
+| `format` | What to point it at |
+|---|---|
+| `junit`, `pytest` | JUnit XML: `go-junit-report` and `gotestsum --junitfile`, pytest `--junitxml`, Jest's `jest-junit`, Vitest's `junit` reporter, Maven Surefire, Playwright's `junit` reporter. A directory is read for every `.xml` file in it. |
+| `playwright` | Playwright's JSON reporter (`reporter: [['json', { outputFile: 'results.json' }]]`). |
+| `go-test` | `go test -json` output, or `gotestsum --jsonfile`. |
+
+**Flaky tests.** A test that failed and then passed on a retry is recorded as `flaky`, not passed, with the number of attempts. Ankra reads retries from Playwright's JSON reporter, from a JUnit file's Surefire `flakyFailure`/`rerunFailure` elements, and from a test that appears more than once in one report (`gotestsum --rerun-fails`). Playwright's `junit` reporter only writes retries with `includeRetries: true` (or `PLAYWRIGHT_JUNIT_INCLUDE_RETRIES=1`); without it a flaky test reads as passed, so use the JSON reporter or turn that on.
+
+**What you get.**
+
+- The run page's **Tests** section: failed tests first, then flaky ones, then the slowest, each with its duration, attempts and failure message. A report that was declared but not uploaded or could not be read is listed with the reason.
+- `GET …/pipeline-runs/{run_id}/tests`: the same summary over the API.
+- `GET …/pipeline-tests/history?test_key=…`: one test's outcomes in the newest runs of your default branch (or `branch=`), with its flaky rate.
+- `GET …/pipeline-tests/timings?stage=…&group_by=file|test`: each file's or test's mean recorded duration on the default branch, to balance shards by time. `runs_sampled: 0` means there is no data yet; fall back to an even split.
+
+All three need `pipelines.read` and answer on `/api/v1/org/pipeline-repositories/{repository_id}/…` and `/api/v1/org/applications/{application_id}/…`.
+
+**When a report is missing.** If your test command never wrote the report (the suite crashed before its reporter ran), the step is not failed for it on an agent that supports optional uploads. On an older agent, Ankra uploads a report only when the stage also lists the same path under `artifacts:`, so declaring `test_results` can never fail a step that passed; otherwise the run's test summary says the report was not uploaded and why, and upgrading the agent fixes it.
+
+**Limits.** A report is at most 32 MiB, and a directory at most 256 report files and 64 MiB unpacked. At most 100,000 tests are read from one report, and 20,000 per report and 50,000 per run are stored, failed and flaky ones first; the counts always cover every test read. Failure messages are kept to 2,000 characters, and anything that looks like a credential is redacted. A report with a `DOCTYPE` is refused. Test results are kept as long as the run they belong to.
 
 ## Organisation CI settings
 
