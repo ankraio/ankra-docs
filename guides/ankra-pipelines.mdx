@@ -600,6 +600,8 @@ To raise capacity, change the limit that is full:
 - **Runs queue as `waiting_on_ci_slots`.** `ankra cluster agent ci set --workers N --cluster <name>` (up to 128 on current agents).
 - **Steps are slow to start although slots are free.** The cluster has no room for the pods: raise the node group's autoscaling maximum (`ankra cluster node-group autoscaling get` shows it), or use larger nodes. More slots without more nodes only means more steps waiting for a node.
 
+The panel also says what is stopping each CI cluster from running your waiting steps, as a code and the one thing to do about it: a node the cloud provider refused for a quota, a node group at its maximum, no node type big enough for the step, an image the registry refused. `ankra org ci-settings get -o json` carries the same list per pool member as `scale_up_blockers`, with `scale_up_blockers_state` saying whether an empty list means nothing is wrong (`none_observed`) or the cluster's events could not be read (`unknown`). The codes are listed in [Diagnosis codes](#diagnosis-codes).
+
 Ankra also watches every pipeline cluster for you. When a cluster's steps in flight have stayed at or above its CI slots for fifteen minutes, Ankra raises a saturation alert for that cluster: pipelines there are queueing for slots while everything else reads healthy. The remedy is the same as above, more slots, or a larger node group maximum when the nodes are what is full.
 
 ### Step placement
@@ -731,6 +733,49 @@ Every failed step carries an error class, and the class decides whose failure it
 - **Cancel.** `ankra pipeline cancel <run>`, `POST …/pipeline-runs/{run_id}/cancel`, or the **Cancel** button on the check run while the run is live. A run that is cancelled concludes with outcome `cancelled`.
 - **Re-run.** `ankra pipeline rerun <run>` (add `--failed-only` to re-run only the steps that did not succeed, whatever depends on them, and the steps they build on), `POST …/pipeline-runs/{run_id}/rerun`, or GitHub's own **Re-run** button on the check. A re-run is a new run with `rerun_of_run_id` pointing at the old one; the old run's outcome stays the record of what happened. It re-plans from the **original run's own definition**, not from whatever the pipeline has become since, so re-running a month-old run reproduces it rather than quietly executing a different pipeline.
 - **Failed-only re-runs start from an empty workspace.** A re-run gets a workspace of its own - the original's is removed once it concludes - so `--failed-only` re-runs the checkout and every upstream step whose output a repeated step reads (through `needs`, and for a `gate` the stages in its `require_stages`) together with the failed steps and their dependents. Steps that succeeded and that nothing repeated needs, such as a publish after the failure, are not repeated. A failed-only re-run that could not run a step that failed - a stage limited by `when.events` to `push`, which a re-run's `rerun` trigger filters out - is refused with the reason for each such step, rather than queued to pass without it.
+
+### Diagnosis codes
+
+A step that failed for a reason Ankra recognises, or that has waited more than two minutes for its pod to start, carries a `diagnosis`: a stable `code`, a `title`, a `next_step` and, where there is one, the cluster's or the provider's own words in `detail` (cleaned of hidden characters and anything that looks like a credential, and cut to 300 characters). The run carries the one a reader should act on first in its own `diagnosis`, and the run page shows it above the steps. A step that failed in its own script has no diagnosis, because its log is the answer. A running step whose cluster events could not be read says so in `diagnosis_unavailable` rather than showing nothing.
+
+Ankra reads the evidence it already has, so nothing extra runs on your cluster: the step's error class and the agent's message, the Kubernetes events on the step's pod and its workspace volume, the Cluster Autoscaler's events, and, for node groups Ankra scales, its own record of the node create the provider refused. It reads only events of clusters your organisation owns.
+
+**Why a step, or a CI cluster, is waiting**
+
+| `code` | What it means | What to do |
+|--------|---------------|------------|
+| `provider_quota_exceeded` | The cloud provider refused a new node for a project or account limit, such as Hetzner's `403 resource_limit_exceeded: shared core limit exceeded`, an AWS vCPU limit or a GCP or Azure quota | Raise the limit with the provider. On Hetzner, open the Cloud console, the account menu, **Limits**, **Request change**; the `next_step` field names the shared or dedicated vCPU or server limit. Or add another CI cluster to the pool with `ankra org ci-settings pool add <cluster>` |
+| `provider_volume_quota_exceeded` | The provider refused the step's workspace or cache volume for a volume limit | Delete detached volumes nothing uses, raise the volume limit, or add a pool member |
+| `scale_up_failed` | The autoscaler asked for a node and it was not added, for a reason that is not a known quota | Check the CI cluster's node groups; the autoscaler tries again after its back-off. Or add a pool member |
+| `node_group_at_max` | Every node group that could run the step is at its maximum size | Raise the node group's autoscaling maximum, or add a pool member |
+| `no_node_group_fits` | No node group's node type has enough CPU or memory for the step, so adding nodes would not help | Lower the stage's `resources`, or add a node group with a larger node type |
+| `insufficient_capacity` | No node has room for the step and nothing is adding one | Enable autoscaling on the CI node group, add nodes, or add a pool member |
+| `run_node_full` | The step shares the run's workspace volume, so it must run on the node that holds it, and that node is full | It starts when the run's other steps finish. Lower the stage's `resources` to fit more steps on one node |
+| `image_pull_auth` | The registry refused the step's image to the cluster's credentials | Check the image name, then add the registry's credential to the organisation, or use a public image |
+| `image_pull_failed` | The cluster could not pull the image for another reason | Check that the image name and tag exist and that the registry is reachable from the cluster |
+| `volume_unavailable` | The step's volume could not be provisioned, attached or mounted | Check the CI cluster's StorageClass and CSI driver. A volume still detaching from another node clears on its own |
+| `scale_up_in_progress` | The autoscaler is adding a node for the step | Nothing; a new node usually joins in one to three minutes |
+
+**Why a step or run failed**
+
+| `code` | What it means | What to do |
+|--------|---------------|------------|
+| `out_of_memory` | The kernel killed the step at its memory limit; the `next_step` field names the limit | Raise the stage's `resources.memory`, or make the step use less. When the run did not take the stage's resources because the definition is not approved, approve it instead |
+| `stage_exceeds_node_size` | The stage asks for more CPU or memory than any node of the CI cluster offers, so it can never start | Lower the stage's `resources`, or add a node group with a larger node type |
+| `build_runtime_confined` | The cluster's node runtime stops the rootless image builder (see [When something fails](#when-something-fails)) | Keep `--build-fallback platform_builders`, or build on a cluster whose runtime allows the builder |
+| `image_pull_auth`, `image_pull_failed` | As above, for a step that gave up on its image | As above |
+| `deadline_exceeded` | The step ran longer than its `timeout` | Raise the stage's `timeout`, or make the step faster; caches help most |
+| `deadline_exceeded_waiting` | The step's whole time budget went on waiting for its pod to start; when the agent's message quotes the cluster's reason, the `next_step` field names what held it | Fix that (see the waiting codes), then run the pipeline again |
+| `no_ci_cluster` | The organisation has no CI cluster | `ankra org ci-settings set --cluster <cluster>`, then run again |
+| `definition_needs_approval` | An administrator has not approved the pipeline definition, so the run did not execute its protected sections as written | Approve it on the run page or with `ankra pipeline definitions approve <id>`, then run again |
+
+**A notice on a passing step**
+
+| `code` | What it means | What to do |
+|--------|---------------|------------|
+| `cache_volume_fallback` | The step's caches ran without a persistent volume, so the next run starts cold. Its `category` is `notice`, not `failure` | Give the CI cluster a default StorageClass. Runs from forks and tags never share caches, by design |
+
+The codes are a fixed vocabulary that monitoring and scripts can key on; the sentences may be reworded.
 
 ### Status is the lifecycle, outcome is the verdict
 
