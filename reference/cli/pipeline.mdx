@@ -383,6 +383,7 @@ ankra pipeline get [run] [flags]
 | `--latest` | `false` | Take the newest matching run when several match (on its own: the pipeline's newest run) |
 | `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
 | `--repository` |   | Pipeline repository id to act on (mutually exclusive with `--application`) |
+| `--step` |   | Also print the per-cache table of the step with this key: each cache's outcome, reason, size and save |
 | `--timeout` | `0s` | Give up waiting after this long and exit 5, e.g. 45m (default: wait until the run concludes) |
 | `--trigger` |   | Select the run with this trigger: push, pull_request, tag, schedule, manual, api, agent, or rerun |
 | `--wait` | `false` | Wait for the run to conclude, then print its final detail; exits non-zero unless it succeeded |
@@ -592,6 +593,35 @@ ankra pipeline repositories list [flags]
 | `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
 | `--provider` |   | Repository provider: github, gitlab, or bitbucket (filter) |
 
+## ankra pipeline repositories set-cluster
+
+Change a connected repository's CI cluster override without disconnecting it.
+
+```bash
+ankra pipeline repositories set-cluster <repository-id> --cluster build-cluster
+ankra pipeline repositories set-cluster <repository-id> --cluster ""
+```
+
+The cluster (name or id) must belong to the organisation and its agent must run
+pipeline steps. An empty `--cluster` clears the override, so the repository's
+runs follow the organisation's CI settings - its pipeline cluster, or its CI
+pool - again.
+
+It changes where the repository's next runs go; a run already queued or
+running keeps the cluster it was pinned to, because a run's steps never split
+across clusters. Requires the pipelines.manage permission.
+
+```bash
+ankra pipeline repositories set-cluster <repository-id> [flags]
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--cluster` |   | Cluster name or id the repository's runs go to; empty clears the override |
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+
 ## ankra pipeline rerun
 
 Open a new run from a run that already happened.
@@ -742,6 +772,109 @@ ankra pipeline schedules update <schedule-id> [flags]
 | `--repository` |   | Pipeline repository id to act on (mutually exclusive with `--application`) |
 | `--timezone` |   | New IANA timezone |
 
+## ankra pipeline train
+
+Manage a repository's Ankra merge train.
+
+The merge train tests each pull request squashed onto the base branch and the
+pull requests ahead of it, exactly as its merge will land, and merges it
+through the repository host's own merge when that run passes. Every merge is
+then a tree a pipeline run already passed, so a definition whose publish stage
+declares promote_from: pull_request publishes the tested image instead of
+rebuilding it.
+
+The train is off by default: 'ankra pipeline train enable' switches it on
+(pipelines.manage). 'ankra pipeline train add &lt;pull request&gt;' puts a pull
+request at the end of it (pipelines.operate), 'list' shows it in order and
+'remove' takes one out. GitHub repositories only.
+
+## ankra pipeline train add
+
+Put a pull request at the end of the merge train.
+
+The train tests the pull request's head as it is now: pass `--head-sha` to pin
+the commit you reviewed. A push to the pull request after it entered takes it
+out of the train again. A pull request already in the train is answered with
+its entry.
+
+```bash
+ankra pipeline train add <pull request number> [flags]
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--application` |   | Application name or id whose pipeline to act on |
+| `--head-sha` |   | Full commit sha to pin as the head the train tests and merges |
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+| `--repository` |   | Pipeline repository id to act on (mutually exclusive with `--application`) |
+
+## ankra pipeline train disable
+
+Switch the merge train off and empty it
+
+```bash
+ankra pipeline train disable [flags]
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--application` |   | Application name or id whose pipeline to act on |
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+| `--repository` |   | Pipeline repository id to act on (mutually exclusive with `--application`) |
+
+## ankra pipeline train enable
+
+Switch the merge train on
+
+```bash
+ankra pipeline train enable [flags]
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--application` |   | Application name or id whose pipeline to act on |
+| `--max-cars` | `1` | How many pull requests are tested at once (1-8), each stacked on the ones ahead of it |
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+| `--repository` |   | Pipeline repository id to act on (mutually exclusive with `--application`) |
+
+## ankra pipeline train list
+
+Show the merge train in order, and what recently left it
+
+```bash
+ankra pipeline train list [flags]
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--application` |   | Application name or id whose pipeline to act on |
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+| `--repository` |   | Pipeline repository id to act on (mutually exclusive with `--application`) |
+
+## ankra pipeline train remove
+
+Take a pull request out of the merge train
+
+```bash
+ankra pipeline train remove <entry id> [flags]
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--application` |   | Application name or id whose pipeline to act on |
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+| `--repository` |   | Pipeline repository id to act on (mutually exclusive with `--application`) |
+
 ## ankra pipeline validate
 
 Dry-run a pipeline definition: parse it, validate it, and plan it for a
@@ -752,6 +885,17 @@ Defaults to .ankra/pipeline.yaml when no file is given; with neither that file n
 validate. Passing a file validates its content directly, which is what a
 'is my pipeline.yaml correct before I commit it' check wants. `--spec-file` is
 the flag spelling of that argument, matching 'pipeline run `--spec-file`'.
+
+After the per-event detail, a table shows every stage against every event
+probed (push, pull_request, and tag when the pipeline declares on.tag):
+"run", or "skip" with the planner's reason. Path filters - flat when.paths or
+an event block's when.pull_request.paths / when.push.paths - cannot decide
+without a diff, so they pass with a diagnostic; `--changed-file` (repeatable)
+names a dry-run diff so they decide for real:
+
+```bash
+ankra pipeline validate --repository <id> --changed-file frontend/app.ts
+```
 
 `--ref` reads the definition from a git reference in the current checkout
 instead of the working tree, so a candidate on a branch can be checked
@@ -773,6 +917,7 @@ ankra pipeline validate [file] [flags]
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--application` |   | Application name or id whose pipeline to act on |
+| `--changed-file` | `[]` | Plan as if this repository-relative path changed (repeatable), so path filters decide instead of passing |
 | `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
 | `--ref` |   | Read the definition from this git reference in the current checkout (for example origin/my-branch) instead of the working tree |
 | `--repository` |   | Pipeline repository id to act on (mutually exclusive with `--application`) |
