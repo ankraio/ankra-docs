@@ -67,6 +67,61 @@ Requests reach the cluster through Ankra's authenticated proxy, which is why thi
 
 An [organisation access policy](/guides/cluster-access#organisation-access-policy) sets a ceiling on the role any grant can carry, what a cluster's creator is given, how long access above `view` may last, and from which role a grant needs a reason. For incident access without standing privilege, use [break-glass elevation](/guides/cluster-access#break-glass-elevation): time-boxed, reasoned access a person or service account gives itself, announced on your notification channels and recorded in the audit log.
 
+### The identity your cluster sees
+
+The Ankra agent re-issues every proxied request to the API server as the member, using Kubernetes impersonation. The API server, its RBAC and your admission policies see this identity:
+
+| Field | Value |
+|-------|-------|
+| Username | `ankra:user:<ankra-user-id>` - the member's or service account's Ankra user ID, never an email address |
+| Group | `system:authenticated`, which Kubernetes adds to every impersonated identity |
+| Group | `ankra:users`, on every request through Ankra |
+| Group | `ankra:org:<organisation-id>`, the organisation the credential belongs to |
+| Group | `ankra:grant:<role>`, one per role the member holds on that cluster through a live grant (`view`, `edit`, `admin` or `cluster-admin`), whatever the grant's scope. A grant that has expired or been revoked no longer contributes its group |
+
+The `ankra:` groups carry no permissions. Ankra binds every grant to the username, never to a group, so the groups only add names your policies can match. Do not bind a Role or ClusterRole to one of them yourself: that would grant access outside Ankra's access policy and its audit trail.
+
+The groups are sent by agent version 2.1.1221 and later. An older agent impersonates the username alone, and so does an agent whose own service account may not impersonate groups (the agent's chart grants that permission; the agent logs a warning when it is missing). Check what a cluster sees with your Ankra kubeconfig:
+
+```bash
+kubectl auth whoami
+```
+
+The `Groups` row lists the `ankra:` groups when they arrive.
+
+Because the groups can be absent, write admission policies that use them to **exempt** a caller, never to deny one. This ValidatingAdmissionPolicy (Kubernetes 1.30 or newer) refuses namespace deletion through Ankra unless the member holds a `cluster-admin` grant on the cluster, such as a [break-glass elevation](/guides/cluster-access#break-glass-elevation). Requests that do not come through Ankra are left alone:
+
+```yaml
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: ankra-namespace-delete-needs-cluster-admin
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["DELETE"]
+        resources: ["namespaces"]
+  matchConditions:
+    - name: through-ankra
+      expression: "request.userInfo.username.startsWith('ankra:user:')"
+  validations:
+    - expression: "'ankra:grant:cluster-admin' in request.userInfo.groups"
+      message: "Deleting a namespace through Ankra needs a cluster-admin grant on this cluster."
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: ankra-namespace-delete-needs-cluster-admin
+spec:
+  policyName: ankra-namespace-delete-needs-cluster-admin
+  validationActions: ["Deny"]
+```
+
+On an agent older than 2.1.1221 this policy refuses every namespace deletion through Ankra, including by holders of `cluster-admin`, which fails closed. A `cluster-admin` grant scoped to a single namespace also produces `ankra:grant:cluster-admin`; if the exemption should mean cluster-wide access only, issue `cluster-admin` at cluster scope.
+
 <Warning>
 The Ankra audit log records who was given Kubernetes access and every credential minted against a cluster: access grants and their changes, kube-token minting (which is also how a kubeconfig is generated), and every pod terminal session, with a recording of the session. Individual Kubernetes API calls - through Ankra's proxy or any other client - are recorded only by your cluster's own audit policy. If you need a trail of in-cluster API activity, enable Kubernetes audit logging on the cluster.
 </Warning>
