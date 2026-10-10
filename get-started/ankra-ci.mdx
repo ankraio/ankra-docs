@@ -1,0 +1,339 @@
+---
+title: Get started with Ankra CI
+sidebarTitle: Get started with Ankra CI
+description: "Move a repository's CI to Ankra Pipelines in about 20 minutes: choose the cluster your builds run on, connect the repository, commit .ankra/pipeline.yaml and get a green Ankra pipeline check on your next pull request."
+---
+
+import { CliVersion } from "/snippets/cli-version.jsx";
+
+Ankra CI - Ankra Pipelines in the product - runs your repository's CI inside a Kubernetes cluster you already run through Ankra. You describe the pipeline in one file, `.ankra/pipeline.yaml`. Every push and pull request then runs it as hardened Kubernetes Jobs on your own nodes. The result lands on the commit as an `Ankra pipeline` check, next to the logs, test results and scan findings in Ankra.
+
+This tutorial takes one repository from nothing to a green check on a pull request. Every step ends with something you can see, so you know it worked before you move on.
+
+## Why teams move to Ankra CI
+
+| | GitHub Actions, GitLab CI | Ankra CI |
+| --- | --- | --- |
+| **Where jobs run** | Hosted runners billed per minute, or a self-hosted runner fleet you patch and scale | Pods on a cluster you already operate, under the quotas and node groups you set |
+| **Secrets** | Copied into each repository's CI settings, readable by any workflow that names them | References to your Ankra variables and registries, delivered to one step as a file and never written to a log |
+| **What a pull request can change** | Anything in the workflow file, including which secrets it reads | The steps and scripts. Secrets, network access, compute and caches stay as an administrator approved them |
+| **Image security** | Push first, scan afterwards, if a scan step exists | `build`, `scan`, `gate`, `publish`: nothing reaches your registry until the gate has judged the exact digest |
+| **Where the evidence lives** | The CI provider | Ankra, with the same status on GitHub, GitLab or Bitbucket Cloud |
+
+## Choose your starting point
+
+<CardGroup cols={3}>
+  <Card title="I already have GitHub Actions or GitLab CI" icon="arrows-rotate" href="/guides/migrate-from-github-actions">
+    Ankra converts your existing workflow into `.ankra/pipeline.yaml` and opens a pull request. Then come back for steps 1, 2, 6 and 7.
+  </Card>
+  <Card title="I am deploying a new app with Ankra" icon="rocket" href="/guides/deliver-your-app">
+    The setup pull request Ankra opens for a new application already commits a pipeline that tests, builds, scans and publishes. Steps 1, 2 and 7 are all you need here.
+  </Card>
+  <Card title="I want to start from a blank file" icon="file-code" href="#1-choose-the-cluster-your-builds-run-on">
+    Follow this page from top to bottom. It is the best way to learn how a pipeline fits together.
+  </Card>
+</CardGroup>
+
+## Before you start
+
+- **An Ankra organisation where you are an administrator.** Choosing the CI cluster and approving a pipeline are administrator actions. Anyone with pipeline access can do the rest.
+- **A cluster connected to Ankra** with a healthy agent and some spare capacity. Any cluster works, and it does not have to be dedicated to CI: steps run in their own `ankra-ci` namespace, in a worker pool kept apart from the agent's deploy work. Many teams start on their staging cluster and move CI to its own cluster later.
+- **The repository connected to Ankra** through the [Ankra GitHub App](/integrations/github), [GitLab](/integrations/gitlab) or [Bitbucket Cloud](/integrations/bitbucket-cloud). On GitHub, the App needs the **Checks: write** permission to post the `Ankra pipeline` check.
+- **The Ankra CLI**, logged in to the right organisation:
+
+<CliVersion since="0.16.0" />
+
+```bash
+brew install ankraio/tap/ankra
+ankra login
+ankra org switch <your-organisation>
+```
+
+Other install methods are on the [CLI page](/integrations/ankra-cli).
+
+## 1. Choose the cluster your builds run on
+
+Pipelines run on one cluster per organisation, the **pipeline cluster**. Until you choose one, a push has nowhere to run, and the commit gets a failing check that asks you to choose a cluster.
+
+<Tabs>
+  <Tab title="CLI">
+    ```bash
+    ankra org ci-settings set --cluster <cluster-name>
+    ankra org ci-settings get
+    ```
+  </Tab>
+  <Tab title="Portal">
+    Open **Settings → Pipelines**. Under **Pipeline cluster**, pick the cluster in **Cluster** and click **Save**.
+  </Tab>
+</Tabs>
+
+**You should see** your cluster named as the pipeline cluster in `ankra org ci-settings get`, or in the portal.
+
+## 2. Turn on pipeline workers on that cluster
+
+The Ankra agent on every cluster starts with **zero** pipeline workers, which means pipelines are switched off there. Give it some. Each worker runs one pipeline step at a time, separately from the agent's deploy and read work, so a busy pipeline never delays a deploy.
+
+<Tabs>
+  <Tab title="CLI">
+    ```bash
+    ankra cluster agent ci set --workers 2 --cluster <cluster-name>
+    ankra cluster agent ci get --cluster <cluster-name>
+    ```
+  </Tab>
+  <Tab title="Portal">
+    In **Settings → Pipelines**, under **Workers and step placement**, set **Pipeline-step workers** to `2` and click **Save**.
+  </Tab>
+</Tabs>
+
+Ankra applies the setting through the agent's own release. A recent agent picks up the new count straight away, and an older one restarts to pick it up. Do not `helm upgrade` the agent yourself to change it, because Ankra re-renders that release and would overwrite your value.
+
+**You should see** the new worker count when you read the settings back. Start with 2 and raise it once you see steps waiting: the run page says when a step is waiting for a free worker.
+
+## 3. Connect the repository
+
+<Tabs>
+  <Tab title="CLI">
+    Find the name of the organisation's Git credential, then connect the repository with it:
+
+    ```bash
+    ankra credentials list
+    ankra pipeline repositories connect --provider github --owner my-org --name my-repo --credential <git-credential-name>
+    ```
+
+    Use `--provider gitlab` or `--provider bitbucket` for those hosts, and add `--default-branch <branch>` when it is not `main`.
+
+    The output starts with `Connected my-org/my-repo as repository <repository-id>`. Keep that id - the commands below take it as `--repository <repository-id>`, and `ankra pipeline repositories list` shows it again later.
+  </Tab>
+  <Tab title="New portal (application)">
+    When the repository already backs an [Ankra application](/concepts/applications), open the application in the new Ankra portal (`/next` on your portal's address, for example `https://platform.ankra.app/next/applications`), then **Technical details → Pipelines**. Under **Connect this repository to pipelines**, pick the **Source connection**, click **Review pipeline connection**, then **Confirm pipeline connection**.
+
+    For an application, use `--application <application-name>` in the commands below instead of `--repository`. Inside a checkout of the application's repository you can leave it out: the CLI works it out from your `origin` remote and says which application it picked.
+  </Tab>
+</Tabs>
+
+The connect output's second line reads `Definition: absent` until a pipeline file is on the default branch. That is expected - step 5 stores one.
+
+**You should see** the repository in `ankra pipeline repositories list`, and under **Settings → Pipelines** in the portal.
+
+## 4. Add `.ankra/pipeline.yaml`
+
+On a new branch, create `.ankra/pipeline.yaml`. This first pipeline checks out the commit and runs your tests on every push to `main`, on every pull request into it, and whenever you start it by hand. Pick your toolchain:
+
+<Tabs>
+  <Tab title="Node.js (npm)">
+    ```yaml
+    apiVersion: ankra.io/v1
+    kind: Pipeline
+    metadata:
+      name: "my-repo"
+    on:
+      push:
+        branches: ["main"]
+      pull_request:
+        branches: ["main"]
+      manual: {}
+    defaults:
+      network: "egress-https"
+    stages:
+      - name: "checkout"
+        kind: "checkout"
+      - name: "test"
+        kind: "run"
+        image: "node:24-alpine"
+        needs: ["checkout"]
+        env:
+          npm_config_cache: "/workspace/.ankra-node-cache/npm"
+        run: |
+          npm ci
+          npm test
+    ```
+  </Tab>
+  <Tab title="Python (pip)">
+    ```yaml
+    apiVersion: ankra.io/v1
+    kind: Pipeline
+    metadata:
+      name: "my-repo"
+    on:
+      push:
+        branches: ["main"]
+      pull_request:
+        branches: ["main"]
+      manual: {}
+    defaults:
+      network: "egress-https"
+    stages:
+      - name: "checkout"
+        kind: "checkout"
+      - name: "test"
+        kind: "run"
+        image: "python:3.13-slim"
+        needs: ["checkout"]
+        env:
+          PIP_CACHE_DIR: "/workspace/.ankra-python-cache/pip"
+        run: |
+          python -m venv /workspace/.ankra-venv
+          . /workspace/.ankra-venv/bin/activate
+          pip install -r requirements.txt
+          pytest
+    ```
+  </Tab>
+  <Tab title="Go">
+    ```yaml
+    apiVersion: ankra.io/v1
+    kind: Pipeline
+    metadata:
+      name: "my-repo"
+    on:
+      push:
+        branches: ["main"]
+      pull_request:
+        branches: ["main"]
+      manual: {}
+    defaults:
+      network: "egress-https"
+    stages:
+      - name: "checkout"
+        kind: "checkout"
+      - name: "test"
+        kind: "run"
+        image: "golang:1.26"
+        needs: ["checkout"]
+        env:
+          GOPATH: "/workspace/.ankra-go"
+          GOCACHE: "/workspace/.ankra-go/cache"
+          GOMODCACHE: "/workspace/.ankra-go/mod"
+          GOTMPDIR: "/workspace/.ankra-go/tmp"
+          GOFLAGS: "-buildvcs=false"
+        run: |
+          mkdir -p "$GOTMPDIR"
+          go test ./...
+    ```
+  </Tab>
+</Tabs>
+
+Each of these was run on a real pipeline cluster before it was published. A few lines in them are there because of how Ankra runs a step, and every pipeline you write will need them:
+
+- **`checkout` is a stage you declare.** Every run starts from an empty workspace, mounted at `/workspace`, and nothing is cloned unless a `checkout` stage does it. Stages that come after it list it in `needs`.
+- **`manual: {}` lets you start a run by hand.** Without it, `ankra pipeline run` and the portal's **Run pipeline** button answer that no trigger matches.
+- **`network: "egress-https"` lets a step download packages.** A `run` stage has no network access by default. `egress-https` allows HTTPS to the public internet and nothing private.
+- **Package caches point into `/workspace`.** A step runs as a non-root user on a read-only root filesystem. `HOME` is `/tmp`, which is writable but small and held in memory, so the file sends each package manager's cache to `/workspace`, the run's shared, disk-backed volume.
+
+More toolchains, image builds and database-backed tests are in [Starter pipelines](/guides/ankra-ci-starter-pipelines).
+
+## 5. Validate and store the definition
+
+Check the file before you commit it. `validate` plans it for a sample push and a sample pull request and prints which stages would run:
+
+```bash
+ankra pipeline validate .ankra/pipeline.yaml --repository <repository-id>
+```
+
+A `fatal` result means the file cannot run - fix what it names. A `warn` means it runs, but probably not the way you meant, so read it.
+
+Then store the file as the repository's definition, so the very first webhook has something to run:
+
+```bash
+ankra pipeline definition put .ankra/pipeline.yaml --repository <repository-id>
+```
+
+On GitHub, every later run reads `.ankra/pipeline.yaml` from the commit it runs, so changing the file in a pull request changes that pull request's run. On GitLab and Bitbucket Cloud the stored definition is what runs, so run `definition put` again whenever you change the file.
+
+<Tip>
+You can also ask Ankra's AI to check a pipeline in the portal chat - "validate this .ankra/pipeline.yaml" with the file pasted in - which needs no repository at all.
+</Tip>
+
+## 6. Open a pull request and watch the run
+
+Commit the file on your branch, push it and open a pull request into `main`:
+
+```bash
+git checkout -b add-ankra-ci
+git add .ankra/pipeline.yaml
+git commit -m "Add the Ankra pipeline"
+git push -u origin add-ankra-ci
+```
+
+Shortly after the push, the pull request gets an **Ankra pipeline** check with a table of steps. On GitHub it has a **Cancel** button while the run is live and GitHub's own **Re-run** afterwards. Ankra also keeps one status comment on the pull request up to date with the same table.
+
+Follow the same run from your terminal:
+
+```bash
+ankra pipeline list --repository <repository-id>
+ankra pipeline get --repository <repository-id> --branch add-ankra-ci --latest --watch
+ankra pipeline logs <run-id> --repository <repository-id> --step test --follow
+```
+
+In the portal, the run has a timeline, each step's output, test results and artifacts, with **Re-run failed steps** and **Cancel run** on the run page.
+
+**You should see** both steps succeed. On a repository's first pipeline the check then waits with the title **Awaiting authority approval** - that is the next step, not a failure.
+
+## 7. Approve the pipeline once
+
+The check waits because a pipeline that runs on pull requests carries a security setting an administrator has to accept: `fork_policy: read_only`, which runs pull requests from forks with no secrets, no credentials and no network beyond what their checkout, build and scan need. It is the safest setting there is, and Ankra still asks a person to approve it rather than granting anything on its own. The check lists it in a table:
+
+| Protected setting | Approved today | This pipeline asks for |
+| --- | --- | --- |
+| `fork_policy` | - | `read_only` |
+
+Approve it:
+
+<Tabs>
+  <Tab title="Portal">
+    Open **Settings → Pipelines**. **Pending approvals** lists every repository waiting, with the protected settings it asks for. Review them and click **Approve**. You can also approve from the run page, or press **Approve authority** on the GitHub check if your GitHub account is linked to your Ankra profile.
+  </Tab>
+  <Tab title="CLI">
+    The pull request comment prints the exact command with the definition id filled in. Read what you are granting, then approve it:
+
+    ```bash
+    ankra pipeline definitions get <definition-id>
+    ankra pipeline definitions approve <definition-id>
+    ```
+  </Tab>
+</Tabs>
+
+Approving needs an organisation administrator with pipeline management access, signed in as themselves - an API token cannot approve.
+
+**You should see** the check turn green. Every later pull request gets a plain green or red check, as long as nobody changes a protected setting. Merge the pull request: the push to `main` runs the pipeline again, this time as a branch run.
+
+### When you add more to the pipeline
+
+The same approval covers more than the fork policy. These settings are **protected**: secrets, credentials, caches, CPU and memory, a stage's timeout, sidecar services such as a database, network access beyond `egress-https`, and where a step runs.
+
+A pull request can change what a pipeline *does* - its stages, scripts and images - but not what it is *allowed to touch*. Otherwise anyone who can open a pull request could read your secrets or claim your biggest nodes. So a protected setting takes effect only once an administrator approves the version of the file on the default branch. Until then, runs execute as if the setting were not there, and the check and `ankra pipeline validate` both say which settings were left out.
+
+The order is always the same: merge the change to the default branch, approve it, and the waiting runs re-run on their own. A change that touches no protected setting never needs approval.
+
+## 8. Make it the check that guards `main`
+
+Once the pipeline has been green on a few pull requests:
+
+1. In your repository's branch protection rules (on GitHub, **Settings → Branches** or **Rules**), add **Ankra pipeline** as a required status check.
+2. Remove or disable the old workflow (`.github/workflows/*.yml`, `.gitlab-ci.yml`), so each commit is built once.
+
+[Move a team to Ankra CI](/guides/move-to-ankra-ci) has the full rollout plan for more than one repository.
+
+## What you have now
+
+- [x] A pipeline cluster and pipeline workers for the organisation
+- [x] A repository connected to Ankra Pipelines
+- [x] `.ankra/pipeline.yaml` that runs on every push and pull request
+- [x] An `Ankra pipeline` check on every commit, and run history in Ankra
+- [x] Protected settings that only an administrator can grant
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Starter pipelines" icon="layer-group" href="/guides/ankra-ci-starter-pipelines">
+    Copy-paste pipelines for Node.js, Python, Go and Rust, caches, a Postgres service, and build, scan and publish an image.
+  </Card>
+  <Card title="Move a team to Ankra CI" icon="list-check" href="/guides/move-to-ankra-ci">
+    A rollout plan from one pilot repository to all of them, with a GitHub Actions to Ankra mapping.
+  </Card>
+  <Card title="Troubleshooting" icon="stethoscope" href="/guides/ankra-ci-troubleshooting">
+    A push that started nothing, a step that waits, a step that cannot write or download.
+  </Card>
+  <Card title="Ankra Pipelines in depth" icon="book" href="/guides/ankra-pipelines">
+    How a run is planned and dispatched, the security model, organisation CI settings and capacity.
+  </Card>
+</CardGroup>

@@ -1,0 +1,200 @@
+---
+title: Ankra CI troubleshooting
+sidebarTitle: Troubleshooting
+description: "Fix what a new Ankra pipeline usually hits first: a push that started no run, a check waiting for approval, a step that waits, cannot reach the network, cannot write, runs out of memory or cannot find its secret."
+---
+
+import { CliVersion } from "/snippets/cli-version.jsx";
+
+Find the symptom, then the fix. Most first-week problems are one of these, and the run usually names the cause itself: a failed or waiting step carries a **diagnosis** with what happened and what to do, shown above the steps on the run page and in `ankra pipeline get <run-id>`.
+
+<CliVersion since="0.16.0" />
+
+```bash
+ankra pipeline list --repository <repository-id>
+ankra pipeline get <run-id> --repository <repository-id>
+ankra pipeline logs <run-id> --repository <repository-id> --step <step>
+```
+
+Inside a checkout of an [Ankra application](/concepts/applications)'s repository you can leave out `--repository`: the CLI finds the application from your `origin` remote.
+
+## A push or pull request started no run
+
+Work down this list - each line is a reason Ankra records for an event that did not start a run.
+
+| Check | Fix |
+| --- | --- |
+| Is the repository connected? `ankra pipeline repositories list` | Connect it - [step 3 of Get started](/get-started/ankra-ci#3-connect-the-repository) |
+| Does it have a definition? `ankra pipeline definition get --repository <repository-id>` | Store one: `ankra pipeline definition put .ankra/pipeline.yaml --repository <repository-id>`. Connecting only reads the file when it is already on the default branch. |
+| Is there a pipeline cluster? `ankra org ci-settings get` | `ankra org ci-settings set --cluster <cluster-name>`. Until you do, the commit gets a failing check that asks you to choose one. |
+| Does `on:` match the event? | `on.push.branches` is the branch you pushed. `on.pull_request.branches` is the pull request's **base** branch, the one it merges into. |
+| Did a path filter exclude it? | A push that changed no file under `paths` starts nothing. The run list shows it as concluded `skipped` with the reason. |
+
+`ankra pipeline list` shows runs that were recorded as skipped, with the reason.
+
+### No check appears on GitHub, but the run is there
+
+The Ankra GitHub App needs the **Checks: write** permission to post the `Ankra pipeline` check. Without it, Ankra reports the run in its status comment on the pull request instead, and the comment says which permission is missing. Grant it in the App's settings on GitHub.
+
+## "No trigger this pipeline declares matches this event"
+
+`ankra pipeline run`, and the portal's **Run pipeline** button, answer this when the pipeline does not declare manual runs. Add it to `on:`:
+
+```yaml
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+  manual: {}
+```
+
+## The check says "Awaiting authority approval"
+
+The pipeline asks for a protected setting that no administrator has approved yet, and the check lists which. On a repository's first pipeline this is expected: the pull request trigger's `fork_policy: read_only` is one of them.
+
+The steps still run, but the check stays in progress until an administrator approves. Approve once, in **Settings → Pipelines → Pending approvals**, with **Approve authority** on the check, or with the command the pull request comment prints:
+
+```bash
+ankra pipeline definitions approve <definition-id>
+```
+
+The check then settles. See [Approve the pipeline once](/get-started/ankra-ci#7-approve-the-pipeline-once).
+
+## A setting in the file has no effect
+
+Secrets, credentials, caches, CPU and memory, a stage's timeout, services, a network tier above `egress-https` and step placement are **protected**. A run takes them only from the version of the pipeline on the default branch, and only once an administrator has approved it. Until then the run behaves as if they were not set - a cache does not restore, a memory limit stays at 1Gi, a secret's file is missing.
+
+`ankra pipeline validate` names every protected setting that will not apply yet, and prints the command to approve it:
+
+```bash
+ankra pipeline validate .ankra/pipeline.yaml --repository <repository-id>
+```
+
+Merge the change to the default branch, then approve it. The runs that waited re-run on their own.
+
+## A step waits and does not start
+
+The run page and `ankra pipeline get` say why a step is waiting. The common reasons:
+
+| What it says | What to do |
+| --- | --- |
+| Waiting for a CI slot, or `waiting_on_ci_workers` | The cluster's agent has no free pipeline worker. On a new cluster it has none at all: `ankra cluster agent ci set --workers 2 --cluster <cluster-name>`. Otherwise raise the count. |
+| `scale_up_in_progress` | A node is being added for the step. It usually joins in one to three minutes. |
+| `node_group_at_max` | Every node group that could run the step is at its maximum. Raise the maximum, or add another cluster to the CI pool. |
+| `no_node_group_fits`, `stage_exceeds_node_size` | No node is big enough for what the stage asks for. Lower its `resources`, or add a node group with bigger nodes. |
+| `provider_quota_exceeded` | Your cloud provider refused a new node for a quota. Raise the quota with the provider. |
+| `image_pull_auth`, `image_pull_failed` | The cluster cannot pull the step's image. Check the name and tag, and that the registry is reachable, or add the registry's credential to the organisation. |
+
+A step that never starts is eventually concluded with a message pointing at the cluster's agent and its worker count, so a run never stays open forever. [Diagnosis codes](/guides/ankra-pipelines#diagnosis-codes) lists every code.
+
+## The step cannot reach the network
+
+A package install fails on a DNS lookup or a connection:
+
+```text
+npm error code EAI_AGAIN
+npm error request to https://registry.npmjs.org/... failed, reason: getaddrinfo EAI_AGAIN registry.npmjs.org
+```
+
+pip, Go, Cargo and curl report the same thing as `Temporary failure in name resolution`, `bad address` or `Could not resolve host`. A `run` stage has **no network by default**. Give it HTTPS to the public internet:
+
+```yaml
+defaults:
+  network: "egress-https"
+```
+
+Or set `network: "egress-https"` on the one stage that needs it. Two more cases:
+
+- **A host on a private address**, such as an internal package mirror, stays out of reach on `egress-https`. An administrator can allow its range for every pipeline: `ankra org ci-settings set --egress-allowed-cidr 10.20.0.0/16`.
+- **A stage on `network: "services"`** reaches its sidecar services and nothing else. Install dependencies in an earlier stage on `egress-https`, and reuse them from `/workspace`.
+
+## "Read-only file system" or "permission denied"
+
+A step runs as a non-root user (uid 65532) on a read-only root filesystem. It can write to three places:
+
+| Path | What it is |
+| --- | --- |
+| `/workspace` | The run's shared volume, on disk. The checkout lives here. Put caches, virtual environments and build output here. |
+| `/tmp` | Private to the step, 256 MiB, held in memory. `HOME` points here. |
+| `/dev/shm` | 64 MiB unless the stage sets `shm_size`. |
+
+The usual fixes:
+
+- **`corepack enable` fails with `EROFS`** - call the package manager through corepack instead: `corepack pnpm install`, `corepack yarn install`.
+- **`pip install` cannot write to `site-packages`** - create a virtual environment in the workspace first: `python -m venv /workspace/.ankra-venv`.
+- **`apt-get install`, `apk add` fail** - a step cannot install system packages. Use an image that already contains the tools, such as `mcr.microsoft.com/playwright` for browser tests.
+- **A compiler or test runner reports `No space left on device`** - it is filling `/tmp`. Point its temporary files into the workspace: `export TMPDIR=/workspace/.tmp && mkdir -p "$TMPDIR"` at the top of the `run` script.
+
+## git: "detected dubious ownership in repository"
+
+The checkout belongs to a different user than the one later steps run as, so git refuses to work in it:
+
+```text
+fatal: detected dubious ownership in repository at '/workspace'
+```
+
+Trust the workspace on the command itself:
+
+```bash
+git -c safe.directory=/workspace rev-parse HEAD
+```
+
+Go builds hit the same thing when they stamp version information. Add `GOFLAGS: "-buildvcs=false"` to the stage's `env`, as the [Go starter](/guides/ankra-ci-starter-pipelines#test-pipelines-by-toolchain) does. The commit being built is in `$ANKRA_HEAD_SHA` if that is all you needed git for.
+
+## The step was killed: `out_of_memory`
+
+The step used more memory than it asked for - 1Gi unless the stage says otherwise. Large JavaScript installs and TypeScript builds commonly need more. Raise it on the stage:
+
+```yaml
+    resources:
+      cpu: "2"
+      memory: "4Gi"
+```
+
+`resources` is protected, so merge and approve it. `ankra pipeline get <run-id>` prints each step's memory peak against what it asked for, which tells you how much to ask for.
+
+## The secret file is missing
+
+```text
+cat: can't open '/run/agent-secrets/npm_token': No such file or directory
+```
+
+Check, in order:
+
+1. The pipeline declares it in the top-level `secrets` list, **and** the stage lists its name under `secrets`.
+2. The declaration is on the default branch and approved. A pull request that adds a secret runs without it until then.
+3. The run is not from a fork. Pull requests from forks get no secrets.
+4. The value exists: `ankra org variables get <NAME>` for an organisation variable.
+
+## The cache never restores
+
+The step's **CACHE** column in `ankra pipeline get` says what happened:
+
+- **Nothing shown, or the cache is ignored** - `cache` is protected. Merge and approve it.
+- **`miss` every time** - the key changes on every run, often because `hashFiles` matched nothing. Check the lock file name and that it is committed.
+- **`disabled`** - the cluster has no StorageClass to back the cache. Give the pipeline cluster a default StorageClass.
+
+Pull requests from forks and tag runs never share caches, by design.
+
+## The build step fails before the Dockerfile is read
+
+`build_runtime_confined` means the cluster's nodes stop the rootless image builder from starting - common with AppArmor on Ubuntu or k3s nodes. No pipeline or cluster setting changes that. Ankra builds the image on its own platform builders instead, and the scan, gate and publish still run as usual. That is on by default: `ankra org ci-settings get` should show `Build fallback: platform_builders` and `Platform builds enabled: yes`. If either says otherwise, set `ankra org ci-settings set --build-fallback platform_builders`, or [contact support](/platform/support).
+
+## The check says `action_required`
+
+The run failed because of Ankra or the cluster, not your code - an agent that went offline, a volume that would not attach, an image that could not be pulled. Ankra retries these once by itself. If the retry fails too, the check names the cause. Fix it if it is on your side, then press **Re-run** on the check, or:
+
+```bash
+ankra pipeline rerun <run-id> --repository <repository-id> --failed-only
+```
+
+## Still stuck
+
+Ask Ankra's AI in the portal chat - "why did run #12 of my-repo fail?" - and it reads the run, the step logs and the cluster's events. Or [contact support](/platform/support) with the run's link from the check.
+
+## Related
+
+- [Get started with Ankra CI](/get-started/ankra-ci)
+- [Starter pipelines](/guides/ankra-ci-starter-pipelines)
+- [When something fails](/guides/ankra-pipelines#when-something-fails) - every error class and how retries work
