@@ -437,6 +437,33 @@ Mention **`@ankraai merge when green`** in a pull request comment, ask Ankra AI 
 
 The request expires 24 hours after it is made, and a new push to the pull request invalidates it. Every refusal is posted once, naming the exact condition that failed. This works on GitHub only today: a request against GitLab or Bitbucket Cloud is accepted and then refused, because neither provider adapter reports the capability to merge yet.
 
+### The merge train: test every pull request as it will merge
+
+A pull request that is behind its base branch merges as a tree nobody tested: the pull request's own run tested its head, not its head on top of everything that landed since. Turn on the **merge train** for a repository and Ankra tests each pull request **as the commit its merge will produce** before it merges it - the way GitLab's merge trains work, and without GitHub's merge queue, which Team-plan private repositories do not have.
+
+```bash
+ankra pipeline train enable --application orders-api            # pipelines.manage; --max-cars 3 to test three at once
+ankra pipeline train add 412 --application orders-api           # pipelines.operate; --head-sha pins the commit you reviewed
+ankra pipeline train list --application orders-api              # the train in order, and what recently left it
+ankra pipeline train remove <entry-id> --application orders-api
+```
+
+For each pull request in the train, Ankra writes a **car**: the pull request squashed onto the base branch - or onto the car ahead of it, when more than one is tested at once - exactly as GitHub's squash merge will produce it, on a branch of its own (`ankra-merge-train/<entry>`). A pipeline run tests that commit. It is planned as a pull request into the base branch, so `on.pull_request` decides whether it runs, `when.events: [pull_request]` stages run and push-only `publish` and deploy stages do not, under the base branch's approved authority. When the car's run passes and the base branch has not moved, Ankra squash-merges the pull request through GitHub's own merge - branch protection, required reviews and required checks apply exactly as for a person's merge, and Ankra never pushes to or force-pushes the base branch.
+
+Because the merge is exactly the tree the car tested, a definition whose `publish` declares [`promote_from: pull_request`](/guides/pipeline-reference#promote-a-tested-image-instead-of-rebuilding) publishes the car run's tested image on the merge instead of building and testing it again: merge to published is a re-tag.
+
+What happens when something moves:
+
+- **A car fails.** The pull request leaves the train with the failing run linked; every car behind it, which included it, is rebuilt without it. Each car tests everything ahead of it, so the pull request that failed is the one that broke, with no bisection.
+- **Somebody merges around the train.** Every car built on the old base branch head is rebuilt on the new one, and nothing is merged onto a base its car did not test.
+- **The pull request is pushed to, retargeted or closed.** It leaves the train: the train merges the head a person put in it, never one that arrived later.
+- **GitHub declines the merge** - usually because the pull request's own required check is still running. The car waits, passed, and the merge is retried every pass; after three hours it leaves the train with GitHub's reason.
+- **A fork.** Refused, as for merge when green.
+
+Ankra posts an **Ankra merge train** check on every pull request it holds, and concludes it `success` only immediately before it merges. Make that check required on the base branch, and every merge goes through the train.
+
+The train writes with a GitHub App token minted for that one repository with only `contents`, `pull_requests` and `checks` permissions. It works on GitHub only today.
+
 ### Chat watches a run, and a failed build gets a fix
 
 Ask Ankra AI to watch a run - or dispatch one, which registers the watch itself - and the `watch_pipeline_run` tool wakes the same conversation the moment it concludes, with the failing step, a bounded tail of its log, the findings and the gate verdict already in the prompt. Separately and unattended, a failed `build` step (never `infra_error`, a stranded step, or one a protected policy refused - only a genuine script failure) on a **direct push** to the tracked branch, in **Agent** mode, dispatches the same auto-fix mission the generated GitHub Actions workflow's own failed-build webhook already dispatches, with a log excerpt as evidence. A failed build on a **pull request** never gets an unattended commit from this lane, in either mode - it gets its diagnosis (the failing step, its error class, a log excerpt) posted into the status comment's `pipeline` section instead, pointing at Agent mode's **Propose a fix** on the [pull request review](/integrations/github#ask-ankra-in-a-comment) as the actual route to a fix.
@@ -898,10 +925,11 @@ Every command addresses one pipeline with `--application <name-or-id>` or `--rep
 | `ankra pipeline validate [file]` | Validate and dry-run a definition without writing anything |
 | `ankra pipeline definition get\|put <file>` | Read or replace the stored definition of record |
 | `ankra pipeline schedules list\|create\|update\|delete` | Manage cron schedules (`--cron`, `--timezone`, `--ref`, `--input`, `--enabled`) - stored, validated and now fired |
+| `ankra pipeline train list\|add <pull request>\|remove <entry>\|enable [--max-cars N]\|disable` | The repository's [merge train](#the-merge-train-test-every-pull-request-as-it-will-merge): test each pull request as it will merge, then merge it |
 
 `ankra pipeline repositories connect|list|get|disconnect`, `ankra pipeline definitions get|approve`, `ankra pipeline findings`, the concluded-step behaviour of `logs` and artifact listings that carry a status have all merged and ship in v0.15.0, which is a pre-release today - enable the [beta channel](/integrations/ankra-cli#beta-pre-release-channel) to get them, or use the API and the portal until v0.15.0 is stable. `ankra cluster agent ci get|set`, which turns a cluster's pipeline-step workers on, lands in `v0.15.0-rc3`; until then that setting is `PUT /api/v1/org/clusters/{cluster_id}/agent/ci-settings` on the API.
 
-The same run and repository operations are on the API under `/api/v1/org/applications/{application_id}/pipeline-runs`, `/api/v1/org/pipeline-repositories/{repository_id}/pipeline-runs` and `/api/v1/org/pipelines/repositories` with a bearer [token](/reference/tokens): list and create runs, `…/{run_id}`, `…/{run_id}/rerun`, `…/{run_id}/cancel`, `…/{run_id}/steps/{step_id}/logs` (server-sent events, resumable with `from_seq`), `…/{run_id}/artifacts`, `…/artifacts/{artifact_id}/download` (a `302` to a presigned URL), and beside them `…/pipeline` (`GET`, `PUT`), `…/pipeline/validate`, `…/pipeline/schedules` and `…/pipelines/definitions/{id}[/approve]`. Creating a run answers `202` with the run id and its number; connecting a repository answers `201` with the repository and what happened to its committed definition, or `409` naming the one that already exists.
+The same run and repository operations are on the API under `/api/v1/org/applications/{application_id}/pipeline-runs`, `/api/v1/org/pipeline-repositories/{repository_id}/pipeline-runs` and `/api/v1/org/pipelines/repositories` with a bearer [token](/reference/tokens): list and create runs, `…/{run_id}`, `…/{run_id}/rerun`, `…/{run_id}/cancel`, `…/{run_id}/steps/{step_id}/logs` (server-sent events, resumable with `from_seq`), `…/{run_id}/artifacts`, `…/artifacts/{artifact_id}/download` (a `302` to a presigned URL), and beside them `…/pipeline` (`GET`, `PUT`), `…/pipeline/validate`, `…/pipeline/schedules`, `…/merge-train` (`GET`), `…/merge-train/settings` (`PUT`), `…/merge-train/entries` (`POST`) and `…/merge-train/entries/{entry_id}` (`DELETE`), and `…/pipelines/definitions/{id}[/approve]`. Creating a run answers `202` with the run id and its number; connecting a repository answers `201` with the repository and what happened to its committed definition, or `409` naming the one that already exists.
 
 ## What comes next
 
