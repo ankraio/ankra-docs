@@ -9,6 +9,38 @@ description: "Manage organisations"
 
 Commands to list, switch, create, and manage organisations.
 
+## ankra org access-policy
+
+Show the limits every kubectl access grant in this organisation is held
+to, an admin's included:
+
+```text
+creator role       what whoever creates or imports a cluster gets on it
+ceiling            the most access anyone can be given
+elevated lifetime  how long a grant above view may last (also the window
+                   'ankra cluster access elevate' may ask for; 4 hours
+                   when the policy sets none)
+reason from        the lowest role whose grants need a reason
+```
+
+Reading requires managing kubectl access, the policy, or holding
+break-glass (kube_access.elevate). Changing the policy needs an owner or
+admin signed in: Organisation settings, Roles, Kubernetes access policy.
+
+## ankra org access-policy get
+
+Show the organisation's Kubernetes access policy
+
+```bash
+ankra org access-policy get [flags]
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+
 ## ankra org ai-environment
 
 Show or change the organisation's preview settings - where an on-demand
@@ -455,6 +487,91 @@ ankra org ci-settings get [flags]
 | Flag | Default | Description |
 |------|---------|-------------|
 | `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+
+## ankra org ci-settings pool
+
+Show or change the organisation's CI cluster pool: the clusters its pipeline
+runs are spread across.
+
+```bash
+ankra org ci-settings pool list
+ankra org ci-settings pool add ci-hel1-b
+ankra org ci-settings pool add ci-upcloud --weight 50
+ankra org ci-settings pool remove ci-hel1-b
+```
+
+The organisation's pipeline cluster ('ankra org ci-settings set `--cluster`') is
+always a member - the primary. Each run is pinned, when its first step is
+dispatched, to the least-loaded member whose agent can take a step: steps in
+flight over the member's CI workers, scaled by its weight, so a member weighted
+200 takes runs until it carries twice the load of a member weighted 100. When
+two members are close, the one where the repository ran last wins, because it
+holds the repository's warm caches. A run never moves between clusters.
+
+An organisation that lists no members runs every pipeline on its pipeline
+cluster exactly as before.
+
+A member must be a cluster of this organisation whose agent runs pipeline
+steps (give it workers first with 'ankra cluster agent ci set `--workers` N'),
+and a cluster may be in one organisation's pool only.
+
+Reading requires organisation membership; changing requires organisation admin.
+
+## ankra org ci-settings pool add
+
+Add a cluster (name or id) to the organisation's CI pool, or change the
+weight of one already in it.
+
+`--weight` is the member's relative share of runs, 1 to 1000. Without it a new
+member gets 100 and a member already listed keeps its weight.
+
+Runs queued after this land on the member as soon as it is the least loaded.
+Requires organisation admin.
+
+```bash
+ankra org ci-settings pool add <cluster> [flags]
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+| `--weight` | `0` | The member's relative share of runs, 1-1000 (100 when new) |
+
+## ankra org ci-settings pool list
+
+List the organisation's CI pool members
+
+```bash
+ankra org ci-settings pool list [flags]
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+
+## ankra org ci-settings pool remove
+
+Remove a cluster (name or id) from the organisation's CI pool.
+
+New runs stop going to it; runs already pinned to it finish there. Removing the
+organisation's pipeline cluster only drops its weight - it stays the primary
+member until the pipeline cluster itself is changed. Requires organisation
+admin.
+
+```bash
+ankra org ci-settings pool remove <cluster> [flags]
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+| `--yes` | `false` | Skip the confirmation prompt |
 
 ## ankra org ci-settings set
 
@@ -1619,6 +1736,68 @@ ankra org terminal-session <session_id> [flags]
 | `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
 | `--show-input` | `false` | List what was typed, with control characters named |
 | `--transcript` | `false` | Print the recorded output |
+
+## ankra org usage
+
+Show everything the organisation used of Ankra over a window of days, per
+meter and period: worker vCPU-hours, ordered playground time, managed service
+instance time and storage, hosted logs and metrics accepted, and AI requests
+and tokens.
+
+The window defaults to the current month to date. `--period` picks this month
+or last month; `--from` and `--to` (exclusive) pick any stretch of UTC days up to
+93 days long, within the 400 days usage is kept. `--granularity` splits it
+into calendar months or days, and `--group-by` splits each meter by cluster,
+by the application a managed service serves, or by managed service instance.
+
+Each line says how completely it was measured. A quantity is exact when
+every hour of the period was measured, a lower bound (shown as &gt;=) when
+some were not or are still being counted, and 'not measured' when none was,
+for instance a service whose cluster was offline throughout. Not measured is
+never 0; in -o json the quantity is null.
+
+Each line also says what it costs. 'included (pilot)' means Ankra publishes
+no rate and charges nothing for it: managed services and hosted logs and
+metrics during the pilot. A priced line shows the amount in EUR the
+published rate makes of it, as the invoice will. A line no rate applies to
+says why, for instance that AI usage has no per-unit rate.
+
+Grouped by application, a service that serves several applications is
+counted under each of them (marked shared), so application lines do not add
+up to the organisation's total. Grouped by meter, every meter answers every
+period; grouped otherwise, a group that used none of a meter in a fully
+measured period has no line.
+
+-o table (the default) shows quantities in units a person reads (GB, hours,
+thousands separators). -o json and -o yaml carry the platform's own report:
+raw quantities with their unit, and null where nothing was measured.
+
+Needs the billing.read permission.
+
+```bash
+ankra org usage [flags]
+```
+
+**Examples**
+
+```bash
+ankra org usage
+  ankra org usage --period last-month
+  ankra org usage --from 2026-09-01 --to 2026-10-01 --granularity day
+  ankra org usage --group-by cluster
+  ankra org usage --group-by application -o json
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--from` |   | First UTC day to read, YYYY-MM-DD (default: the first day of this month) |
+| `--granularity` | `month` | Period length of each line: month or day |
+| `--group-by` | `meter` | Split each meter by: meter, cluster, application or instance |
+| `-o`, `--output` | `table` | Output format: table, json or yaml |
+| `--period` |   | A ready-made window: this-month or last-month (instead of `--from`/`--to`) |
+| `--to` |   | The day after the last UTC day to read, YYYY-MM-DD (default: tomorrow, so today is included) |
 
 ## ankra org variables
 
