@@ -1,0 +1,512 @@
+---
+title: Ankra CI starter pipelines
+sidebarTitle: Starter pipelines
+description: "Copy-paste .ankra/pipeline.yaml files for Node.js (npm, pnpm, Yarn), Python (pip, uv), Go and Rust, plus caches, a Postgres service, a version matrix, secrets, a nightly run and an image build that is scanned and gated before it is published."
+---
+
+import { CliVersion } from "/snippets/cli-version.jsx";
+
+Each pipeline on this page is a complete `.ankra/pipeline.yaml`, or a stage you add to one. The test pipelines, the cache, the Postgres service, the matrix and the secret were each run on a real Ankra pipeline cluster before they were published, against a small project of each kind.
+
+New to Ankra CI? Start with [Get started with Ankra CI](/get-started/ankra-ci), which connects the repository and gets the first run green.
+
+## Three rules every step follows
+
+A pipeline step is a container on your cluster, and three things about it differ from a CI runner or your laptop. Every recipe below already handles them, and anything you write yourself needs to as well:
+
+1. **No network unless you ask.** A `run` stage has no network access by default. `defaults.network: "egress-https"` gives every stage HTTPS to the public internet, which is what installing packages needs. Private addresses stay out of reach unless an administrator allows them.
+2. **A read-only root filesystem, and a non-root user.** A step cannot install system packages or write into the image, so `apt-get install` and `corepack enable` fail. Use an image that already has your tools in it. `HOME` is `/tmp`: writable, but 256 MiB and held in memory, so send package caches and build output to `/workspace` instead.
+3. **One shared workspace.** `/workspace` holds the checkout and is shared by every stage of the run, so what one stage installs there, the next can use. `/tmp` is private to each step and starts empty.
+
+## Test pipelines by toolchain
+
+All of these run on pushes to `main`, pull requests into `main` and manual runs. Change `branches` to match your default branch.
+
+<Tabs>
+  <Tab title="npm">
+    ```yaml
+    apiVersion: ankra.io/v1
+    kind: Pipeline
+    metadata:
+      name: "my-repo"
+    on:
+      push:
+        branches: ["main"]
+      pull_request:
+        branches: ["main"]
+      manual: {}
+    defaults:
+      network: "egress-https"
+    stages:
+      - name: "checkout"
+        kind: "checkout"
+      - name: "test"
+        kind: "run"
+        image: "node:24-alpine"
+        needs: ["checkout"]
+        env:
+          npm_config_cache: "/workspace/.ankra-node-cache/npm"
+        run: |
+          npm ci
+          npm test
+    ```
+
+    Needs a committed `package-lock.json`.
+  </Tab>
+  <Tab title="pnpm">
+    ```yaml
+    apiVersion: ankra.io/v1
+    kind: Pipeline
+    metadata:
+      name: "my-repo"
+    on:
+      push:
+        branches: ["main"]
+      pull_request:
+        branches: ["main"]
+      manual: {}
+    defaults:
+      network: "egress-https"
+    stages:
+      - name: "checkout"
+        kind: "checkout"
+      - name: "test"
+        kind: "run"
+        image: "node:24-alpine"
+        needs: ["checkout"]
+        env:
+          COREPACK_HOME: "/workspace/.ankra-node-cache/corepack"
+          COREPACK_ENABLE_DOWNLOAD_PROMPT: "0"
+        run: |
+          corepack pnpm install --frozen-lockfile --store-dir /workspace/.ankra-node-cache/pnpm-store
+          corepack pnpm test
+    ```
+
+    Call pnpm as `corepack pnpm`. `corepack enable` tries to write into the image and fails on the read-only filesystem. Corepack installs the pnpm version your `package.json` pins in `packageManager`.
+  </Tab>
+  <Tab title="Yarn">
+    ```yaml
+    apiVersion: ankra.io/v1
+    kind: Pipeline
+    metadata:
+      name: "my-repo"
+    on:
+      push:
+        branches: ["main"]
+      pull_request:
+        branches: ["main"]
+      manual: {}
+    defaults:
+      network: "egress-https"
+    stages:
+      - name: "checkout"
+        kind: "checkout"
+      - name: "test"
+        kind: "run"
+        image: "node:24-alpine"
+        needs: ["checkout"]
+        env:
+          COREPACK_HOME: "/workspace/.ankra-node-cache/corepack"
+          COREPACK_ENABLE_DOWNLOAD_PROMPT: "0"
+          YARN_CACHE_FOLDER: "/workspace/.ankra-node-cache/yarn"
+          YARN_GLOBAL_FOLDER: "/workspace/.ankra-node-cache/yarn-global"
+        run: |
+          case "$(corepack yarn --version)" in
+            1.*) corepack yarn install --frozen-lockfile ;;
+            *) corepack yarn install --immutable ;;
+          esac
+          corepack yarn test
+    ```
+
+    The `case` picks the install flag your Yarn version accepts: Yarn 1 takes `--frozen-lockfile`, and Yarn 2 and later take `--immutable`.
+  </Tab>
+  <Tab title="Python (pip)">
+    ```yaml
+    apiVersion: ankra.io/v1
+    kind: Pipeline
+    metadata:
+      name: "my-repo"
+    on:
+      push:
+        branches: ["main"]
+      pull_request:
+        branches: ["main"]
+      manual: {}
+    defaults:
+      network: "egress-https"
+    stages:
+      - name: "checkout"
+        kind: "checkout"
+      - name: "test"
+        kind: "run"
+        image: "python:3.13-slim"
+        needs: ["checkout"]
+        env:
+          PIP_CACHE_DIR: "/workspace/.ankra-python-cache/pip"
+        run: |
+          python -m venv /workspace/.ankra-venv
+          . /workspace/.ankra-venv/bin/activate
+          pip install -r requirements.txt
+          pytest
+    ```
+
+    The virtual environment lives in the workspace because the image's own `site-packages` is read-only. `pytest` has to be in `requirements.txt`.
+  </Tab>
+  <Tab title="Python (uv)">
+    ```yaml
+    apiVersion: ankra.io/v1
+    kind: Pipeline
+    metadata:
+      name: "my-repo"
+    on:
+      push:
+        branches: ["main"]
+      pull_request:
+        branches: ["main"]
+      manual: {}
+    defaults:
+      network: "egress-https"
+    stages:
+      - name: "checkout"
+        kind: "checkout"
+      - name: "test"
+        kind: "run"
+        image: "ghcr.io/astral-sh/uv:python3.13-bookworm-slim"
+        needs: ["checkout"]
+        env:
+          UV_CACHE_DIR: "/workspace/.ankra-python-cache/uv"
+          UV_LINK_MODE: "copy"
+        run: |
+          uv sync --locked
+          uv run pytest
+    ```
+
+    Needs a committed `uv.lock`, with `pytest` in a dependency group `uv sync` installs, such as `dev`.
+  </Tab>
+  <Tab title="Go">
+    ```yaml
+    apiVersion: ankra.io/v1
+    kind: Pipeline
+    metadata:
+      name: "my-repo"
+    on:
+      push:
+        branches: ["main"]
+      pull_request:
+        branches: ["main"]
+      manual: {}
+    defaults:
+      network: "egress-https"
+    stages:
+      - name: "checkout"
+        kind: "checkout"
+      - name: "test"
+        kind: "run"
+        image: "golang:1.26"
+        needs: ["checkout"]
+        env:
+          GOPATH: "/workspace/.ankra-go"
+          GOCACHE: "/workspace/.ankra-go/cache"
+          GOMODCACHE: "/workspace/.ankra-go/mod"
+          GOTMPDIR: "/workspace/.ankra-go/tmp"
+          GOFLAGS: "-buildvcs=false"
+        run: |
+          mkdir -p "$GOTMPDIR"
+          go test ./...
+    ```
+
+    `-buildvcs=false` stops Go from asking git for version information. The checkout belongs to a different user than the step runs as, so git refuses to answer and the build would fail.
+  </Tab>
+  <Tab title="Rust">
+    ```yaml
+    apiVersion: ankra.io/v1
+    kind: Pipeline
+    metadata:
+      name: "my-repo"
+    on:
+      push:
+        branches: ["main"]
+      pull_request:
+        branches: ["main"]
+      manual: {}
+    defaults:
+      network: "egress-https"
+    stages:
+      - name: "checkout"
+        kind: "checkout"
+      - name: "test"
+        kind: "run"
+        image: "rust:1"
+        needs: ["checkout"]
+        env:
+          CARGO_HOME: "/workspace/.ankra-cargo/home"
+          CARGO_TARGET_DIR: "/workspace/.ankra-cargo/target"
+        run: |
+          cargo test --locked
+    ```
+
+    `--locked` needs a committed `Cargo.lock`. Drop it for a library that does not commit one.
+  </Tab>
+</Tabs>
+
+<Tip>
+Running a test suite in a different image? Use any image your organisation's image policy allows, and keep the three rules above: tools already in the image, caches and build output under `/workspace`, and `network: "egress-https"` when the step downloads anything.
+</Tip>
+
+## Make it faster with caches
+
+Without a cache, every run downloads its dependencies again. A `cache` block keeps directories of the workspace between runs, keyed on your lock file, so a run whose lock file did not change starts warm.
+
+Add it to the stage that installs, pointing at the same directories its `env` sends the package manager's cache to. For the npm pipeline above:
+
+```yaml
+  - name: "test"
+    kind: "run"
+    image: "node:24-alpine"
+    needs: ["checkout"]
+    env:
+      npm_config_cache: "/workspace/.ankra-node-cache/npm"
+    cache:
+      - key: "npm-${{ hashFiles('package-lock.json') }}"
+        paths: [".ankra-node-cache/npm"]
+        restore_keys: ["npm-"]
+        fallback: "none"
+    run: |
+      npm ci
+      npm test
+```
+
+The paths are relative to the workspace. The same pattern for the other toolchains:
+
+| Toolchain | `key` | `paths` |
+| --- | --- | --- |
+| npm | `npm-${{ hashFiles('package-lock.json') }}` | `.ankra-node-cache/npm` |
+| pnpm | `pnpm-${{ hashFiles('pnpm-lock.yaml') }}` | `.ankra-node-cache/pnpm-store`, `.ankra-node-cache/corepack` |
+| Yarn | `yarn-${{ hashFiles('yarn.lock') }}` | `.ankra-node-cache/yarn`, `.ankra-node-cache/yarn-global`, `.ankra-node-cache/corepack` |
+| pip | `pip-${{ hashFiles('requirements.txt') }}` | `.ankra-python-cache/pip` |
+| uv | `uv-${{ hashFiles('uv.lock') }}` | `.ankra-python-cache/uv` |
+| Go | `go-${{ hashFiles('go.mod', 'go.sum') }}` | `.ankra-go/mod`, `.ankra-go/cache` |
+| Rust | `cargo-${{ hashFiles('Cargo.toml', 'Cargo.lock') }}` | `.ankra-cargo/home/registry`, `.ankra-cargo/home/git`, `.ankra-cargo/target` |
+
+Use the key's prefix as its `restore_keys` entry (`npm-`, `go-`), so a changed lock file still starts from the newest older cache.
+
+<Note>
+**Caches need approval.** A cache decides whose earlier output is copied into a run, so the `cache` block is a protected setting: it takes effect once an administrator approves the pipeline on the default branch. Until then the stage runs cold and the run says so. The step's **CACHE** column in `ankra pipeline get` shows `miss` on the first run and `hit` from then on. [Caches](/guides/pipeline-reference#caches) covers keys, scopes and retention.
+</Note>
+
+## Give a step more memory or time
+
+Every step gets 500m of CPU, 1Gi of memory and 30 minutes unless the stage asks for more. A large JavaScript install, a TypeScript build or a big test suite often needs more memory - a step killed at its limit fails with the diagnosis `out_of_memory`.
+
+```yaml
+  - name: "test"
+    kind: "run"
+    image: "node:24-alpine"
+    needs: ["checkout"]
+    resources:
+      cpu: "2"
+      memory: "4Gi"
+    timeout: "45m"
+    run: |
+      npm ci
+      npm test
+```
+
+`resources` and `timeout` are protected settings, so they apply once an administrator approves them. One step can ask for up to 8 CPU cores, 32Gi of memory and 6 hours.
+
+## Test against a Postgres database
+
+A service is a sidecar container next to your test step, reachable by its name. This pipeline installs dependencies in one stage with internet access, then runs the tests in a second stage on the `services` network tier, which reaches the database and nothing else:
+
+```yaml
+apiVersion: ankra.io/v1
+kind: Pipeline
+metadata:
+  name: "my-repo"
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+  manual: {}
+defaults:
+  network: "egress-https"
+services:
+  postgres:
+    image: "postgres:17"
+    env:
+      PGDATA: "/var/lib/postgresql/data/pgdata"
+      POSTGRES_USER: "app"
+      POSTGRES_PASSWORD: "ci-only-password"
+      POSTGRES_DB: "app_test"
+    ports: ["5432"]
+    ready:
+      tcp: "5432"
+stages:
+  - name: "checkout"
+    kind: "checkout"
+  - name: "install"
+    kind: "run"
+    image: "python:3.13-slim"
+    needs: ["checkout"]
+    env:
+      PIP_CACHE_DIR: "/workspace/.ankra-python-cache/pip"
+    cache:
+      - key: "pip-${{ hashFiles('requirements.txt') }}"
+        paths: [".ankra-python-cache/pip"]
+        restore_keys: ["pip-"]
+        fallback: "none"
+    run: |
+      python -m venv /workspace/.ankra-venv
+      . /workspace/.ankra-venv/bin/activate
+      pip install -r requirements.txt
+  - name: "test"
+    kind: "run"
+    image: "python:3.13-slim"
+    needs: ["install"]
+    network: "services"
+    services: ["postgres"]
+    resources:
+      cpu: "1"
+      memory: "2Gi"
+    env:
+      DATABASE_URL: "postgres://app:ci-only-password@postgres:5432/app_test"
+    run: |
+      . /workspace/.ankra-venv/bin/activate
+      pytest
+```
+
+Three details matter, and each one fails in a confusing way when it is missing:
+
+- **Use a Debian-based Postgres image** such as `postgres:17`, not an Alpine one. The sidecar also runs as a non-root user, and the Debian image's entrypoint is the one that can initialise a database that way.
+- **Set `PGDATA` to a subdirectory.** The image's own data directory belongs to another user, and Postgres cannot take it over, so the sidecar would restart in a loop and the step would never start.
+- **Install before you switch to `services`.** The `services` tier has no internet access, so a package install in the test stage fails. Install in an earlier stage on `egress-https` and reuse what it left in `/workspace`.
+
+The `ready` probe holds the test step until Postgres accepts connections. The password here is for this throwaway database only - use a pipeline secret (below) for anything real. `services`, the `services` network tier, `cache` and `resources` are protected, so approve the pipeline before you rely on them.
+
+## Test against several versions
+
+A `matrix` runs one stage once per value, in parallel:
+
+```yaml
+  - name: "test"
+    kind: "run"
+    image: "node:${{ matrix.node }}-alpine"
+    needs: ["checkout"]
+    matrix:
+      node: ["20", "22", "24"]
+    env:
+      npm_config_cache: "/workspace/.ankra-node-cache/npm-${{ matrix.node }}"
+    run: |
+      node --version
+      npm ci
+      npm test
+```
+
+The run shows one step per value: `test:node=20`, `test:node=22`, `test:node=24`. Give each leg its own cache directory, as above, because the legs share the workspace and run at the same time. A matrix takes `include` and `exclude` lists as GitHub Actions does, up to 64 legs per stage.
+
+## Use a secret in a step
+
+Store the value in Ankra once, as an organisation variable - **Variables and secrets** in the portal, or from the CLI, which reads the value from standard input so it stays out of your shell history:
+
+```bash
+ankra org variables set NPM_TOKEN -
+```
+
+Then declare it in the pipeline, and name it on the stage that needs it:
+
+```yaml
+secrets:
+  - name: "npm_token"
+    from: "org_variable"
+    key: "NPM_TOKEN"
+stages:
+  - name: "checkout"
+    kind: "checkout"
+  - name: "test"
+    kind: "run"
+    image: "node:24-alpine"
+    needs: ["checkout"]
+    secrets: ["npm_token"]
+    run: |
+      printf '//registry.npmjs.org/:_authToken=%s\n' "$(cat /run/agent-secrets/npm_token)" > "$HOME/.npmrc"
+      npm ci
+      npm test
+```
+
+A secret arrives as a **file**, `/run/agent-secrets/<name>`, not as an environment variable, and never appears in the pipeline or a log. `from` is `org_variable` for an organisation or cluster variable, `app_env_secret` for the linked application's environment secret, or `registry` for a registry login. Only the stages that list a secret can read it, and pull requests from forks get none.
+
+`secrets` is a protected setting. Merge the declaration to the default branch and approve it before the first run that needs it - a pull request that adds a secret runs without it until then.
+
+## Run every night
+
+Declare the schedule in the pipeline, then create it once:
+
+```yaml
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+  schedule:
+    - cron: "0 2 * * *"
+```
+
+<CliVersion since="0.15.0" />
+
+```bash
+ankra pipeline schedules create --cron "0 2 * * *" --timezone Europe/Stockholm --repository <repository-id>
+ankra pipeline schedules list --repository <repository-id>
+```
+
+The cron has five numeric fields. It runs against the default branch unless the schedule names another `--ref`. To run only your slow suites at night, give the `schedule` entry a `stages` list, and include `checkout` and every stage those suites need. An application's **Pipelines** page in the portal has **Scheduled runs** as well, to create, pause or delete one.
+
+## Build, scan and publish an image
+
+For a repository linked to an [Ankra application](/concepts/applications), the pipeline can build the container image, scan it and publish it to your organisation's registry. Nothing reaches the registry until the gate has passed the exact image that was scanned. Add these stages after your tests:
+
+```yaml
+  - name: "build"
+    kind: "build"
+    needs: ["test"]
+    build:
+      dockerfile: "Dockerfile"
+      provenance: true
+      sbom: true
+  - name: "scan"
+    kind: "scan"
+    needs: ["build"]
+    scan:
+      scanners: ["semgrep", "checkov", "trivy"]
+      fail_on:
+        semgrep: "error"
+  - name: "gate"
+    kind: "gate"
+    needs: ["scan"]
+    gate:
+      require_stages: ["scan"]
+  - name: "publish"
+    kind: "publish"
+    needs: ["gate"]
+    when:
+      events: ["push"]
+```
+
+What each stage does:
+
+- **`build`** builds the image rootless, inside your cluster, and stores it by digest in a staging area of your registry. A pull request's build is built and scanned but not published.
+- **`scan`** runs Semgrep and Checkov over your source and Trivy over the image. The reports go to the run and to the application's **Security** tab.
+- **`gate`** judges what the scanners found against your organisation's image policy - by default, fixable critical and high vulnerabilities in your own dependencies block. `fail_on` can make one pipeline stricter, never looser.
+- **`publish`** tags the exact digest the gate passed as `sha-<first 7 characters of the commit>` in your application's repository, only on pushes to the default branch. Your application deploys that tag.
+
+`build` and `scan` reach the internet by default, so they need no `network` line, and `gate` and `publish` run on the Ankra platform rather than in a pod. If your nodes stop the rootless builder from starting, Ankra builds the image on its own platform builders instead, and the scan and gate still run on your cluster. A new application's setup pull request commits these stages for you.
+
+## A monorepo
+
+For a repository with several components, give each component its own test stage with a path filter for pull requests, so a pull request only tests what it touches and a push to `main` tests everything. [Monorepo: PR-only checks, full builds on push](/guides/ankra-pipelines#monorepo-pr-only-checks-full-builds-on-push) has the full pattern.
+
+## Related
+
+- [Get started with Ankra CI](/get-started/ankra-ci) - connect a repository and get the first run green
+- [Troubleshooting](/guides/ankra-ci-troubleshooting) - what a failing first pipeline usually means
+- [Pipeline reference](/guides/pipeline-reference) - every key, trigger, stage kind and expression
