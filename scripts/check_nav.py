@@ -63,6 +63,8 @@ def main() -> int:
         print("ERROR: docs.json navigation references missing files:")
         for p in missing:
             print(f"  {p}.mdx")
+    if any(p.startswith("reference/cli/") for p in orphans + missing):
+        print("HINT: reference/cli is generated; run scripts/sync_cli_nav.py to resync its navigation group.")
     if shadowed:
         ok = False
         print("ERROR: redirect sources shadow existing pages:")
