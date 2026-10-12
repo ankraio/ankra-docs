@@ -1,0 +1,168 @@
+---
+title: Run tests and lint in Ankra Workspaces
+sidebarTitle: Workspaces
+description: "Send the heavy commands of your development loop - go test, golangci-lint, pnpm typecheck and test, Playwright - to a warm pod on your organisation's CI pool instead of your laptop, by hand with ankra exec or automatically for you and your coding agents with ankra dev install."
+---
+
+import { CliVersion } from "/snippets/cli-version.jsx";
+
+An **Ankra Workspace** is your own long-lived pod on the organisation's CI pool, one per repository (and per kind, such as `node` or `e2e`). `ankra exec` runs a command for your current checkout in it: your uncommitted changes go with it, the output streams back live, and the exit code is the remote command's own. `ankra dev install` puts small shims in front of `go`, `golangci-lint`, `pnpm` and friends so that the heavy commands you, your editor, git hooks and coding agents already run go to the workspace without anyone typing anything different.
+
+The point is your laptop's CPU and memory: five coding agents each running `go test ./...` or a full typecheck stop fighting over one machine.
+
+<CliVersion since="0.30.0" />
+
+## Prerequisites
+
+- **The Ankra CLI**, logged in to the organisation that owns the repository:
+
+  ```bash
+  brew install ankraio/tap/ankra    # or: brew upgrade ankra
+  ankra login
+  ankra org current
+  ```
+
+- **The `workspaces.use` permission.** Organisation admins have it; ask an admin to grant it otherwise. A workspace you cannot reach answers "not found", like one that does not exist.
+- **A git checkout whose `origin` remote is a repository connected to Ankra Pipelines** in that organisation. If it is not connected yet, see [Connect a repository for Workspaces](#connect-a-repository-for-workspaces).
+
+## Run your first command
+
+From anywhere inside the checkout:
+
+```bash
+ankra exec --check && echo "this checkout can use a workspace"
+ankra exec -- go test ./...
+```
+
+The first command in a repository brings its workspace up, which takes a few minutes while the pod is scheduled, the image is pulled and the profile's tools are installed. `ankra exec` says what it is waiting for (`still provisioning: Pulling image ...`). Later commands reuse the warm pod and start in a second or two.
+
+The command runs in the same relative directory as your shell, against your worktree exactly as it is: tracked files plus untracked files that git does not ignore. Your branch, index and working tree are never touched, and only what the workspace does not already hold is uploaded.
+
+## Route commands automatically
+
+```bash
+ankra dev install
+ankra dev status
+```
+
+`ankra dev install` writes the shims to `~/.ankra/dev/shims` and links them into `~/.local/bin`, so every new shell, editor, git hook and coding agent session picks them up. If `~/.local/bin` is not on your `PATH`, or a real tool comes before it, the command prints the exact `PATH` line to add to your shell profile; it never edits a profile for you.
+
+Each shim decides per invocation:
+
+| Where it runs | Commands |
+|---|---|
+| In the workspace | `go test`, `go vet`, `go build` (without `-o`, `-c`, coverage or profile files), `golangci-lint run`, `gofmt -l` / `-d`, `pnpm` / `npm` `typecheck`, `test`, `test:ci`, `test:unit`, `lint`, `lint:*`, `format-check`, `knip`, `vitest run`, `tsc --noEmit` |
+| In the workspace, changes applied to your worktree | `go generate`, `go mod tidy`, `go get`, `go fmt`, `go tool ...`, `gofmt -w`, `golangci-lint run --fix` |
+| In the workspace, results copied back | Playwright runs (`pnpm test:e2e*`, `npx playwright test`): `test-results` and reports |
+| On your machine | Everything else: `go run`, `go install`, dev servers, builds with output, `pnpm install` / `add`, anything interactive (`--ui`, `--debug`, `--headed`) |
+
+A routed command behaves exactly like `ankra exec`: same output, same exit code. When a checkout cannot use a workspace - its repository is not connected, you are not logged in, you are offline - or the workspace could not run the command, the real tool runs on your machine instead, so nothing ever blocks on the platform.
+
+```bash
+ANKRA_EXEC_EXPLAIN=1 go test ./...   # prints route or local, runs nothing
+ankra dev mode local                 # stop routing (ankra dev mode auto to resume)
+ANKRA_EXEC=local go test ./...       # run one command locally
+ankra dev install --uninstall        # remove the shims and their links
+```
+
+## Commands that write files or produce results
+
+```bash
+ankra exec --apply -- gofmt -w ./cmd
+ankra exec --kind e2e --fetch test-results -- pnpm test:e2e
+```
+
+- `--apply` brings the files the command changed in the workspace back as a patch applied to your worktree. A patch that no longer applies (you edited the same lines meanwhile) is kept under `.git/ankra-exec-unapplied-<run>.patch`.
+- `--fetch DIR` copies a directory back after the run, replacing your local one, whatever the exit code.
+
+Only an allowlisted environment is forwarded (`GOFLAGS`, `NODE_OPTIONS`, `TZ` and similar). Add your own variable names, never secrets, with `ANKRA_EXEC_FORWARD_ENV=MY_FLAG,OTHER_FLAG`.
+
+## Manage your workspaces
+
+```bash
+ankra workspace status
+ankra workspace up --wait            # bring it up ahead of the first command
+ankra workspace down --yes           # tear it down; the next command brings a fresh one
+ankra workspace down --yes --kind e2e
+```
+
+A workspace that has not been used for 24 hours is torn down for you. Changing the repository's workspace profile replaces the workspace at the new size the next time it is brought up.
+
+## Connect a repository for Workspaces
+
+A repository has to be connected to Ankra Pipelines in your organisation before anyone can use a workspace for it. If the repository's pipeline runs somewhere else - in another organisation or another CI - connect it for Workspaces only, so Ankra never reads its pipeline file, starts a run or posts a check on its pull requests:
+
+<CliVersion since="0.33.0" />
+
+```bash
+ankra pipeline repositories connect --provider github --owner my-org --name my-repo \
+  --credential <github-credential-name> --workspaces-only
+ankra pipeline repositories set-mode <repository-id> workspaces-only   # or: pipelines
+```
+
+Connecting needs the `pipelines.manage` permission.
+
+## Give a repository a workspace profile
+
+Without a profile, the workspace uses the image of the repository's pipeline. A **workspace profile** says exactly what the pod needs: its image, CPU and memory, disk, service containers (a database the tests reach by name), pinned tools to install and setup commands to run once. A repository can have several kinds, such as `default`, `node` and `e2e`; `ankra dev` uses the `go` kind for Go tools, `node` for pnpm, npm and npx, and `e2e` (or `playwright`) for Playwright runs when the profile has them, and `default` otherwise.
+
+```json
+{
+  "profiles": {
+    "default": {
+      "image": "golang:1.26.3-bookworm",
+      "resources": { "cpu": "6", "memory": "16Gi" },
+      "volume_size": "40Gi",
+      "services": [
+        {
+          "name": "postgres",
+          "image": "postgres:17",
+          "env": { "POSTGRES_HOST_AUTH_METHOD": "trust", "PGDATA": "/tmp/pgdata" },
+          "ports": [5432],
+          "ready": { "tcp": "5432" }
+        }
+      ],
+      "tools": [
+        {
+          "name": "golangci-lint",
+          "url": "https://github.com/golangci/golangci-lint/releases/download/v2.12.2/golangci-lint-2.12.2-linux-amd64.tar.gz",
+          "sha256": "8df580d2670fed8fa984aac0507099af8df275e665215f5c7a2ae3943893a553",
+          "strip_components": 1
+        }
+      ],
+      "setup": ["golangci-lint version"]
+    }
+  }
+}
+```
+
+- **`tools`** are downloaded once, checked against their `sha256` and put first on the `PATH` of every command. A `.tar.gz` or `.tgz` URL is unpacked; anything else is the executable itself.
+- **`setup`** runs once per workspace, before the first command, in the checkout.
+- **Services and commands run as uid 65534.** An image that writes where only its own user may, such as postgres, needs pointing at a writable directory (`PGDATA` above).
+- **`resources.memory` is the limit for every command in the workspace together.** Heavy commands queue for a share of it, so several agents can run at once without the kernel killing the pod. If a command still runs it out of memory, `ankra exec` says so and names the limit to raise.
+- The image must match one of the organisation's allowed CI image prefixes.
+
+Store the profile with the API, which needs `workspaces.manage`:
+
+```bash
+curl -fsS -X PUT \
+  -H "Authorization: Bearer $ANKRA_API_TOKEN" -H "Content-Type: application/json" \
+  --data @workspace-profile.json \
+  "https://platform.ankra.app/api/v1/org/pipeline-repositories/<repository-id>/workspace-profiles"
+```
+
+Find the repository id with `ankra pipeline repositories list`.
+
+## Troubleshooting
+
+| What you see | What it means | Fix |
+|---|---|---|
+| `ankra exec` exits `196`, or a routed command quietly runs on your laptop | The checkout cannot use a workspace: not logged in, the `origin` repository is not connected in the selected organisation, or you lack `workspaces.use` | `ankra login`, `ankra org current`, `ankra exec --check`; connect the repository |
+| `still provisioning: Waiting for a node ...` | The CI pool is adding a node for your workspace | Wait; the first workspace on a fresh node takes a few minutes |
+| `[devbox] got a run slot after Ns` | Other heavy commands were using the workspace's memory; yours waited its turn | Nothing; raise `resources.memory` if waits are long and frequent |
+| `The command ran out of memory ...`, exit `137` | The command (or several together) exceeded the workspace's memory limit | Raise `resources.memory` in the profile |
+| A test passes locally but fails only in the workspace | The image or tools differ from your machine | Pin the same tool versions in the profile's `tools` |
+
+Every run appends one line to `~/.claude/logs/ankra-exec.log` (or `ANKRA_EXEC_LOG`) with the repository, exit code, duration and command, which is the first place to look when a routed command behaved unexpectedly.
+
+See also the CLI reference for [`ankra exec`](/reference/cli/exec), [`ankra workspace`](/reference/cli/workspace) and [`ankra dev`](/reference/cli/dev).
