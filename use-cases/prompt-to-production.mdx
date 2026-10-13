@@ -1,0 +1,318 @@
+---
+title: Prompt to Production
+description: A four-stage developer flow for building a production-grade app with AI agents on Ankra - plan with evidence, storyboard before code, orchestrate the build on a fixed stack, then prove development in a real browser before production exists. Includes the four prompts, the agent contract to commit, and the evidence an agent must attach before it says done.
+---
+
+An agent can write an app in an afternoon. What decides whether it is fit to run is everything around the code: a plan that looked at what already exists, a design the team agreed to, a build on one stack, and a deployment that was tested before it was trusted.
+
+This page is a flow for that, in four stages. Each stage is **one session with one written prompt**, and the output of a stage is the only input to the next. That is what keeps the agent honest, and it is what makes the result repeatable: the prompts live in your repository and improve like any other file.
+
+<Note>
+**The whole flow in four lines.** Each is a fresh session.
+
+1. **Define:** "Plan this idea with web search, name the existing tools, and write `docs/plan.md`."
+2. **Storyboard:** "From the plan, build the screens as an interactive page behind a login, inspired by these links."
+3. **Orchestrate:** "Spawn sub-agents to build the storyboard on this stack, and get Ankra to run it."
+4. **Deploy:** "Bring up development, test it in a browser, and only then promote the same tag to production."
+
+The rest of this page is the full prompt for each line and the checks that make it safe.
+</Note>
+
+<Frame caption="Four sessions, four artefacts: a plan, a storyboard, a build, and a verified deployment">
+  <img src="/images/use-cases/prompt-to-production.svg" alt="Four stages in a row. Define produces a plan. Storyboard takes only the plan and produces screens and journeys, served for review behind authentication. Orchestrate takes the storyboard and has sub-agents build it on a fixed stack as pull requests. Deploy and verify brings up development first, tests it in a real browser, and only then promotes the tag that passed to production. Done means evidence: test output, image tag and digest, scan summary, browser recording, public URL and rollback command." className="w-full" />
+</Frame>
+
+---
+
+## What you need
+
+- The Ankra CLI and the agent skills installed for your assistant, as described in [Build it with your AI coding assistant](/use-cases/production-multi-cluster-platform#build-it-with-your-ai-coding-assistant).
+- An empty GitHub repository and a [GitHub credential](/platform/credentials/git) in your Ankra organisation that can reach it.
+- A development cluster and a production cluster. Development is where the agent may create and delete anything. Production is where it may not, without you.
+- The tools the agent verifies with: a browser it can drive (for example Claude in Chrome), and a way to tell the team when it is live (for example a Slack integration). Both are optional, and both make the last stage much stronger.
+- Optionally, the [Ankra MCP server](/platform/mcp-server), so the agent can read clusters, runs and logs directly instead of through the CLI.
+
+<Note>
+Run each stage in a **fresh session**. A long conversation accumulates stale assumptions, and the artefact from the previous stage is a better memory than the transcript.
+</Note>
+
+---
+
+## Stage 1: Define the idea
+
+The first prompt asks for a detailed plan and forces the agent to look outward: what already exists, what people pay for, which tools would do half the job for free. Only then does it commit to building.
+
+```
+Produce a detailed plan for this idea: <one paragraph>.
+
+Use active web search. Most importantly, survey the existing tools in this space
+and say where we differ. Treat this as a production-grade app from day one.
+
+Apply industry standards: clean architecture, hexagonal (ports and adapters),
+minimal imported libraries, and a clear testing framework with unit, integration
+and end-to-end layers.
+
+Database: we use Alembic for migrations. We do not use an ORM; write explicit,
+parameterised SQL.
+
+Deliver: problem statement, competitor table, architecture diagram, module
+boundaries, data model, test strategy, risks, and a milestone plan. Write it to
+docs/plan.md.
+```
+
+The standards in the second paragraph are an example set. Replace them with yours. What matters is that they are written down and specific, because every standard you leave out is a decision the agent will make differently on each run.
+
+**A good plan has:**
+
+- Three to five real competitors with links, pricing, and the one thing each does better than you will.
+- A sentence per bounded context: what it owns and what it never touches.
+- The dependency rule drawn as a diagram, with the database on the outside.
+- The test pyramid as a contract: what runs on every commit and what runs nightly.
+- Milestones measured in demos, not in weeks.
+
+<Tip>
+Making web search part of the prompt is how you stop the plan from quietly rebuilding something that already exists as a well-funded open-source project. A model's training data is a snapshot; pricing, licences and whether a project is still maintained all change monthly.
+</Tip>
+
+---
+
+## Stage 2: Storyboard
+
+A fresh session takes only the plan. It produces a storyboard: every screen, every journey, every empty and error state, reusing the logos, palettes and components you already own.
+
+```
+Use docs/plan.md and create a storyboard, considering existing assets. Make it
+modern. These products hold design and values I like; study them and use them
+as inspiration: <link 1> <link 2> <link 3>.
+
+Deliver the storyboard as an interactive HTML page, served on an Ankra-automated
+domain with auth access so the team can review it.
+```
+
+Links steer taste better than adjectives. "Modern and clean" means nothing to an agent; three URLs of products you admire give it concrete spacing, type, motion and tone to read and match.
+
+### Serve it for review
+
+The storyboard goes live on a subdomain of the cluster's generated `ankra.cc` domain behind basic authentication, with a Let's Encrypt certificate, so the review is a URL and not an attachment. The agent can do this from the prompt above. The shape it produces is a stack of seven manifests: a namespace, a ConfigMap holding the page, a Secret holding the password hash, a Traefik middleware, a Deployment of an unprivileged nginx, a Service and an Ingress.
+
+```bash
+htpasswd -nbB reviewer '<a-long-random-password>'
+```
+
+The output line is the value of the Secret's `users` key, sealed with `ankra cluster encrypt manifest` before it is committed. The two manifests that make it private:
+
+```yaml
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: storyboard-auth
+  namespace: storyboard
+spec:
+  basicAuth:
+    secret: storyboard-auth
+    realm: Storyboard review
+```
+
+```yaml
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: storyboard
+  namespace: storyboard
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+    traefik.ingress.kubernetes.io/router.middlewares: storyboard-storyboard-auth@kubernetescrd
+spec:
+  ingressClassName: traefik
+  rules:
+    - host: storyboard.<cluster-short-id>.<org-short-id>.ankra.cc
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: storyboard
+                port:
+                  number: 80
+  tls:
+    - hosts:
+        - storyboard.<cluster-short-id>.<org-short-id>.ankra.cc
+      secretName: storyboard-tls
+```
+
+<Warning>
+Manifest names are unique across the whole cluster, not per stack, so prefix every manifest with the stack's name. Give the review password to the team out of band, never in the repository.
+</Warning>
+
+---
+
+## Stage 3: Orchestrate
+
+The third session gets the storyboard and a hard constraint: the technology choices are already made. Its job is to spawn as many sub-agents as the work needs, keep them on the same stack, and let Ankra build the platform underneath.
+
+```
+You are the orchestrator. Your job is to spawn as many sub-agents as you need to
+get this storyboard live.
+
+Our preferred framework is Next.js and Go. We use PostgreSQL, and caching is
+Redis. If we need a time-series database, TimescaleDB is where that lives.
+
+Get Ankra to build this up to production: pipeline, registry, secrets,
+environments. Read docs/plan.md and the storyboard first.
+```
+
+Naming the stack removes the biggest source of agent drift, which is re-litigating technology every time a sub-agent starts. The stack above is an example; name yours.
+
+**How the orchestrator splits the work:**
+
+- One agent per bounded context from the plan.
+- One agent owns the schema and its migrations.
+- One agent owns the test harness and the fakes for every port.
+- One agent owns the Ankra application and its pipeline.
+- The orchestrator integrates and reviews. It never writes code itself.
+
+### The agent contract
+
+A prompt is one conversation. A contract is every conversation. Put the standards, the tools and the gates where the agent reads them automatically, so the fourth session behaves like the first.
+
+| In the repository | What it holds |
+|---|---|
+| `AGENTS.md` | Architecture, naming, "no ORM", the test contract, the stack, what is forbidden |
+| `.ankra/pipeline.yaml` | What runs on every push and merge: test, build, scan, gate, publish |
+| `.claude/skills/` | Repeatable procedures, loaded on demand: how to add a migration, how to ship a service |
+| `.claude/settings.json` | Hooks that run lint and tests before every commit and the full suite before every push |
+| `docs/adr/` | One record per architectural decision, so the next session reads why and not just what |
+
+- **Skills over long prompts.** Package "how we add a migration" as a skill. The orchestrator invokes it by name and sub-agents inherit the same procedure.
+- **One worktree per agent.** Parallel sub-agents never share a checkout. Each gets its own worktree and branch, and the orchestrator merges through pull requests.
+- **Hooks are the hard gate.** The harness runs the tests, so the agent cannot forget to.
+- **Permission modes match the blast radius.** Planning is read-only. Building edits a worktree. Deploying to development may create and delete freely. Deploying to production needs a human.
+
+Ankra's own [agent skills](/integrations/agent-skills) cover the platform half of this contract, so the agent knows the CLI, the YAML and the order of operations without you teaching it.
+
+---
+
+## Stage 4: Deploy and verify
+
+Development first. Production only after the gate.
+
+<CardGroup cols={2}>
+  <Card title="Development" icon="flask">
+    A cluster with its own `.dev` domain. The agent may create and delete any resource. It must test the product in a real browser: sign up, sign in, every journey in the storyboard and every error state. Tests, build, Semgrep, Checkov and Trivy are green; migrations apply and reverse; logs and metrics are visible in Ankra.
+  </Card>
+  <Card title="Production" icon="shield-check">
+    A separate cluster with the `.com` domain, not brought online until development is online and fully tested. Nothing is created here by hand: the same pipeline promotes the same immutable image tag. Secrets and variables are set per environment, DNS and TLS are automated.
+  </Card>
+</CardGroup>
+
+```
+Deploy this solution to a development and a production cluster. Give development
+a .dev domain and production a .com domain.
+
+Do not bring production online until development is online and fully tested,
+including using my Chrome MCP to navigate the platform and test everything. You
+may create and delete any resource in development.
+
+Once it is live, use the Slack MCP to update the team with the URL.
+```
+
+The Ankra half of what the agent does:
+
+```bash
+ankra application ship . --cluster <dev-cluster>
+ankra pipeline get --application <application-id> --latest --wait --exit-code
+ankra application deployments <application-id>
+```
+
+When development passes, the tag that was tested is the tag that is promoted. Turn auto-deploy off first, so production never follows a push:
+
+```bash
+ankra application auto-deploy set <application-id> --enabled=false
+ankra application deploy <application-id> \
+  --cluster <prod-cluster-id> \
+  --set image_tag=sha-<the-tag-that-passed> \
+  --set ingress_enabled=true \
+  --set ingress_host=app.example.com
+```
+
+Secrets and variables are set per environment, and the pipeline never builds for production. See [Ship your app](/guides/deliver-your-app) for the route in detail and [Lovable to Ankra](/use-cases/lovable-to-ankra) for a worked example of one image serving two environments.
+
+---
+
+## Make "done" mean evidence
+
+"Done" is a claim. Evidence is the deliverable. Append this to any stage prompt:
+
+```
+Before you report done, attach the evidence: the test runner output, the image
+tag and digest, the scan summary, a browser recording of every storyboard
+journey, a curl of the public URL, and the exact rollback command. If any item
+is missing, you are not done.
+```
+
+| Evidence | What counts |
+|---|---|
+| Tests | The runner's output pasted in, not "tests pass" |
+| Build | The immutable `sha-` tag and its digest |
+| Scan | The Semgrep, Checkov and Trivy findings, or an explicit zero |
+| Browser | A recording of every journey in the storyboard |
+| Public | DNS resolves, the certificate is valid, the URL returns 200 |
+| Rollback | The previous tag redeploys with one command |
+
+The loop is build, verify, read the evidence, fix, verify again. The agent runs it, and you read the evidence before the code. Add reviewers for the reviewer: a second agent reviews the pull request with no memory of writing it, and Ankra AI reviews every pull request and watches every pipeline run.
+
+---
+
+## Day 2: keeping it in production
+
+- **Supply chain.** Every push builds rootless in your cluster, is scanned by Semgrep, Checkov and Trivy, and publishes an immutable `sha-` tag. No tag is ever overwritten.
+- **Secrets.** Nothing in plaintext. SOPS-encrypted manifests in Git ([SOPS](/guides/sops)), per-environment secrets in the platform, and least-privilege tokens for every integration.
+- **Observability.** Metrics, logs and events from day one. The agent can query Prometheus and read pod logs, so "why is it slow" is a prompt and not a war room. See [Cluster metrics](/platform/cluster-metrics).
+- **Promotion and rollback.** The same image moves from development to production through the pipeline, and rolling back is redeploying the previous tag.
+- **Alerts that reach people.** Route pipeline failures, blocked images and cluster events to your channel. See [Notification routing](/guides/notification-routing).
+- **Backups.** Protect every stack that holds data into a vault. See [Backups and restore points](/guides/backups).
+
+---
+
+## Prompt like a tech lead
+
+<AccordionGroup>
+  <Accordion title="One stage, one session">
+    Planning, design, building and shipping each get a fresh context with only the previous artefact as input.
+  </Accordion>
+  <Accordion title="Name the constraints up front">
+    Stack, database, migration tool, and what you refuse to use. Every unstated preference is a decision the agent will make differently each time.
+  </Accordion>
+  <Accordion title="Demand evidence">
+    "Use web search", "cite the competitor", "show the test output". The verb in your prompt decides whether you get a plan or a guess.
+  </Accordion>
+  <Accordion title="Write prompts that are reusable">
+    If a prompt works, it is a template. Keep the four stage prompts in the repository and improve them the way you improve CI configuration.
+  </Accordion>
+  <Accordion title="Give it the tools, not the answers">
+    A browser, Slack, the Ankra CLI, the repository. An agent that can verify its own work needs far less supervision than one that can only talk.
+  </Accordion>
+  <Accordion title="Gate promotion on verification">
+    Development must be seen working, in a browser, by the agent, before production exists. Put the gate in the prompt so it is never forgotten.
+  </Accordion>
+</AccordionGroup>
+
+---
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Lovable to Ankra" icon="heart" href="/use-cases/lovable-to-ankra">
+    Already built the app in a visual builder? Take it from its repository to production.
+  </Card>
+  <Card title="Production multi-cluster platform" icon="server" href="/use-cases/production-multi-cluster-platform">
+    The infrastructure around a fleet: central metrics, logs, sign-in, backups and alerts.
+  </Card>
+  <Card title="Ankra Pipelines" icon="route" href="/guides/ankra-pipelines">
+    Every stage the pipeline runs, and how the gate decides what may publish.
+  </Card>
+  <Card title="Agent Skills" icon="wand-magic-sparkles" href="/integrations/agent-skills">
+    Install Ankra's skills into Claude Code, Cursor, Codex, Copilot and more.
+  </Card>
+</CardGroup>

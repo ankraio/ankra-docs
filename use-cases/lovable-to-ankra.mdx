@@ -1,0 +1,318 @@
+---
+title: Lovable to Ankra
+description: Move an app you built in Lovable onto your own Kubernetes cluster with open-source components - add the repository in Ankra's add-application wizard, let Ankra's AI analyse it and open the setup pull request, run the front end from one Dockerfile, and run the backend as Postgres and object storage on your own cluster instead of a hosted service.
+---
+
+Lovable builds the app. Ankra runs it on your cluster, with open-source software you control, behind HTTPS, with every change built and scanned first.
+
+You keep prompting in Lovable. Lovable commits to your GitHub repository, and Ankra builds every commit.
+
+<Frame caption="From a Lovable repository to your own cluster">
+  <img src="/images/use-cases/lovable-to-ankra.svg" alt="An app built in Lovable is synced to your GitHub repository. Ankra's add-application wizard analyses it and opens a setup pull request. Ankra builds, scans and deploys it to your cluster, where it runs next to open-source Postgres and object storage that Ankra also runs. A live HTTPS address is printed, and every later edit in Lovable is rebuilt and redeployed." className="w-full" />
+</Frame>
+
+---
+
+## What Ankra does for you
+
+Adding an application is a wizard, and the work is done by Ankra's AI, not by you.
+
+| You | Ankra's wizard and AI agent |
+|---|---|
+| Pick the repository and branch | Reads the repository, detects the framework, and works out what it needs: port, secrets, database |
+| Review one pull request | Opens a setup pull request with the Kubernetes manifests, the deploy options (`.ankra/ankra.yaml`) and the build pipeline (`.ankra/pipeline.yaml`) |
+| Press Deploy | Builds the image in your cluster, scans it with Semgrep, Checkov and Trivy, applies your image gate, deploys, requests the certificate and prints the live address |
+| Approve the plan | If the app needs Postgres, generates a CloudNativePG database in your cluster and wires `DATABASE_URL` to it, so you never copy a password |
+
+You can drive the same flow from chat, which is useful when you want the AI to explain or change the plan before anything is written:
+
+```bash
+ankra chat "add my repository <owner>/<repo> as an application and show me the setup plan" --mode agent
+ankra chat "revise the setup: high availability, 3 replicas" --mode agent
+```
+
+Agent mode stops at a confirmation card before every write. See [Applications](/concepts/applications) and [AI Assistant](/platform/ai-assistant).
+
+---
+
+## Add the app with the wizard
+
+<Steps>
+  <Step title="Connect Lovable to GitHub">
+    In Lovable, open the project's GitHub settings and connect a repository. Lovable commits every change to it from then on. This is the only link between the two.
+  </Step>
+  <Step title="Add the repository in Ankra">
+    In the portal, open **Applications** and choose **Add application** (**What are you shipping?** in the new portal). Pick your GitHub credential, the repository and the branch Lovable tracks. Ankra analyses it in the background.
+
+    Without the portal, from a clone of the repository:
+
+    ```bash
+    ankra application add . --name shop --branch main --wait
+    ```
+  </Step>
+  <Step title="Add the one file Ankra cannot guess">
+    A Lovable project has no `start` script, so Ankra cannot generate a runtime for it and says it wrote no Dockerfile. Add this one at the repository root and commit it to the branch Lovable tracks. Ankra builds whatever Dockerfile it finds and never overwrites it.
+
+    ```dockerfile
+    # Dockerfile
+    FROM node:22-alpine AS build
+    WORKDIR /app
+    COPY package.json package-lock.json* ./
+    RUN if [ -f package-lock.json ]; then npm ci; else npm install; fi
+    COPY . .
+    RUN npm run build
+
+    FROM nginxinc/nginx-unprivileged:1.27-alpine
+    COPY --from=build /app/dist /usr/share/nginx/html
+    COPY <<'EOF' /etc/nginx/conf.d/default.conf
+    server {
+      listen 8080;
+      root /usr/share/nginx/html;
+      location = /healthz { return 200 "ok\n"; }
+      location /assets/ { expires 1y; add_header Cache-Control "public, immutable"; try_files $uri =404; }
+      location / { add_header Cache-Control "no-cache"; try_files $uri /index.html; }
+    }
+    EOF
+    EXPOSE 8080
+    ```
+
+    It builds the app with Vite and serves it with nginx. The `try_files` line makes a refresh on `/dashboard/settings` return the app instead of a 404, and `/healthz` gives the cluster something to probe.
+  </Step>
+  <Step title="Review the setup pull request and ship">
+    Read the pull request Ankra opened: the manifests, the deploy options and the pipeline. It is a proposal, and builds run from the next push whether or not you merge it. Then deploy from the wizard, or in one command:
+
+    ```bash
+    ankra application ship . --cluster <cluster-id> --set target_port=8080
+    ```
+
+    Ankra waits for the build, deploys, waits until the pods run and prints:
+
+    ```
+    Live: https://<app>.<cluster-domain>
+    ```
+
+    <Note>
+    The first pipeline definition needs a person to approve it once. If the build stops with a refused step, run `ankra pipeline get --application shop --latest`, which prints the exact approve command, and run it as yourself.
+    </Note>
+  </Step>
+</Steps>
+
+---
+
+## Run the backend on your cluster
+
+A Lovable app is a front end plus a backend, and the backend is usually a hosted service. On Ankra the backend is open-source software on your own cluster, run by Ankra.
+
+**What Ankra runs for you today**
+
+| Need | Open-source component | How you get it |
+|---|---|---|
+| Relational database | PostgreSQL, run by the CloudNativePG operator | The wizard generates it when the app needs Postgres and wires `DATABASE_URL`. Or add it as a [managed service](/guides/set-up-a-managed-service) |
+| File storage (S3 API) | SeaweedFS | [Managed service](/guides/set-up-a-managed-service) |
+| Cache | Valkey | [Managed service](/guides/set-up-a-managed-service) |
+| Queue | NATS with JetStream | [Managed service](/guides/set-up-a-managed-service) |
+| Search | OpenSearch | [Managed service](/guides/set-up-a-managed-service) |
+
+The database is a Kubernetes resource in your repository, so it is reviewed in the same pull request as the app, sized by the deploy mode (one instance for quick, three for high availability), and protected like any other data with [backups and restore points](/guides/backups). Managed services are in closed beta and enabled per organisation; [contact support](/platform/support) to turn them on.
+
+### The part to be honest about: the data layer
+
+Lovable generates apps that talk to **Supabase** with `supabase-js`: sign-in, tables, storage and functions all go through Supabase's own API. Ankra does not recognise Supabase, and its wizard does not rewrite application code, so a repository that calls Supabase keeps calling Supabase unless the data layer changes. There are two ways to get fully onto your cluster:
+
+1. **Replace the data layer in the code.** Move tables to the Postgres Ankra generated, files to the S3 service, and sign-in to an open-source identity provider such as [Ory Kratos](/use-cases/production-multi-cluster-platform#step-6-infrastructure-cluster-a-staff-sign-in-realm-with-kratos-and-hydra), Keycloak or authentik. This is a code change, and it is the right job for an AI coding assistant working in the repository, with the Ankra skills installed so it knows where the pieces live:
+
+   ```
+   Replace Supabase in this app with the open-source stack on my Ankra cluster.
+   Use the Postgres the setup PR generated (DATABASE_URL), keep schema changes in
+   versioned migrations, and put files in the S3 service. Show me the plan and the
+   diff before you commit.
+   ```
+
+2. **Run Supabase's open-source stack on your cluster.** Supabase is open source and can be self-hosted, which keeps the app's code unchanged because only its address changes. Ankra can convert a Supabase self-host Docker Compose file with [`ankra migrate`](/guides/migrate-from-docker) and restore its Postgres through a backup vault, but there is no one-step Supabase package yet, and the compose file's mounted configuration needs care. Treat this as an advanced route.
+
+<Warning>
+Whichever you choose, never ship the Supabase **service role** key in the repository or in any `VITE_` variable, and review Row Level Security or its replacement before real users arrive. Do not switch the data layer in production first: prove it in development.
+</Warning>
+
+---
+
+## Use your own domain
+
+Add two options to the deploy:
+
+```bash
+ankra application ship . --cluster <cluster-id> \
+  --set target_port=8080 \
+  --set ingress_enabled=true \
+  --set ingress_host=app.example.com
+```
+
+Ankra's DNS automation covers the generated subdomain. For a zone of your own, store a DNS credential and serve the zone from the cluster once:
+
+```bash
+ankra org dns credentials create --name example-dns
+ankra cluster custom-dns-zones add <cluster> --zone example.com --credential example-dns
+```
+
+If the name points at Lovable's hosting today, remove it there first. See [Domains and DNS](/guides/avura-domains).
+
+---
+
+## Development, then production
+
+Add a second cluster so each change is proved before production sees it. An application deploys to as many environments as you give it, and each environment is a cluster and namespace with its own database and secrets.
+
+<Frame caption="One image, two environments: the backend address is injected when the container starts">
+  <img src="/images/use-cases/lovable-to-ankra-environments.svg" alt="An app built in Lovable is committed to GitHub. An Ankra pipeline tests, builds, scans and gates it and publishes an immutable tag. The tag is deployed to a development cluster and proved there, then promoted unchanged to a production cluster. Each environment talks to its own backend, and one image serves both because the backend address is injected when the container starts." className="w-full" />
+</Frame>
+
+<Steps>
+  <Step title="Deploy to development">
+    ```bash
+    ankra application ship . --cluster <dev-cluster-id> --namespace shop-dev \
+      --set target_port=8080 \
+      --set ingress_enabled=true --set ingress_host=app.example.dev
+    ```
+
+    Each environment gets its own database, so development data never reaches production.
+  </Step>
+  <Step title="Promote the tag that passed">
+    Turn auto-deploy off so production never follows a push, then promote the exact tag you tested. Promotion moves the image tag only: never a rebuild, never configuration.
+
+    ```bash
+    ankra application auto-deploy set <application-id> --enabled=false
+    ankra application deploy <application-id> --cluster <prod-cluster-id> --namespace shop \
+      --set image_tag=sha-<the-tag-that-passed> \
+      --set target_port=8080 --set replicas=2 --mode high_availability \
+      --set ingress_enabled=true --set ingress_host=app.example.com
+    ```
+
+    You can also promote from the application's **Environments** page in the portal, or from chat with `promote_application`. To roll back, deploy an earlier tag the same way.
+  </Step>
+</Steps>
+
+Anything that differs per environment and is baked into a Vite build, such as a public API address, can be filled in when the container starts instead of at build time:
+
+<AccordionGroup>
+  <Accordion title="Dockerfile that reads its backend address at start">
+    ```dockerfile
+    # Dockerfile
+    FROM node:22-alpine AS build
+    WORKDIR /app
+    COPY package.json package-lock.json* ./
+    RUN if [ -f package-lock.json ]; then npm ci; else npm install; fi
+    COPY . .
+    ARG VITE_SUPABASE_URL=__SUPABASE_URL__
+    ARG VITE_SUPABASE_PUBLISHABLE_KEY=__SUPABASE_PUBLISHABLE_KEY__
+    ENV VITE_SUPABASE_URL=$VITE_SUPABASE_URL \
+        VITE_SUPABASE_PUBLISHABLE_KEY=$VITE_SUPABASE_PUBLISHABLE_KEY
+    RUN npm run build
+
+    FROM nginxinc/nginx-unprivileged:1.27-alpine
+    COPY --from=build /app/dist /usr/share/nginx/html
+    COPY <<'EOF' /etc/nginx/conf.d/default.conf
+    server {
+      listen 8080;
+      root /tmp/site;
+      location = /healthz { return 200 "ok\n"; }
+      location /assets/ { expires 1y; add_header Cache-Control "public, immutable"; try_files $uri =404; }
+      location / { add_header Cache-Control "no-cache"; try_files $uri /index.html; }
+    }
+    EOF
+    COPY --chmod=755 <<'EOF' /docker-entrypoint.d/40-runtime-config.sh
+    #!/bin/sh
+    set -eu
+    rm -rf /tmp/site && mkdir -p /tmp/site && cp -R /usr/share/nginx/html/. /tmp/site/
+    swap() {
+      value="$(printenv "$1" || true)"
+      [ -n "$value" ] || { echo "runtime-config: $1 is not set" >&2; exit 1; }
+      escaped="$(printf '%s' "$value" | sed -e 's/[\\&|]/\\&/g')"
+      find /tmp/site -type f \( -name '*.js' -o -name '*.html' \) -exec sed -i "s|$2|$escaped|g" {} +
+    }
+    swap SUPABASE_URL __SUPABASE_URL__
+    swap SUPABASE_PUBLISHABLE_KEY __SUPABASE_PUBLISHABLE_KEY__
+    EOF
+    EXPOSE 8080
+    ```
+
+    The same image serves any backend whose address you pass as `SUPABASE_URL` and `SUPABASE_PUBLISHABLE_KEY` (the names follow Lovable's; rename them to match your `.env`), including a self-hosted one. Give each environment its values with an environment secret, which is stored per application, sealed into the workloads and rolled on apply:
+
+    ```bash
+    printf '%s' "$BACKEND_URL" | ankra application env-secrets set <application-id> SUPABASE_URL
+    printf '%s' "$BACKEND_KEY" | ankra application env-secrets set <application-id> SUPABASE_PUBLISHABLE_KEY
+    ankra application env-secrets apply <application-id>
+    ```
+
+    Variables in the environment take priority over the `.env` Lovable commits, so the committed address never reaches the bundle. A container started without a variable exits at once and names it.
+  </Accordion>
+</AccordionGroup>
+
+---
+
+## What you get without asking
+
+- **Scans on every change.** Semgrep over the source, Checkov over the manifests and Trivy over the image, judged against your organisation's gate before anything is published. A generated app is mostly code you did not write, so this is where an unsafe pattern or a leaked key shows up.
+- **An immutable tag per commit.** Every deployment is a `sha-` tag.
+- **Tests when you add them.** The pipeline has a test stage only when `package.json` has a `test` script, and Lovable projects usually have none.
+- **An AI review and a watcher.** Ankra reads every pull request, watches every run, and opens a fix when a build breaks.
+- **Pull request previews.** A live preview of each branch, with its own throwaway Postgres if you ask for one. See [Pull request preview environments](/guides/pr-preview-environments).
+
+---
+
+## Verify
+
+```bash
+curl -fsS https://app.example.com/healthz
+ankra application deployments <application-id>
+ankra cluster get pods -n shop --cluster <cluster-id>
+ankra pipeline findings <run-id> --application shop
+```
+
+Then open the address, reload a nested page, and sign up and sign in once. A green deployment is not a working app; the sign-in is the check.
+
+---
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="Ankra says it wrote no Dockerfile">
+    Expected for a Lovable project, which has no `start` script. Add the Dockerfile from the wizard steps and ship again.
+  </Accordion>
+  <Accordion title="The page loads but refreshing a nested route shows a 404">
+    The `try_files $uri /index.html;` line is missing from the nginx config, or the config was not copied into the image.
+  </Accordion>
+  <Accordion title="Sign-in redirects to localhost or the old address">
+    The identity provider's allowed redirect list does not include the new address. Add it for each environment.
+  </Accordion>
+  <Accordion title="The app still talks to the hosted Supabase">
+    The code still calls Supabase, which Ankra does not rewrite. Change the data layer as described above, or inject a self-hosted backend's address.
+  </Accordion>
+  <Accordion title="The build stops at the image gate">
+    A scanner found something above your threshold. `ankra pipeline findings <run-id> --application shop` lists it, worst first. Fix it, or accept it deliberately and write down why.
+  </Accordion>
+  <Accordion title="The pod restarts and its log says a variable is not set">
+    Only the runtime-config Dockerfile does this, on purpose. Set the environment secret and run `ankra application env-secrets apply <application-id>`.
+  </Accordion>
+  <Accordion title="My own domain shows no certificate or does not resolve">
+    The zone was not declared for that cluster. Run `ankra cluster custom-dns-zones list <cluster>` and add it with its credential.
+  </Accordion>
+</AccordionGroup>
+
+---
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Applications" icon="rocket" href="/concepts/applications">
+    How Ankra analyses a repository, what the setup pull request contains and how deployments work.
+  </Card>
+  <Card title="Managed services" icon="database" href="/concepts/managed-services">
+    PostgreSQL, Valkey, NATS, OpenSearch and S3-compatible storage, run on your cluster.
+  </Card>
+  <Card title="Backups and restore points" icon="shield-check" href="/guides/backups">
+    Protect the database and the files the app depends on.
+  </Card>
+  <Card title="Prompt to Production" icon="wand-magic-sparkles" href="/use-cases/prompt-to-production">
+    The same development-then-production discipline for apps you build from a written plan.
+  </Card>
+</CardGroup>
