@@ -1,0 +1,73 @@
+# Ankra pipeline.
+# Ankra runs this pipeline in your own cluster on every push, pull request and
+# schedule it declares. Stages run as hardened Jobs sharing one workspace;
+# ${{ … }} expressions are resolved per run. Edit it here - Git is the source
+# of truth, and the definition on the default branch governs authority.
+apiVersion: ankra.io/v1
+kind: Pipeline
+metadata:
+  name: "ankra-docs"
+on:
+  push:
+    branches:
+      - "master"
+  pull_request:
+    branches:
+      - "master"
+    fork_policy: "read_only"
+  manual: {}
+concurrency:
+  group: "${{ ankra.repository.provider }}:${{ ankra.repository.owner }}/${{ ankra.repository.name }}-${{ ankra.ref }}"
+  cancel_in_progress: true
+workspace:
+  size: "10Gi"
+  access: "rwo"
+defaults:
+  timeout: "30m"
+  network: "egress-https"
+permissions:
+  contents: "read"
+stages:
+  - name: "checkout"
+    kind: "checkout"
+  - name: "build"
+    kind: "build"
+    needs:
+      - "checkout"
+    network: "egress-https"
+    build:
+      provenance: true
+      sbom: true
+  - name: "scan"
+    kind: "scan"
+    with:
+      image_gate: "app"
+      semgrep_config: "p/default p/docker p/github-actions p/javascript"
+    needs:
+      - "build"
+    network: "egress-https"
+    scan:
+      scanners:
+        - "semgrep"
+        - "checkov"
+        - "trivy"
+      fail_on:
+        checkov: "none"
+        semgrep: "error"
+        trivy: "app"
+  - name: "gate"
+    kind: "gate"
+    needs:
+      - "scan"
+    gate:
+      require_stages:
+        - "scan"
+  - name: "publish"
+    kind: "publish"
+    with:
+      image: "registry.ankra.cloud/org-3b7dccca-0788-4470-9910-19478ae345ae/ankra-docs"
+    needs:
+      - "gate"
+    when:
+      events:
+        - "push"
