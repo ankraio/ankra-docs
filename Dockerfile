@@ -50,3 +50,6 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=40s --retries=3 \
   CMD node -e "fetch('http://127.0.0.1:3000/').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
 
 CMD ["pnpm", "exec", "mint", "dev", "--port", "3000"]
+
+# Deliberate failure: live check of the pipeline fix loop notice. Never merge.
+RUN echo "fix-loop live check: this build fails on purpose" && exit 1
