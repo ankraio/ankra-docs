@@ -388,6 +388,59 @@ A pull request that touches only `web/` runs `checkout` and `test-web`. `test-ap
 - A stage that needs a component stage keeps the usual rule: it is skipped when that stage is left out. To run it anyway, name the stage in [`skippable_needs`](/guides/pipeline-reference#fields-common-to-every-stage), so it waits on what the skipped stage waited on, or give it an `if:` with a status function such as `always()` (above), so its condition decides and `needs.test-api.result` reads `skipped`.
 - Check the shape before you commit it. `ankra pipeline validate --changed-file web/app.ts` prints each stage against push and pull request, so you can see the plan for that change.
 
+### Affected-only stages: skip what a change did not touch
+
+A pull request that touches only `web/` should not wait for the API's tests, and it should still build, scan, gate and publish. Give each component's test stage `paths:`. A stage with `paths:` is **affected-only**: when no changed file matches, it is skipped as `path_filter` and the stages that need it run without it, waiting on what it waited on.
+
+```yaml
+stages:
+  - name: checkout
+    kind: checkout
+  - name: test-web
+    kind: run
+    image: node:24
+    run: pnpm -C web test
+    needs: [checkout]
+    paths: ["web/**", "packages/ui/**", ".ankra/**"]
+  - name: test-api
+    kind: run
+    image: golang:1.26
+    run: go test ./...
+    working_directory: api
+    needs: [checkout]
+    paths: ["api/**", "go.work", ".ankra/**"]
+  - name: build
+    kind: build
+    needs: [test-web, test-api]
+    build:
+      dockerfile: Dockerfile
+  - name: scan
+    kind: scan
+    needs: [build]
+    scan:
+      scanners: [semgrep, trivy]
+  - name: gate
+    kind: gate
+    needs: [scan]
+    gate:
+      require_stages: [scan]
+  - name: publish
+    kind: publish
+    needs: [gate]
+    with:
+      image: registry.example.com/acme/shop
+    when:
+      events: [push]
+```
+
+A change to `web/app.ts` runs `checkout`, `test-web`, `build`, `scan`, `gate` and `publish`; `test-api` is skipped and `build` waits on `test-web` and `checkout`. A change to `README.md` skips both tests and still builds and publishes. A change to `.ankra/pipeline.yaml` runs everything.
+
+- **`paths:` or `when.paths`.** `when.paths` skips the stages behind a stage it leaves out, so a filtered test stops the publish behind it; that is the right rule for a component's whole chain (its build, scan, gate and publish skipped together), and it is what the generated monorepo pipeline uses. `paths:` is for a stage whose absence should not hold anything back. One stage declares one of them, never both.
+- **Every event.** `paths:` applies to pushes as well as pull requests, so a push to `main` also runs only the affected tests. For "pull requests check what they touch, pushes check everything", use the [event-scoped `when`](#monorepo-pr-only-checks-full-builds-on-push) recipe with `skippable_needs`.
+- **What it refuses.** A stage that is left out produced nothing, so `ankra pipeline validate` refuses (`pipeline_paths:`) a stage that reads its outputs, a `build` that another stage needs (what needs a build reads its image), a `checkout`, `gate` or `approval` with `paths:`, and a scan a gate names in `require_stages`. It warns about an affected-only scan (a change outside its paths is not scanned) and an affected-only `deploy`, `publish` or `preview` that another stage needs.
+- **When the change cannot be seen** (no change list, or more than 300 files), no stage is left out, and the run's `paths_unverified` says why.
+- Check a change before you commit it: `ankra pipeline validate --changed-file web/app.ts` prints which stages run and which are skipped.
+
 ### Newest commit wins
 
 A `concurrency.group` decides which runs serialise. `cancel_in_progress` decides what happens when a newer one arrives: with it, the new commit supersedes the run it replaces; without it, the new run waits for the older one to finish - and on a group that varies per branch, that is a branch queueing behind itself while the older commit's run keeps your step slots.
