@@ -696,6 +696,10 @@ Two readings need care. A memory peak counts page cache, which the kernel uses t
 
 **A step that cannot fit beside its run goes back to the queue.** When the node holding a run's workspace is full, a step that has to run there would otherwise sit waiting on that node while holding a CI slot. After a minute of that, the agent gives the slot back and Ankra returns the step to the queue; it is handed out again once the run's other live steps have finished and the node has room. The run page says how many times a step was returned to the queue, and `ankra pipeline get` prints the count.
 
+**A run can reserve its room before it starts.** With the run reservation on for a pipeline cluster (`ankra cluster agent ci set --run-reservation on --cluster <name>`), Ankra works out from the plan how much CPU and memory the run's steps will need side by side at their peak. Before the first step starts, it asks the cluster to hold that much room on one node with a placeholder pod. The run's steps then take that room over as they start, so another run cannot fill the node between two steps. When no node has that much room free, the placeholder waits like any pod, and the cluster autoscaler can add a node for it. When the run concludes, the room is released.
+
+That has a cost. While a reserved run is in progress it keeps its room on the node even between steps, and that can **add a node** or **keep one from scaling down** that an unreserved run would have let go. `shadow` works out and records each run's reservation without holding any room, so you can compare the estimate with what the steps used before you turn it on. `off` reserves nothing. Each run's reservation is on its detail as `reservation` (mode, the estimated CPU and memory, and the peak its steps were observed to use), and the run page shows it under **Reservation**.
+
 **A step that can never be scheduled fails fast.** If no node the step may run on is large enough for what it asks for, and the autoscaler cannot add one that is, the step fails after about two minutes with the scheduler's own reason, instead of holding a slot until its timeout and reporting a timeout for a step that never ran. Lower the stage's `resources`, or add a node group with larger nodes.
 
 #### Why a run is waiting
@@ -710,9 +714,13 @@ A queued run says which limit it is behind. The run page shows it under the run'
 | `waiting_on_step_cap` | The run already has `ci_max_parallel_steps` steps running | Raise `ci_max_parallel_steps` if one run should fan out wider |
 | `waiting_on_ci_workers` | The CI cluster's agent runs no pipeline steps, is offline, or is missing | The message names the fix, usually `ankra cluster agent ci set --workers N` |
 | `waiting_on_ci_slots` | Every CI slot on the cluster is taken; the message says how many slots it has and how many steps hold them | Raise `ci_worker_count`, and check the node group can grow to match |
+| `waiting_for_room_on_cluster` | With the run reservation on, the cluster caps how many runs it admits at once while their reservations are still being placed, and it is at that cap. This run has not been admitted yet, so it is still queued | It is admitted as earlier runs' reservations are placed |
+| `waiting_on_run_node` | The node the run's workspace lives on has no room for the run's next step | It starts when the run's other steps on that node finish |
 | `waiting_on_capacity` | The run's steps are queued behind other work on the cluster | They start as slots free up |
 
 Once a run's first step has started it shows no `Waiting:` line, whichever of these limits holds its next step back: its pending steps start as the limit frees up. A step that Ankra has handed to the agent and that is waiting for a free slot shows as waiting for a CI slot on the run page.
+
+**A run waiting for room for its reservation** has been admitted and is already running, so it carries no `queue_reason`. It says so in its own field instead. While the run's first step waits for a node with room for the run's reservation, the run page shows **Waiting for a node with room for this run**, with the room it is holding out for, how long it has waited, and what the autoscaler is doing about it (adding a node, at its node group's maximum, refused by the provider). `ankra pipeline get` prints the same sentence on its `Waiting:` line and a `Reserving:` line with the room and the wait. The run detail carries it as `reservation_wait` (`state` `waiting` or `returned_to_queue`, `since`, `waited_seconds`, the reserved `cpu_millicores` and `memory_bytes`, and the `message`). If no node has room within 10 minutes, the first step goes back to the queue and is sent again, and the state reads `returned_to_queue` with the count. When Ankra could not read the cluster, `reservation_wait_unavailable` says so, and while it is set the wait is unknown: a missing `reservation_wait` then does not mean nothing is holding the run back. The step itself carries the diagnosis `run_reservation_pending` (see [Diagnosis codes](#diagnosis-codes)).
 
 #### Seeing and raising capacity
 
@@ -879,6 +887,7 @@ Ankra reads the evidence it already has, so nothing extra runs on your cluster: 
 | `image_pull_failed` | The cluster could not pull the image for another reason | Check that the image name and tag exist and that the registry is reachable from the cluster |
 | `volume_unavailable` | The step's volume could not be provisioned, attached or mounted | Check the CI cluster's StorageClass and CSI driver. A volume still detaching from another node clears on its own |
 | `scale_up_in_progress` | The autoscaler is adding a node for the step | Nothing; a new node usually joins in one to three minutes |
+| `run_reservation_pending` | The run's first step is waiting for a node with room for the whole run's reservation (the run reservation is on for the cluster); the `next_step` names the room and says whether a node is being added | Nothing while a node is being added. If the node group is at its maximum or the provider refused a node, the same remedy as `node_group_at_max` or the quota codes. To stop holding room, `ankra cluster agent ci set --run-reservation off` |
 
 **Why a step or run failed**
 
