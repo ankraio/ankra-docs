@@ -26,7 +26,12 @@ ENV NODE_ENV=production \
     PORT=3000 \
     HOSTNAME=0.0.0.0
 
+# The server runs through corepack's pnpm, never npm. npm and npx are removed
+# because the copy bundled in the node image carries its own dependency tree
+# (pacote, sigstore, brace-expansion, picomatch) that the image gate scans and
+# that lags behind its fixes.
 RUN corepack enable \
+ && rm -rf /usr/local/lib/node_modules/npm /usr/local/bin/npm /usr/local/bin/npx \
  && apk add --no-cache python3 \
  && addgroup -S -g 1001 docs \
  && adduser -S -u 1001 -G docs -h /app docs
