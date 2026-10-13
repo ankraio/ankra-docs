@@ -1,81 +1,135 @@
 ---
 title: Lovable to Ankra
-description: Take an app you built in Lovable from its GitHub repository to a production deployment on your own Ankra cluster - a container that keeps one image for every environment, a development cluster that proves each change, a custom domain with TLS, and a pipeline that tests, scans and promotes the same tag.
+description: Put an app you built in Lovable on your own cluster with one Dockerfile and one command - Ankra builds it, scans it, deploys it behind HTTPS and prints the live address, and every later edit in Lovable is redeployed. Optionally add a development environment that proves each change before production.
 ---
 
-Lovable builds the app and keeps editing it. Ankra runs it: in your cluster, on your domain, behind a pipeline that tests, scans and publishes every change, with a development environment that proves it before production sees it.
+Lovable builds the app. Ankra runs it, on your cluster, behind HTTPS, with every change built and scanned first.
 
-The app stays a Lovable app. Lovable keeps pushing commits to your GitHub repository, and every commit that lands on the tracked branch is a build on Ankra. Nothing here needs you to stop prompting in Lovable.
+You do not stop prompting in Lovable. Lovable commits to your GitHub repository, and Ankra builds every commit.
 
----
-
-## What moves and what stays
-
-A Lovable project is a React and Vite single-page app, usually with a Supabase backend for sign-in, the database, file storage and edge functions. Only the first half moves.
-
-| Part | Where it runs after this guide |
-|---|---|
-| The React app, built by Vite | A container on your Ankra cluster: static files behind nginx, with a health endpoint and the single-page-app fallback |
-| Build, test, scan, publish | An Ankra pipeline in your cluster, from a committed `.ankra/pipeline.yaml` |
-| The public URL and its certificate | Ankra's ingress, DNS and TLS, on a generated `ankra.cc` host or your own domain |
-| Sign-in, database, storage, edge functions | **Stays on Supabase.** One Supabase project per environment, with its sign-in redirect URLs pointing at the new domains |
-| Prompting and editing | **Stays in Lovable.** Its two-way GitHub sync is the only link between the two |
-
-<Note>
-Check which Supabase project your Lovable app uses before you start. If it is a Supabase project in your own Supabase account, nothing about the backend changes. If it is a project Lovable manages for you, confirm what export and ownership options Lovable offers, because production should not depend on a backend you cannot administer. This guide assumes the backend stays where it is.
-</Note>
-
-<Frame caption="Lovable commits to GitHub, Ankra builds and tests, development proves it, production runs the same image">
-  <img src="/images/use-cases/lovable-to-ankra.svg" alt="An app built in Lovable is synced to your GitHub repository. An Ankra pipeline tests, builds, scans and gates it and publishes an immutable tag. The tag is deployed to a development cluster and proved there, then promoted unchanged to a production cluster. Each environment talks to its own Supabase project, and one image serves both because the backend address is injected when the container starts." className="w-full" />
+<Frame caption="One command from a Lovable repository to a live address">
+  <img src="/images/use-cases/lovable-to-ankra.svg" alt="An app built in Lovable is synced to your GitHub repository. One Ankra command builds it, scans it, deploys it to your cluster and prints a live HTTPS address. The app keeps talking to its Supabase project, and every later edit in Lovable is rebuilt and redeployed." className="w-full" />
 </Frame>
 
 ---
 
-## Build it with your AI coding assistant
-
-An assistant that has the Ankra CLI and skills can carry out this guide while you review. Install them once, as described in [Build it with your AI coding assistant](/use-cases/production-multi-cluster-platform#build-it-with-your-ai-coding-assistant), then start the assistant in a clone of your Lovable repository:
-
-```
-Take this Lovable app to production on Ankra, following
-https://docs.ankra.ai/use-cases/lovable-to-ankra
-
-- Development: cluster <dev-cluster>, domain app.example.dev, Supabase project <dev-ref>
-- Production: cluster <prod-cluster>, domain app.example.com, Supabase project <prod-ref>
-- Repository: <owner>/<repo>, tracked branch main
-
-Work one step at a time. Add the container files in one commit and show me the
-diff before you push. Validate every cluster change with `ankra cluster validate`
-and stage it with `ankra cluster draft`. Seal anything that goes in a Secret with
-`ankra cluster encrypt`. Do not deploy to production until the development
-deployment passes the Verify list on that page. Never use kubectl or helm.
-```
-
----
-
-## Prerequisites
-
-- A Lovable project connected to a GitHub repository. In Lovable, open the project's GitHub settings and connect the repository; Lovable then commits every change to it.
-- An Ankra organisation with a [GitHub credential](/platform/credentials/git) that can reach that repository, and the [CLI](/integrations/ankra-cli) logged in.
-- A development cluster and a production cluster, [created on your provider](/guides/operate-ankra-managed-clusters) or imported. One cluster works for a trial, but the point of this guide is the two.
-- Two Supabase projects, development and production, each with the schema applied. Lovable commits the schema as `supabase/migrations` in the repository, so a new project is built from those files with the Supabase CLI.
-- A domain, for example `example.dev` for development and `example.com` for production, if you want your own hostnames. Without one, Ankra publishes each deployment on a generated `ankra.cc` host.
-
----
-
-## Step 1: Make the repository shippable
-
-Add four files to the repository in one commit, on the branch Lovable tracks. Lovable keeps editing the project through GitHub, so after the first Lovable edit confirm the files are still there and unchanged.
+## Ship it in four steps
 
 <Steps>
-  <Step title="Build the app with placeholders, not values">
-    Vite bakes `VITE_*` variables into the JavaScript at build time. If the Supabase address went into the image, you would need a different image for each environment and could never promote the one you tested. Instead the image is built with two placeholders, and the container swaps in the real values when it starts.
+  <Step title="Connect Lovable to GitHub">
+    In Lovable, open the project's GitHub settings and connect a repository. Lovable commits every change to it from then on. This is the only link between the two.
+  </Step>
+  <Step title="Add one file">
+    Ankra builds whatever Dockerfile it finds, and a Lovable project has none. Add this one at the repository root and commit it to the branch Lovable tracks.
 
     ```dockerfile
     # Dockerfile
     FROM node:22-alpine AS build
     WORKDIR /app
     COPY package.json package-lock.json* ./
-    RUN npm ci
+    RUN if [ -f package-lock.json ]; then npm ci; else npm install; fi
+    COPY . .
+    RUN npm run build
+
+    FROM nginxinc/nginx-unprivileged:1.27-alpine
+    COPY --from=build /app/dist /usr/share/nginx/html
+    COPY <<'EOF' /etc/nginx/conf.d/default.conf
+    server {
+      listen 8080;
+      root /usr/share/nginx/html;
+      location = /healthz { return 200 "ok\n"; }
+      location /assets/ { expires 1y; add_header Cache-Control "public, immutable"; try_files $uri =404; }
+      location / { add_header Cache-Control "no-cache"; try_files $uri /index.html; }
+    }
+    EOF
+    EXPOSE 8080
+    ```
+
+    It builds the app with Vite and serves the result with nginx. The `try_files` line is what makes a refresh on `/dashboard/settings` return the app instead of a 404, and `/healthz` gives the cluster something to probe. The Supabase address Lovable committed in `.env` is built into the app, so it keeps talking to the same backend.
+  </Step>
+  <Step title="Ship it">
+    From a clone of the repository, with the [CLI](/integrations/ankra-cli) logged in:
+
+    ```bash
+    ankra application ship . --cluster <cluster-id> --set target_port=8080
+    ```
+
+    Ankra registers the repository, builds the image in your cluster, scans it, applies your organisation's image gate, deploys it, waits until it is running and prints:
+
+    ```
+    Live: https://<app>.<cluster-domain>
+    ```
+
+    The address comes from the cluster's generated `ankra.cc` domain, with a certificate. If you run the command again it carries on from where it stopped.
+
+    <Note>
+    Ankra pipelines need a person to approve the pipeline definition once. If the build stops with a refused step, run `ankra pipeline get --application <name> --latest`, which prints the exact approve command, and run it as yourself.
+    </Note>
+  </Step>
+  <Step title="Tell Supabase where the app lives">
+    In your Supabase project, open **Authentication** then **URL Configuration**. Set **Site URL** to the live address and add it to **Redirect URLs**. A sign-in that bounces to the wrong host is almost always this list.
+  </Step>
+</Steps>
+
+That is the whole setup. Edit in Lovable, Lovable commits, Ankra builds and deploys.
+
+---
+
+## Use your own domain
+
+Add one option to the same command:
+
+```bash
+ankra application ship . --cluster <cluster-id> \
+  --set target_port=8080 \
+  --set ingress_enabled=true \
+  --set ingress_host=app.example.com
+```
+
+Ankra's DNS automation covers the generated subdomain only. For a zone of your own, store a DNS credential and serve the zone from the cluster once:
+
+```bash
+ankra org dns credentials create --name example-dns
+ankra cluster custom-dns-zones add <cluster> --zone example.com --credential example-dns
+```
+
+If the name currently points at Lovable's own hosting, remove it there first. Then add the new address to Supabase's redirect list. See [Domains and DNS](/guides/avura-domains).
+
+---
+
+## What you get without asking
+
+- **Scans on every change.** Semgrep over the source, Checkov over the manifests and Trivy over the image, judged against your organisation's gate before anything is published. A generated app is mostly code you did not write, so this is where an unsafe pattern or a leaked key shows up.
+- **An immutable tag per commit.** Every deployment is a `sha-` tag, so going back is deploying an earlier one.
+- **Tests when you add them.** Ankra adds a test stage only when `package.json` has a `test` script. Lovable projects usually have none, so the pipeline starts at the build, and a test stage appears the day you add a script.
+- **An AI review.** Ankra reads every pull request and watches every run, and opens a fix when a build breaks.
+
+Check what was found with `ankra pipeline findings <run-id> --application <name>`.
+
+<Warning>
+The Supabase address and the **publishable** key are public by design, because every visitor's browser holds them and Row Level Security protects the data. The **service role** key is the opposite. It must never be in the repository or in any `VITE_` variable. If it appears anywhere in the tree, rotate it in Supabase before you go on.
+</Warning>
+
+---
+
+## Add a development environment
+
+Everything above gives you one running copy. When real users depend on the app, add a second cluster and a second Supabase project so each change is proved before production sees it.
+
+<Frame caption="One image, two environments: the backend address is injected when the container starts">
+  <img src="/images/use-cases/lovable-to-ankra-environments.svg" alt="An app built in Lovable is committed to GitHub. An Ankra pipeline tests, builds, scans and gates it and publishes an immutable tag. The tag is deployed to a development cluster and proved there, then promoted unchanged to a production cluster. Each environment talks to its own Supabase project, and one image serves both because the backend address is injected when the container starts." className="w-full" />
+</Frame>
+
+Vite builds the Supabase address into the JavaScript, so an image built for one project cannot serve another. The fix is to build with two placeholders and let the container fill them in when it starts. Replace the Dockerfile with this one, still a single file:
+
+<AccordionGroup>
+  <Accordion title="Dockerfile for two or more environments">
+    ```dockerfile
+    # Dockerfile
+    FROM node:22-alpine AS build
+    WORKDIR /app
+    COPY package.json package-lock.json* ./
+    RUN if [ -f package-lock.json ]; then npm ci; else npm install; fi
     COPY . .
     ARG VITE_SUPABASE_URL=__SUPABASE_URL__
     ARG VITE_SUPABASE_PUBLISHABLE_KEY=__SUPABASE_PUBLISHABLE_KEY__
@@ -85,375 +139,120 @@ Add four files to the repository in one commit, on the branch Lovable tracks. Lo
 
     FROM nginxinc/nginx-unprivileged:1.27-alpine
     COPY --from=build /app/dist /usr/share/nginx/html
-    COPY docker/nginx.conf /etc/nginx/conf.d/default.conf
-    COPY --chmod=755 docker/40-runtime-config.sh /docker-entrypoint.d/40-runtime-config.sh
+    COPY <<'EOF' /etc/nginx/conf.d/default.conf
+    server {
+      listen 8080;
+      root /tmp/site;
+      location = /healthz { return 200 "ok\n"; }
+      location /assets/ { expires 1y; add_header Cache-Control "public, immutable"; try_files $uri =404; }
+      location / { add_header Cache-Control "no-cache"; try_files $uri /index.html; }
+    }
+    EOF
+    COPY --chmod=755 <<'EOF' /docker-entrypoint.d/40-runtime-config.sh
+    #!/bin/sh
+    set -eu
+    rm -rf /tmp/site && mkdir -p /tmp/site && cp -R /usr/share/nginx/html/. /tmp/site/
+    swap() {
+      value="$(printenv "$1" || true)"
+      [ -n "$value" ] || { echo "runtime-config: $1 is not set" >&2; exit 1; }
+      escaped="$(printf '%s' "$value" | sed -e 's/[\\&|]/\\&/g')"
+      find /tmp/site -type f \( -name '*.js' -o -name '*.html' \) -exec sed -i "s|$2|$escaped|g" {} +
+    }
+    swap SUPABASE_URL __SUPABASE_URL__
+    swap SUPABASE_PUBLISHABLE_KEY __SUPABASE_PUBLISHABLE_KEY__
+    EOF
     EXPOSE 8080
     ```
 
-    Lovable commits a `.env` file with the Supabase address in it. Variables that already exist in the environment take priority over `.env` in Vite, so the `ENV` lines above win and the committed values never reach the bundle. Check the names against your own `.env`: older projects use `VITE_SUPABASE_ANON_KEY` where newer ones use `VITE_SUPABASE_PUBLISHABLE_KEY`. `npm ci` needs a `package-lock.json`. Lovable projects commonly carry both that and a `bun.lockb`; if yours has only the bun lockfile, change the first stage to the `oven/bun` image and install with `bun install --frozen-lockfile`, and do the same for `pnpm`.
-  </Step>
-  <Step title="Serve a single-page app properly">
-    A React Router app has routes the server has never heard of. A refresh on `/dashboard/settings` has to return `index.html`, not a 404, while a missing file under `/assets/` must still 404.
-
-    ```nginx
-    # docker/nginx.conf
-    server {
-      listen 8080;
-      server_name _;
-      root /tmp/site;
-      index index.html;
-
-      gzip on;
-      gzip_types text/css application/javascript application/json image/svg+xml;
-
-      add_header X-Content-Type-Options "nosniff" always;
-      add_header Referrer-Policy "strict-origin-when-cross-origin" always;
-
-      location = /healthz {
-        access_log off;
-        default_type text/plain;
-        return 200 "ok\n";
-      }
-
-      location /assets/ {
-        expires 1y;
-        add_header Cache-Control "public, immutable";
-        try_files $uri =404;
-      }
-
-      location / {
-        expires -1;
-        try_files $uri /index.html;
-      }
-    }
-    ```
-
-    The hashed files under `/assets/` are cached for a year because their names change with their content; `index.html` is never cached, so a new release is picked up on the next load. The `/healthz` route gives the cluster a readiness probe that does not depend on Supabase.
-  </Step>
-  <Step title="Swap the placeholders at start">
-    ```sh
-    #!/bin/sh
-    # docker/40-runtime-config.sh
-    set -eu
-
-    source_dir=/usr/share/nginx/html
-    site_dir=/tmp/site
-
-    rm -rf "$site_dir"
-    mkdir -p "$site_dir"
-    cp -R "$source_dir"/. "$site_dir"/
-
-    replace_placeholder() {
-      name="$1"
-      placeholder="$2"
-      value="$(printenv "$name" || true)"
-      if [ -z "$value" ]; then
-        echo "runtime-config: $name is not set" >&2
-        exit 1
-      fi
-      escaped="$(printf '%s' "$value" | sed -e 's/[\\&|]/\\&/g')"
-      find "$site_dir" -type f \( -name '*.js' -o -name '*.html' \) \
-        -exec sed -i "s|$placeholder|$escaped|g" {} +
-    }
-
-    replace_placeholder SUPABASE_URL __SUPABASE_URL__
-    replace_placeholder SUPABASE_PUBLISHABLE_KEY __SUPABASE_PUBLISHABLE_KEY__
-    ```
-
-    The script copies the built site to `/tmp/site`, which nginx serves, so the image itself stays read-only and a container that runs as a non-root user can still do it. A container started without either variable exits at once with a message naming it, instead of serving a site that points nowhere.
-  </Step>
-  <Step title="Keep the build context small">
-    ```
-    # .dockerignore
-    node_modules
-    dist
-    .git
-    .env
-    *.log
-    ```
-  </Step>
-  <Step title="Give the pipeline something to test">
-    Ankra's generated pipeline runs the project's own test command. A Lovable project often has none, and a missing `test` script fails the first run. Either add a small render test with Vitest, or let the stage prove the build and the lint:
-
-    ```bash
-    npm run lint
-    npm run build
-    ```
-
-    A pipeline that only builds is fine on day one. Add real tests as the app grows, and let the gate in Step 3 hold the line.
-  </Step>
-</Steps>
-
-<Warning>
-The Supabase address and the **publishable** key are public by design: every visitor's browser holds them, and Row Level Security is what protects the data. The **service role** key is the opposite. It must never be in the repository, the image or any `VITE_` variable. If it appears anywhere in the tree, rotate it in Supabase before you go on; deleting the line in a later commit does not remove it from the history.
-</Warning>
-
----
-
-## Step 2: Prepare the two Supabase projects
-
-Do this in Supabase, once per environment, before the first deployment. These are the settings that make sign-in work on a new domain.
+    Variables that exist in the environment take priority over the `.env` Lovable commits, so the placeholders win and the committed address never reaches the bundle. A container started without either variable exits at once, naming the one that is missing. Check the variable names against your `.env`: older projects use `VITE_SUPABASE_ANON_KEY`.
+  </Accordion>
+</AccordionGroup>
 
 <Steps>
-  <Step title="Create the development and production projects from the repository">
-    ```bash
-    supabase link --project-ref <dev-project-ref>
-    supabase db push
-    supabase functions deploy
+  <Step title="Give each cluster its own values">
+    Each cluster holds a small Secret with its project's address and publishable key. Add it to that cluster's file, then seal it:
+
+    ```yaml
+    # stacks/lovable-runtime/manifests/runtime-config.yaml
+    apiVersion: v1
+    kind: Secret
+    metadata:
+      name: lovable-runtime
+      namespace: shop-web
+    type: Opaque
+    stringData:
+      SUPABASE_URL: https://<project-ref>.supabase.co
+      SUPABASE_PUBLISHABLE_KEY: <publishable-key>
     ```
-
-    Repeat with `<prod-project-ref>` when you reach production. Apply production migrations deliberately, from a reviewed change, never as a side effect of a deployment.
-  </Step>
-  <Step title="Tell each project which addresses are its own">
-    In each project, open **Authentication** and **URL Configuration**. Set **Site URL** to that environment's address, and add every address people will sign in from to **Redirect URLs**, including the preview wildcard if you want sign-in to work on pull request previews:
-
-    ```
-    https://app.example.dev
-    https://app.example.dev/**
-    https://*.example.dev/**
-    ```
-
-    A sign-in that bounces to the wrong host, or to `localhost`, is almost always this list. A social provider such as Google also keeps its own list of allowed redirect addresses; it needs the project's Supabase callback, not the app's address, so it only changes if the Supabase project itself changes.
-  </Step>
-  <Step title="Check the edge functions' CORS">
-    Edge functions Lovable generates usually answer any origin. If you have narrowed that, add the new domains to the allowed origins, or every call from the new address fails in the browser with a CORS error while working fine from Lovable's own preview.
-  </Step>
-  <Step title="Review Row Level Security">
-    Moving to a real domain with real users is the moment to read every table's policies. Ankra's pipeline scans your source, but it cannot know that a table was left open. In the Supabase dashboard, the security advisor lists tables without Row Level Security.
-  </Step>
-</Steps>
-
----
-
-## Step 3: Register the repository with Ankra
-
-Register after the container files are on the tracked branch, so Ankra's analysis sees your `Dockerfile` instead of generating one.
-
-```bash
-ankra credentials list --provider github
-ankra application add . --name shop-web --branch main
-ankra application get <application-id>
-```
-
-Ankra analyses the repository and opens a setup pull request that adds `.ankra/ankra.yaml` and `.ankra/pipeline.yaml`. Read the pipeline: it checks out, tests, builds your `Dockerfile` rootless in your cluster, scans with Semgrep, Checkov and Trivy, applies the organisation's image gate, and publishes an immutable `sha-` tag. The setup pull request is a proposal, not a gate; builds run from the next push whether or not it is merged, and merging is how the file reaches the branch.
-
-<Warning>
-An unapproved pipeline definition runs without its protected sections, so the build has no registry login and fails with a step refusal. Pipeline authority is approved by a person: run `ankra pipeline definitions approve <definition-id>` as yourself, not from an automation token. See [Ankra Pipelines](/guides/ankra-pipelines#logic-is-open-authority-is-closed).
-</Warning>
-
-Push one commit and watch the first run:
-
-```bash
-ankra pipeline get --application <application-id> --latest --wait --exit-code
-ankra pipeline findings <run-id> --application <application-id>
-```
-
-Fix or consciously accept every high finding now. A Lovable app is mostly generated code, so Semgrep is worth reading carefully: it is where unsafe HTML injection or a hard-coded key shows up.
-
----
-
-## Step 4: Give each cluster its own runtime configuration
-
-The same image runs in both clusters with different values. Each cluster gets a small stack holding a Secret that the container reads as environment variables. Add this to the development cluster's file, and a copy with the production project's values to the production cluster's.
-
-```yaml
-# stacks/lovable-runtime/manifests/runtime-config.yaml
-apiVersion: v1
-kind: Secret
-metadata:
-  name: lovable-runtime
-  namespace: shop-web
-type: Opaque
-stringData:
-  SUPABASE_URL: https://<dev-project-ref>.supabase.co
-  SUPABASE_PUBLISHABLE_KEY: <dev-publishable-key>
-```
-
-```yaml
-stacks:
-  - name: lovable-runtime
-    manifests:
-      - name: lovable-runtime-namespace
-        from_file: stacks/lovable-runtime/manifests/namespace.yaml
-      - name: lovable-runtime-config
-        from_file: stacks/lovable-runtime/manifests/runtime-config.yaml
-        parents:
-          - kind: manifest
-            name: lovable-runtime-namespace
-        encrypted_paths:
-          - SUPABASE_URL
-          - SUPABASE_PUBLISHABLE_KEY
-```
-
-```bash
-ankra cluster encrypt manifest lovable-runtime-config --all-data -f clusters/<dev-cluster>/<dev-cluster>.yaml
-ankra cluster validate -f clusters/<dev-cluster>/<dev-cluster>.yaml
-ankra cluster draft -f clusters/<dev-cluster>/<dev-cluster>.yaml
-```
-
-The two values are not confidential, but they are per-environment configuration and a Secret keeps them out of the image and out of plain Git. Manifest names are unique across a whole cluster, so keep the `lovable-runtime-` prefix. A namespace manifest has to be a parent of everything inside it. The stack owns the `shop-web` namespace, and the application deploys into it in Step 5; deleting the stack later deletes the namespace and the application with it.
-
----
-
-## Step 5: Deploy to development
-
-Deploy the tag the pipeline published, with the Secret attached and an ingress on the development domain.
-
-```bash
-ankra application deploy <application-id> \
-  --cluster <dev-cluster-id> \
-  --namespace shop-web \
-  --set image_tag=sha-<seven-characters> \
-  --set target_port=8080 \
-  --set env_from_secrets=lovable-runtime \
-  --set ingress_enabled=true \
-  --set ingress_host=app.example.dev
-```
-
-`env_from_secrets` turns every key of the named Secret into an environment variable of the container, which is exactly what the start-up script reads. `ingress_tls_issuer` defaults to `letsencrypt-prod`, so the certificate is requested for you.
-
-<Tabs>
-  <Tab title="A generated ankra.cc host">
-    Leave `ingress_enabled` and `ingress_host` out of the command. Ankra derives a hostname on the cluster's generated `ankra.cc` subdomain on the first deployment and publishes its DNS record and certificate. `ankra cluster domain <cluster>` shows the domain it derives from.
-  </Tab>
-  <Tab title="Your own domain">
-    Ankra's external-dns only manages the generated subdomain. For a zone of your own, store a DNS credential and serve the zone from the cluster that owns it:
 
     ```bash
-    ankra org dns credentials create --name example-dns
-    ankra cluster custom-dns-zones add <dev-cluster> --zone example.dev --credential example-dns
+    ankra cluster encrypt manifest lovable-runtime-config --all-data -f clusters/<cluster>/<cluster>.yaml
     ```
 
-    Do the same for `example.com` on the production cluster. If the domain currently points at Lovable's own hosting, remove it from Lovable first, or the two will compete for the name. See [Domains and DNS](/guides/avura-domains) for the Avura route.
-  </Tab>
-</Tabs>
-
-Then watch it settle, in this order:
-
-```bash
-ankra cluster operations list --cluster <dev-cluster-id> --failed
-ankra cluster get pods -n shop-web --cluster <dev-cluster-id>
-ankra cluster events -n shop-web --type Warning --cluster <dev-cluster-id>
-curl -fsS https://app.example.dev/healthz
-```
-
-A green deploy is not a working app. Open the address, sign up, sign in, reload a deep link, and use the feature you last changed.
-
----
-
-## Step 6: Promote to production
-
-Production never follows pushes. It receives the tag you already tested.
-
-<Steps>
-  <Step title="Stop deployments following the branch">
-    Auto-deploy is on from registration and applies to the application. Turn it off, and from now on deploy to each cluster explicitly:
+    The stack that declares it also needs a `shop-web` namespace manifest as its parent, with names prefixed `lovable-runtime-` because manifest names are unique across a cluster. See [SOPS Encryption](/guides/sops).
+  </Step>
+  <Step title="Deploy to development">
+    ```bash
+    ankra application ship . --cluster <dev-cluster-id> --namespace shop-web \
+      --set target_port=8080 \
+      --set env_from_secrets=lovable-runtime \
+      --set ingress_enabled=true --set ingress_host=app.example.dev
+    ```
+  </Step>
+  <Step title="Promote the tag that passed">
+    Turn auto-deploy off so production never follows a push, then deploy the exact tag you tested:
 
     ```bash
     ankra application auto-deploy set <application-id> --enabled=false
-    ```
-  </Step>
-  <Step title="Prepare production once">
-    Create the production Supabase project, apply its migrations, add `app.example.com` to its redirect URLs, and apply the Step 4 stack on the production cluster with that project's values.
-  </Step>
-  <Step title="Deploy the same tag">
-    ```bash
-    ankra application deploy <application-id> \
-      --cluster <prod-cluster-id> \
-      --namespace shop-web \
-      --set image_tag=sha-<the-tag-that-passed-in-development> \
-      --set target_port=8080 \
-      --set env_from_secrets=lovable-runtime \
-      --set replicas=2 \
-      --set ingress_enabled=true \
-      --set ingress_host=app.example.com
+    ankra application deploy <application-id> --cluster <prod-cluster-id> --namespace shop-web \
+      --set image_tag=sha-<the-tag-that-passed> \
+      --set target_port=8080 --set env_from_secrets=lovable-runtime --set replicas=2 \
+      --set ingress_enabled=true --set ingress_host=app.example.com
     ```
 
-    The tag in production is the tag from development, byte for byte. Nothing is rebuilt, so what you tested is what runs. Compare with `ankra application deployments <application-id>`.
-  </Step>
-  <Step title="Know the way back">
-    Every deployment is keyed on a `sha-` tag, so rolling back is deploying an earlier one:
-
-    ```bash
-    ankra application deploy <application-id> --cluster <prod-cluster-id> --namespace shop-web --set image_tag=sha-<previous-tag>
-    ```
-
-    A rollback changes only the running image. It does not undo a Supabase migration or data written since, so write migrations that can be reversed.
+    Nothing is rebuilt, so what you tested is what runs. To roll back, deploy an earlier tag the same way. A rollback changes the running image only; it does not undo a Supabase migration.
   </Step>
 </Steps>
 
----
-
-## Day 2
-
-- **Every edit in Lovable is a build.** A commit to the tracked branch runs the pipeline, and a failure is a notification, not a surprise in production. Route `pipeline_run_failed` and `image_gate_blocked` to your channel with `ankra alerts routes create`; see [Notification routing](/guides/notification-routing).
-- **Pull requests get previews.** If you work on branches, Ankra posts a preview URL and an AI review on each pull request. Add the preview domain to the development project's redirect list, as in Step 2. See [Pull request preview environments](/guides/pr-preview-environments).
-- **Ankra AI watches the runs.** When a build breaks, it reads the logs and proposes the fix as a pull request, which Lovable then picks up like any other commit.
-- **The backend has its own backups.** Ankra backs up what runs on your clusters; the database lives in Supabase, so its backups, point-in-time recovery and retention are Supabase settings. Switch them on for the production project before the first real user.
-- **Watch what is exploited.** `ankra application security-versions <application-id>` lists every published tag with its findings, and `ankra security findings --known-exploited` shows what is being exploited in the wild across your fleet.
+The database lives in Supabase, so its backups and point-in-time recovery are Supabase settings. Switch them on for the production project before the first real user.
 
 ---
 
 ## Verify
 
-<Steps>
-  <Step title="The pipeline is green and the image is scanned">
-    ```bash
-    ankra pipeline get --application <application-id> --latest --wait --exit-code
-    ankra pipeline findings <run-id> --application <application-id>
-    ```
-  </Step>
-  <Step title="Both environments serve the same tag">
-    ```bash
-    ankra application deployments <application-id>
-    ```
+```bash
+curl -fsS https://app.example.com/healthz
+ankra application deployments <application-id>
+ankra cluster get pods -n shop-web --cluster <cluster-id>
+```
 
-    Development and production show the same `sha-` tag once you have promoted.
-  </Step>
-  <Step title="Each environment talks to its own backend">
-    In the browser's network tab on development, requests go to the development project's address. On production, to the production project's. A mix means the wrong Secret was attached.
-  </Step>
-  <Step title="Deep links and sign-in work">
-    Reload a nested route, then sign out, sign up and sign in with each method the app offers. This is the check that catches the redirect list.
-  </Step>
-  <Step title="The public address is real">
-    ```bash
-    dig +short app.example.com
-    curl -fsS -o /dev/null -w '%{http_code}\n' https://app.example.com/healthz
-    ```
-
-    The record resolves and the health endpoint returns 200 over a valid certificate.
-  </Step>
-</Steps>
+Then open the address, reload a nested page, and sign up and sign in once. A green deployment is not a working app; the sign-in is the check that catches the Supabase redirect list.
 
 ---
 
 ## Troubleshooting
 
 <AccordionGroup>
-  <Accordion title="The pod restarts and the log says a variable is not set">
-    The container exits on purpose when `SUPABASE_URL` or `SUPABASE_PUBLISHABLE_KEY` is missing. The Secret is not in the namespace, is misnamed, or `env_from_secrets` was not passed. `ankra cluster get resources Secret --namespace shop-web --cluster <cluster-id>` shows what exists; redeploy with `--set env_from_secrets=lovable-runtime`.
+  <Accordion title="Ankra says it wrote no Dockerfile">
+    Expected for a Lovable project: its `package.json` has no `start` script, so there is nothing for Ankra to guess. Add the Dockerfile from step 2 and run `ship` again. Ankra builds whatever Dockerfile it finds and never overwrites it.
   </Accordion>
-  <Accordion title="Refreshing a page shows a 404">
-    The server is not returning `index.html` for unknown routes. Check that `docker/nginx.conf` was copied to `/etc/nginx/conf.d/default.conf` and still has the `try_files $uri /index.html;` line.
+  <Accordion title="The page loads but refreshing a nested route shows a 404">
+    The `try_files $uri /index.html;` line is missing from the nginx config, or the config was not copied into the image.
   </Accordion>
-  <Accordion title="The app loads but every request says Invalid API key or fails to fetch">
-    The placeholders were not replaced, or the variable names in the Dockerfile do not match the ones the code reads. Search the bundle for the placeholder: `curl -s https://app.example.dev/assets/<file>.js | grep -c __SUPABASE`. A count above zero means the swap did not run; compare the names in `docker/40-runtime-config.sh` with the Secret's keys.
-  </Accordion>
-  <Accordion title="Sign-in redirects to localhost or to the old address">
-    The Supabase **Site URL** or **Redirect URLs** do not include the new domain. Fix them in the project that environment uses, and check the provider's own callback list if a social login still fails.
+  <Accordion title="Sign-in redirects to localhost or the old address">
+    The Supabase **Site URL** or **Redirect URLs** do not include the new address. Fix them in the project that environment uses.
   </Accordion>
   <Accordion title="Calls to an edge function fail with a CORS error">
-    The function allows a fixed list of origins that does not include the new domain. Add it, redeploy the functions with `supabase functions deploy`, and retest.
-  </Accordion>
-  <Accordion title="The first run fails on the test stage">
-    The project has no `test` script. Add one, or change the stage's command to the lint and build commands from Step 1. Edit the file in Git, not in the portal, so the change is reviewed.
+    The function allows a fixed list of origins that does not include the new address. Add it and redeploy the functions with `supabase functions deploy`.
   </Accordion>
   <Accordion title="The build stops at the image gate">
-    A scanner found something above the organisation's threshold. `ankra pipeline findings <run-id> --application <application-id>` lists it, worst first. Fix the dependency or the code, or accept the finding deliberately and write down why.
+    A scanner found something above your threshold. `ankra pipeline findings <run-id> --application <name>` lists it, worst first. Fix the dependency or the code, or accept it deliberately and write down why.
+  </Accordion>
+  <Accordion title="The pod restarts and its log says a variable is not set">
+    Only the two-environment Dockerfile does this, on purpose. The Secret is missing from the namespace or `env_from_secrets` was not passed. `ankra cluster get resources Secret --namespace shop-web --cluster <cluster-id>` shows what exists.
   </Accordion>
   <Accordion title="My own domain shows no certificate or does not resolve">
-    The zone was not declared for that cluster, so no record was published and no certificate could be issued. Run `ankra cluster custom-dns-zones list <cluster>` and add the zone with its credential.
+    The zone was not declared for that cluster, so no record was published. Run `ankra cluster custom-dns-zones list <cluster>` and add it with its credential.
   </Accordion>
 </AccordionGroup>
 
@@ -471,7 +270,7 @@ Production never follows pushes. It receives the tag you already tested.
   <Card title="Prompt to Production" icon="wand-magic-sparkles" href="/use-cases/prompt-to-production">
     The same development-then-production discipline for apps you build from a written plan.
   </Card>
-  <Card title="Single sign-on" icon="key" href="/guides/single-sign-on">
-    Put your own identity provider in front of the Ankra organisation that runs it.
+  <Card title="Pull request previews" icon="eye" href="/guides/pr-preview-environments">
+    A live preview and an AI review on every pull request.
   </Card>
 </CardGroup>
