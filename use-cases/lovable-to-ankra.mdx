@@ -50,39 +50,20 @@ Agent mode stops at a confirmation card before every write. See [Applications](/
     ankra application add . --name shop --branch main --wait
     ```
   </Step>
-  <Step title="Add the one file Ankra cannot guess">
-    A Lovable project has no `start` script, so Ankra cannot generate a runtime for it and says it wrote no Dockerfile. Add this one at the repository root and commit it to the branch Lovable tracks. Ankra builds whatever Dockerfile it finds and never overwrites it.
+  <Step title="Let Ankra write the Dockerfile">
+    A Lovable project is a Vite single-page app: it builds static files and starts no process. Ankra recognises that shape from `package.json` (Vite, a `build` script, no `start` script) and writes the Dockerfile for it. You add nothing to the repository.
 
-    ```dockerfile
-    # Dockerfile
-    FROM node:22-alpine AS build
-    WORKDIR /app
-    COPY package.json package-lock.json* ./
-    RUN if [ -f package-lock.json ]; then npm ci; else npm install; fi
-    COPY . .
-    RUN npm run build
+    The Dockerfile builds the app with Vite and serves the result from an unprivileged nginx on port 8080, running as a non-root user:
 
-    FROM nginxinc/nginx-unprivileged:1.27-alpine
-    COPY --from=build /app/dist /usr/share/nginx/html
-    COPY <<'EOF' /etc/nginx/conf.d/default.conf
-    server {
-      listen 8080;
-      root /usr/share/nginx/html;
-      location = /healthz { return 200 "ok\n"; }
-      location /assets/ { expires 1y; add_header Cache-Control "public, immutable"; try_files $uri =404; }
-      location / { add_header Cache-Control "no-cache"; try_files $uri /index.html; }
-    }
-    EOF
-    EXPOSE 8080
-    ```
-
-    It builds the app with Vite and serves it with nginx. The `try_files` line makes a refresh on `/dashboard/settings` return the app instead of a 404, and `/healthz` gives the cluster something to probe.
+    - A refresh on `/dashboard/settings` returns the app instead of a 404, while a missing file under `/assets/` is still a 404.
+    - Hashed assets are cached for a year and `index.html` never is, so a new release is picked up on the next load.
+    - `/healthz` answers without touching anything, so the cluster has something to probe.
   </Step>
   <Step title="Review the setup pull request and ship">
-    Read the pull request Ankra opened: the manifests, the deploy options and the pipeline. It is a proposal, and builds run from the next push whether or not you merge it. Then deploy from the wizard, or in one command:
+    Read the pull request Ankra opened: the Dockerfile, the manifests, the deploy options and the pipeline. It is a proposal, and builds run from the next push whether or not you merge it. Then deploy from the wizard, or in one command:
 
     ```bash
-    ankra application ship . --cluster <cluster-id> --set target_port=8080
+    ankra application ship . --cluster <cluster-id>
     ```
 
     Ankra waits for the build, deploys, waits until the pods run and prints:
@@ -142,7 +123,6 @@ Add two options to the deploy:
 
 ```bash
 ankra application ship . --cluster <cluster-id> \
-  --set target_port=8080 \
   --set ingress_enabled=true \
   --set ingress_host=app.example.com
 ```
@@ -170,7 +150,6 @@ Add a second cluster so each change is proved before production sees it. An appl
   <Step title="Deploy to development">
     ```bash
     ankra application ship . --cluster <dev-cluster-id> --namespace shop-dev \
-      --set target_port=8080 \
       --set ingress_enabled=true --set ingress_host=app.example.dev
     ```
 
@@ -183,7 +162,7 @@ Add a second cluster so each change is proved before production sees it. An appl
     ankra application auto-deploy set <application-id> --enabled=false
     ankra application deploy <application-id> --cluster <prod-cluster-id> --namespace shop \
       --set image_tag=sha-<the-tag-that-passed> \
-      --set target_port=8080 --set replicas=2 --mode high_availability \
+      --set replicas=2 --mode high_availability \
       --set ingress_enabled=true --set ingress_host=app.example.com
     ```
 
@@ -275,8 +254,8 @@ Then open the address, reload a nested page, and sign up and sign in once. A gre
 ## Troubleshooting
 
 <AccordionGroup>
-  <Accordion title="Ankra says it wrote no Dockerfile">
-    Expected for a Lovable project, which has no `start` script. Add the Dockerfile from the wizard steps and ship again.
+  <Accordion title="Ankra says it wrote no Dockerfile, or the build cannot find the app">
+    Ankra writes the Dockerfile for a Vite app that builds static files and names no server of its own. If `package.json` has a `start` script or a `main` file, or a `server.js` sits beside the app, Ankra treats the repository as a Node server instead. If `vite.config` moves the build output out of `dist/`, the generated image cannot find it. In either case add your own `Dockerfile` at the repository root and commit it to the branch Lovable tracks: Ankra builds whatever Dockerfile it finds and never overwrites it.
   </Accordion>
   <Accordion title="The page loads but refreshing a nested route shows a 404">
     The `try_files $uri /index.html;` line is missing from the nginx config, or the config was not copied into the image.
