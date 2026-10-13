@@ -81,15 +81,22 @@ An organisation can hold up to 16 key generations.
 Anyone with read access can check a published image with [cosign](https://docs.sigstore.dev/cosign/) and the organisation's public keys.
 
 ```bash
-curl -s -H "Authorization: Bearer $ANKRA_TOKEN" https://platform.ankra.app/api/v1/org/provenance/keys \
-  | jq -r '.keys[] | select(.status != "revoked") | .public_key_pem' > provenance.pub
+curl -s -H "Authorization: Bearer $ANKRA_TOKEN" https://platform.ankra.app/api/v1/org/provenance/keys > keys.json
 
-cosign verify-attestation --key provenance.pub --insecure-ignore-tlog=true \
-  --type https://ankra.io/attestations/pipeline-gate/v1 \
-  <registry>/<repository>@sha256:<digest>
+# one file per trusted key
+jq -r '.keys[] | select(.status != "revoked") | .key_id' keys.json | while read -r key_id; do
+  jq -r --arg id "$key_id" '.keys[] | select(.key_id == $id) | .public_key_pem' keys.json > "provenance-$key_id.pub"
+done
+
+# cosign takes one key per check: try each until one verifies
+for key in provenance-*.pub; do
+  cosign verify-attestation --key "$key" --insecure-ignore-tlog=true \
+    --type https://ankra.io/attestations/pipeline-gate/v1 \
+    <registry>/<repository>@sha256:<digest> && break
+done
 ```
 
-If the organisation has several trusted keys, save each public key in its own file and try them in turn. `--insecure-ignore-tlog` is needed because these statements are not recorded in a public transparency log.
+An image verifies if any trusted key accepts it. `--insecure-ignore-tlog` is needed because these statements are not recorded in a public transparency log.
 
 ## Rollbacks under enforce
 
