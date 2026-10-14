@@ -1,0 +1,134 @@
+---
+title: Verified Provenance at Deploy
+description: Make an application refuse any image that was not published by your organisation's pipeline gate - the three modes, the signing keys, verifying by hand with cosign, and what changes for rollbacks.
+---
+import { CliVersion } from "/snippets/cli-version.jsx";
+
+Verified provenance lets an application refuse to deploy an image unless the image carries signed proof that it passed **your organisation's** [Ankra Pipeline](/guides/ankra-pipelines) gate. An image built on a laptop, pushed by hand, or published by another organisation's pipeline carries no such proof and is not rolled out.
+
+## How it works
+
+When a pipeline's `publish` step pushes an image, Ankra signs a statement about it and stores the statement next to the image in your registry. The statement records:
+
+- your organisation and the application
+- the repository, commit and ref
+- the pipeline run that built it
+- that the gate passed for exactly this image digest
+- the pipeline definition the run executed under
+
+The statement is signed with a key that belongs to your organisation. Before an application rolls out an image, the deploy checks that the statement exists, that its signature verifies against a key your organisation trusts, and that it names this repository, this digest, this organisation and this application. Every deploy path goes through the check: the Deploy button, push-to-deploy, promotions and rollbacks.
+
+## The three modes
+
+| Mode | At publish | At deploy |
+|---|---|---|
+| `off` | No statement is signed. | Nothing is checked. |
+| `warn` | A signed statement is stored. | Every image from the application's registry is checked. The deploy goes ahead whatever the result, and an image that does not verify raises a finding on the application. |
+| `enforce` | A signed statement is stored. | The deploy is refused unless every image from the application's registry verifies. Each verified image is pinned to its digest in the manifest written to the cluster. |
+
+The mode that applies is the first one set, in this order: the application's own mode, then your organisation's default, then Ankra's default. Applications created before 14 October 2026 default to `off`, so nothing changes until you choose. Applications created since default to `warn`.
+
+Start with `warn`. Read the findings, publish through the pipeline, and move an application to `enforce` once the images you deploy, and the ones you might roll back to, were all published by a pipeline run that signed them.
+
+## Set the mode
+
+Setting a mode needs the `security.manage` permission. Reading needs `pipelines.read`, which every built-in role has.
+
+<Tabs>
+  <Tab title="Web UI">
+    Open the application to see its provenance mode and the result of its last deploy check: verified, unverified or refused, with the reason. Change it from the same panel. The organisation default lives in the organisation settings next to the signing keys, and can also be set with `PUT /api/v1/org/provenance/policy` (see the API Reference).
+  </Tab>
+  <Tab title="CLI">
+    <CliVersion since="0.34.0" />
+
+    ```bash
+    ankra application provenance get my-app
+    ankra application provenance set my-app --mode enforce
+    ```
+  </Tab>
+</Tabs>
+
+## Check an image before you deploy it
+
+The dry run verifies images against an application's mode and reports what a deploy would do. It deploys nothing and changes nothing.
+
+```bash
+ankra application provenance verify my-app --image <registry>/<repository>:<tag>
+```
+
+For each image it reports `verified`, `refused` or `unknown`, with the reason, and then the decision for the application's mode: `deploy`, `deploy_with_finding`, `refuse` or `not_checked`. `unknown` means Ankra could not ask the registry or the key store, which is different from the image failing the check.
+
+## Keys
+
+Each organisation has its own signing keys. The newest key that is not revoked signs new images. Every key that is not revoked verifies, so rotating a key does **not** invalidate images that are already published.
+
+```bash
+ankra org provenance keys                       # list keys and their status
+ankra org provenance rotate                     # new keys sign from the next publish
+ankra org provenance revoke --key-id <key-id> --reason "key exposed"
+```
+
+Rotating and revoking need `security.manage`, and both are written to the [audit log](/guides/audit-log), as is every mode change.
+
+<Warning>
+Revoking a key makes everything it signed stop verifying. An application in `enforce` refuses those images until they are published again. Revoking the active key makes the next publish create a successor.
+</Warning>
+
+An organisation can hold up to 16 key generations.
+
+## Verify an image by hand
+
+Anyone with read access can check a published image with [cosign](https://docs.sigstore.dev/cosign/) and the organisation's public keys.
+
+```bash
+curl -s -H "Authorization: Bearer $ANKRA_TOKEN" https://platform.ankra.app/api/v1/org/provenance/keys > keys.json
+
+# one file per trusted key
+jq -r '.keys[] | select(.status != "revoked") | .key_id' keys.json | while read -r key_id; do
+  jq -r --arg id "$key_id" '.keys[] | select(.key_id == $id) | .public_key_pem' keys.json > "provenance-$key_id.pub"
+done
+
+# cosign takes one key per check: try each until one verifies
+for key in provenance-*.pub; do
+  cosign verify-attestation --key "$key" --insecure-ignore-tlog=true \
+    --type https://ankra.io/attestations/pipeline-gate/v1 \
+    <registry>/<repository>@sha256:<digest> && break
+done
+```
+
+An image verifies if any trusted key accepts it. `--insecure-ignore-tlog` is needed because these statements are not recorded in a public transparency log.
+
+## Rollbacks under enforce
+
+<Warning>
+Under `enforce`, an application cannot deploy or roll back to an image that was published before its first signed publish. Older images carry no statement, so the deploy is refused with the reason `unsigned`.
+</Warning>
+
+Plan for this before you switch an application to `enforce`. If you need to roll back past the first signed version:
+
+1. Set the application to `warn`: `ankra application provenance set my-app --mode warn`.
+2. Deploy or roll back to the older version.
+3. Set the application back to `enforce`.
+
+You need `security.manage` for steps 1 and 3. The mode change is audited.
+
+## What is checked
+
+Only images from the application's own registry project are judged, because those are the images an Ankra pipeline publishes. Third-party images, such as a public database image or a chart's sidecar, are outside the check. They are listed as unchecked in the deploy output and in the dry run, and they are never refused.
+
+The check covers deploys made through Ankra. A manifest edited by hand in your GitOps repository is not verified by it.
+
+## When a deploy is refused
+
+| What you see | What it means | What to do |
+|---|---|---|
+| Deploy fails with `application_deploy_provenance_unverified` | An image has no valid statement from your organisation's pipeline. The message names each image and the reason. | Publish through the application's pipeline, where a run that passes its gate signs the image, then deploy that. If the image is built elsewhere on purpose, set the application to `warn`. |
+| Deploy fails with `application_deploy_provenance_unavailable` | The registry, its credential or the key set could not be read. | Deploy again once they answer. |
+| A publish step reports `provenance_error` | The image was published but its statement was not stored. | Re-run the pipeline run. Storing the statement again is safe. Under `enforce` the image does not deploy until it is signed. |
+| Deploy fails with a message that the policy could not be read | A temporary read failure. | Deploy again. |
+
+## Related
+
+- [Ankra Pipelines](/guides/ankra-pipelines)
+- [Roles and access](/guides/roles-and-access)
+- [Audit log](/guides/audit-log)
