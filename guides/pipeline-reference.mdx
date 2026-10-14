@@ -47,7 +47,7 @@ A pipeline mistakenly committed under `.ankra/manifests/` is refused by the mani
 | `defaults.image` | string | none | The image of every stage that names none |
 | `defaults.timeout` | duration | 30 minutes | The timeout of every stage that names none, for example `"15m"` |
 | `defaults.resources` | block | 500m CPU, 1Gi memory | `cpu`, `memory`, `gpu` for every stage that names none |
-| `defaults.cache` | list, or `false` | none | [Caches](#caches) every stage declares unless it declares its own. `false` turns off the [caches Ankra adds by default](#caches-are-on-by-default) for the whole pipeline |
+| `defaults.cache` | list | none | [Caches](#caches) every stage declares unless it declares its own |
 | `defaults.working_directory` | string | the workspace root | Working directory of every stage that names none |
 | `defaults.network` | tier | the kind's default | Network tier of every stage that names none, in place of that kind's own default - so `defaults.network: "none"` denies egress to a `build` or a `scan` stage that names no tier of its own, and does it quietly, because the validator's warning reads a stage's own declaration rather than this one. A value above `egress-https` is a protected section. |
 | `defaults.env` | map | none | Environment variables for every stage |
@@ -152,7 +152,7 @@ A block for an event the pipeline's `on:` does not trigger on, or that the stage
 | `services` | list | none | Names from the `services` block this stage reaches |
 | `env` | map | none | Environment variables; names beginning `ANKRA_`, `PATH` and the loader variables, and the builder's own `BUILDKIT*`, `BUILDCTL`, `ROOTLESSKIT` and `DOCKER_CONFIG` are refused |
 | `secrets` | list | none | Names from the `secrets` block this stage may read |
-| `cache` | list, or `false` | `defaults.cache`, else [the toolchain caches](#caches-are-on-by-default) for a `run` stage | `false` (or `[]`) runs the stage with no cache at all, neither the defaults' nor the toolchain caches. Otherwise each entry takes `key` (expressions allowed, typically `hashFiles`), `paths` under the workspace, optional `restore_keys` (an ordered list of key prefixes), `size` and `fallback` (`volume` or `none`). Each path is restored before the step and saved after it succeeds, scoped to the repository and to the trust of the run. See [Caches](#caches) for how keys are computed, what restores, what saves and how long it is kept. A restricted fork run and a tag run get no shared cache. `size` is held to the organisation policy's `max_cache_size`. The whole block is protected - a cache decides whose earlier output lands in this run's workspace. |
+| `cache` | list | `defaults.cache` | `key` (expressions allowed, typically `hashFiles`), `paths` under the workspace, optional `restore_keys` (an ordered list of key prefixes), `size` and `fallback` (`volume` or `none`). Each path is restored before the step and saved after it succeeds, scoped to the repository and to the trust of the run. See [Caches](#caches) for how keys are computed, what restores, what saves and how long it is kept. A restricted fork run and a tag run get no shared cache. `size` is held to the organisation policy's `max_cache_size`. The whole block is protected - a cache decides whose earlier output lands in this run's workspace. |
 | `artifacts` | list | none | `name`, `paths` and optional `retention_days` (zero takes the organisation default). Every artifact is a presigned upload into the organisation's oldest ready [backup vault](/concepts/backup-vaults) - or, for an organisation that has none, into the Ankra-managed default vault, under a key prefix of its own. The step's execution says which: `pipeline_artifacts: "granted"` or `"granted (Ankra-managed default vault)"`. Only with no ready vault on either side is the step dispatched with no upload grants, recording `pipeline_artifacts: "unavailable: …"`. [Bringing your own vault](/guides/ankra-pipelines#before-your-first-run) decides where the objects live, not whether they are collected. |
 | `test_results` | list | none | `format` (`junit`, `go-test`, `pytest` or `playwright`) and `path`, a file or a directory of reports under the workspace. Ankra uploads each report after the step and records every test's outcome, duration and attempts; see [Test results](/guides/ankra-pipelines#test-results). A path with a wildcard is a warning and is not uploaded. Never changes the step's own outcome. |
 | `outputs` | map | none | The names the stage writes to `$ANKRA_OUTPUT`, read back onto the step |
@@ -203,7 +203,7 @@ cache:
 
 **`fallback`, on an older agent.** Caches are archives on a cluster whose Ankra agent supports them. On an agent that does not, a cache with `fallback: volume` - the default - is one 5Gi volume per path, shared by every run of the same trust scope on that cluster, with the key used as written rather than hashed; a cache with `fallback: none` gets an empty directory for the step instead, and the step's `pipeline_caches` note says so. A shared volume can be attached to one node at a time, so `none` is the safer choice for a cache that is only an optimisation: two overlapping runs on two nodes do not wait on each other's volume. `size` sizes that volume and is not used by archives.
 
-**What Ankra generates.** The `.ankra/pipeline.yaml` a new application's setup pull request commits declares its test stage's package caches this way, with `fallback: "none"`, in directories under `.ankra-` that the scan step skips, and points the toolchain at them through the stage's `env`. A pipeline you already committed is never rewritten. It gets [the caches Ankra adds by default](#caches-are-on-by-default) instead, or you can copy the block into it.
+**What Ankra generates.** The `.ankra/pipeline.yaml` a new application's setup pull request commits declares its test stage's package caches this way, with `fallback: "none"`, in directories under `.ankra-` that the scan step skips, and points the toolchain at them through the stage's `env`. A pipeline you already committed is never rewritten; copy the block into it to get the same.
 
 | Toolchain | Key | Paths |
 | --- | --- | --- |
@@ -218,34 +218,6 @@ cache:
 | Rust | `cargo-registry-${{ hashFiles('Cargo.toml', 'Cargo.lock') }}` and `cargo-target-` the same | `.ankra-cargo/home/registry`, `.ankra-cargo/home/git`; `.ankra-cargo/target` |
 
 Each key's `restore_keys` is its own prefix (`pnpm-`, `go-`, ...). In a monorepo each component's directories carry the component's directory (`.ankra-node-cache-web/...` for `web/`), because its test stage runs beside its siblings'. A Rust component gets a test stage when it commits integration tests under `tests/` and pins no toolchain file.
-
-### Caches are on by default
-
-A `run` stage that declares no `cache` block and inherits none from `defaults.cache` is cached anyway, as long as its `network` is not `none`. Ankra reads the stage's script for the install commands it runs and adds a cache for each package manager it finds:
-
-| Toolchain | Detected from | Variables Ankra sets | Key hashes |
-| --- | --- | --- | --- |
-| pnpm | `pnpm install`, `i`, `fetch`, `add` | `npm_config_store_dir`, `pnpm_config_store_dir`, `COREPACK_HOME` | `pnpm-lock.yaml`, `package.json` |
-| Yarn | `yarn`, `yarn install`, `yarn add` | `YARN_CACHE_FOLDER`, `YARN_GLOBAL_FOLDER`, `COREPACK_HOME` | `yarn.lock`, `package.json` |
-| npm | `npm ci`, `install`, `i` | `npm_config_cache` | `package-lock.json`, `package.json` |
-| Go | `go build`, `test`, `vet`, `run`, `install`, `generate`, `list`, `mod` | `GOCACHE`, `GOMODCACHE` | `go.sum`, `go.mod` |
-| golangci-lint | `golangci-lint run` | `GOLANGCI_LINT_CACHE` | `go.sum`, `go.mod` |
-| uv | `uv sync`, `pip`, `run`, `tool`, and `uvx` | `UV_CACHE_DIR` | `uv.lock`, `pyproject.toml` |
-| Poetry | `poetry install`, `sync` | `POETRY_CACHE_DIR` (virtual environments are kept outside the cache) | `poetry.lock`, `pyproject.toml` |
-| Pipenv | `pipenv install`, `sync` | `PIPENV_CACHE_DIR` | `Pipfile.lock`, `Pipfile` |
-| pip | `pip install`, `pip3 install`, `python -m pip install` | `PIP_CACHE_DIR` | `requirements*.txt`, `pyproject.toml`, `setup.py`, `setup.cfg` |
-| Cargo | `cargo build`, `test`, `check`, `clippy`, `fetch`, `run`, `install`, `doc`, `nextest` | `CARGO_HOME` (`target/` stays where it is) | `Cargo.lock`, `Cargo.toml` |
-
-Leading variable assignments and `corepack`, `exec`, `time`, `env`, `sudo` and `command` are skipped, so `CI=1 corepack pnpm install` counts. A script that only runs `pnpm test` or `npm run lint` installs nothing and gets no cache.
-
-Each toolchain keeps one directory, `/workspace/.ankra-cache/<step>/<toolchain>`, where `<step>` is the stage name plus any matrix values, so parallel stages and matrix legs never share one. The scan step skips it. The key is the toolchain's name and the hash of its lock file and manifest, `restore_keys` is the toolchain's prefix (`npm-`, `go-`, ...), and `fallback` is `none`, so on an agent that does not keep cache archives the stage runs exactly as it did before. The caches show on the planned step and in `ankra pipeline get` like declared ones, and fork and tag runs get none, the same as declared caches.
-
-To control it:
-
-- **Your own placement wins.** If a stage sets one of a toolchain's variables in its `env`, that toolchain gets no cache and your value is kept.
-- **Declaring a cache replaces them.** A stage with its own `cache` block, or a pipeline with `defaults.cache`, gets exactly what it declares.
-- **`cache: false` turns caching off.** On a stage it turns off both the defaults' caches and the toolchain caches for that stage. In `defaults` it turns off the toolchain caches for every stage. `cache: true` is refused, because caches are already on.
-- **No egress, no cache.** A stage on `network: none` cannot download anything, so it gets no cache.
 
 ### What a step reports about its caches
 
