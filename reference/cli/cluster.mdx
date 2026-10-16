@@ -535,6 +535,19 @@ next step dispatched. Each node keeps about 0.9 GB of images it would
 otherwise pull on demand. It needs an agent that advertises image pre-pull;
 off (the default) removes it with the next step dispatched.
 
+`--build-apparmor-profile` &lt;name&gt; runs the rootless image builder under a
+Localhost AppArmor profile installed on the cluster's nodes under that name.
+On nodes whose container runtime confines the builder with its default
+AppArmor profile (containerd on Ubuntu denies the builder its mount), builds
+otherwise fail in-cluster and fall back to Ankra's builders. The build
+namespace's Pod Security Baseline admits a Localhost profile, so nothing else
+is relaxed. Install the profile on every node builds can run on first: a node
+without it makes the build wait rather than run. The name is a DNS-1123
+subdomain other than unconfined; pass an empty value to go back to the
+runtime's default. It needs an agent that advertises the capability, applies
+to the next build dispatched with no agent restart, and the next build is
+probed in-cluster again even if the cluster was known to confine the builder.
+
 ```bash
 ankra cluster agent ci set [flags]
 ```
@@ -550,12 +563,14 @@ ankra cluster agent ci set --workers 2
   ankra cluster agent ci set --clear-placement
   ankra cluster agent ci set --run-reservation shadow --cluster ci-01
   ankra cluster agent ci set --image-prepull on --cluster ci-01
+  ankra cluster agent ci set --build-apparmor-profile ankra-rootless-buildkit --cluster ci-01
 ```
 
 **Flags**
 
 | Flag | Default | Description |
 |------|---------|-------------|
+| `--build-apparmor-profile` |   | Node-installed AppArmor profile the rootless image builder runs under (Localhost); pass empty to use the runtime's default (omit the flag to keep the stored value) |
 | `--clear-placement` | `false` | Remove the cluster's CI placement |
 | `--image-prepull` |   | Image pre-pull: off (default) pulls the platform's step images on demand, on keeps them pulled on every node pipeline steps can land on |
 | `--node-group` |   | Run every pipeline pod on this Ankra node group: selects its nodes and tolerates its taints |
@@ -566,6 +581,82 @@ ankra cluster agent ci set --workers 2
 | `--storage-class` |   | Storage class for pipeline step workspaces; pass empty to use the cluster default (omit the flag to keep the stored value) |
 | `--toleration` | `[]` | Taint every pipeline pod tolerates, as key[=value]:Effect with Effect NoSchedule, PreferNoSchedule or NoExecute (repeatable) |
 | `--workers` | `0` | CI slots: pipeline steps the agent watches at once, not nodes (nodes come from the node group autoscaler); up to 128 on agents that support live resize, 32 otherwise; 0 disables the scheduler |
+
+## ankra cluster agent resources
+
+The cluster agent runs as one pod in the cluster, and these settings size it:
+its memory limit and request and its CPU limit and request, as Kubernetes
+quantities ("2Gi", "500m").
+
+They are stored on the platform, so every install or upgrade command Ankra
+generates for this cluster carries them - unlike a hand-run
+'helm upgrade `--set` resources.limits.memory=...', which the next agent
+upgrade renders away again. A member the cluster does not set uses the agent
+chart's default.
+
+## ankra cluster agent resources get
+
+Show the stored memory and CPU limits and requests of the cluster's agent, when
+they last changed, and how the platform applied them. A member the cluster
+does not set reads "chart default": the agent chart's own value applies.
+
+```bash
+ankra cluster agent resources get [flags]
+```
+
+**Examples**
+
+```bash
+ankra cluster agent resources get
+  ankra cluster agent resources get --cluster edge-01 -o json
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+
+## ankra cluster agent resources set
+
+Store the memory and CPU limits and requests of this cluster's agent, as
+Kubernetes quantities ("2Gi", "512Mi", "1", "500m").
+
+Only the flags you pass are sent, so setting the memory limit alone keeps
+every other member as stored. Pass an empty value ("") to clear a member: the
+agent goes back to the chart's default for it. At least one flag is required.
+
+The write always stores the values. Whether they reach the agent now depends
+on the agent: an online agent new enough to accept them re-renders its
+release immediately, an older one picks them up at its next upgrade, and an
+offline one when it reconnects. The command prints the platform's sentence
+saying which happened.
+
+The platform validates the values - a malformed quantity, or a request above
+its limit - and its refusal is printed as it came.
+
+```bash
+ankra cluster agent resources set [flags]
+```
+
+**Examples**
+
+```bash
+ankra cluster agent resources set --memory-limit 2Gi
+  ankra cluster agent resources set --memory-limit 2Gi --memory-request 1Gi --cluster edge-01
+  ankra cluster agent resources set --cpu-limit 1 --cpu-request 250m
+  ankra cluster agent resources set --memory-limit ""
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--cpu-limit` |   | Agent CPU limit, such as 1 or 1500m; pass "" to clear it back to the chart default |
+| `--cpu-request` |   | Agent CPU request, such as 250m; pass "" to clear it back to the chart default |
+| `--memory-limit` |   | Agent memory limit, a Kubernetes quantity such as 2Gi; pass "" to clear it back to the chart default |
+| `--memory-request` |   | Agent memory request, such as 1Gi; pass "" to clear it back to the chart default |
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
 
 ## ankra cluster agent status
 
@@ -760,6 +851,11 @@ one), a NAT router for the nodes' IPv4 egress, the per-server firewalls, a
 bastion with a public IPv4 address, and the control plane and worker servers.
 The kube-apiserver stays private and is reached through the bastion.
 
+That is the ipv4_nat network mode, the server default. A zone with no public
+IPv4 left takes `--network-mode` ipv6_only instead: no NAT router, the bastion
+is reached over IPv6 through the Cloud's port forward, and the nodes reach
+IPv4 through the zone's NAT64. The preflight names the mode a zone needs.
+
 Servers are sized by plan: list them with 'ankra cluster ankracloud plans'.
 Run 'preflight' first to check the zone, plans and network.
 
@@ -770,6 +866,7 @@ ankra cluster ankracloud create --name prod --credential-id <id> \
   --ssh-key-credential-id <id> --zone <zone> \
   --bastion-plan <plan> --control-plane-plan <plan> --worker-plan <plan>
 ankra cluster ankracloud create --name edge --distribution k3s ...
+ankra cluster ankracloud create --name fsn --zone de-fsn3 --network-mode ipv6_only ...
 ```
 
 ```bash
@@ -799,6 +896,7 @@ ankra cluster ankracloud create [flags]
 | `--kubernetes-version` |   | Pin a Kubernetes version (default: latest supported) |
 | `--name` |   | Cluster name (required) |
 | `--network-ip-range` |   | RFC 1918 CIDR (/16 to /29) for the created private network (server default: a /24 derived from the cluster) |
+| `--network-mode` |   | Network mode: ipv4_nat (NAT router and a public-IPv4 bastion) or ipv6_only (for a zone without public IPv4: no router, bastion reached over IPv6 and the Cloud's port forward, IPv4 egress through NAT64). Server default: ipv4_nat |
 | `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
 | `--private-network-id` |   | Adopt an existing private network instead of creating one |
 | `--retention-policy` |   | Teardown policy for volumes: retain or delete (server default: retain) |
@@ -986,6 +1084,7 @@ ankra cluster ankracloud preflight [flags]
 | `--kubernetes-version` |   | Pin a Kubernetes version (default: latest supported) |
 | `--name` |   | Cluster name (required) |
 | `--network-ip-range` |   | RFC 1918 CIDR (/16 to /29) for the created private network (server default: a /24 derived from the cluster) |
+| `--network-mode` |   | Network mode: ipv4_nat (NAT router and a public-IPv4 bastion) or ipv6_only (for a zone without public IPv4: no router, bastion reached over IPv6 and the Cloud's port forward, IPv4 egress through NAT64). Server default: ipv4_nat |
 | `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
 | `--private-network-id` |   | Adopt an existing private network instead of creating one |
 | `--retention-policy` |   | Teardown policy for volumes: retain or delete (server default: retain) |
@@ -1762,6 +1861,74 @@ ankra cluster clone <existing_cluster_file_or_url> <new_cluster_path> [flags]
 | `--copy-missing` | `false` | Copy missing files even for skipped stacks |
 | `--force` | `false` | Force merge even when names conflict |
 | `--stack` | `[]` | Clone only specific stacks by name (can be used multiple times) |
+
+## ankra cluster control-plane-heal
+
+When a control plane node has been NotReady for several minutes while every other
+control plane node is Ready and etcd keeps quorum without it, Ankra can restart
+that one node through your cloud provider. It never stops, scales or deletes
+anything, and it shows each step on the cluster in the product.
+
+The switch is per cluster and on by default. Turning it off stops the restart
+only: the NotReady card is still shown. Changing it needs permission to change
+cluster settings (clusters.write).
+
+**Examples**
+
+```bash
+ankra cluster control-plane-heal get
+  ankra cluster control-plane-heal set --enabled=false --cluster prod
+```
+
+## ankra cluster control-plane-heal get
+
+Show whether Ankra may restart a NotReady control plane of the cluster, and the
+latest episode: which node, how it ended or why Ankra is not restarting it yet,
+and whether the platform acted or only recorded what it would have done
+(shadow).
+
+-o json prints the platform's answer as it is.
+
+```bash
+ankra cluster control-plane-heal get [flags]
+```
+
+**Examples**
+
+```bash
+ankra cluster control-plane-heal get
+  ankra cluster control-plane-heal get --cluster prod -o json
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+
+## ankra cluster control-plane-heal set
+
+Turn Ankra's automatic restart of a NotReady control plane on or off for the
+cluster. `--enabled` is required, so a change is always explicit. Turning it off
+sends nothing anywhere, so this does not ask for confirmation.
+
+```bash
+ankra cluster control-plane-heal set --enabled=true|false [flags]
+```
+
+**Examples**
+
+```bash
+ankra cluster control-plane-heal set --enabled=false
+  ankra cluster control-plane-heal set --enabled=true --cluster prod
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--enabled` | `false` | Whether Ankra may restart a NotReady control plane (required) |
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
 
 ## ankra cluster cordon
 
@@ -2790,6 +2957,17 @@ ankra cluster encrypt manifest db-secret --key password \
 
 (compared to "manifests upgrade `--set`" followed by "encrypt manifest", which
 commits the plaintext value first).
+
+`--set` also replaces a value that is already encrypted, which is how a sealed
+credential is rotated in place. A manifest that carries SOPS metadata is
+decrypted in memory, the edits are applied, and every key that was encrypted
+is encrypted again together with `--key`, still in a single write. A key whose
+name starts with a dot is escaped in the `--set` path:
+
+```bash
+ankra cluster encrypt manifest registry --key .dockerconfigjson \
+  --set 'data.\.dockerconfigjson=<new base64>' --cluster prod
+```
 
 In cluster mode every key the manifest already declares in encrypted_paths is
 sealed together with `--key`. A value declared in the portal or through the API
@@ -5451,7 +5629,7 @@ ankra cluster operations list [execution ID] [flags]
 
 ## ankra cluster operations retry
 
-Retry a terminal execution (failed/cancelled/timeout)
+Retry a failed, cancelled or critical execution
 
 ```bash
 ankra cluster operations retry <execution_id> [flags]
