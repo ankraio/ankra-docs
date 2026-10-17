@@ -30,9 +30,12 @@ ENV NODE_ENV=production \
 # because the copy bundled in the node image carries its own dependency tree
 # (pacote, sigstore, brace-expansion, picomatch) that the image gate scans and
 # that lags behind its fixes.
+# libexpat is upgraded past the base image's copy, which the image gate blocks
+# (CVE-2026-77214, fixed in 2.9.0-r0); python3 depends on it.
 RUN corepack enable \
  && rm -rf /usr/local/lib/node_modules/npm /usr/local/bin/npm /usr/local/bin/npx \
  && apk add --no-cache python3 \
+ && apk upgrade --no-cache libexpat \
  && addgroup -S -g 1001 docs \
  && adduser -S -u 1001 -G docs -h /app docs
 
