@@ -1,8 +1,10 @@
 ---
 title: Connect to a Managed Service
-description: Find a managed service's in-cluster address and credentials Secret, read a value with kubectl, and wire it into an application running in another namespace.
+description: Find a managed service's in-cluster address and credentials Secret, read a value with the Ankra CLI, and wire it into an application running in another namespace.
 tag: "Closed Beta"
 ---
+
+import { CliVersion } from "/snippets/cli-version.jsx";
 
 <Warning>
 **Closed beta.** Connecting to a service is part of [Managed services](/concepts/managed-services), which is in closed beta and enabled per organisation on request. [Contact support](/platform/support) to have it turned on for your organisation.
@@ -19,7 +21,7 @@ Open the service in **My services**. Its **Connect** section shows:
 - the namespace, which is the service name;
 - each address, with a **Copy** button;
 - the name of the Secret that holds the credentials;
-- for each key in that Secret, a `kubectl` command that prints its value, with a **Copy** button.
+- for each key in that Secret, a command that prints its value, with a **Copy** button.
 
 The portal never shows the values themselves. The details are derived from the service's package, not observed on the cluster, so they are shown as soon as the service is set up: the addresses answer once the service is running. The section is not shown for a deleted service or while a service is being deleted.
 
@@ -41,55 +43,53 @@ The addresses resolve from any namespace on the service's cluster, and not from 
 
 ## Read a value
 
-Run this against the service's cluster (see [Kubeconfig](/guides/kubeconfig) for access), with the Secret, namespace and key from the table:
+<CliVersion since="0.21.1" command="cluster get secrets --reveal" />
+
+Select the service's cluster, then read the Secret by name with `--reveal`, using the Secret and namespace from the table:
 
 ```bash
-kubectl get secret <secret> -n <service> -o jsonpath='{.data.<key>}' | base64 -d
+ankra cluster select <cluster>
+ankra cluster get secrets <secret> -n <service> --reveal -o json
 ```
+
+Without `--reveal`, every value comes back as a `sha256:` digest. `--reveal` needs the `kubernetes.secrets_reveal` permission on the cluster, which the operator, admin and owner roles carry, and every reveal is recorded in the organisation's audit log. Values under `data` stay base64-encoded.
 
 For a PostgreSQL service named `orders-db`, this prints its connection URI:
 
 ```bash
-kubectl get secret postgresql-app -n orders-db -o jsonpath='{.data.fqdn-uri}' | base64 -d
+ankra cluster get secrets postgresql-app -n orders-db --reveal -o json | jq -r '.data["fqdn-uri"]' | base64 -d
 ```
 
-A key with a dot in its name, such as OpenSearch's `ca.crt`, needs the dot escaped:
+A key with a dot in its name, such as OpenSearch's `ca.crt`, works the same way:
 
 ```bash
-kubectl get secret opensearch-credentials -n search -o jsonpath='{.data.ca\.crt}' | base64 -d > opensearch-ca.crt
+ankra cluster get secrets opensearch-credentials -n search --reveal -o json | jq -r '.data["ca.crt"]' | base64 -d > opensearch-ca.crt
 ```
 
 ## Wire it into an application
 
-A workload can only read Secrets in its own namespace, so an application in another namespace cannot use the service's Secret directly. Give the application the values it needs in its own namespace, from the portal or with `kubectl`.
+A workload can only read Secrets in its own namespace, so an application in another namespace cannot use the service's Secret directly. Give the application the values it needs as environment secrets, from the portal or the CLI.
 
 ### From the portal
 
-The service's page has a **Use it** section with a **Use it in &lt;application&gt;** button for each application it was set up for. The section names the address and the keys of the Secret to add, and each button opens that application's **Settings › Secrets**. [Read each value](#read-a-value) with `kubectl`, add it there as an environment secret, then apply the secrets to the environment. Saving a value and applying it to the workloads are separate steps.
+The service's page has a **Use it** section with a **Use it in &lt;application&gt;** button for each application it was set up for. The section names the address and the keys of the Secret to add, and each button opens that application's **Settings › Secrets**. [Read each value](#read-a-value), add it there as an environment secret, then apply the secrets to the environment. Saving a value and applying it to the workloads are separate steps.
 
-### With kubectl
+### With the CLI
 
-Copy the values into a Secret in the application's namespace. For an application in `storefront` using the `orders-db` PostgreSQL service:
+Store the value as an environment secret of the application, then apply the stored secrets to its deployments. For an application using the `orders-db` PostgreSQL service:
 
 ```bash
-kubectl create secret generic orders-db-connection -n storefront \
-  --from-literal=DATABASE_URL="$(kubectl get secret postgresql-app -n orders-db -o jsonpath='{.data.fqdn-uri}' | base64 -d)"
+ankra cluster get secrets postgresql-app -n orders-db --reveal -o json \
+  | jq -r '.data["fqdn-uri"]' | base64 -d \
+  | ankra application env-secrets set <application-id> DATABASE_URL
+ankra application env-secrets apply <application-id>
 ```
 
-Then reference it from the workload's container:
+Piping the value keeps it out of your shell history. Storing a value does not reach a running workload: `env-secrets apply` seals the stored values into the application's deployments and rolls them.
 
-```yaml
-env:
-  - name: DATABASE_URL
-    valueFrom:
-      secretKeyRef:
-        name: orders-db-connection
-        key: DATABASE_URL
-```
+For a workload that is not an Ankra application, keep the Secret in Git and encrypt it with [SOPS](/guides/sops). Ankra will deliver credentials into application environments in a later release.
 
-If you keep the Secret in Git instead of creating it by hand, encrypt it with [SOPS](/guides/sops). Ankra will deliver credentials into application environments in a later release.
-
-A Secret you create this way is yours: [deleting the service](/guides/delete-a-managed-service) does not remove it from the application's namespace. Delete it yourself once the application no longer uses the service.
+A value you copy this way is yours: [deleting the service](/guides/delete-a-managed-service) does not remove it from the application. Delete it yourself once the application no longer uses the service.
 
 ## Notes per service
 
@@ -106,13 +106,13 @@ A Secret you create this way is yours: [deleting the service](/guides/delete-a-m
 A finished deployment is not yet a ready service. The service's **Service health** section says whether its workload runs as planned, which does not prove a client can connect. Ankra checks that a client can connect for every service it publishes, about every five minutes, and shows the result as the service's **Readiness**: see [Health and readiness](/concepts/managed-services#health-and-readiness). Until readiness reads **Ready**, or while it reads **Not verified** because the cluster's agent is too old to run the check, check the service yourself before you rely on it. Its pods run in its namespace:
 
 ```bash
-kubectl get pods -n <service>
+ankra cluster get pods -n <service>
 ```
 
-A PostgreSQL service can report its deployment finished 30 to 100 seconds before the database accepts connections. Wait for the database itself:
+A PostgreSQL service can report its deployment finished 30 to 100 seconds before the database accepts connections. Check the database itself until its `Ready` condition is `True`:
 
 ```bash
-kubectl wait --for=condition=Ready clusters.postgresql.cnpg.io/postgresql -n <service> --timeout=5m
+ankra cluster describe Cluster postgresql -n <service> --group postgresql.cnpg.io
 ```
 
 About every five minutes, a service's namespace also holds a short-lived pod: labelled `app.kubernetes.io/name=ankra-postgres-connection-test` for PostgreSQL, and `app.kubernetes.io/name=ankra-service-canary` for every other service. That is Ankra's readiness check, which connects the way an application would; it is deleted when it finishes.
