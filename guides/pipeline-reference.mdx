@@ -40,6 +40,7 @@ A pipeline mistakenly committed under `.ankra/manifests/` is refused by the mani
 | `kind` | string | required | `Pipeline` |
 | `metadata.name` | string | required | The pipeline's name |
 | `on` | block | none | The triggers - see [Triggers](#triggers). A pipeline that declares none is still runnable by API dispatch. |
+| `full_run` | block | none | `events` and `branches` naming the runs on which no path filter applies, so every stage runs. See [Setting path filters aside](#setting-path-filters-aside). |
 | `concurrency.group` | string | none | Runs sharing a group serialise: a new run waits queued behind the group's holder. Expressions are allowed, for example `"${{ ankra.repository.provider }}:${{ ankra.repository.owner }}/${{ ankra.repository.name }}-${{ ankra.ref }}"`. |
 | `concurrency.cancel_in_progress` | flag | `false` | With a group, an in-flight run of the same group is superseded and cancelled when a new one arrives. Leave it off and the new run waits instead - on a per-branch group that means the branch queues behind itself, which the validator points out as advice; see [Newest commit wins](/guides/ankra-pipelines#newest-commit-wins). Set without a group it does nothing, and the validator warns. |
 | `workspace.size` | quantity | none | The per-run volume every stage shares, for example `"10Gi"` |
@@ -116,6 +117,47 @@ A path filter is decided on the event's changed files, and never excludes a run 
 Every path list here, and every path list on a stage, can include a named list from `path_sets:` with a `{set: <name>}` entry. See [Path sets](#path-sets).
 
 The `on:` triggers decide whether a run starts at all, for the whole pipeline. To run one stage on a narrower set of changes for one event only - a component's checks on a pull request that touches it, but on every push - give the stage an [event-scoped `when`](#event-scoped-filters) block rather than a second trigger or a duplicate stage.
+
+### Setting path filters aside
+
+A path filter lets a run skip what a change did not touch. When you want to see every stage anyway, or want some stages never to be skipped, set the filters aside. Nothing here changes a stage's `if:`, which still decides.
+
+A **full run** runs every stage whatever the path filters say: `on.<event>.paths`, `when.paths` (and an [event block's](#event-scoped-filters) `paths`) and an [affected-only](#fields-common-to-every-stage) stage's `paths:` all pass. A run is a full run when one of these asks for it:
+
+| Who asks | How | Recorded as |
+|---|---|---|
+| A person or token starting a run | `ankra pipeline run --full`, or `"full_run": true` in the body of `POST …/pipeline-runs` | `dispatch`, with who asked |
+| A person re-running a run | `ankra pipeline rerun <run> --full`, or `?full_run=true` on `POST …/pipeline-runs/<run>/rerun` | `rerun`, with who asked. A re-run of a full run is a full run again without the flag |
+| The `ankra:full-run` label on a GitHub pull request | Add the label. A full run of the pull request's head starts at once, every later push to the pull request runs in full while the label stays on it, and so does its [merge train](/guides/ankra-pipelines#the-merge-train-test-every-pull-request-as-it-will-merge) car. Remove the label and the next run applies the filters again | `label`, with who added it |
+| Your organisation | `ci_full_run_on_default_branch` in the [organisation CI settings](/guides/ankra-pipelines#organisation-ci-settings) runs every push to a repository's default branch in full | `organisation_policy` |
+| The pipeline | A top-level `full_run` block naming the `events` and `branches` it covers. An empty `events` list covers every event and an empty `branches` list every branch; for a pull request the branch is the one it targets | `pipeline` |
+
+```yaml
+# Pull requests skip what they do not touch. Every push to main runs everything.
+full_run:
+  events: [push]
+  branches: [main]
+```
+
+The run records why it set its filters aside: `full_run_source`, `full_run_requested_by` and `full_run_message`, the sentence the run page and `ankra pipeline get` show, for example "Path filters were set aside: the pull request carries the ankra:full-run label." The plan carries a `plan_paths_set_aside:` diagnostic. A request for a full run never joins a run of the same commit that applied its filters; it queues a run of its own.
+
+**Always-run stages.** `ci_always_run_stages` in the [organisation CI settings](/guides/ankra-pipelines#organisation-ci-settings) names stages that run whatever their path filters say, together with every stage they need. It applies to every pipeline in the organisation that declares a stage of that name, and a name a pipeline does not declare changes nothing there. When the trigger's own `on.push.paths` or `on.pull_request.paths` matches none of the changed files, the run still starts for the always-run stages and what they need, and every other stage is skipped as `path_filter`. A stage that ran only because of the setting carries a `plan_paths_set_aside:` diagnostic. An always-run stage does not make the run a full run.
+
+`paths`, `when` and `if` are logic, not [protected sections](/guides/ankra-pipelines#logic-is-open-authority-is-closed): a pull request can change them, its own filters included. That is deliberate, because an author can rewrite a stage's script anyway. A stage a pull request must not be able to filter away belongs in `ci_always_run_stages`, which lives in the organisation's settings, outside every repository, and only an organisation administrator can change. `full_run` is logic too, and only ever makes a run do more.
+
+### Skipping a push with [skip ci]
+
+A pushed commit whose message carries `[skip ci]`, `[ci skip]`, `[no ci]`, `[skip ankra]` or `[ankra skip]` (in any case), or whose last paragraph has a `skip-checks: true` trailer, records a skipped run instead of queueing one: outcome `skipped`, error class `skip_marker`, and a message naming the marker. The skipped run still posts its check. `[skip ankra]` and `[ankra skip]` skip Ankra Pipelines alone; GitHub Actions' own `[skip actions]` does not skip Ankra.
+
+Only the head commit of a branch push counts. A tag push, a pull request run and a merge train car never honour a marker: a tag releases, and a pull request's check is what branch protection reads, so a line in a commit message must not turn it green. Where a branch push may be skipped is `ci_skip_markers` in the organisation CI settings:
+
+| `ci_skip_markers` | A marker skips a push to |
+|---|---|
+| `except_default_branch` (the default) | Any branch but the repository's default branch |
+| `everywhere` | Any branch, the default branch included |
+| `never` | Nothing. Markers are ignored |
+
+The default keeps every push to the default branch running, because that run is what releases and what catches whatever a pull request's path filters left out.
 
 ## Stages
 
@@ -527,7 +569,7 @@ Every event that reaches the trigger is decided in order, and the answer is reco
 | `enqueued` | One run was queued | Yes |
 | `already_queued` | A run for this event is still queued; the redelivery joined it | No new run |
 | `already_recorded` | A run for the same commit, trigger, reference and pull request exists inside the recent-run window - running, or concluded skipped; the redelivery joined it | No new run |
-| `skipped` | The trigger matched but its branch, tag or path filter excluded the event | Yes, concluded with outcome `skipped` and the planner's sentence |
+| `skipped` | The trigger matched but its branch, tag or path filter excluded the event, or a pushed commit carries a [skip marker](#skipping-a-push-with-skip-ci) the organisation honours on that branch | Yes, concluded with outcome `skipped` and the planner's sentence, or error class `skip_marker` and a sentence naming the marker |
 | `refused` | A dispatch the planner refused - an undeclared `on.manual`, an input outside its declared type | No; the diagnostics go back to the caller |
 | `repository_not_onboarded` | The repository is not connected to a pipeline | No |
 | `no_ci_cluster` | The organisation has no CI cluster and no AI staging cluster | No, for a provider event; a dispatch still gets its run row |
@@ -623,9 +665,10 @@ A result has a severity - `ok`, `advice` (the pipeline does what it says, and th
 | `pipeline_environment:` | A stage targeting an environment the pipeline does not declare (warning) |
 | `pipeline_paths:` | An [affected-only](#fields-common-to-every-stage) stage on a shape where "satisfied" would be untrue: a stage reading its outputs (`needs.<stage>.outputs`, `steps.<stage>.outputs`, a deploy whose `artifact` names it), a `build` another stage needs, a `checkout`, `gate` or `approval`, a scan a gate requires, an empty pattern, or `paths` beside a `when` path filter (fatal). Warnings: an affected-only scan no gate requires, an affected-only `deploy`, `publish` or `preview` that another stage needs, a `skippable_needs` entry the needed stage's own `paths` already covers, and any path pattern, in a path list or a [path set](#path-sets), spelled so that it can match no file (a leading `./` or `/`, a trailing `/`, a backslash or surrounding whitespace). A path set's entry is reported once, at `path_sets.<name>[i]` |
 | `pipeline_path_sets:` | The [`path_sets:`](#path-sets) block and its `{set: <name>}` references: a reference to an undeclared set, sets that include each other in a cycle, a reference in a list that is not a path filter, an invalid or duplicate set name, an entry that is neither a pattern nor a reference, an empty pattern (fatal). Warnings: a set nothing references, an empty set |
+| `pipeline_full_run:` | A [`full_run`](#setting-path-filters-aside) block naming an event no run is planned as, or naming no event and no branch, which sets every path filter aside on every run (both warnings) |
 | `pipeline_build_component:` | A `build.component` that is not a valid component name; one on a stage that is not `kind: build` (warning). Validated against an application: a build stage that belongs to no component, a `build.component` the application does not record, and two build stages that publish to the same repository - fatal when both always run, a warning when one of them runs only under a condition. See [Which component a build belongs to](/guides/ankra-pipelines#which-component-a-build-belongs-to) and the application's [declared components](/reference/application-descriptor#components) |
 
-The planner adds diagnostics with `plan_` keys (`plan_trigger:`, `plan_paths:`, `plan_matrix:`, `plan_condition:`, `plan_fork:`, `plan_fork_budget:`, `plan_concurrency:`, `plan_interpolation:`, `plan_timeout:`, `plan_needs:`, `plan_spec:`), and the step renderer records what it decided on incomplete information: `image_policy_open` when the organisation set no image policy, `resources_defaulted`, `service_without_readiness`, `service_undeclared`, `build_without_registry_auth`, `registry_push_withheld`, `build_namespace_workspace` and `multi_platform_build`. A step the renderer refuses outright - an image outside the policy, more compute than one step may have, a missing timeout, a `services` tier without services, host privilege - is a fixed sentence naming the field, and the same refusal at dispatch time is what a step that never started shows.
+The planner adds diagnostics with `plan_` keys (`plan_trigger:`, `plan_paths:`, `plan_paths_set_aside:`, `plan_matrix:`, `plan_condition:`, `plan_fork:`, `plan_fork_budget:`, `plan_concurrency:`, `plan_interpolation:`, `plan_timeout:`, `plan_needs:`, `plan_spec:`), and the step renderer records what it decided on incomplete information: `image_policy_open` when the organisation set no image policy, `resources_defaulted`, `service_without_readiness`, `service_undeclared`, `build_without_registry_auth`, `registry_push_withheld`, `build_namespace_workspace` and `multi_platform_build`. A step the renderer refuses outright - an image outside the policy, more compute than one step may have, a missing timeout, a `services` tier without services, host privilege - is a fixed sentence naming the field, and the same refusal at dispatch time is what a step that never started shows.
 
 ## A complete example
 
