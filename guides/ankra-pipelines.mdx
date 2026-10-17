@@ -442,6 +442,47 @@ A push that changes `web/app.ts` runs `checkout`, `test-web`, `build`, `scan`, `
 - **When the change cannot be seen** (no change list, or more than 300 files), no stage is left out, and the run's `paths_unverified` says why.
 - Check a change before you commit it: `ankra pipeline validate --changed-file web/app.ts` prints which stages run and which are skipped.
 
+### Affected from the dependency graph: `affected:`
+
+Path globs have one blind spot: a package a stage's tests import from somewhere else in the repository. `test-api` lists `api/**`, a change to `libs/auth` that `api` imports matches nothing, and the tests that would have caught the break are skipped. `affected:` names the packages instead of the files, and Ankra follows their imports.
+
+```yaml
+stages:
+  - name: checkout
+    kind: checkout
+  - name: test-api
+    kind: run
+    image: golang:1.26
+    run: go test ./...
+    working_directory: api
+    needs: [checkout]
+    affected:
+      go: ["./..."]
+    paths: ["migrations/**"]
+  - name: test-web
+    kind: run
+    image: node:24
+    run: corepack enable && pnpm install --frozen-lockfile && pnpm --filter @acme/web... test
+    needs: [checkout]
+    affected:
+      pnpm: ["@acme/web"]
+  - name: build
+    kind: build
+    needs: [test-api, test-web]
+    build:
+      dockerfile: Dockerfile
+```
+
+A stage with `affected:` runs when a changed file is in the dependency graph of what it names, its tests included, or matches its `paths:`. Otherwise it is skipped as **not affected**, and the stages that need it run without it, exactly as for an affected-only stage left out by its `paths:`.
+
+- **`go`** names Go packages the way the stage's own `go test` does: `./...` and `./internal/api` are read from the stage's `working_directory`, and an import path such as `example.com/shop/libs/...` works too. Ankra reads every `go.mod` in the repository, so a module another one pulls in through a local `replace` directive counts. A change to `go.mod`, `go.sum` or `vendor/` reaches every package of that module.
+- **`pnpm`** names workspace packages by name (`@acme/web`) or by directory (`./apps/web`). A dependency on another workspace package, by name, `workspace:` alias or `file:` path, is followed. A change to a file at the repository root, such as `pnpm-lock.yaml` or the root `package.json`, reaches every pnpm stage.
+- **`paths:` beside `affected:`** adds files no import graph sees: migrations, fixtures a test opens by path, a script the stage runs. A matching file runs the stage.
+- **Where the graph comes from.** The run's checkout step reads the graph of the exact commit it checked out, in a few seconds, and records an answer for each stage. Nothing is cached and there is no extra step. The planner decides only what it can without the code: a change list it could not read in full, a change to `.ankra/pipeline.yaml` or a matching `paths:` glob runs the stage, and a change of no files leaves it out.
+- **A skip needs an answer.** The stage is skipped only when the checkout answered that no changed file reaches it. No answer at all (a pattern that names nothing, an analysis that failed or took over two minutes, a pipeline with no checkout stage) runs it, and the checkout's log says why.
+- **The same rules as `paths:`.** `affected:` makes a stage affected-only, so it is refused where a skip would be unsafe: a stage whose outputs another reads, a `build` another stage needs, a `checkout`, `gate` or `approval`, a scan a gate judges. A false `if:` is still the condition's own skip and skips what needs the stage.
+- Check a change before you commit it: inside your checkout, `ankra pipeline validate --changed-file libs/auth/token.go` reads the same graph from your working tree and shows which stages the change reaches.
+
 ### Newest commit wins
 
 A `concurrency.group` decides which runs serialise. `cancel_in_progress` decides what happens when a newer one arrives: with it, the new commit supersedes the run it replaces; without it, the new run waits for the older one to finish - and on a group that varies per branch, that is a branch queueing behind itself while the older commit's run keeps your step slots.

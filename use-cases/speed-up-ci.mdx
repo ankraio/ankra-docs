@@ -34,6 +34,7 @@ Timings from Ankra's own pipelines.
 | Run nothing when a change only touches documentation | [`on.<event>.paths`](#skip-documentation-only-changes) |
 | Run a pull request's checks only for what it touches, and everything on main | [`when.pull_request`](#run-only-the-tests-a-change-touches) |
 | Skip a component's tests on every event when its files did not change | [`paths:` on the stage](#run-only-the-tests-a-change-touches) |
+| Skip a component's tests when nothing it imports changed, across modules and workspace packages | [`affected:` on the stage](#run-only-the-tests-a-change-touches) |
 | Stop building and testing a commit again after its pull request did | [`promote_from`](#build-once-and-promote-on-merge) |
 | Test each pull request on top of the latest main | [Merge train](#test-each-pull-request-as-it-will-merge) |
 | Run slow suites less often | [`on.schedule`](#run-slow-suites-nightly) |
@@ -211,6 +212,78 @@ stages:
   - name: build
     kind: build
     needs: [test-web, test-api]
+    build:
+      dockerfile: Dockerfile
+  - name: scan
+    kind: scan
+    needs: [build]
+    scan:
+      scanners: [semgrep, trivy]
+  - name: gate
+    kind: gate
+    needs: [scan]
+  - name: publish
+    kind: publish
+    needs: [gate]
+    when:
+      events: [push]
+```
+
+</Accordion>
+  </Tab>
+  <Tab title="From the dependency graph">
+Name the packages a stage tests instead of listing their files. Ankra follows the imports, so a change to a shared library reaches every stage that uses it, even from another Go module or pnpm workspace package, and a change to anything else skips it. Like `paths:`, the stages that need a skipped stage still run.
+
+```yaml
+- name: test-api
+  kind: run
+  image: golang:1.26
+  run: go test ./...
+  working_directory: api
+  needs: [checkout]
+  affected:
+    go: ["./..."]
+  paths: ["migrations/**"]
+```
+
+A change to `libs/auth/token.go`, which `api` imports through a `replace` directive in `api/go.mod`, runs `test-api`. A change to `web/app.ts` skips it as not affected. `paths:` adds the files the tests read at run time, which no import graph sees. The run's checkout reads the graph of the exact commit it tested in a few seconds; a stage it cannot answer for runs.
+
+<Accordion title="Full pipeline.yaml">
+
+```yaml
+apiVersion: ankra.io/v1
+kind: Pipeline
+metadata:
+  name: shop
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+defaults:
+  network: egress-https
+stages:
+  - name: checkout
+    kind: checkout
+  - name: test-api
+    kind: run
+    image: golang:1.26
+    run: go test ./...
+    working_directory: api
+    needs: [checkout]
+    affected:
+      go: ["./..."]
+    paths: ["migrations/**"]
+  - name: test-web
+    kind: run
+    image: node:24
+    run: corepack enable && pnpm install --frozen-lockfile && pnpm --filter @acme/web... test
+    needs: [checkout]
+    affected:
+      pnpm: ["@acme/web"]
+  - name: build
+    kind: build
+    needs: [test-api, test-web]
     build:
       dockerfile: Dockerfile
   - name: scan
@@ -546,6 +619,7 @@ A path filter only skips a stage when Ankra has the complete list of files the c
 | The change edits `.ankra/pipeline.yaml` | Every path filter is set aside (`plan_definition_changed`) |
 | A pull request is retargeted to another base | It is planned again against the new base, and the new check replaces the old one |
 | An `if:` can only be decided when its step starts | It reads the run's stored list, and runs when that list is incomplete and the answer depends on it |
+| A stage declares `affected:` | It is skipped only when the run's checkout read the graph and answered that no changed file reaches it. An analysis that failed, timed out or found nothing to match runs the stage |
 | A push asks to promote | Only an identical tree, the same approved authority, the gate's own digest, within 72 hours, never from a fork |
 
 Pushes and pull requests are filtered the same way on GitHub, GitLab and Bitbucket Cloud, up to 300 changed files.
@@ -580,7 +654,7 @@ Pushes and pull requests are filtered the same way on GitHub, GitLab and Bitbuck
     ```
   </Step>
   <Step title="Try a few typical changes">
-    Run it for a documentation edit, one component and two components. The command also reports every refusal and warning above, and exits non-zero only when the pipeline cannot be planned.
+    Run it for a documentation edit, one component and two components. The command also reports every refusal and warning above, and exits non-zero only when the pipeline cannot be planned. For stages with `affected:`, run it inside your checkout: it reads the same dependency graph from your working tree and marks each one `run (graph: affected)` or `skip: not affected (graph)`.
   </Step>
 </Steps>
 
