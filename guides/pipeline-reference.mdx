@@ -59,6 +59,7 @@ A pipeline mistakenly committed under `.ankra/manifests/` is refused by the mani
 | `stages` | list | required | The main DAG |
 | `on_failure` | list | none | Stages that run after the main `stages` have all concluded, and only when one of them failed. See [Failure and cleanup stages](#failure-and-cleanup-stages) |
 | `finally` | list | none | Stages that run after every main and `on_failure` stage has concluded, whatever the outcome, and after a run that had started is cancelled. See [Failure and cleanup stages](#failure-and-cleanup-stages) |
+| `path_sets` | map | none | Named lists of path patterns. Any path filter list includes one with a `{set: <name>}` entry. See [Path sets](#path-sets) |
 | `environments` | map | none | The pipeline's half of each deployment environment binding: `data` (`none`, `restore_point` or `seed`), `verify` (stage names), `rollout` (`recreate`, `rolling`, `blue_green` or `canary`) and `gate` (`automatic`, `manual` or `custom`). Protected. |
 
 Stage names must be unique across `stages`, `on_failure` and `finally`, because the three share one run and one output namespace.
@@ -112,6 +113,8 @@ A manual input has a `name` (letters, digits and underscores, so it can be addre
 
 A path filter is decided on the event's changed files, and never excludes a run when the diff could not be read or was truncated - a file the planner could not see is not a file that did not change; the run records that it passed on incomplete information. A push's changed files are read from the provider the same way on GitHub, GitLab and Bitbucket Cloud: from the head of the branch's last successful push run (the newest one that concluded `success` within 30 days) to the pushed commit, or from the push's previous head when the branch has no such run, up to 300 paths. Ankra uses GitHub's compare API, GitLab's repository compare and Bitbucket Cloud's diffstat, and first checks with the provider that the starting commit is still in the pushed commit's history. So a push that follows a cancelled or failed one still sees the files those pushes changed, and a force push is caught on every provider, GitLab included. When there is no range to read, because the push created the branch or because history was rewritten past that commit, no path filter excludes anything. A pull request's files are read from the provider when the run is triggered (GitHub's pull request files, a GitLab merge request's diffs, Bitbucket's diffstat), up to 300 paths. The list is stored on the run, and a re-run reuses it. When a filter had to pass without a complete list, the run's `paths_unverified` says why: `provider_error` (the provider was asked and failed), `truncated` (more than 300 paths changed), `unsupported_provider` (the provider or the event offers no list), `branch_created` (the push created its branch, so there is no earlier commit to compare with) or `forced_push` (the push rewrote the branch's history, so its commits do not name every file that differs).
 
+Every path list here, and every path list on a stage, can include a named list from `path_sets:` with a `{set: <name>}` entry. See [Path sets](#path-sets).
+
 The `on:` triggers decide whether a run starts at all, for the whole pipeline. To run one stage on a narrower set of changes for one event only - a component's checks on a pull request that touches it, but on every push - give the stage an [event-scoped `when`](#event-scoped-filters) block rather than a second trigger or a duplicate stage.
 
 ## Stages
@@ -164,6 +167,61 @@ stages:
 
 A block for an event the pipeline's `on:` does not trigger on, or that the stage's own `when.events` leaves out, can never apply and is a warning under `pipeline_trigger:`. Converted pipelines use these blocks: a GitHub Actions repository's workflows keep their own `on.pull_request.paths` and `on.push.paths` on their stages, and a GitLab rule whose `if:` tests `$CI_PIPELINE_SOURCE == "merge_request_event"` or `== "push"` becomes `when.pull_request` or `when.push`. The recipe for a monorepo is [PR-only checks, full builds on push](/guides/ankra-pipelines#monorepo-pr-only-checks-full-builds-on-push).
 
+### Path sets
+
+A monorepo filters many stages on the same few directories. `path_sets:` names a list of patterns once, and every path list includes it with a `{set: <name>}` entry: `on.push.paths`, `on.pull_request.paths`, a stage's `paths`, `when.paths`, `when.push.paths` and `when.pull_request.paths`. A set can include other sets the same way.
+
+```yaml
+apiVersion: ankra.io/v1
+kind: Pipeline
+metadata:
+  name: shop
+path_sets:
+  pipeline: [".ankra/**"]
+  backend:
+    - "backend/**"
+    - "!backend/**/*.md"
+    - set: pipeline
+  frontend: ["frontend/**", "packages/ui/**", {set: pipeline}]
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+defaults:
+  network: egress-https
+stages:
+  - name: checkout
+    kind: checkout
+  - name: test-backend
+    kind: run
+    image: golang:1.26
+    run: go test ./...
+    needs: [checkout]
+    paths:
+      - set: backend
+      - "go.work"
+  - name: test-frontend
+    kind: run
+    image: node:24
+    run: pnpm test
+    needs: [checkout]
+    when:
+      pull_request:
+        paths: [{set: frontend}]
+      push: {}
+```
+
+- A set name uses lower-case letters, digits, `-` and `_`, and starts with a letter or digit, like a stage name.
+- An entry is a pattern, with the same glob rules as any path list (`*`, `**`, `?`, a leading `!` to exclude), or `{set: <name>}`. A path list can also be a single `{set: <name>}` in place of a list.
+- A reference is replaced by the set's patterns, in order, where it stands. The list then means exactly what it would mean with the patterns written there, so the last pattern that matches a file still decides, and a `!` pattern in a set excludes from the list it lands in.
+- Ankra expands the sets when it reads the file. Plans, the stored definition and its hash are those of the expanded lists, so a file written with sets and the same file written out by hand are the same pipeline. Paths are not a protected section, so changing a set never needs an administrator's approval.
+- `{set: <name>}` is accepted only in the path lists above. In `needs`, `branches`, a cache's or an artifact's `paths` or any other list it is refused.
+
+Refused under `pipeline_path_sets:`: a reference to a set `path_sets:` does not declare (the message suggests the closest name), sets that include each other in a cycle, an invalid set name, a set declared twice, an entry that is neither a pattern nor `{set: <name>}`, and an empty pattern. A set nothing references, directly or through another set, and an empty set are warnings. A set entry spelled so that it can match no file is a `pipeline_paths:` warning that names the set and the entry, once, not again for every list the set is used in.
+
+`ankra pipeline validate` lists every set with its expanded patterns, the sets it includes and the lists that use it. The API answer carries the same as `path_sets`.
+
 ### Fields common to every stage
 
 | Field | Type | Default | Meaning |
@@ -174,7 +232,7 @@ A block for an event the pipeline's `on:` does not trigger on, or that the stage
 | `run` | string | none | The script; required on a `run` stage without `uses` |
 | `needs` | list | none | Stages this one waits for. Every name must exist and the graph must be acyclic. |
 | `skippable_needs` | list | none | The entries of `needs` this stage may run without. When a listed stage is left out because its own path filter (`when.paths`, or the [event block's](#event-scoped-filters) `paths` for this run's event) matches no changed file, this stage waits on what that stage would have waited on instead of being skipped with it. When the listed stage runs, it is an ordinary need: this stage runs after it, and only if it succeeded. Any other reason the listed stage is skipped - a branch or event filter, a false `if`, the fork policy - still skips this stage, unless this stage's own `if:` calls a status function (see `if`). Every entry must also be in `needs`; an entry naming a stage with no path filter has no effect and is a warning. |
-| `paths` | list | none | Makes the stage **affected-only**: it runs only when a changed file matches one of these globs (the `when.paths` dialect: `*`, `**`, `?`, a leading `!` to exclude). When none does, the stage is skipped as `path_filter` and **counts as satisfied** for every stage that needs it: each of them waits on what the skipped stage waited on instead of being skipped with it, so a monorepo can leave out the tests of the components a change did not touch and still build, gate and publish. That is the difference from `when.paths`, which skips the stages behind it unless each lists it in `skippable_needs`. A change list that could not be read in full never leaves the stage out. Only `paths` may be the reason it is out: when its `if` is false for the run, or can only be decided at dispatch, the stages behind it are skipped as for any other need. Refused (`pipeline_paths:`): a stage that reads its outputs, a `build` another stage needs, a `checkout`, `gate` or `approval`, a scan a gate names in `require_stages`, and `paths` together with a `when` path filter on one stage. See [Affected-only stages](/guides/ankra-pipelines#affected-only-stages-skip-what-a-change-did-not-touch). |
+| `paths` | list | none | Makes the stage **affected-only**: it runs only when a changed file matches one of these globs (the `when.paths` dialect: `*`, `**`, `?`, a leading `!` to exclude), or a [path set](#path-sets) the list includes. When none does, the stage is skipped as `path_filter` and **counts as satisfied** for every stage that needs it: each of them waits on what the skipped stage waited on instead of being skipped with it, so a monorepo can leave out the tests of the components a change did not touch and still build, gate and publish. That is the difference from `when.paths`, which skips the stages behind it unless each lists it in `skippable_needs`. A change list that could not be read in full never leaves the stage out. Only `paths` may be the reason it is out: when its `if` is false for the run, or can only be decided at dispatch, the stages behind it are skipped as for any other need. Refused (`pipeline_paths:`): a stage that reads its outputs, a `build` another stage needs, a `checkout`, `gate` or `approval`, a scan a gate names in `require_stages`, and `paths` together with a `when` path filter on one stage. See [Affected-only stages](/guides/ankra-pipelines#affected-only-stages-skip-what-a-change-did-not-touch). |
 | `if` | expression | none | Runs the stage only when the expression is true; see [Expressions](#expressions). As in GitHub Actions, an `if:` that calls a status function - `always()`, `success()`, `failure()`, `cancelled()`, `skipped()` - replaces the implicit "every need succeeded": such a stage is not skipped because a need was left out of the run. It waits on the nearest stages behind that need that do run, and its condition decides at dispatch, where `needs.<stage>.result` reads `skipped` and `skipped()` is true. |
 | `when.branches`, `when.paths`, `when.events` | lists | none | Filters on the event without an expression, decided before any expression context exists. `branches` and `paths` apply to every event that has no [event block](#event-scoped-filters) of its own; `events` always applies |
 | `when.push`, `when.pull_request` | `branches`, `paths` | absent | The branch and path filter for that one event, in place of the flat fields; an empty block (`{}`) means the event is unfiltered. See [Event-scoped filters](#event-scoped-filters) |
@@ -529,7 +587,8 @@ A result has a severity - `ok`, `advice` (the pipeline does what it says, and th
 | `pipeline_retry:` | More than 5 attempts, a negative count, an unknown backoff or condition |
 | `pipeline_artifacts:` | An artifact without a name or paths; a negative retention (warning); an unknown test result format or a missing path |
 | `pipeline_environment:` | A stage targeting an environment the pipeline does not declare (warning) |
-| `pipeline_paths:` | An [affected-only](#fields-common-to-every-stage) stage on a shape where "satisfied" would be untrue: a stage reading its outputs (`needs.<stage>.outputs`, `steps.<stage>.outputs`, a deploy whose `artifact` names it), a `build` another stage needs, a `checkout`, `gate` or `approval`, a scan a gate requires, an empty pattern, or `paths` beside a `when` path filter (fatal). Warnings: an affected-only scan no gate requires, an affected-only `deploy`, `publish` or `preview` that another stage needs, and a `skippable_needs` entry the needed stage's own `paths` already covers |
+| `pipeline_paths:` | An [affected-only](#fields-common-to-every-stage) stage on a shape where "satisfied" would be untrue: a stage reading its outputs (`needs.<stage>.outputs`, `steps.<stage>.outputs`, a deploy whose `artifact` names it), a `build` another stage needs, a `checkout`, `gate` or `approval`, a scan a gate requires, an empty pattern, or `paths` beside a `when` path filter (fatal). Warnings: an affected-only scan no gate requires, an affected-only `deploy`, `publish` or `preview` that another stage needs, a `skippable_needs` entry the needed stage's own `paths` already covers, and any path pattern, in a path list or a [path set](#path-sets), spelled so that it can match no file (a leading `./` or `/`, a trailing `/`, a backslash or surrounding whitespace). A path set's entry is reported once, at `path_sets.<name>[i]` |
+| `pipeline_path_sets:` | The [`path_sets:`](#path-sets) block and its `{set: <name>}` references: a reference to an undeclared set, sets that include each other in a cycle, a reference in a list that is not a path filter, an invalid or duplicate set name, an entry that is neither a pattern nor a reference, an empty pattern (fatal). Warnings: a set nothing references, an empty set |
 | `pipeline_build_component:` | A `build.component` that is not a valid component name; one on a stage that is not `kind: build` (warning). Validated against an application: a build stage that belongs to no component, a `build.component` the application does not record, and two build stages that publish to the same repository - fatal when both always run, a warning when one of them runs only under a condition. See [Which component a build belongs to](/guides/ankra-pipelines#which-component-a-build-belongs-to) and the application's [declared components](/reference/application-descriptor#components) |
 
 The planner adds diagnostics with `plan_` keys (`plan_trigger:`, `plan_paths:`, `plan_matrix:`, `plan_condition:`, `plan_fork:`, `plan_fork_budget:`, `plan_concurrency:`, `plan_interpolation:`, `plan_timeout:`, `plan_needs:`, `plan_spec:`), and the step renderer records what it decided on incomplete information: `image_policy_open` when the organisation set no image policy, `resources_defaulted`, `service_without_readiness`, `service_undeclared`, `build_without_registry_auth`, `registry_push_withheld`, `build_namespace_workspace` and `multi_platform_build`. A step the renderer refuses outright - an image outside the policy, more compute than one step may have, a missing timeout, a `services` tier without services, host privilege - is a fixed sentence naming the field, and the same refusal at dispatch time is what a step that never started shows.

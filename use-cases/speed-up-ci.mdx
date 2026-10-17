@@ -37,21 +37,24 @@ Timings from Ankra's own pipelines.
 | Stop building and testing a commit again after its pull request did | [`promote_from`](#build-once-and-promote-on-merge) |
 | Test each pull request on top of the latest main | [Merge train](#test-each-pull-request-as-it-will-merge) |
 | Run slow suites less often | [`on.schedule`](#run-slow-suites-nightly) |
+| Write a list of paths once and use it on many stages | [`path_sets`](#write-each-path-list-once) |
 
 They combine. A typical setup is pull-request-only filters on the expensive tests, `promote_from` on `publish`, and the merge train on the default branch.
 
 ## Skip documentation-only changes
 
-A trigger `paths` list that starts with `!` means "everything except". A change that only touches the excluded files runs no stage, and the run is recorded as skipped.
+A trigger `paths` list that starts with `!` means "everything except". A change that only touches the excluded files runs no stage, and the run is recorded as skipped. Name the list once in `path_sets:` and both triggers use it.
 
 ```yaml
+path_sets:
+  not-docs: ["!docs/**", "!*.md", "!.github/**"]
 on:
   push:
     branches: [main]
-    paths: ["!docs/**", "!*.md", "!.github/**"]
+    paths: {set: not-docs}
   pull_request:
     branches: [main]
-    paths: ["!docs/**", "!*.md", "!.github/**"]
+    paths: {set: not-docs}
 ```
 
 A pull request that changes only `docs/intro.md` and `README.md` is skipped with the reason "Every file this event changed falls outside the paths this pipeline's trigger declares." One that also changes `api/README.md` runs, because `*.md` matches only files at the repository root.
@@ -64,13 +67,15 @@ apiVersion: ankra.io/v1
 kind: Pipeline
 metadata:
   name: shop
+path_sets:
+  not-docs: ["!docs/**", "!*.md", "!.github/**"]
 on:
   push:
     branches: [main]
-    paths: ["!docs/**", "!*.md", "!.github/**"]
+    paths: {set: not-docs}
   pull_request:
     branches: [main]
-    paths: ["!docs/**", "!*.md", "!.github/**"]
+    paths: {set: not-docs}
 defaults:
   network: egress-https
 stages:
@@ -423,6 +428,87 @@ stages:
     needs: [checkout]
     when:
       events: [schedule]
+```
+
+</Accordion>
+
+## Write each path list once
+
+A monorepo filters many stages on the same directories, and most of those lists also name the pipeline file. `path_sets:` names each list once. Any path list includes a set with a `{set: <name>}` entry, and a set can include another set.
+
+```yaml
+path_sets:
+  pipeline: [".ankra/**"]
+  backend: ["backend/**", {set: pipeline}]
+  frontend: ["frontend/**", "packages/ui/**", {set: pipeline}]
+```
+
+```yaml
+- name: backend-test
+  kind: run
+  image: golang:1.26
+  run: go test ./...
+  working_directory: backend
+  needs: [checkout]
+  when:
+    pull_request:
+      paths: [{set: backend}]
+    push: {}
+```
+
+Ankra replaces each reference with the set's patterns where it stands, when it reads the file, so the plan is exactly the plan of the lists written out by hand. Changing `pipeline` changes every list that includes it. `ankra pipeline validate` refuses a reference to a set that does not exist and sets that include each other, warns about a set nothing uses, and lists every set with its patterns and the stages that use it. See [Path sets](/guides/pipeline-reference#path-sets).
+
+<Accordion title="Full pipeline.yaml">
+
+```yaml
+apiVersion: ankra.io/v1
+kind: Pipeline
+metadata:
+  name: shop
+path_sets:
+  pipeline: [".ankra/**"]
+  backend: ["backend/**", {set: pipeline}]
+  frontend: ["frontend/**", "packages/ui/**", {set: pipeline}]
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+defaults:
+  network: egress-https
+stages:
+  - name: checkout
+    kind: checkout
+  - name: backend-test
+    kind: run
+    image: golang:1.26
+    run: go test ./...
+    working_directory: backend
+    needs: [checkout]
+    when:
+      pull_request:
+        paths: [{set: backend}]
+      push: {}
+  - name: frontend-test
+    kind: run
+    image: node:24
+    run: corepack enable && pnpm install --frozen-lockfile && pnpm run test
+    working_directory: frontend
+    needs: [checkout]
+    when:
+      pull_request:
+        paths: [{set: frontend}]
+      push: {}
+  - name: frontend-lint
+    kind: run
+    image: node:24
+    run: corepack enable && pnpm install --frozen-lockfile && pnpm run lint
+    working_directory: frontend
+    needs: [checkout]
+    when:
+      pull_request:
+        paths: [{set: frontend}]
+      push: {}
 ```
 
 </Accordion>
