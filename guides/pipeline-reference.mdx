@@ -57,11 +57,22 @@ A pipeline mistakenly committed under `.ankra/manifests/` is refused by the mani
 | `credentials` | list | none | `name`, `from` (`cloud`, `git`, `registry` or `object_storage`) and `as`, the name it is materialised under. Declared once for the whole run and materialised for every step of it - there is no per-stage `credentials` block, and unlike `secrets`, a stage does not narrow which of them it receives. A `credentials:` key written on a stage is an unknown key: it is ignored, `validate` warns, and nothing is delivered. Protected, and refused for a fork run. |
 | `services` | map | none | Sidecars by name: `image` (required), `env`, `ports`, and `ready.tcp` (a port) or `ready.http` (a path, probed on the first declared port). Without a probe the stage starts as soon as the container does. A sidecar's image is held to the organisation's image policy and its `env` to the same reserved names a step's own is - either violation refuses the whole step rather than running it. Protected. |
 | `stages` | list | required | The main DAG |
-| `on_failure` | list | none | Stages that run only when the run is failing |
-| `finally` | list | none | Stages that run after everything else whatever the outcome, including a cancelled run |
+| `on_failure` | list | none | Stages that run after the main `stages` have all concluded, and only when one of them failed. See [Failure and cleanup stages](#failure-and-cleanup-stages) |
+| `finally` | list | none | Stages that run after every main and `on_failure` stage has concluded, whatever the outcome. They do not run yet when the whole run is cancelled. See [Failure and cleanup stages](#failure-and-cleanup-stages) |
 | `environments` | map | none | The pipeline's half of each deployment environment binding: `data` (`none`, `restore_point` or `seed`), `verify` (stage names), `rollout` (`recreate`, `rolling`, `blue_green` or `canary`) and `gate` (`automatic`, `manual` or `custom`). Protected. |
 
 Stage names must be unique across `stages`, `on_failure` and `finally`, because the three share one run and one output namespace.
+
+### Failure and cleanup stages
+
+A run has three phases, in this order: the main `stages`, then `on_failure`, then `finally`. Every `on_failure` and `finally` stage waits on every stage of the phases before it without declaring it.
+
+- **`on_failure` runs only when the main stages failed.** Once every main stage has concluded, the stage runs if one of them failed, timed out, or was stopped by an infrastructure fault or by its agent. A failure that `continue_on_error` or `allow_failure` keeps from failing the run does not count. After a green run the stage is skipped with the reason "Skipped because the run did not fail, so this on_failure stage was not needed."
+- **`finally` runs whatever the outcome.** It starts once every main and `on_failure` stage has concluded: after a green run, after a failed one, and after `on_failure` stages that themselves failed.
+- **`needs:` inside a phase works as it does in `stages`.** An `on_failure` stage that `needs:` another `on_failure` stage runs only when that one succeeded, and the same holds between two `finally` stages. A `needs:` on a main stage only orders the stage and gives it that stage's `needs.<stage>.*` values; it never stops an `on_failure` or `finally` stage from running when the main stage failed.
+- **They count toward the run's outcome.** An `on_failure` stage that succeeds does not turn a failed run green. A `finally` stage that fails fails a run whose main stages passed; give it `allow_failure: true` when a failed cleanup should not do that.
+- **A failed-only re-run** repeats an `on_failure` stage together with the main stage it responds to, and runs it again only if that stage fails again. A `finally` stage that failed is repeated on its own.
+- **Not yet: `finally` on a cancelled run.** Cancelling a run as a whole (from the portal, the CLI or the check run, by a newer push that supersedes it, or because its pull request was merged or closed) stops every open step at once and runs neither `on_failure` nor `finally` stages. Only a single step stopped where it ran, by an infrastructure fault or its agent, counts as a failure that starts `on_failure`. Until that changes, keep cleanup that must always happen outside a run that can be cancelled.
 
 ## Triggers
 
