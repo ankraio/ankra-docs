@@ -1,58 +1,63 @@
 ---
 title: Speed Up CI
-description: Run only the work a change needs. Skip runs for documentation changes, test only what a pull request touches, build an image once and promote it on merge, and see why a skipped stage never hides a failure. With ready-to-paste pipeline.yaml examples and real timings from Ankra's own pipelines.
+description: Run only the work a change needs, and publish the image that was already tested. Ready-to-paste pipeline.yaml examples and real timings from Ankra's own pipelines.
 ---
 
 import { CliVersion } from "/snippets/cli-version.jsx";
 
-Most CI time goes on work a change did not need: the backend tests for a frontend fix, a full rebuild of a commit that was already built and tested on its pull request, a whole pipeline for a README edit. Ankra Pipelines lets you skip that work with a few lines of `.ankra/pipeline.yaml`, and it never skips anything it cannot prove the change left alone.
+Most CI time goes on work a change did not need: backend tests for a frontend fix, or a second build of a commit its pull request already built and tested. Ankra Pipelines skips that work with a few lines of `.ankra/pipeline.yaml`, and never skips anything it cannot prove the change left alone.
 
-This page shows each technique with a complete pipeline you can paste, says which one to use when, and explains why a skipped stage never turns a run green by mistake.
-
-<Frame caption="Run what a change touches, then publish the image that was tested">
-  <img src="/images/use-cases/speed-up-ci.svg" alt="A pull request's changed files are read from the provider. Only the stages those files touch run, and the tests of untouched components are skipped. The image is built, scanned and gated by digest. The merge train tests the pull request on the latest main and merges it. On the merge, publish re-tags the image that was already tested, because the tree is the same. When Ankra cannot see every changed file, because there is no file list, more than 300 files changed, the push created a branch or rewrote history, or the pipeline file was edited, nothing is skipped." className="w-full" />
+<Frame>
+  <img src="/images/use-cases/speed-up-ci.svg" alt="Four steps. A pull request runs only the stages its files touch. The image is built once, scanned and gated by digest. The merge train tests the pull request as it will merge. Publish re-tags the tested image instead of building it again. Below them: if Ankra cannot see every changed file, nothing is skipped." className="w-full" />
 </Frame>
-
----
 
 ## What it saves
 
-These are timings from Ankra's own pipelines, which use the techniques on this page.
+Timings from Ankra's own pipelines.
 
 <CardGroup cols={3}>
   <Card title="15 seconds from merge to published" icon="rocket">
-    A TypeScript frontend with 20-minute pull request runs. Each of its last 40 merges re-tagged the image its pull request run had already built and tested.
+    A TypeScript frontend with 20-minute pull request runs. Its last 40 merges re-tagged the image the pull request had already built and tested.
   </Card>
   <Card title="About 3 minutes instead of 19" icon="stopwatch">
     A Go and Next.js repository. A pull request that does not touch the backend skips its 17 minutes of tests.
   </Card>
   <Card title="About 60 CPU minutes per merge" icon="microchip">
-    A Go, TypeScript and Rust monorepo. Three stages, one a 10-minute simulation suite, now run only when their files change. Estimated from stage timings.
+    A Go, TypeScript and Rust monorepo. Three rarely touched stages, one a 10-minute suite, now run only when their files change. Estimated from stage timings.
   </Card>
 </CardGroup>
 
----
-
 ## Which technique to use
 
-| You want to | Use | What happens to the stages after it |
-|---|---|---|
-| Run nothing for changes that only touch documentation | [`on.<event>.paths`](#skip-runs-that-only-touch-documentation) | No stage runs, and the run is recorded as skipped |
-| Check only what a pull request touches, and run everything on main | [`when.pull_request`](#check-only-what-a-pull-request-touches) | Skipped too, unless they list the stage in `skippable_needs` |
-| Skip a component's tests on every event when its files did not change | [`paths:` on the stage](#skip-tests-for-components-a-change-did-not-touch) | They still run: the skipped stage counts as satisfied |
-| Run a stage on a condition that a path list cannot express | [`if:`](#keep-later-stages-running-and-write-your-own-conditions) | Skipped, unless their own `if:` calls a status function such as `always()` |
-| Stop building and testing a commit again after its pull request already did | [`promote_from`](#build-once-and-promote-on-merge) | The push runs `publish` only |
-| Test each pull request on top of the latest main without testing it twice | [The merge train](#test-each-pull-request-as-it-will-merge) | Merge publishes the tested image |
-| Run slow suites less often | [`on.schedule`](#move-slow-suites-to-a-nightly-run) | Only the listed stages run |
-| Stop spending time on commits nobody will look at | [`cancel_in_progress`](#move-slow-suites-to-a-nightly-run) | The older run is cancelled and shown as superseded |
+| You want to | Use |
+|---|---|
+| Run nothing when a change only touches documentation | [`on.<event>.paths`](#skip-documentation-only-changes) |
+| Run a pull request's checks only for what it touches, and everything on main | [`when.pull_request`](#run-only-the-tests-a-change-touches) |
+| Skip a component's tests on every event when its files did not change | [`paths:` on the stage](#run-only-the-tests-a-change-touches) |
+| Stop building and testing a commit again after its pull request did | [`promote_from`](#build-once-and-promote-on-merge) |
+| Test each pull request on top of the latest main | [Merge train](#test-each-pull-request-as-it-will-merge) |
+| Run slow suites less often | [`on.schedule`](#run-slow-suites-nightly) |
 
-The techniques combine. A typical setup is pull-request-only filters on the expensive test stages, `promote_from` on `publish`, the merge train on the default branch, and a nightly run for the slowest suite.
+They combine. A typical setup is pull-request-only filters on the expensive tests, `promote_from` on `publish`, and the merge train on the default branch.
 
----
+## Skip documentation-only changes
 
-## Skip runs that only touch documentation
+A trigger `paths` list that starts with `!` means "everything except". A change that only touches the excluded files runs no stage, and the run is recorded as skipped.
 
-Give a trigger a `paths` list, and an event whose changed files all fall outside it runs no stage: the run is recorded as skipped. A list that starts with `!` means "everything except", so this pipeline runs for every change except documentation, root Markdown files and GitHub workflow files:
+```yaml
+on:
+  push:
+    branches: [main]
+    paths: ["!docs/**", "!*.md", "!.github/**"]
+  pull_request:
+    branches: [main]
+    paths: ["!docs/**", "!*.md", "!.github/**"]
+```
+
+A pull request that changes only `docs/intro.md` and `README.md` is skipped with the reason "Every file this event changed falls outside the paths this pipeline's trigger declares." One that also changes `api/README.md` runs, because `*.md` matches only files at the repository root.
+
+<AccordionGroup>
+  <Accordion title="Full pipeline.yaml">
 
 ```yaml
 apiVersion: ankra.io/v1
@@ -78,28 +83,40 @@ stages:
     needs: [checkout]
 ```
 
-A pull request that changes only `docs/intro.md` and `README.md` runs no stage. Its run is recorded as skipped, with the reason "Every file this event changed falls outside the paths this pipeline's trigger declares." A pull request that also changes `api/README.md` runs, because `*.md` matches Markdown files at the repository root only.
-
-<Warning>
-Exclude a file type everywhere (`**/*.md`) only when nothing your build or tests read has that type. Code that embeds Markdown, such as prompt files or templates, needs its tests to run when those files change.
-</Warning>
-
-<AccordionGroup>
+  </Accordion>
   <Accordion title="How path patterns match">
-    - Patterns are matched against file paths from the repository root: `api/**`, never `./api/**` or `/api/**`.
-    - `*` matches any characters except `/`. `**` matches any characters, `/` included. `?` matches one character.
+    - Patterns match file paths from the repository root: `api/**`, never `./api/**` or `/api/**`.
+    - `*` matches any characters except `/`, `**` matches any characters including `/`, and `?` matches one character.
     - A pattern matches whole file names, so `docs/` matches nothing. Write `docs/**`.
-    - `!` in front of a pattern removes what it matches. The last pattern that matches a file decides, so `["web/**", "!web/**/*.md"]` means the web directory except its Markdown files.
+    - `!` removes what a pattern matches, and the last pattern that matches a file decides: `["web/**", "!web/**/*.md"]` is the web directory without its Markdown files.
     - Matching is case-sensitive.
-    - `ankra pipeline validate` warns about a pattern that can match no file, such as one starting with `./` or `/`, ending in `/`, or containing a backslash, and names the pattern to write instead.
+    - Exclude a file type everywhere (`**/*.md`) only when nothing your build or tests read has that type. Code that embeds Markdown prompts or templates needs its tests to run when they change.
+    - `ankra pipeline validate` warns about a pattern that can match no file (a leading `./` or `/`, a trailing `/`, a backslash) and names the pattern to write instead.
   </Accordion>
 </AccordionGroup>
 
----
+## Run only the tests a change touches
 
-## Check only what a pull request touches
+Filter each expensive test stage on the files it covers. Choose whether the filter applies to pull requests only or to every event.
 
-A monorepo usually wants a pull request to run the checks of the components it changes, while every push to main runs everything. Give each expensive stage an event-scoped `when` block: the `pull_request` block filters on paths, and an empty `push` block means pushes are not filtered.
+<Tabs>
+  <Tab title="Pull requests only">
+Pull requests skip the tests of components they do not touch, and every push to main still runs everything. This is the safest place to start, and the technique behind the "About 3 minutes instead of 19" example.
+
+```yaml
+- name: backend-test
+  kind: run
+  image: golang:1.26
+  run: go test ./...
+  when:
+    pull_request:
+      paths: ["backend/**"]
+    push: {}
+```
+
+A pull request that changes only `frontend/src/app.tsx` skips `backend-test` with reason `path_filter`. A stage that needs a filtered stage is skipped with it, unless it lists it in `skippable_needs` (see **Later stages and conditions**).
+
+<Accordion title="Full pipeline.yaml">
 
 ```yaml
 apiVersion: ankra.io/v1
@@ -138,15 +155,24 @@ stages:
       push: {}
 ```
 
-A pull request that changes only `frontend/src/app.tsx` runs `checkout` and `frontend-test`, and records `backend-test` as skipped with reason `path_filter`. Every push to main runs all three, so main keeps a full test run after every merge.
+</Accordion>
+  </Tab>
+  <Tab title="Every event">
+A stage with `paths:` is **affected-only**: when no changed file matches, it is skipped on every event, pushes included, and the stages that need it still run, each waiting on what the skipped stage waited on. The image is still built, scanned, gated and published.
 
-This is the technique behind the "About 3 minutes instead of 19" example above. It is the safest place to start: nothing is skipped on main.
+```yaml
+- name: test-api
+  kind: run
+  image: golang:1.26
+  run: go test ./...
+  working_directory: api
+  needs: [checkout]
+  paths: ["api/**", "go.work"]
+```
 
----
+A push that changes `web/app.ts` skips `test-api`, and `build` waits for `test-web`, and for `checkout` in place of `test-api`. `ankra pipeline validate` refuses `paths:` where a skip would be unsafe: a stage whose outputs another stage reads, a `build` another stage needs, a `checkout`, `gate` or `approval`, a scan a gate judges, or a stage a release bundle build packs. It warns when an affected-only stage that another stage needs declares `artifacts:`.
 
-## Skip tests for components a change did not touch
-
-When a component's tests should be skipped on every event, pushes included, give the stage `paths:`. A stage with `paths:` is **affected-only**: when no changed file matches, it is skipped, and the stages that need it still run: each waits on what the skipped stage waited on. That lets a monorepo skip the tests of untouched components and still build, scan, gate and publish.
+<Accordion title="Full pipeline.yaml">
 
 ```yaml
 apiVersion: ankra.io/v1
@@ -196,25 +222,23 @@ stages:
       events: [push]
 ```
 
-A push that changes `web/app.ts` skips `test-api` and runs every other stage. `build` waits for `test-web`, and for `checkout` in place of the skipped `test-api`.
+</Accordion>
+  </Tab>
+  <Tab title="Later stages and conditions">
+`skippable_needs` keeps a later stage running when a stage it needs was skipped for its paths. `if:` covers rules a path list cannot express, using `event.changed_files` and `event.kind`.
 
-Use `paths:` only on stages whose absence holds nothing back. `ankra pipeline validate` refuses an affected-only stage when skipping it would be unsafe:
+```yaml
+- name: e2e
+  needs: [checkout, frontend-test]
+  skippable_needs: [frontend-test]
+- name: migrations-check
+  needs: [checkout]
+  if: "event.kind == 'push' || event.changed_files.exists(f, f.startsWith('db/migrations/'))"
+```
 
-- a stage whose outputs another stage reads
-- a `build` that another stage needs, because what needs a build reads its image
-- a `checkout`, `gate` or `approval` stage
-- a scan that a gate judges, whether the gate names it in `require_stages`, pairs with it by name (`gate-api` with `scan-api`), or judges every scan in the run
-- a stage that a release bundle build depends on, because the bundle packs what that stage left in the workspace
+A pull request that changes only `backend/main.go` skips `frontend-test` (`path_filter`) and `migrations-check` (`condition_false`), and still runs `e2e`. An `if:` that calls a status function such as `always()` also runs when a need was skipped, and `needs.<stage>.result` reads `skipped`.
 
-It also warns when an affected-only stage that another stage needs declares `artifacts:`.
-
----
-
-## Keep later stages running, and write your own conditions
-
-A stage filtered by `when` paths normally takes the stages that need it with it. To keep a later stage running, name the filtered stage in `skippable_needs`: when the filtered stage is skipped for its paths, the later stage waits on what that stage waited on instead. When the filtered stage runs, it is an ordinary need.
-
-For a rule that a path list cannot express, give the stage an `if:` condition. `event.changed_files` is the run's list of changed files, and `event.kind` is the event.
+<Accordion title="Full pipeline.yaml">
 
 ```yaml
 apiVersion: ankra.io/v1
@@ -256,15 +280,33 @@ stages:
     if: "event.kind == 'push' || event.changed_files.exists(f, f.startsWith('db/migrations/'))"
 ```
 
-A pull request that changes only `backend/main.go` skips `frontend-test` (`path_filter`) and `migrations-check` (`condition_false`), and still runs `e2e`. A pull request that adds `db/migrations/0042_add.sql` runs `migrations-check`. Every push runs everything.
-
-An `if:` that calls a status function, such as `always()`, also keeps a stage running when a need was skipped: its condition decides, and `needs.<stage>.result` reads `skipped`.
-
----
+</Accordion>
+  </Tab>
+</Tabs>
 
 ## Build once and promote on merge
 
-Without promotion, a merge to main builds, scans and tests the merged commit again, although its pull request run already did all of that. With `publish.promote_from: pull_request`, a push whose files are exactly the files a pull request run tested publishes that run's image instead:
+Publish the image the pull request run already built, scanned and tested, instead of building the merged commit again.
+
+```yaml
+- name: publish
+  kind: publish
+  needs: [gate]
+  when:
+    events: [push]
+  publish:
+    promote_from: pull_request
+```
+
+A promoted push runs `publish` alone: it re-tags the gate-approved digest as the push's own `sha-<7>` tag, and push-to-deploy rolls it out. The other stages show as skipped with reason `promoted`, naming the run that passed them. This is the "15 seconds from merge to published" example.
+
+A push is promoted when its commit has the same git tree as a pull request run that passed every stage `publish` needs, under the same approved pipeline authority, within the last 72 hours, from a branch in the repository itself. Anything else builds and tests in full, and the run records why. A stage that a pull-request-only filter skipped did not pass, so that merge builds in full too.
+
+<Note>
+`promote_from` is a protected section: an administrator approves it with the default branch's definition, and a pull request cannot turn it on for itself. Pipelines Ankra generates for an application already declare it when their shape allows. A publish that meets a registry timeout or an outage status is retried for up to five minutes before the step fails.
+</Note>
+
+<Accordion title="Full pipeline.yaml">
 
 ```yaml
 apiVersion: ankra.io/v1
@@ -308,20 +350,11 @@ stages:
       promote_from: pull_request
 ```
 
-A promoted push runs `publish` alone: it re-tags the digest the pull request run's gate approved as the push's own `sha-<7>` tag, and push-to-deploy rolls it out as after a full run. Every other stage shows as skipped with reason `promoted`, naming the run that passed it. This is the "15 seconds from merge to published" example above.
-
-- **When it applies.** The pushed commit has the same git tree as a pull request run that passed every stage `publish` needs, under the same approved pipeline authority, within the last 72 hours, from a branch in the repository itself. A squash merge of a pull request that was up to date with main has that tree. Anything else builds and tests in full, and the run records why.
-- **Combined with pull-request-only filters.** A stage the pull request run skipped did not pass, so the push builds and tests in full. That is the point of pull-request-only filters: main still runs everything that a pull request left out.
-- **Approval.** `promote_from` is a protected section. An administrator approves it with the rest of the default branch's definition, and a pull request cannot turn it on for itself.
-- **New applications.** Pipelines Ankra generates for an application declare `promote_from` whenever the pipeline's shape allows it.
-
-A publish that meets a registry timeout or an outage status is retried for up to five minutes before the step fails, so a short registry problem does not leave a merge undeployed.
-
----
+</Accordion>
 
 ## Test each pull request as it will merge
 
-A pull request that is behind main merges as a tree nobody tested, and its push then has nothing to promote from. Turn on the merge train, and Ankra tests each pull request squashed onto the latest main, then merges it through GitHub's own merge when that run passes. The merged tree is exactly the tree the train tested, so when the train run passed every stage `publish` needs, `promote_from` publishes the train's image on the merge. When a pull-request-only filter skipped one of those stages, the merge builds and tests in full, as described above.
+The merge train tests each pull request squashed onto the latest main, then merges it through GitHub's own merge. When that run passed every stage `publish` needs, `promote_from` publishes its image on the merge.
 
 <CliVersion since="0.30.0" />
 
@@ -331,17 +364,30 @@ ankra pipeline train add 412 --application my-app
 ankra pipeline train list --application my-app
 ```
 
-- A train run is planned as a pull request run with the pull request's own list of changed files, so the same filters apply. A train run with nothing left to run passes, as the pull request's own skipped check does. Such a run is never a source for promotion, so its merge builds in full or promotes from another passing run of the same tree.
-- `--max-cars 3` on `enable` tests three pull requests at once, each on top of the ones ahead of it. When one fails, it leaves the train and the cars behind it are tested again without it.
+- A train run uses the pull request's own list of changed files, so the same filters apply. A train run with nothing left to run passes, and is never a source for promotion.
+- `--max-cars 3` on `enable` tests three pull requests at once. One that fails leaves the train, and the ones behind it are tested again without it.
 - Make the **Ankra merge train** check required on main, and every merge goes through the train.
 
-The merge train runs on GitHub repositories. [The merge train](/guides/ankra-pipelines#the-merge-train-test-every-pull-request-as-it-will-merge) explains what happens when main moves, a car fails or a pull request is pushed to.
+The merge train runs on GitHub repositories. See [the merge train](/guides/ankra-pipelines#the-merge-train-test-every-pull-request-as-it-will-merge) for what happens when main moves or a car fails.
 
----
+## Run slow suites nightly
 
-## Move slow suites to a nightly run
+Run a suite that is too slow for every pull request once a night, and cancel a branch's older run when a newer commit arrives.
 
-A suite that is too slow for every pull request can run once a night. A schedule entry's `stages` list restricts that run to the stages it names, and `when.events: [schedule]` keeps the suite out of push and pull request runs. `concurrency` with `cancel_in_progress` cancels a branch's older run when a newer commit arrives, so you do not wait for a run of a commit that is already out of date.
+```yaml
+on:
+  schedule:
+    - cron: "0 3 * * *"
+      branch: main
+      stages: [checkout, e2e-all-browsers]
+concurrency:
+  group: "${{ ankra.repository.name }}-${{ ankra.ref }}"
+  cancel_in_progress: true
+```
+
+The schedule's `stages` list restricts the nightly run to those stages, so name every stage they need, `checkout` included. `when.events: [schedule]` on the suite keeps it out of push and pull request runs. A cancelled older run shows as **Superseded**, with a neutral commit status and no failure notification.
+
+<Accordion title="Full pipeline.yaml">
 
 ```yaml
 apiVersion: ankra.io/v1
@@ -379,72 +425,70 @@ stages:
       events: [schedule]
 ```
 
-Name every stage the subset needs, `checkout` included: a stage whose need is left out of the subset is skipped. A cancelled older run is shown as **Superseded** in grey, with a neutral commit status and no failure notification.
-
----
+</Accordion>
 
 ## Why a skip never hides a failure
 
-A path filter only leaves a stage out when Ankra has the complete list of files the change touched. Whenever it cannot be sure, the stage runs, and the run's `paths_unverified` says why.
+<Tip>
+A path filter only skips a stage when Ankra has the complete list of files the change touched. When it cannot be sure, the stage runs, and the run's `paths_unverified` says why.
+</Tip>
 
 | Situation | What Ankra does |
 |---|---|
-| The provider could not be read, or the event has no file list | Nothing is skipped for its paths (`provider_error`, `unsupported_provider`) |
-| More than 300 files changed | Nothing is skipped for its paths (`truncated`) |
-| The push created the branch | Nothing is skipped for its paths (`branch_created`), so a new release branch runs its tests |
-| The push rewrote the branch's history | Nothing is skipped for its paths (`forced_push`) |
-| An earlier push to the branch was cancelled or failed | On GitHub, a push's files are counted from the last push run on that branch that succeeded within 30 days, so the earlier push's files are still in the list |
-| The change edits `.ankra/pipeline.yaml` | Every path filter is set aside and every stage runs, because the edit can change what a filter guards (`plan_definition_changed`) |
-| A pull request is retargeted to another base branch | It is planned again against the new base, and the new check replaces the old one |
-| An `if:` condition can only be decided when its step starts | It reads the run's stored file list. When that list is incomplete, the stage runs unless the answer does not depend on the list |
-| A merge train run | It carries the pull request's file list. A train run with nothing to run passes, and is never promoted from |
-| A push asks to promote | Only an identical tree, tested under the same approved authority, with the gate's own digest, within 72 hours and never from a fork. Anything else builds in full |
+| No file list, more than 300 files, a push that created the branch, or a push that rewrote history | Nothing is skipped for its paths: `provider_error`, `unsupported_provider`, `truncated`, `branch_created` or `forced_push` |
+| An earlier push to the branch was cancelled or failed | On GitHub, a push's files are counted from the last push run on the branch that succeeded within 30 days, so they are still in the list |
+| The change edits `.ankra/pipeline.yaml` | Every path filter is set aside (`plan_definition_changed`) |
+| A pull request is retargeted to another base | It is planned again against the new base, and the new check replaces the old one |
+| An `if:` can only be decided when its step starts | It reads the run's stored list, and runs when that list is incomplete and the answer depends on it |
+| A push asks to promote | Only an identical tree, the same approved authority, the gate's own digest, within 72 hours, never from a fork |
 
-On GitLab, a push's file list is the files its own commits touched, including after a force push. On Bitbucket Cloud, a push carries no file list, so path filters skip nothing on pushes there. Pull requests are filtered on every provider, up to 300 changed files.
+On GitLab, a push lists the files its own commits touched, including after a force push. On Bitbucket Cloud, a push carries no file list, so path filters skip nothing on pushes. Pull requests are filtered on every provider, up to 300 changed files.
 
----
+## Preview before you commit
 
-## Preview a change before you commit it
+<Steps>
+  <Step title="Plan the pipeline for a change">
+    `ankra pipeline validate` plans the pipeline for a push and a pull request without running anything. Each `--changed-file` makes the path filters decide for real.
 
-`ankra pipeline validate` plans your pipeline for a push and a pull request without running anything. Add `--changed-file` for each file a change would touch, and the path filters decide for real:
+    ```bash
+    ankra pipeline validate --application my-app \
+      --spec-file .ankra/pipeline.yaml \
+      --changed-file web/app.ts
+    ```
+  </Step>
+  <Step title="Read the plan">
+    The output ends with every stage against every event. For the **Every event** pipeline above:
 
-```bash
-ankra pipeline validate --application my-app \
-  --spec-file .ankra/pipeline.yaml \
-  --changed-file web/app.ts
-```
-
-For the affected-only pipeline above, the end of the output is a table of every stage against every event:
-
-```text
-╭──────────┬───────────────────┬────────────────────╮
-│ STAGE    │ PUSH              │ PULL_REQUEST       │
-├──────────┼───────────────────┼────────────────────┤
-│ checkout │ run               │ run                │
-│ test-web │ run               │ run                │
-│ build    │ run               │ run                │
-│ scan     │ run               │ run                │
-│ gate     │ run               │ run                │
-│ publish  │ run               │ skip: event_filter │
-│ test-api │ skip: path_filter │ skip: path_filter  │
-╰──────────┴───────────────────┴────────────────────╯
-```
-
-The command also reports every refusal and warning from the sections above, such as a pattern that can match no file or an affected-only stage that would be unsafe, and exits non-zero only when the pipeline cannot be planned. Run it with a few typical changes, a documentation edit, one component, two components, before you commit a new filter.
-
----
+    ```text
+    ╭──────────┬───────────────────┬────────────────────╮
+    │ STAGE    │ PUSH              │ PULL_REQUEST       │
+    ├──────────┼───────────────────┼────────────────────┤
+    │ checkout │ run               │ run                │
+    │ test-web │ run               │ run                │
+    │ build    │ run               │ run                │
+    │ scan     │ run               │ run                │
+    │ gate     │ run               │ run                │
+    │ publish  │ run               │ skip: event_filter │
+    │ test-api │ skip: path_filter │ skip: path_filter  │
+    ╰──────────┴───────────────────┴────────────────────╯
+    ```
+  </Step>
+  <Step title="Try a few typical changes">
+    Run it for a documentation edit, one component and two components. The command also reports every refusal and warning above, and exits non-zero only when the pipeline cannot be planned.
+  </Step>
+</Steps>
 
 ## Next steps
 
 <CardGroup cols={2}>
   <Card title="Ankra Pipelines" icon="route" href="/guides/ankra-pipelines">
-    How a run happens, the merge train, affected-only stages and what a pull request can change.
+    How a run happens, the merge train and affected-only stages.
   </Card>
   <Card title="pipeline.yaml reference" icon="book" href="/guides/pipeline-reference">
-    Every key, the trigger table, event-scoped filters, expressions and the validator's diagnostics.
+    Every key, event-scoped filters, expressions and validator diagnostics.
   </Card>
   <Card title="Promote a tested image" icon="arrow-up-right-dots" href="/guides/pipeline-reference#promote-a-tested-image-instead-of-rebuilding">
-    The full list of conditions a push must meet to publish a pull request run's image.
+    Every condition a push must meet to publish a pull request run's image.
   </Card>
   <Card title="Get started with Ankra CI" icon="play" href="/get-started/ankra-ci">
     Connect a repository and get its first commit through a run.
