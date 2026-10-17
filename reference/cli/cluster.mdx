@@ -26,6 +26,9 @@ cluster and one organisation member, identified by email. A grant can be
 time-boxed with `--expires` and carry a `--reason`; the organisation access
 policy ('ankra org access-policy') may require both.
 
+A service account has no email: 'list' names it "service account &lt;name&gt;",
+and it gets access with 'elevate', run with its own token.
+
 Break-glass: 'elevate' gives the caller itself time-boxed access, within the
 policy. It needs only the kube_access.elevate permission, so automation
 running as a service account can use it without being able to grant anyone
@@ -33,15 +36,18 @@ else.
 
 'list' shows where each grant came from (Source: manual, creator, role,
 elevated) and whether the current policy would refuse it today (Over policy).
-A grant whose source is "role" comes from the member's organisation role:
-revoking it is undone by the role sync, so change the member's role instead.
+A grant whose source is "role" comes from the member's organisation role and
+cannot be revoked here: the platform refuses it, because the role sync would
+re-create it. Change the member's role, or the role's Kubernetes access, to
+remove it.
 
 Exit codes:
 
 ```text
 2  a flag is missing or invalid, or the organisation access policy refused
    the request (a role above the ceiling, a missing or too long --expires,
-   a missing --reason): change the flags and run it again
+   a missing --reason): change the flags and run it again. Also revoke of a
+   grant that comes from an organisation role: change the member's role
 3  the grant or member was not found on the cluster (revoke)
 6  the credentials are missing, expired or rejected: run 'ankra login'
 7  your role does not allow this (for example elevate without
@@ -158,11 +164,14 @@ Pass a grant ID (from 'ankra cluster access list') to revoke a single grant,
 or an email address to revoke every grant that member has on the cluster.
 
 A grant whose Source is "role" in 'ankra cluster access list' comes from the
-member's organisation role: the role sync re-creates it after a revoke. To
-remove that access, change the member's role instead.
+member's organisation role and cannot be revoked here: the platform refuses
+it, because the role sync would re-create it. Change the member's role, or
+the role's Kubernetes access, to remove it. Revoking by email still revokes
+the member's other grants, then names the ones it kept and exits 2, so a
+script never reads the member's access as gone while a role grant remains.
 
-Exits 3 when no grant matches, and 7 when your role does not allow managing
-kubectl access.
+Exits 2 when a grant comes from an organisation role, 3 when no grant
+matches, and 7 when your role does not allow managing kubectl access.
 
 ```bash
 ankra cluster access revoke <grant-id|email> [flags]
@@ -4156,6 +4165,11 @@ works: a cluster ID the selected organisation does not have is looked up
 across the organisations you belong to, and the token is minted against the
 one that owns it. Your selected organisation is not changed.
 
+It authenticates like every ankra command: a `--token` flag, else the saved
+'ankra login' in ~/.ankra.yaml (or `--config`), else ANKRA_API_TOKEN from the
+environment kubectl runs it in. See 'ankra cluster kubeconfig add `--help`' for
+what that means for automation.
+
 kubectl runs this on every command, so the token is cached on disk (readable
 only by you) and reused while it has more than two minutes left and was minted
 less than five minutes ago; logging in again starts over.
@@ -4206,10 +4220,43 @@ ankra cluster kubeconfig remove --all
 
 ## ankra cluster kubeconfig add
 
-Add or update an Ankra context in your kubeconfig
+Add or update an Ankra context in your kubeconfig.
+
+The context's user is an exec credential plugin: on every kubectl command,
+kubectl runs 'ankra cluster kube-token `--cluster` &lt;id&gt; `--org` &lt;organisation&gt;'
+(the executable is `--exec-command`) and uses the short-lived gateway token it
+prints. Pass `--embed-token` to write that token into the file instead; it
+stops working when it expires.
+
+Whose access kubectl gets is decided when kubectl runs the plugin, not when
+the context is added: kube-token authenticates like every ankra command,
+with the saved 'ankra login' in ~/.ankra.yaml first, and ANKRA_API_TOKEN from
+kubectl's environment only when there is no saved login. On a machine where
+a person ran 'ankra login', kubectl therefore acts as that person even when
+ANKRA_API_TOKEN holds a service account's token (kube-token prints a note
+on stderr when it ignores ANKRA_API_TOKEN this way).
+
+Automation that should act as a service account must run kubectl where
+nothing is logged in (no ~/.ankra.yaml for that user, or HOME pointing at a
+clean directory) and export the service token as ANKRA_API_TOKEN in the
+environment kubectl runs in. Without a grant, a service account gives
+itself time-boxed access with 'ankra cluster access elevate'.
 
 ```bash
 ankra cluster kubeconfig add [cluster] [flags]
+```
+
+**Examples**
+
+```bash
+ankra cluster kubeconfig add my-cluster --use
+  ankra cluster kubeconfig add --all
+  ankra cluster kubeconfig add my-cluster --print > my-cluster.yaml
+
+  # CI, acting as a service account:
+  export ANKRA_API_TOKEN="$SERVICE_TOKEN"
+  ankra cluster kubeconfig add my-cluster --use
+  kubectl get pods
 ```
 
 **Flags**
