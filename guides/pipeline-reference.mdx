@@ -485,6 +485,40 @@ Inside a run, a stage that is not planned carries a skip reason: `kind_unavailab
 
 A step that *was* planned can still be concluded without running. At dispatch, a deferred `if:` that evaluates false concludes the step `skipped` with the condition in the message, and a `${{ }}` reference dispatch cannot resolve concludes it `infra_error` naming the field. A step still `pending` once its run has outlived the sum of every step's `timeout` is concluded `infra_error` with error class `step_stranded`, never retried. A `kind: scan` step is refused at dispatch with error class `artifact_store_unavailable` - "This step's reports need a ready backup vault in the organisation, and there is none." - when its reports would have nowhere to go: no ready vault in the organisation *and* no Ankra-managed default vault designated. An organisation with no vault of its own ordinarily falls back to the platform's, so this is now the rare case rather than the first-run one. A `scan` step can also be concluded and then *revised*: one that succeeded but whose declared report Ankra could not read becomes `infra_error` with error class `report_unreadable`, because an unread scan is not a clean one - see [When something fails](/guides/ankra-pipelines#when-something-fails).
 
+## Time saved
+
+Every run records the CI time it did not spend because of a path filter or a promoted publish, with an estimate for each piece of work it skipped. Only runs planned after this was released have a record. Older runs show nothing.
+
+### What counts
+
+| Saving | `reason` |
+|--------|----------|
+| A stage left out by a path filter (`when.paths`, the event block's `paths`, or the stage's affected-only `paths:`) | `path_filter` |
+| A stage skipped because a stage it needs was left out by a path filter. `cause_stage` names that stage | `dependency_skipped` |
+| A step a promoted publish (`publish.promote_from`) did not run again | `promoted` |
+| A whole run that `on.<event>.paths` excluded | `run_paths_excluded` |
+
+A stage skipped by a branch filter or a condition is not counted, because it would not have run whatever the change touched. An `on_failure` stage is never counted.
+
+### How a saving is estimated
+
+Each estimate is made when the run is planned or skipped, from the history of the same repository.
+
+| Saving | Estimate | `basis` |
+|--------|----------|---------|
+| A skipped stage | The median time of the stage's newest 20 successful runs, read from the repository's newest 300 concluded runs. A matrix stage adds up its legs | `stage_history` |
+| A promoted step | The time the same step took in the run it was promoted from. When that run no longer has it, the median of the step's own newest 20 successful runs | `promoted_source_run` or `step_history` |
+| A whole run | The median total step time of the newest 20 successful runs of the same trigger | `run_history` |
+| Work with no usable history | Unknown. `saved_seconds` is null and the saving is not added to any total | `no_history` |
+
+The time is runner time, the seconds the skipped steps would have run added up. It is not wall-clock time, so two skipped stages that would have run side by side count twice. CPU-minutes are the requested CPU times that duration, and are null when a sample step carried no CPU request.
+
+### Where to read it
+
+- `ankra pipeline get <run-id>` prints a `Time saved` line under the run's steps, with one line per saving. It prints nothing for a run with no savings. With `-o json` or `-o yaml` the run's record is added as the `time_saved` field, which is null when the platform has no record for the run.
+- `ankra pipeline time-saved` prints the total for the organisation over the last 30 days. `--window 7d` reads the last 7 days, and `--application` or `--repository` reads one pipeline.
+- The API has three routes. `GET …/pipeline-runs/{run_id}/time-saved` reads one run. `GET …/pipeline-time-saved?window=30d` reads one repository or application. `GET /api/v1/org/pipelines/time-saved?window=30d` reads the organisation. `window` is `7d` or `30d` and defaults to `30d`.
+
 ## Validation
 
 <CliVersion since="0.15.0" />
