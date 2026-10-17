@@ -58,7 +58,7 @@ A pipeline mistakenly committed under `.ankra/manifests/` is refused by the mani
 | `services` | map | none | Sidecars by name: `image` (required), `env`, `ports`, and `ready.tcp` (a port) or `ready.http` (a path, probed on the first declared port). Without a probe the stage starts as soon as the container does. A sidecar's image is held to the organisation's image policy and its `env` to the same reserved names a step's own is - either violation refuses the whole step rather than running it. Protected. |
 | `stages` | list | required | The main DAG |
 | `on_failure` | list | none | Stages that run after the main `stages` have all concluded, and only when one of them failed. See [Failure and cleanup stages](#failure-and-cleanup-stages) |
-| `finally` | list | none | Stages that run after every main and `on_failure` stage has concluded, whatever the outcome. They do not run yet when the whole run is cancelled. See [Failure and cleanup stages](#failure-and-cleanup-stages) |
+| `finally` | list | none | Stages that run after every main and `on_failure` stage has concluded, whatever the outcome, and after a run that had started is cancelled. See [Failure and cleanup stages](#failure-and-cleanup-stages) |
 | `environments` | map | none | The pipeline's half of each deployment environment binding: `data` (`none`, `restore_point` or `seed`), `verify` (stage names), `rollout` (`recreate`, `rolling`, `blue_green` or `canary`) and `gate` (`automatic`, `manual` or `custom`). Protected. |
 
 Stage names must be unique across `stages`, `on_failure` and `finally`, because the three share one run and one output namespace.
@@ -72,7 +72,28 @@ A run has three phases, in this order: the main `stages`, then `on_failure`, the
 - **`needs:` inside a phase works as it does in `stages`.** An `on_failure` stage that `needs:` another `on_failure` stage runs only when that one succeeded, and the same holds between two `finally` stages. A `needs:` on a main stage only orders the stage and gives it that stage's `needs.<stage>.*` values; it never stops an `on_failure` or `finally` stage from running when the main stage failed.
 - **They count toward the run's outcome.** An `on_failure` stage that succeeds does not turn a failed run green. A `finally` stage that fails fails a run whose main stages passed; give it `allow_failure: true` when a failed cleanup should not do that.
 - **A failed-only re-run** repeats an `on_failure` stage together with the main stage it responds to, and runs it again only if that stage fails again. A `finally` stage that failed is repeated on its own.
-- **Not yet: `finally` on a cancelled run.** Cancelling a run as a whole (from the portal, the CLI or the check run, by a newer push that supersedes it, or because its pull request was merged or closed) stops every open step at once and runs neither `on_failure` nor `finally` stages. Only a single step stopped where it ran, by an infrastructure fault or its agent, counts as a failure that starts `on_failure`. Until that changes, keep cleanup that must always happen outside a run that can be cancelled.
+- **`finally` also runs when a run is cancelled.** See [Cancelling a run](#cancelling-a-run) below.
+
+#### Cancelling a run
+
+A run can be cancelled as a whole in five ways: a person cancels it from the portal, the CLI, the API or the check run's **Cancel** button; a newer run takes its concurrency group (`cancel_in_progress: true`); its pull request is merged or closed; the merge train stops testing its car; or `cancel_queued` replaces it before it starts.
+
+When the run had already started, it cancels the way GitHub Actions treats `if: always()` steps and GitLab treats `after_script`:
+
+1. Every main and `on_failure` stage that has not finished stops at once and concludes `cancelled`. Their pods are stopped. `on_failure` stages do not start, because a cancel is not a failure.
+2. The `finally` stages run once the stopped stages' pods have stopped (at most three minutes after the cancel, if a cluster does not answer). Each keeps its own `timeout`.
+3. The run concludes `cancelled`, whatever the `finally` stages did. Who cancelled it and why are recorded when you cancel, not at the end.
+
+While the `finally` stages run, the run reads `running` with `cancelling: true` in the API, `ankra pipeline get` and the check run, and the check run stays in progress. It never reports success. Its title says the run was cancelled and is running its finally stages. Cancelling it again answers that it is already cancelling.
+
+Some limits apply:
+
+- **A run that never started runs no `finally`.** A queued run, including one `cancel_queued` replaces, has done nothing to clean up, so it concludes `cancelled` at once.
+- **Cleanup has a budget of 15 minutes from the cancel.** `finally` stages still running after that are stopped and the run concludes `cancelled`.
+- **Force cancel skips cleanup.** `ankra pipeline cancel <run> --force`, or `POST .../pipeline-runs/{run_id}/cancel?force=true`, concludes the run at once. On a run that is already running its `finally` stages, it stops them.
+- **The concurrency group.** With `cancel_in_progress: false`, a cancelled run keeps its group while its `finally` stages run, so two runs of the group never overlap, cleanup included. The next run waits at most for the cleanup budget. With `cancel_in_progress: true`, a newer run takes the group at once and the cancelled run's `finally` stages finish outside it. Scope that cleanup to its own run, for example by naming what it creates and deletes after the `ANKRA_RUN_ID` variable every step has.
+
+Stopping a single stage where it ran is not a cancel of the run. An infrastructure fault or an agent stopping a stage counts as a failure: `on_failure` runs, then `finally`.
 
 ## Triggers
 
