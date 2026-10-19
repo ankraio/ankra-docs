@@ -12,7 +12,7 @@ Commands to list, switch, create, and manage organisations.
 ## ankra org access-policy
 
 Show the limits every kubectl access grant in this organisation is held
-to, an admin's included:
+to, an admin's included, or propose a change to them:
 
 ```text
 creator role       what whoever creates or imports a cluster gets on it
@@ -23,17 +23,32 @@ elevated lifetime  how long a grant above view may last (also the window
 reason from        the lowest role whose grants need a reason
 ```
 
-The first line says whether the organisation has set a policy at all
-(Configured: yes or no); with none, the platform defaults apply. -o json
-and -o yaml carry it as is_configured.
+The policy is changed by a person, never by a token. 'ankra org
+access-policy set' proposes a change and prints a link; an organisation
+owner or admin opens the link, signed in, and applies it. The CLI cannot
+apply it.
+
+Commands:
+
+```text
+get              the policy in force, and a pending proposal if there is one
+set              propose a change (needs kube_access.manage)
+proposals        list proposals
+proposal <id>    show one proposal and its apply link
+```
 
 Reading requires managing kubectl access, the policy, or holding
-break-glass (kube_access.elevate). Changing the policy needs an owner or
-admin signed in: Organisation settings, Roles, Kubernetes access policy.
+break-glass (kube_access.elevate).
 
 ## ankra org access-policy get
 
-Show the organisation's Kubernetes access policy
+Show the organisation's Kubernetes access policy.
+
+The first line says whether the organisation has set a policy at all
+(Configured: yes or no); with none, the platform defaults apply. -o json
+and -o yaml carry it as is_configured. When a proposed change is waiting
+for an owner or admin, the last line names it and its apply link
+(pending_proposal in -o json and -o yaml).
 
 ```bash
 ankra org access-policy get [flags]
@@ -45,13 +60,106 @@ ankra org access-policy get [flags]
 |------|---------|-------------|
 | `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
 
+## ankra org access-policy proposal
+
+Show one proposed change to the organisation's Kubernetes access policy:
+who proposed it and why, the policy before and after (changed rows marked
+*), its status, and while it is pending the link an owner or admin applies
+it from. The CLI cannot apply it.
+
+```bash
+ankra org access-policy proposal <id> [flags]
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+
+## ankra org access-policy proposals
+
+List proposed changes to the organisation's Kubernetes access policy,
+newest first. `--status` pending (the default) shows the one waiting for an
+owner or admin; `--status` all shows every proposal, and applied, dismissed,
+expired or superseded show those alone.
+
+```bash
+ankra org access-policy proposals [flags]
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+| `--status` | `pending` | pending, applied, dismissed, expired, superseded or all |
+
+## ankra org access-policy set
+
+Propose a change to the organisation's Kubernetes access policy.
+
+Nothing changes when this runs. The platform records the proposal and
+answers a link; an organisation owner or admin must open the link, signed
+in, and apply it. The CLI cannot apply it: the policy is changed by a
+person, never by a token.
+
+Pass only what should change; every other field keeps its live value. The
+command prints the policy before and after (changed rows marked *), the
+proposal id, when it expires (7 days) and the apply link. A new proposal
+replaces one that is still pending.
+
+```text
+--creator-role         none, view, edit, admin or cluster-admin
+--max-role             view, edit, admin or cluster-admin (the ceiling)
+--elevated-max-ttl     how long a grant above view may last: 30m, 4h,
+                       7d; none removes the limit
+--require-reason-from  view, edit, admin or cluster-admin; none means
+                       only break-glass needs a reason
+```
+
+`--wait` blocks until the proposal is decided. Exit codes: 0 applied, 4
+dismissed by an owner or admin, 1 expired or replaced by a newer
+proposal, 5 still pending when `--timeout` ran out (it stays pending and
+can still be applied).
+
+Proposing needs kube_access.manage.
+
+Examples:
+
+```bash
+ankra org access-policy set --max-role edit --creator-role view --reason "PLA-878: no standing admin"
+ankra org access-policy set --elevated-max-ttl 4h --require-reason-from edit --reason "audit finding 12"
+ankra org access-policy set --max-role edit --reason "tighten" --wait --timeout 1h
+```
+
+```bash
+ankra org access-policy set [flags]
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--creator-role` |   | Role whoever creates or imports a cluster gets on it: none, view, edit, admin or cluster-admin |
+| `--elevated-max-ttl` |   | How long a grant above view may last (30m, 4h, 7d), or none for no limit |
+| `--max-role` |   | The most access anyone can be given (the ceiling): view, edit, admin or cluster-admin |
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+| `--reason` |   | Why the policy should change; the owner or admin who applies it reads it (required) |
+| `--require-reason-from` |   | Lowest role whose grants need a reason: view, edit, admin or cluster-admin, or none |
+| `--timeout` | `30m0s` | How long `--wait` waits |
+| `--wait` | `false` | Wait until an owner or admin applies or dismisses the proposal |
+
 ## ankra org ai-environment
 
 Show or change the organisation's preview settings - where an on-demand
-demo or PR preview is published, and how it terminates TLS.
+demo or PR preview is published, and how it terminates TLS - and where AI
+workspaces and demos run (the staging cluster), how long they live, and the
+mode new AI gateway connections start in.
 
 ```bash
 ankra org ai-environment get
+ankra org ai-environment set --staging-cluster staging --demo-ttl-hours 48
 ankra org ai-environment set --demo-base-domain previews.example.com
 ankra org ai-environment set --demo-cert-issuer letsencrypt-prod
 ankra org ai-environment set --demo-base-domain ""
@@ -122,7 +230,7 @@ admin.
 
 ## ankra org ai-environment get
 
-Show the organisation's preview settings
+Show the organisation's AI workspace and preview settings
 
 ```bash
 ankra org ai-environment get [flags]
@@ -147,6 +255,22 @@ ankra org ai-environment set --demo-cert-issuer letsencrypt-prod
 ankra org ai-environment set --demo-cert-issuer ""
 ```
 
+The same command sets where AI workspaces and demos run and how long they live:
+
+```bash
+ankra org ai-environment set --staging-cluster staging
+ankra org ai-environment set --workspace-ttl-hours 12 --demo-ttl-hours 48
+ankra org ai-environment set --demo-ttl-role-cap member=24 --demo-ttl-role-cap operator=96
+ankra org ai-environment set --default-gateway-mode ask
+```
+
+`--staging-cluster` takes a cluster name or id; an empty value clears it.
+`--workspace-ttl-hours` is 1-168, `--demo-ttl-hours` 1-720, and each
+`--demo-ttl-role-cap` (admin, operator or member) is the longest demo that role
+may ask for, 1-720 hours; roles not named keep their cap.
+`--default-gateway-mode` is the mode new AI gateway connections start in: ask
+or agent.
+
 `--demo-cert-issuer` only applies alongside a demo base domain: on the Ankra
 subzone Ankra picks the issuer itself, from the networking stack it can
 verify. Naming one without a base domain is refused rather than stored.
@@ -164,11 +288,16 @@ ankra org ai-environment set [flags]
 
 | Flag | Default | Description |
 |------|---------|-------------|
+| `--default-gateway-mode` |   | Mode new AI gateway connections start in: ask or agent |
 | `--demo-base-domain` |   | Wildcard zone demos are published under; empty clears it |
 | `--demo-cert-issuer` |   | cert-manager ClusterIssuer to ask instead of the cluster's own; empty clears it |
 | `--demo-ingress-class` |   | Ingress class for demo ingresses; empty clears it |
 | `--demo-tls-secret` |   | Secret holding a certificate for the preview domain; empty clears it |
+| `--demo-ttl-hours` | `0` | How long a PR demo lives by default, in hours (1-720) |
+| `--demo-ttl-role-cap` | `[]` | Longest demo a role may ask for, as &lt;role&gt;=&lt;hours&gt; (admin, operator or member; 1-720; repeatable) |
 | `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+| `--staging-cluster` |   | Cluster name or id AI workspaces and PR demos run on; empty clears it |
+| `--workspace-ttl-hours` | `0` | How long an AI workspace lives, in hours (1-168) |
 
 ## ankra org ai-review
 
@@ -594,7 +723,17 @@ ankra org ci-settings set --allowed-image-prefix ""
 ankra org ci-settings set --egress-allowed-cidr 10.0.0.0/8 --egress-allowed-cidr 192.168.10.0/24
 ankra org ci-settings set --run-retention-days 180
 ankra org ci-settings set --ignore-unfixed=false
+ankra org ci-settings set --always-run-stage security-scan --always-run-stage lint
+ankra org ci-settings set --full-run-on-default-branch --skip-markers never
 ```
+
+`--always-run-stage`, `--full-run-on-default-branch` and `--skip-markers` are the
+safety net around path filters. An always-run stage (and every stage it
+needs) runs whatever its path filters say; a full run on the default branch
+sets the filters aside for every push there; `--skip-markers` decides where a
+[skip ci] marker in a pushed commit skips the run: everywhere,
+except_default_branch (Ankra's default) or never. A merge train car and a tag
+push never honour a marker.
 
 `--allowed-image-prefix` and `--egress-allowed-cidr` replace their whole list
 rather than adding to it, because a list you can only grow is one you cannot
@@ -625,17 +764,20 @@ ankra org ci-settings set [flags]
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--allowed-image-prefix` | `[]` | Image prefix a step may name (repeatable); replaces the list, empty clears it |
+| `--always-run-stage` | `[]` | Stage that runs whatever its path filters say, with every stage it needs (repeatable); replaces the list, empty clears it |
 | `--artifact-retention-days` | `0` | How long a run's artifacts survive |
 | `--build-fallback` |   | Whether a build may fall back to Ankra's build cluster when the pipeline cluster's agent does not run pipeline steps, or its node runtime confines the rootless builder: platform_builders or none |
 | `--cache-retention-days` | `0` | How long a run's caches survive |
 | `--cluster` |   | Cluster name or id that pipeline steps run on; empty clears it |
 | `--egress-allowed-cidr` | `[]` | Private CIDR pipeline steps may reach (repeatable); replaces the list, empty clears it |
+| `--full-run-on-default-branch` | `false` | Run every stage on a push to a repository's default branch, setting path filters aside; =false applies them |
 | `--ignore-unfixed` | `true` | Let a gate stage leave findings with no available fix out of its verdict; =false makes every unfixed finding block |
 | `--image-gate` |   | Which image findings block a publish: app, all or off |
 | `--max-parallel-runs` | `0` | How many of this organisation's pipeline runs may be in flight at once |
 | `--max-parallel-steps` | `0` | How many steps of one run may be in flight at once |
 | `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
 | `--run-retention-days` | `0` | How long a repository's concluded run history survives (7-365) |
+| `--skip-markers` |   | Where a [skip ci] marker in a pushed commit skips the run: everywhere, except_default_branch (default) or never |
 
 ## ankra org cloudflare
 
@@ -1759,6 +1901,166 @@ List the organisation's OIDC trust policies
 ankra org oidc-trust list
 ```
 
+## ankra org provenance
+
+Verified provenance at deploy: a pipeline's publish step signs a statement about
+every image it publishes, and a deploy can refuse an image that is not attested.
+This command holds the organisation default and the signing keys.
+
+```bash
+ankra org provenance get                    the default mode
+ankra org provenance set --mode warn        change it
+ankra org provenance keys                   the signing keys
+ankra org provenance rotate                 start a new key generation
+ankra org provenance revoke <key-id>        stop trusting a key
+```
+
+An application follows this default unless it has its own mode
+('ankra application provenance').
+
+Modes:
+
+```text
+off      nothing is checked at deploy, exactly as before
+warn     every image in the application's registry is checked; the deploy
+         goes ahead whatever the result, and an image that is not verified
+         files a finding on the application's installation
+enforce  the deploy is refused unless every image in the application's
+         registry carries a valid attestation from this organisation's
+         pipeline, and each verified image is pinned to its digest
+```
+
+## ankra org provenance get
+
+Show the organisation's default provenance mode
+
+```bash
+ankra org provenance get [flags]
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+
+## ankra org provenance keys
+
+List the organisation's provenance signing keys, oldest generation first. Only
+public keys are shown.
+
+```text
+active    signs new attestations and verifies
+trusted   an earlier generation: verifies, no longer signs
+revoked   nothing it signed verifies any more
+```
+
+`--public-keys` prints the PEM of every key that is not revoked, one block per
+key. 'cosign verify-attestation `--key`' takes one key per check, so with more than
+one trusted key save each block to its own file and try them in turn.
+
+```bash
+ankra org provenance keys [flags]
+```
+
+**Examples**
+
+```bash
+ankra org provenance keys
+  ankra org provenance keys --public-keys > provenance.pub
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+| `--public-keys` | `false` | Print the PEM of every key that is not revoked instead of the table |
+
+## ankra org provenance revoke
+
+Revoke a key. Nothing it signed verifies any more: an application under enforce
+refuses those images until they are published again, which includes rolling back
+to them. Revoking the active key makes the next publish create a successor.
+Needs the security.manage permission. Use 'ankra org provenance keys' for key ids.
+
+```bash
+ankra org provenance revoke <key-id> [flags]
+```
+
+**Examples**
+
+```bash
+ankra org provenance revoke <key-id> --reason "key exposed in a build log"
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+| `--reason` |   | Why the key is revoked (recorded in the audit log, at most 500 characters) |
+| `--yes` | `false` | Skip the confirmation prompt |
+
+## ankra org provenance rotate
+
+Create the next key generation. The next publish signs with it. Earlier
+generations stay trusted, so images already published keep verifying. At most
+16 generations exist per organisation. Needs the security.manage permission.
+
+```bash
+ankra org provenance rotate [flags]
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+
+## ankra org provenance set
+
+Set the mode every application without its own mode runs under, or remove the
+default with `--clear`. Needs the security.manage permission.
+
+Modes:
+
+```text
+off      nothing is checked at deploy, exactly as before
+warn     every image in the application's registry is checked; the deploy
+         goes ahead whatever the result, and an image that is not verified
+         files a finding on the application's installation
+enforce  the deploy is refused unless every image in the application's
+         registry carries a valid attestation from this organisation's
+         pipeline, and each verified image is pinned to its digest
+```
+
+Start with warn. enforce as an organisation default refuses the deploys of every
+application that follows it and whose images are not attested; under enforce,
+versions published before an application's first attested publish cannot be
+deployed or rolled back to. This command asks before turning enforce on (`--yes`
+skips the question).
+
+```bash
+ankra org provenance set --mode off|warn|enforce [flags]
+```
+
+**Examples**
+
+```bash
+ankra org provenance set --mode warn
+  ankra org provenance set --clear
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--clear` | `false` | Remove the organisation default |
+| `--mode` |   | Provenance mode: off, warn or enforce |
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+| `--yes` | `false` | Skip the confirmation asked before turning enforce on |
+
 ## ankra org remove
 
 Remove a user from the current organisation
@@ -1892,8 +2194,13 @@ values.
 ankra org variables list
 ankra org variables get DB_HOST
 ankra org variables set DB_HOST db.prod.example.com --description "Primary database"
+ankra org variables set API_TOKEN - --secret < token.txt
+ankra org variables reveal API_TOKEN
 ankra org variables delete DB_HOST
 ```
+
+A secret variable's value is never shown by list or get; reveal reads it back
+for members who can change variables, and every reveal is audited.
 
 Variable resolution order at deploy time is stack &gt; cluster &gt; organisation; a
 more specific scope overrides a less specific one.
@@ -1940,20 +2247,55 @@ ankra org variables list [flags]
 |------|---------|-------------|
 | `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
 
+## ankra org variables reveal
+
+Print one organisation variable's stored value. This is the only way to
+read back a secret variable: list and get never show it.
+
+Revealing needs permission to change variables, and every reveal is recorded
+in the organisation's audit log. The value is printed on its own line, so it
+can be captured in a script:
+
+```bash
+TOKEN="$(ankra org variables reveal API_TOKEN)"
+```
+
+```bash
+ankra org variables reveal <name> [flags]
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+
 ## ankra org variables set
 
 Create or update an organisation variable (upsert). If the variable
 does not exist it is created; otherwise its value (and description, when
 supplied) is updated.
 
+`--secret` creates the variable as a secret, or marks an existing one secret:
+list and get then never show its value, and only "ankra org variables reveal"
+reads it back. `--secret=false` makes an existing secret variable plain again.
+Without the flag an update keeps the variable's current setting.
+
 The value can also be read from stdin by passing "-":
 
 ```bash
-echo "secret-token" | ankra org variables set API_TOKEN -
+echo "secret-token" | ankra org variables set API_TOKEN - --secret
+```
+
+Leave the value out to change only an existing variable's secret setting or
+description, keeping its value:
+
+```bash
+ankra org variables set API_TOKEN --secret
 ```
 
 ```bash
-ankra org variables set <name> <value> [flags]
+ankra org variables set <name> [value] [flags]
 ```
 
 **Flags**
@@ -1961,4 +2303,5 @@ ankra org variables set <name> <value> [flags]
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--description` |   | Optional human-readable description |
+| `--secret` | `false` | Store the value as a secret that list and get never show (`--secret=false` makes an existing secret plain) |
 
