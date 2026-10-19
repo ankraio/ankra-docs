@@ -1,0 +1,229 @@
+---
+title: Self-host an AI agent observability backend on-prem
+description: Run Moyai's AI agent observability backend on your own Kubernetes cluster from one shared stack profile - the trace API, highly available Postgres, S3 object storage, an Iceberg REST catalog, an LLM and Prometheus - on Proxmox, HPE Morpheus, an imported cluster or any cloud, in a handful of commands.
+---
+
+import { CliVersion } from "/snippets/cli-version.jsx";
+
+Your agent traces stay in your network. Moyai packages its whole backend as one Ankra stack profile, shares it with your organisation, and you apply it to a cluster you already run. Ankra deploys it, keeps it reconciled, and rolls out every new version Moyai publishes.
+
+There is no Helm chart to assemble and no runbook to follow. The profile pins every component, orders them, and asks you only for what is yours: your secrets, your sizes and where the LLM lives.
+
+<Frame caption="One shared profile puts the whole backend on your cluster">
+  <img src="/images/use-cases/self-host-ai-agent-observability.svg" alt="The vendor shares the moyai-observatory stack profile with your Ankra organisation. You apply it with a dry run, bind the secrets and deploy, and Ankra runs it on Proxmox VE, HPE Morpheus, an imported cluster or any cloud. On the cluster your AI agents send traces to the easterisland API, which uses Postgres with three CloudNativePG instances, SeaweedFS S3 for uploads and the Iceberg trace lake, a Lakekeeper Iceberg REST catalog and an OpenAI-compatible LLM. A lean Prometheus scrapes every component." className="w-full" />
+</Frame>
+
+---
+
+## What runs
+
+Everything lands in one Stack, `moyai-observatory`, in the order each part needs.
+
+| Component | What it is | Namespace |
+|---|---|---|
+| easterisland API | Trace upload and ingest, triage, evidence and incident reports | `easterisland` |
+| Postgres | Two CloudNativePG clusters (the API's and the catalog's), three instances each by default, with automatic failover | `easterisland` |
+| Object storage | SeaweedFS with an S3 API, holding uploaded traces and the Iceberg trace lake | `easterisland` |
+| Iceberg REST catalog | Lakekeeper, the table catalog the API queries the trace lake through | `easterisland` |
+| LLM | An OpenAI-compatible endpoint for the analysis pipeline: a small in-cluster CPU model, or yours | `easterisland` |
+| CloudNativePG operator | Runs the Postgres clusters | `cnpg-system` |
+| Prometheus | A lean kube-prometheus-stack (no Grafana or Alertmanager, 3 days of data) that scrapes every component | `monitoring` |
+
+The API is internal to the cluster unless you publish it on a host of your own.
+
+---
+
+## What you need
+
+- An Ankra organisation that Moyai has shared the `moyai-observatory` profile with. Send Moyai your organisation slug (under organisation settings); they grant the share, and the profile appears in your catalogue. See [Share with specific organisations](/concepts/stack-profiles#share-with-specific-organisations).
+- A cluster in that organisation, wherever you run Kubernetes:
+  - On-prem: [Proxmox VE](/guides/proxmox-clusters) or [HPE Morpheus](/guides/morpheus-clusters) (closed beta), which Ankra builds for you.
+  - A cluster you already run: [import it](/guides/import-cluster) with one command.
+  - Any cloud Ankra supports.
+- About 4 vCPU and 8 GiB of memory free, and a StorageClass. For three Postgres instances, use three nodes so each replica lands on its own.
+- The pull credentials and the WorkOS client ID Moyai issues you.
+- The [Ankra CLI](/integrations/ankra-cli), or the portal: every step below is also **Stack Profiles** > **moyai-observatory** > **Use Profile**.
+
+---
+
+## Install
+
+<CliVersion since="0.16.0" />
+
+<Steps>
+  <Step title="See what the profile asks for">
+    ```bash
+    ankra stack-profiles get moyai-observatory
+    ankra stack-profiles apply moyai-observatory --cluster my-cluster --dry-run
+    ```
+
+    The dry run creates nothing. It prints every input with the value it would deploy with and where that value came from: your `--set`, a choice, or the default. Five inputs are secrets with no default, and the dry run lists them as unset until you bind them.
+  </Step>
+  <Step title="Write the secrets to files">
+    Secrets are bound from files, so they never reach your shell history. You choose the S3 keys and the catalog key yourself:
+
+    ```bash
+    umask 077 && mkdir -p observatory-secrets && cd observatory-secrets
+    openssl rand -hex 10 > s3-access-key-id
+    openssl rand -hex 20 > s3-secret-access-key
+    openssl rand -hex 32 > catalog-encryption-key
+    printf 'unused' > llm-api-key        # your LLM endpoint's key, if it needs one
+    printf '{"auths":{"%s":{"auth":"%s"}}}' "$REGISTRY" \
+      "$(printf '%s:%s' "$PULL_USER" "$PULL_TOKEN" | base64)" > pull-secret.json
+    ```
+
+    `REGISTRY`, `PULL_USER` and `PULL_TOKEN` are the pull credentials Moyai gave you. Keep this directory: upgrades bind the same files.
+  </Step>
+  <Step title="Apply, review, deploy">
+    ```bash
+    ankra stack-profiles apply moyai-observatory --cluster my-cluster \
+      --set workos_client_id=client_XXXXXXXX \
+      --set-file manifest.registry-credentials.stringData..dockerconfigjson=pull-secret.json \
+      --set-file manifest.object-storage-credentials.stringData.access-key-id=s3-access-key-id \
+      --set-file manifest.object-storage-credentials.stringData.secret-access-key=s3-secret-access-key \
+      --set-file manifest.catalog-credentials.stringData.encryption-key=catalog-encryption-key \
+      --set-file manifest.llm-credentials.stringData.api-key=llm-api-key
+    ```
+
+    Without `--deploy` this creates a reviewable Stack draft on the cluster. Read it in the Stack builder, then deploy it there, or run the same command again with `--deploy`. The secrets are sealed with SOPS before they reach the cluster's GitOps repository.
+
+    Add `--set` for anything you want to change from the default:
+
+    | Input | Default | Set it when |
+    |---|---|---|
+    | `database_instances` | `3` | `1` for a small or evaluation install |
+    | `database_storage` | `5Gi` | Each Postgres instance needs more room |
+    | `object_storage_size` | `20Gi` | You keep more traces |
+    | `storage_class` | empty (the cluster default) | Your cluster has no default class, for example `local-path` or `longhorn` |
+    | `api_exposure` | `internal` | `public`, with `public_host`, to publish the API over HTTPS |
+    | `public_host` | empty | The API's hostname, for example `observatory-api.example.com` |
+    | `cluster_issuer` | `letsencrypt-prod` | Your certificates come from an internal CA issuer |
+    | `api_ingress_class` | set by `api_exposure` | Your ingress controller is not Traefik |
+    | `otel_dev_mode` | `false` | Never on a shared cluster: `true` turns authentication off |
+  </Step>
+</Steps>
+
+`ankra stack-profiles apply` takes `--cluster` more than once, so the same command installs the backend on several clusters at a time.
+
+---
+
+## Choose the LLM
+
+The analysis pipeline calls one OpenAI-compatible endpoint. Pick where it lives with `llm_mode`; the choice sets the model, the endpoint and whether the demo model runs.
+
+<Tabs>
+  <Tab title="In-cluster CPU demo">
+    The default. llama.cpp serves Qwen2.5 0.5B on CPU inside the Stack, with about 1 GiB of memory. It needs no GPU and no key, and it is right for evaluation, not for production analysis.
+
+    ```bash
+    --set llm_mode=in-cluster-demo
+    ```
+  </Tab>
+  <Tab title="Your own GPU with vLLM">
+    Serve a stronger model on your own GPUs, for example with the public `gpu-chat` stack profile or any vLLM deployment, and point the backend at it. The demo model scales to zero.
+
+    ```bash
+    --set llm_mode=external \
+    --set llm_base_url=http://vllm.inference.svc:8000/v1 \
+    --set llm_model=qwen3-8b
+    ```
+  </Tab>
+  <Tab title="An OpenAI-compatible API">
+    Any hosted endpoint or gateway that speaks the OpenAI API. Put its key in `llm-api-key` before you apply.
+
+    ```bash
+    --set llm_mode=external \
+    --set llm_base_url=https://api.openai.com/v1 \
+    --set llm_model=gpt-4.1-mini
+    ```
+  </Tab>
+</Tabs>
+
+---
+
+## Verify
+
+```bash
+ankra cluster get pods -n easterisland --cluster my-cluster
+ankra cluster exec <easterisland-pod> -n easterisland --cluster my-cluster -- \
+  python -c "import urllib.request as r; [print(p, r.urlopen('http://localhost:8000' + p).read().decode()) for p in ('/health', '/health/db', '/health/s3', '/health/trace-lake')]"
+ankra cluster exec prometheus-kps-prometheus-0 -n monitoring -c prometheus --cluster my-cluster -- \
+  promtool query instant http://localhost:9090 'up{namespace="easterisland"}'
+```
+
+All pods are `Running` and ready (the `create-buckets` and `create-warehouse` jobs `Completed`), the four health checks answer healthy, and every Prometheus target returns `1`: the API database, SeaweedFS, the catalog and, when it runs, the demo LLM.
+
+Then upload one trace end to end. With a WorkOS token in the `X-Moyai-Authorization: Bearer <token>` header, the API under `/internal/v1/uploads` takes four calls: create the upload record (`POST`), ask for a presigned URL (`POST /{upload-id}/presigned-url`), `PUT` the JSONL file to that URL, and start processing (`POST /{upload-id}/process`). `GET /internal/v1/uploads/{upload-id}` then reports its progress until the incident report is ready.
+
+<Note>
+The presigned URL points at the in-cluster S3 service, so run the upload from inside the cluster or from a network that reaches it.
+</Note>
+
+---
+
+## Upgrades
+
+Moyai publishes new versions of the profile; you choose when each cluster takes one. A rollout replaces the Stack's contents in place, so Kubernetes rolls the workloads and the data stays where it is.
+
+```bash
+ankra stack-profiles deployments moyai-observatory --outdated
+ankra stack-profiles diff moyai-observatory --from 1 --to 2
+ankra stack-profiles rollout moyai-observatory --cluster my-cluster --version 2 --dry-run
+ankra stack-profiles rollout moyai-observatory --cluster my-cluster --version 2 \
+  --set-file manifest.object-storage-credentials.stringData.access-key-id=s3-access-key-id \
+  --set-file manifest.object-storage-credentials.stringData.secret-access-key=s3-secret-access-key \
+  --set-file manifest.catalog-credentials.stringData.encryption-key=catalog-encryption-key \
+  --set-file manifest.llm-credentials.stringData.api-key=llm-api-key \
+  --set-file manifest.registry-credentials.stringData..dockerconfigjson=pull-secret.json
+```
+
+Your non-secret inputs carry forward; pass the same secret files again. Never apply the profile a second time to upgrade: that creates a second Stack beside the first. Protect the Stack into a [backup vault](/guides/backups) before the first upgrade, so a restore point exists if a version misbehaves.
+
+---
+
+## Air-gapped clusters
+
+The profile reaches the internet for three things: container images, the embedding model the API loads at startup, and the demo LLM's weights. Each has a local replacement.
+
+- **Images.** Mirror the images into your registry and configure it as a registry mirror on the nodes. Set `image` to your mirrored easterisland reference and bind your registry's pull secret in `pull-secret.json`.
+- **Model weights.** Mirror `minishlab/potion-base-32M` and `Qwen/Qwen2.5-0.5B-Instruct-GGUF` into a Hugging Face-compatible mirror inside your network and set `model_mirror_url` to it. With an external LLM, only the embedding model is needed.
+- **Helm charts.** Add internal mirrors of the CloudNativePG and prometheus-community charts as [Helm registries](/guides/registries).
+- **Certificates.** Keep the API internal, or publish it with `cluster_issuer` set to your internal CA's cert-manager issuer instead of Let's Encrypt.
+
+---
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="The easterisland pod is stuck in ImagePullBackOff">
+    The pull secret cannot pull `image`. Check the registry host and credentials in `pull-secret.json`, then bind it again with `rollout` and `--set-file`.
+  </Accordion>
+  <Accordion title="Postgres or SeaweedFS volumes stay Pending">
+    The cluster has no default StorageClass. Set `storage_class` to one that exists.
+  </Accordion>
+  <Accordion title="Authenticated calls answer 500 'No authentication provider configured'">
+    `workos_client_id` is empty. Set it to the client ID Moyai gave you.
+  </Accordion>
+  <Accordion title="The fetch-model init container fails">
+    It cannot reach `model_mirror_url`. Allow egress to Hugging Face, or point it at your mirror.
+  </Accordion>
+</AccordionGroup>
+
+---
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Stack profiles" icon="layer-group" href="/concepts/stack-profiles">
+    Versions, choices, sharing and fleet rollouts.
+  </Card>
+  <Card title="Proxmox VE clusters" icon="server" href="/guides/proxmox-clusters">
+    Build the cluster on your own hardware.
+  </Card>
+  <Card title="Backups and restore points" icon="shield-check" href="/guides/backups">
+    Protect the trace lake and the databases.
+  </Card>
+  <Card title="Build a Monitoring Stack" icon="chart-line" href="/guides/monitoring-stack">
+    Add Grafana, Alertmanager and logs on top of the bundled Prometheus.
+  </Card>
+</CardGroup>
