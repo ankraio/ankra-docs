@@ -1,0 +1,442 @@
+---
+title: Claude Code to Two Clusters
+description: Build a codebase with Claude Code, hand the repository to Ankra, and run it on a development and a production cluster - what Ankra generates for you (Dockerfile, manifests, pipeline, scans, fixes), who is responsible for which part once it is live, security in every Stack, CVE handling and the security email, SOPS encryption, and the Ankra automations and AI agents that fix and maintain it on day 2.
+---
+
+Claude Code writes the application. Ankra writes everything that turns a repository into a running, scanned, promotable service, and runs it on your clusters. You decide what ships to production.
+
+This page follows one codebase from an empty folder to two environments: a **development** cluster that follows every merge, and a **production** cluster that only moves when a person promotes a tag that development has already proved.
+
+<Frame caption="Claude Code writes, Ankra generates and runs, a person promotes">
+  <img src="/images/use-cases/claude-code-to-two-clusters.svg" alt="Claude Code, with the Ankra skills installed, writes the code and tests and pushes to GitHub. Ankra writes a setup pull request with the Dockerfile, Kubernetes manifests, .ankra/ankra.yaml, .ankra/pipeline.yaml and Postgres when needed, and fixes its own checks. Ankra Pipelines tests, builds, scans, gates and publishes an immutable sha tag in your cluster. Every pull request gets an Ankra AI review, a preview URL and fix pull requests. Every merge deploys to the development cluster; a person promotes the tag that passed to the production cluster, which runs the same image. On day 2 Ankra watches both clusters with AI review, alerts, backups, CVEs ranked by exploitation, Kubernetes upgrades and rollback, and the next change goes back through Claude Code." className="w-full" />
+</Frame>
+
+---
+
+## What you need
+
+- [Claude Code](https://claude.com/claude-code) and the [Ankra CLI](/integrations/ankra-cli), logged in with `ankra login`.
+- An empty GitHub repository, and a [GitHub credential](/integrations/github) in your organisation that can reach it.
+- Two clusters in the same organisation: one for development and one for production. They can be clusters Ankra builds for you ([Ankra Managed](/guides/operate-ankra-managed-clusters)), clusters your cloud runs ([Managed Kubernetes](/guides/managed-kubernetes)), or clusters you [import](/guides/import-cluster).
+- A cluster your organisation runs CI on, for [Ankra Pipelines](/guides/ankra-pipelines#before-your-first-run). The development cluster is a good choice.
+
+---
+
+## Build it and hand it over
+
+<Steps>
+  <Step title="Give Claude Code the Ankra skills">
+    Install Ankra's [Agent Skills](/integrations/agent-skills) into Claude Code. They teach it to use the Ankra CLI and the Ankra workflow instead of writing raw Kubernetes and CI files by hand:
+
+    ```bash
+    ankra skills install --client claude-code --with-hooks
+    ```
+
+    Optionally add the [Ankra MCP server](/platform/mcp-server), so Claude Code can read clusters, pipeline runs and logs directly.
+  </Step>
+  <Step title="Build the codebase">
+    Work with Claude Code the way you normally would. Two things make the hand-over clean: write down the standards it must follow, and tell it which files are Ankra's job.
+
+    ```
+    Build <one paragraph describing the app> in this repository.
+
+    Standards: <your language, framework, database and migration tool>.
+    Every module has unit tests, and `<test command>` runs them all.
+    The app reads its configuration from environment variables, listens on one
+    port, and answers GET /healthz without touching the database.
+
+    Do not write Kubernetes manifests or CI workflows: Ankra generates them.
+    Commit in small steps and push to main when the tests pass.
+    ```
+
+    For a longer build, split it into planned stages as described in [Prompt to Production](/use-cases/prompt-to-production).
+
+    <Tip>
+    A `/healthz` endpoint, configuration from environment variables and a test script that exits non-zero on failure are the three things that make the generated packaging work first time. Ankra's pipeline runs your tests only when the repository declares a test command.
+    </Tip>
+  </Step>
+  <Step title="Hand the repository to Ankra">
+    From the checkout, with the development cluster:
+
+    ```bash
+    ankra application ship . --cluster <dev-cluster-id>
+    ```
+
+    Or ask Claude Code to do it with the `/ankra-ship-service` command the skills installed. `ship` registers the application, waits for Ankra's analysis and setup pull request, waits for the first build, deploys, and prints:
+
+    ```
+    Live: https://<app>.<cluster-domain>
+    ```
+
+    [Ship from your checkout](/guides/deliver-your-app#ship-from-your-checkout) explains each step it waits on. Re-running it is always safe.
+  </Step>
+</Steps>
+
+---
+
+## What Ankra generates for you
+
+When the repository is registered, Ankra's AI reads it, detects the language and framework, and works out what it needs to run. It writes the result as one **setup pull request** in your repository, so every generated file is something you can read and review.
+
+| Generated | What it is | Notes |
+|---|---|---|
+| `Dockerfile` | The image build for the detected framework | Only when the repository has none. A Dockerfile Claude Code or you commit is used as-is and never overwritten |
+| Kubernetes manifests | Deployment, Service, and the Ingress for the public address | Sized by the deploy mode: one replica for quick, more for high availability |
+| `.ankra/ankra.yaml` | The deploy options: port, replicas, ingress, namespace | The values `--set` overrides at deploy time |
+| `.ankra/pipeline.yaml` | The CI definition, run as Jobs in your own cluster | Test (when a test command exists), rootless build, scan, gate, publish |
+| A Postgres database | A CloudNativePG cluster, with `DATABASE_URL` wired to the app | Only when the analysis finds the app needs Postgres. No password is ever copied by hand |
+
+From then on, Ankra does these on every change without being asked:
+
+- **Builds and scans.** Each push is built rootless in your cluster, scanned with Semgrep over the source, Checkov over the manifests and Trivy over the image, and judged against your organisation's security gate before anything is published.
+- **Publishes an immutable tag.** A passing build on the tracked branch is published as `sha-<7>`. No tag is ever overwritten, so the tag you tested is byte-for-byte the tag you promote.
+- **Fixes its own setup pull request.** If the setup pull request fails its checks, usually on a vulnerable dependency the repository already had, Ankra AI commits a fix to the same pull request and explains it in a status comment. See [When the setup pull request does not pass its checks](/concepts/applications#when-the-setup-pull-request-does-not-pass-its-checks).
+- **Investigates failed builds.** A failed build on the tracked branch dispatches an agent that proposes a fix, or opens a fix pull request if you allow it. See [When a build on your branch fails](/concepts/applications#when-a-build-on-your-branch-fails).
+- **Reviews pull requests.** Ankra AI reviews every pull request against your organisation's skills, and can post a live preview URL for each one. See [Application AI settings](/platform/application-ai) and [Pull request preview environments](/guides/pr-preview-environments).
+- **Gives it an address.** The app gets a hostname under the cluster's domain with a TLS certificate, or your own domain. See [Domains and DNS](/guides/avura-domains).
+
+<Note>
+The generated pipeline needs a person to approve it once. Creating the application in the portal approves it in your name. An application added from the CLI, an API token or Claude Code leaves that approval to an administrator: `ankra pipeline get --application <name> --latest` prints the exact approve command. This is deliberate: an agent can propose a pipeline, but only a person can authorise what runs in your cluster.
+</Note>
+
+---
+
+## Deploy to two clusters
+
+One application deploys to as many environments as you give it. Each environment is a cluster and a namespace with its own deploy options, its own database and its own push-to-deploy switch.
+
+<Steps>
+  <Step title="Development follows every merge">
+    The first `ship` already deployed to development. Push to deploy is on from registration, so every successful build of the tracked branch now rolls out there automatically. Give development its own namespace and address if you want them explicit:
+
+    ```bash
+    ankra application deploy <application-id> --cluster <dev-cluster-id> --namespace shop-dev \
+      --set ingress_enabled=true --set ingress_host=shop.example.dev
+    ```
+  </Step>
+  <Step title="Set the secrets">
+    Application secrets are stored in Ankra, never committed. Pipe them in so they never land in your shell history:
+
+    ```bash
+    printf '%s' "$STRIPE_KEY" | ankra application env-secrets set <application-id> STRIPE_KEY
+    ankra application env-secrets apply <application-id>
+    ```
+
+    These secrets belong to the application, and `apply` seals them into every deployment of it, in development and production alike. A value that must differ between the two, such as a test and a live payment key, belongs in each cluster's own configuration instead: encrypt it with SOPS in that cluster's Stack, as described in [Encryption and SOPS](#encryption-and-sops). The generated database is already separate per environment. To reuse a database, registry or API the organisation already has, see [Connect to a managed service](/guides/connect-to-a-managed-service).
+  </Step>
+  <Step title="Production moves only when a person promotes">
+    In the portal, open the application's **Settings** → **Push to deploy**. Under **What follows pushes**, leave development on and turn production off. Then promote the exact tag development proved:
+
+    ```bash
+    ankra application deploy <application-id> --cluster <prod-cluster-id> --namespace shop \
+      --set image_tag=sha-<the-tag-that-passed> \
+      --set replicas=3 --mode high_availability \
+      --set ingress_enabled=true --set ingress_host=shop.example.com
+    ```
+
+    Promotion moves the image tag only: never a rebuild. You can also promote from the application's **Environments** page, or ask Claude Code with `/ankra-promote`, which promotes a verified tag without rebuilding it and stops for your confirmation.
+  </Step>
+</Steps>
+
+<Warning>
+`ankra application auto-deploy set <application-id> --enabled=false` turns push to deploy off for **every** environment of the application. Use the per-environment switch in **What follows pushes** when development should keep following merges.
+</Warning>
+
+---
+
+## Who is responsible for what
+
+Ankra automates a lot, so it matters to be explicit about what it does not do. The rule of thumb: **Ankra generates and runs; you decide and own.** Anything Ankra generates lands as a pull request or a file in your repository, and once you merge it, it is yours.
+
+| Area | Claude Code / you | Ankra |
+|---|---|---|
+| **Application code and tests** | Writes and owns them. Ankra never rewrites application logic | Runs the tests on every push when a test command exists |
+| **Dependencies** | Chooses them and keeps them current | Scans them on every build, flags known exploited CVEs first, and proposes fixes when a build fails |
+| **Dockerfile and manifests** | Reviews the setup pull request. After merge, they are your files to change | Generates them once, when missing. Never overwrites a file you committed |
+| **Pipeline definition** | A person approves it once, and approves any change to what it may do | Generates `.ankra/pipeline.yaml` and runs it in your cluster |
+| **Build, scan, publish** | Sets the organisation's security gate threshold | Builds rootless, scans, applies the gate, publishes an immutable tag |
+| **Secrets** | Owns the values and rotates them | Stores application secrets, seals them into every deployment, rolls pods on apply. Decrypts SOPS values per cluster at deploy time |
+| **Encryption keys** | Initialises encryption once and lists which keys are sealed | Holds the organisation's AGE private key, seals listed keys on every push to Git, refuses a push it cannot seal |
+| **Cluster security baseline** | Chooses Audit or Enforce per cluster, and the exempt namespaces | Installs the baseline, scans every running image, labels namespaces for Pod Security Admission |
+| **CVEs on running images** | Fixes, or accepts the risk with a reason and a review date | Finds them, ranks them by real-world exploitation, emails the summary, alerts on new known-exploited ones |
+| **Development deploys** | Decides that development follows merges | Rolls out every passing build of the tracked branch |
+| **Production deploys** | **A person promotes a tag.** Keep agents that can reach production at **Propose**, so they suggest and you decide | Deploys the tag you chose, tracks the rollout, keeps the history for rollback |
+| **AI actions** | Chooses Ask or Agent per lane, can pause autonomous actions, and reviews every fix PR | Investigates, explains, and commits fixes only on its own setup branch or as pull requests you merge |
+| **Clusters it builds** (Ankra Managed) | Chooses provider, size, and when to move to a new Kubernetes minor version | Provisions nodes and control plane, scales node groups, runs upgrades node by node with an etcd snapshot first, and applies patch versions on its own if you turn on auto upgrade |
+| **Clusters your cloud runs** (EKS, GKE, AKS and others) | Owns the account and the provider's lifecycle | Runs the Stacks and applications on top, and node pool operations through the provider |
+| **Imported clusters** | Owns the cluster and its upgrades | Runs the Stacks and applications on top |
+| **Platform add-ons** (ingress, cert-manager, monitoring) | Chooses them and pins their versions in Git | Reconciles the cluster to what Git says |
+| **Data** | Decides which Stacks hold data and how long to keep it | Takes restore points into your vault on the schedule you set, and restores on request |
+| **Alerts** | Decides who gets paged for what | Raises the notifications and delivers them where you route them |
+
+Two lines in that table are the ones to hold on to: Claude Code can do almost everything up to a production deploy, and **production is a decision a person makes**. In Agent mode, every write the AI proposes stops at a confirmation card, and the pipeline approval is never something an agent can grant itself.
+
+For the platform-wide boundary, including what this means for your own audits and certifications, see [Shared responsibility](/security/shared-responsibility).
+
+---
+
+## Security, CVEs and encryption
+
+Security is not a stage you add at the end. Each cluster carries a security baseline, every Stack shows what its containers are exposed to, every CVE is ranked by whether it is actually being exploited, and every secret in Git is encrypted.
+
+### Security in every Stack
+
+**The baseline.** Clusters Ankra builds get the `ankra-security-baseline` Stack profile at create time, unless your organisation opted out. On an imported or cloud-run cluster, open the cluster's **Security** page and choose **Enable security baseline**. The baseline carries:
+
+- **Trivy Operator**, which scans every running image, audits configuration and runs the CIS benchmark.
+- **Pod Security Standards enforced by Kubernetes itself.** The Ankra agent labels namespaces for Pod Security Admission, which is built into the API server, so no policy engine has to run. Start both clusters in **Audit**, fix what development reports, and switch production to **Enforce** once it is clean.
+- **A guard on the enforce label**, so nobody can switch enforcement off with a namespace edit.
+
+If you need image-signature verification or policies of your own, add the opt-in `ankra-policy-engine` profile, which runs Kyverno.
+
+**The Stack Security tab.** Every Stack's detail page has a **Security** tab that lists the running pods under the add-on or manifest that deploys them. Each container has its own **CVE**, **SBOM** and **KEV** report, so "is the Postgres in this Stack exposed?" is one click, or one command:
+
+```bash
+ankra security stacks --cluster <prod-cluster-id>
+ankra security stack <stack-name> --cluster <prod-cluster-id>
+ankra security addon <addon-name> --cluster <prod-cluster-id>
+```
+
+A container the scanner has not reached reads **Not scanned**, never zero. See [Stack security](/guides/cluster-security#stack-security).
+
+### Dealing with CVEs
+
+CVEs arrive at two points, and Ankra handles each one differently:
+
+- **Before an image ships.** The pipeline scans every build with Semgrep, Checkov and Trivy, and your organisation's gate refuses to publish anything above its threshold. `ankra pipeline findings <run-id> --application <name>` lists what stopped a build, worst first.
+- **After an image is running.** A CVE published next month lands on the image already in production. Trivy Operator finds it, and the Security Center cross-references it with the CISA Known Exploited Vulnerabilities (KEV) catalogue and FIRST EPSS scores, so the top of the list is what attackers are actually using.
+
+When a CVE turns up in production:
+
+<Steps>
+  <Step title="Look at what is exploited first">
+    ```bash
+    ankra security findings --known-exploited --cluster <prod-cluster-id>
+    ankra security advisory <cve-id>
+    ```
+
+    The advisory gives the affected versions, CISA's required action and remediation deadline, and every place in your organisation the vulnerable package runs.
+  </Step>
+  <Step title="Fix it through the same pipeline">
+    Hand the fix to Claude Code. It is a normal change: a pull request, scanned again, deployed to development, then promoted.
+
+    ```
+    Fix <cve-id> in this app. Run `ankra security advisory <cve-id>`, bump the
+    dependency or base image to the first fixed version, open a pull request, and
+    confirm the Ankra pipeline scan no longer reports it.
+    ```
+
+    **Fix with AI** on the exploited-in-the-wild banner starts the same work from the portal.
+  </Step>
+  <Step title="Or decide, on the record">
+    If there is no fix yet, or the vulnerable code path is never reached, record a decision instead of ignoring the finding. **Acknowledged** keeps it actionable and alerting. **Accepted risk** removes it from actionable counts and alerts, and needs a reason, a review date at most a year out and the `security.manage` permission. Every disposition is audited. An image-scoped acceptance follows the image digest, so the next rebuild brings the finding back for a fresh decision. See [Acknowledge vs accept risk](/guides/cluster-security#acknowledge-vs-accept-risk).
+  </Step>
+</Steps>
+
+To hear about a new exploited CVE before anyone asks, route the `security_findings` alerts (`kev` and `new_kev_cves`) to the team that owns the app. See [Alerts](/guides/alerts).
+
+### The security email
+
+Each cluster can email a security report weekly or monthly, for example to your security team or an auditor. Recipients do not need an Ankra account. The report shows actionable findings by severity and how they moved since the last report, puts known-exploited CVEs in their own banner, and lists the package upgrades that clear them under **Fix these first**. Accepted risk is left out, so the report only shows what still needs work.
+
+```bash
+ankra security report-schedule set --cluster <prod-cluster-id> --frequency weekly \
+  --recipient security@example.com --recipient team@example.com
+ankra security report-schedule send --cluster <prod-cluster-id>
+```
+
+`send` emails the current report right away, so you can check delivery before the first scheduled one. The same schedule is under the cluster's **Settings** → **Integrations**. The report needs Trivy Operator, which the security baseline installs. See [Security reports](/guides/security-reports).
+
+### Encryption and SOPS
+
+Everything about a cluster lives in Git, and Git must never see a plaintext secret. Ankra encrypts values with [SOPS](/guides/sops) and an AGE key that belongs to your organisation:
+
+<Steps>
+  <Step title="Initialise encryption once">
+    In **Organisation Settings** → **Encryption**, choose **Initialize Encryption**. Ankra generates the AGE key pair: the public key seals values, and the private key stays in Ankra's secret store. Decryption on each cluster is automatic, so there is nothing to configure per cluster.
+  </Step>
+  <Step title="Mark which keys are sealed">
+    In the Stack Builder, list a manifest's or add-on's sensitive keys under **Encrypted Keys (SOPS)**. Or from the CLI, where a `glob:` pattern also covers keys you add later:
+
+    ```bash
+    ankra cluster encrypt manifest shop-secrets --key 'glob:stringData.*' --cluster <prod-cluster-id>
+    ankra cluster encrypt addon --name grafana --key adminPassword --cluster <prod-cluster-id>
+    ```
+
+    Ankra seals the listed keys on every push to Git, so the repository only ever holds `ENC[AES256_GCM,...]` for them. A push that cannot seal a listed key is refused, not committed. The agent decrypts inside the cluster at deploy time.
+  </Step>
+  <Step title="Check Git, not the editor">
+    The Stack Builder shows the value you typed, because sealing happens at the push. To confirm a value is encrypted, open the file in the Git repository.
+  </Step>
+</Steps>
+
+Put each secret where it belongs:
+
+| Secret | Where it lives |
+|---|---|
+| The same for every environment | An application secret: `ankra application env-secrets set`, sealed into every deployment |
+| Different per cluster, such as a test and a live payment key | A SOPS-encrypted Secret manifest in each cluster's Stack |
+| A credential for a database, registry or API the organisation already runs | The existing credential, connected rather than copied. See [Connect to a managed service](/guides/connect-to-a-managed-service) |
+
+Add one line to Claude Code's standing instructions so it never breaks the rule: "Never commit a plaintext secret. Seal sensitive keys with `ankra cluster encrypt`." Rotating the organisation key is not self-service yet; see [Key rotation](/guides/sops#key-rotation).
+
+---
+
+## Day 2
+
+The app is live in two places. Most of day 2 is the same loop you used to build it, with Ankra doing the watching.
+
+### Changing the app
+
+Keep working in Claude Code. Every pull request is built, scanned and reviewed by Ankra AI, and can get its own throwaway preview URL. Previews deploy to the organisation's staging cluster, which an admin sets under **AI** → **Settings** → **Workspaces**; the development cluster works well for it, so no third cluster is needed. See [Pull request preview environments](/guides/pr-preview-environments#prerequisites). When it merges, development redeploys on its own:
+
+```
+Add <feature>. Open a pull request, wait for the Ankra pipeline and review,
+fix what they find, and tell me the preview URL when it is green.
+```
+
+### Promoting and rolling back
+
+Promote the same way every time: the tag that passed in development, to production, by a person. To roll back, deploy the previous tag:
+
+```bash
+ankra application deployments <application-id>
+ankra application deploy <application-id> --cluster <prod-cluster-id> --namespace shop \
+  --set image_tag=sha-<previous-tag>
+```
+
+The previous tags are listed on the application's **Environments** page. Configuration that differs between environments stays in each environment's deploy options and cluster configuration, so a promotion never carries development settings into production.
+
+### When something breaks
+
+Ask Claude Code to investigate with `/ankra-triage`. It reads logs, events, metrics and Ankra's operation history through the CLI, read-only until it has a diagnosis:
+
+```bash
+ankra cluster logs <pod> -n shop --cluster <prod-cluster-id>
+ankra cluster get events -n shop --cluster <prod-cluster-id>
+ankra cluster operations list --cluster <prod-cluster-id>
+```
+
+See [Logs](/platform/logs), [Operations](/platform/operations) and [Cluster metrics](/platform/cluster-metrics).
+
+### Keeping both clusters healthy
+
+- **Alerts.** Route pipeline failures, blocked images and cluster events to the channel that owns the app. See [Notification routing](/guides/notification-routing).
+- **Backups.** Protect every Stack that holds data, starting with the generated database, so production can be restored. See [Backups and restore points](/guides/backups).
+- **Security.** New CVEs land on images that are already running. Work the known-exploited ones first, read the weekly security email, and run `/ankra-harden` now and then for a ranked security pass over the organisation. See [Dealing with CVEs](#dealing-with-cves).
+- **Dependencies.** Ask Claude Code to update them in a pull request. The pipeline scans the result before it can publish.
+- **Kubernetes upgrades.** Upgrade development first, run the app there, then upgrade production. For clusters Ankra builds, see [Upgrade Kubernetes](/guides/operate-ankra-managed-clusters#upgrade-kubernetes). For cloud-run clusters, see [Managed Kubernetes](/guides/managed-kubernetes#day-2-operations).
+- **Platform add-ons.** Change versions in the GitOps repository, let development reconcile first, and promote the same change to production. See [GitOps](/concepts/gitops).
+
+---
+
+## Let Ankra fix and maintain it
+
+Claude Code works in your repository while you are at the keyboard. Ankra's AI agents work in the platform when you are not: on a schedule, when an alert fires, or when a ticket lands on the board. You decide how far each one may go.
+
+### What already runs on its own
+
+Without any setup, Ankra AI fixes a failing setup pull request, investigates every failed build on the tracked branch, and reviews every pull request. These are covered in [What Ankra generates for you](#what-ankra-generates-for-you). Everything below is something you switch on.
+
+### The DevSecOps agent: CVEs to pull requests
+
+The DevSecOps agent, one of the six default agents under **AI** → **Agents**, turns a cluster's security report into fixes:
+
+1. It reads the critical and high findings, known-exploited CVEs first, production clusters before the rest.
+2. It maps each vulnerable image to the application or add-on that deployed it.
+3. For an application, it bumps the base image or package in the repository and opens **one pull request** listing every CVE it clears. For an add-on, it proposes the chart version that ships the fix, with the current version as the rollback.
+4. Once the fix is merged and rebuilt, it re-reads the report and quotes the before-and-after counts.
+
+Its autonomy is **Propose**: the pull request is the review gate, cluster writes wait for your approval, and accepting a risk stays a human decision. It can never delete a resource to make a finding go away. Ask it from the cluster's chat to "clear the critical and high findings", or file a board ticket for it. See [The DevSecOps agent](/platform/ai-agents#the-devsecops-agent).
+
+### Auto-remediation: alerts that fix themselves
+
+Under **AI** → **Settings** → **Autonomy**, the **Auto-Remediation Policy** hands firing alerts to a remediation agent. It is off until an admin turns it on. Choose:
+
+- **The level.** **Observe only** diagnoses and reports. **Propose** sends every corrective action to Slack for approval, and is the default. **Autonomous** runs low-risk reversible actions itself and asks for the rest.
+- **The scope.** All clusters, or an allow-list. Start with the development cluster.
+- **Per-action rules.** For example, let `restart_deployment` run automatically, make `delete_pod` ask on Slack, and never run anything else.
+- **The limits.** A cap on actions per incident and a cooldown before the same alert on the same cluster is picked up again.
+
+See [AI Autonomy](/platform/ai-autonomy).
+
+### Automations: maintenance on a schedule
+
+**AI** → **Automations** is a canvas for workflows with stages. A **trigger** (a schedule, an alert, a webhook or a manual run) starts the workflow. **Agent** steps do the work, **conditions** route on what they found, an **approval** gate pauses for an administrator, and an **output** posts the result. Start from a template: **Nightly cluster fix plans**, **Daily insight digest** or **On alert: diagnose**.
+
+A weekly maintenance workflow for this app could look like:
+
+| Node | Setting |
+|---|---|
+| Trigger | Schedule, Mondays at 06:00 |
+| Agent | "Find known-exploited and critical CVEs and outdated add-on charts on the production cluster. Draft the fixes as pull requests and upgrade proposals." |
+| Condition | Continue only if the agent found something to change |
+| Approval | An administrator approves before anything is applied |
+| Output | Post the summary and the pull request links to the team's channel |
+
+The approval gate is what makes a scheduled workflow safe: the agent prepares the work overnight, and nothing irreversible happens until a person signs off. See [AI Automations](/platform/ai-automations).
+
+### Configure your own agent
+
+When one goal on one trigger is enough, create an agent instead of a workflow:
+
+<Steps>
+  <Step title="Create it with the wizard">
+    **AI** → **Agents** → **New agent** starts a short interview. Give it a role, its focus areas, the clusters it may touch, a communication style and its guardrails, and the wizard writes its persona. For example: a dependency agent scoped to the development and production clusters of this app, told to open pull requests and never touch production directly.
+  </Step>
+  <Step title="Set how far it may go">
+    Pick an autonomy level: **Observe** (read-only), **Propose** (suggests, you approve) or **Autonomous** (runs low-risk, reversible actions itself). Set its budgets for tool calls, turns and runtime, its model, and a daily token limit. Start at **Propose**, and raise it only once you have read a few of its runs.
+  </Step>
+  <Step title="Give it a trigger">
+    Run it on a schedule, from an alert, from board tickets, or with **Run now**. To have tickets that Ankra files from its own insights worked automatically, designate the agent under **Settings** → **Autonomy** → **Board staffing**.
+  </Step>
+  <Step title="Watch what it does">
+    Every dispatch is recorded as a run with a full transcript:
+
+    ```bash
+    ankra agents runs --status awaiting_user
+    ankra agents transcript <run-id>
+    ankra agents cancel <run-id>
+    ```
+
+    The **Agents** page sorts agents that need your input to the top, and the sidebar badge counts them.
+  </Step>
+</Steps>
+
+See [AI Agents](/platform/ai-agents).
+
+### Keep a hand on the switch
+
+Two stops apply to the whole organisation at once. `ankra ai autonomy pause` stops every autonomous action, and the AI keeps diagnosing but changes nothing without approval. `ankra ai autonomy stop-all` is the emergency stop for an incident. `resume` and `start-all` undo them. Whatever the settings, the lines from [Who is responsible for what](#who-is-responsible-for-what) hold: an agent cannot approve its own pipeline or accept a risk on your behalf, and promoting to production stays a decision you keep for people: leave it out of every agent's goals and set agents that can reach production to **Propose**.
+
+---
+
+## Verify
+
+```bash
+curl -fsS https://shop.example.dev/healthz
+curl -fsS https://shop.example.com/healthz
+ankra application deployments <application-id>
+ankra cluster get pods -n shop --cluster <prod-cluster-id>
+```
+
+Both addresses answer, the application has a deployment on each cluster, the **Environments** page shows the same `sha-` tag in development and production after a promotion, and the production pods are running. Then open production in a browser and walk one real journey, such as signing up and signing in. A green deployment is not a working app; the journey is the check.
+
+---
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Prompt to Production" icon="wand-magic-sparkles" href="/use-cases/prompt-to-production">
+    Plan, storyboard, build and verify a larger app with agents, one stage per session.
+  </Card>
+  <Card title="Applications" icon="rocket" href="/concepts/applications">
+    How Ankra analyses a repository and what the setup pull request contains.
+  </Card>
+  <Card title="Ankra Pipelines" icon="route" href="/guides/ankra-pipelines">
+    Every stage the generated pipeline runs, and how the gate decides what may publish.
+  </Card>
+  <Card title="Agent Skills" icon="book" href="/integrations/agent-skills-catalogue">
+    Every skill and slash command Claude Code gets from Ankra.
+  </Card>
+</CardGroup>

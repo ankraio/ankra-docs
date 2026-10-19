@@ -131,7 +131,15 @@ ankra pipeline branches [flags]
 
 ## ankra pipeline cancel
 
-Cancel a pipeline run that has not concluded
+Cancel a pipeline run that has not concluded.
+
+A run that had started stops its main and on_failure stages, then runs its
+finally stages before it concludes cancelled. While they run the run reads
+"running" and "cancelling". A run that never started concludes at once.
+
+`--force` skips the finally stages: the run concludes cancelled at once. On a
+run that is already cancelling it stops the finally stages still running.
+Cancelling such a run again without `--force` is refused.
 
 ```bash
 ankra pipeline cancel <run> [flags]
@@ -142,6 +150,7 @@ ankra pipeline cancel <run> [flags]
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--application` |   | Application name or id whose pipeline to act on |
+| `--force` | `false` | Skip the run's finally stages, or stop them if the run is already cancelling |
 | `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
 | `--repository` |   | Pipeline repository id to act on (mutually exclusive with `--application`) |
 
@@ -335,11 +344,31 @@ Cancelled runs (-o json 'cancelled_by', 'cancel_reason', 'cancelled_at';
 the Cancelled line): who stopped a run, why and when. 'cancelled_by' is the actor
 in the same form 'requested_by' uses - "user:&lt;id&gt;" for a cancel pressed in
 the portal, the CLI or the API, "github:&lt;login&gt;" for the Cancel action on a
-pull request's check run, "concurrency:&lt;run id&gt;" for a supersession - and
-'cancel_reason' is one of "user_requested", "source_control", "superseded",
-"pull_request_closed" (the run's pull request merged or closed; no actor).
-All three are null for a run nobody cancelled and for one cancelled before
-Ankra recorded this, which is "not recorded", never "the platform did it".
+pull request's check run, "concurrency:&lt;run id&gt;" for a supersession,
+"merge_train:&lt;entry id&gt;" for the merge train - and 'cancel_reason' is one of:
+
+```text
+user_requested       somebody cancelled it in the portal, the CLI or the API
+source_control       the Cancel action on its check run
+superseded           a newer run took its concurrency group
+queued_replaced      a newer commit replaced it before it started
+merge_train          the merge train no longer needed this change tested
+pull_request_closed  its pull request merged or closed (no actor)
+step_cancelled       nobody cancelled it: a step was stopped where it ran,
+                     for example when the cluster's agent shut down, and
+                     the Error line carries that step's sentence (no actor)
+```
+
+superseded, queued_replaced and merge_train runs read 'superseded' (above).
+A reason this list does not name yet is printed as it is.
+All three fields are null for a run nobody cancelled and for one cancelled
+before Ankra recorded this, which is "not recorded", never "the platform
+did it".
+
+Steps that never started (error_class "never_scheduled"): a step whose time
+ran out while no node had room for what it requests concludes timed_out,
+and so does its run, but nothing ran. The Class line says so; free capacity
+on the cluster, add a node, or lower the stage's resources, then rerun.
 
 Authority (-o json 'authority_state', the Authority line): the protected
 authority the run executed under. 'approved' - the default branch's
@@ -664,14 +693,30 @@ ankra pipeline repositories set-mode <repository-id> <workspaces-only|pipelines>
 Open a new run from a run that already happened.
 
 The new run is a fresh run, not a retry of the old one: the old run's outcome
-stays the record of what happened, and 'rerun_of_run_id' ties the two together.
-`--failed-only` restricts the new run to the steps that did not succeed,
-whatever depended on them, and the steps they build on. The new run starts
-from an empty workspace, so the checkout and every upstream step whose output
-a repeated step reads run again with it; steps that succeeded and that nothing
-repeated needs (a publish after the failure, say) do not. A failed-only re-run
-that could not run a step that failed - a push-only stage, which a re-run's
-trigger filters out - is refused with the reason rather than passing without it.
+stays the record of what happened. The new run is recorded with trigger
+'rerun', and 'rerun_of_run_id' ties the two together.
+
+A re-run repeats the original event. A re-run of a push run is planned as a
+push, so its push-only stages run. A re-run of a pull request run (or of a
+merge train car) is planned as a pull request, and a re-run of a schedule run
+as that schedule. A re-run of a tag run or of a manual or API dispatch is
+planned as a plain re-run, so stages limited to other events are skipped.
+
+A re-run's publish pushes the sha- image, but that image does not become the
+push-to-deploy candidate, so a re-run does not roll the deployment.
+
+`--failed-only` restricts the new run to the steps that failed, the steps that
+were skipped because of a failure, whatever depends on them, and the steps
+they build on. The new run starts from an empty workspace, so the checkout and
+every upstream step whose output a repeated step reads run again with it;
+steps that succeeded and that nothing repeated needs do not. A failed-only
+re-run that would still skip one of those steps (for example a tag-only
+release behind a failed build, on a re-run of a tag run) is refused with the
+reason rather than passing without it.
+
+`--full` sets the pipeline's path filters aside for the new run, so every stage
+whose filters left it out runs, and the run records that you asked. A re-run
+of a run that was already a full run is one again without the flag.
 
 ```bash
 ankra pipeline rerun <run> [flags]
@@ -683,6 +728,7 @@ ankra pipeline rerun <run> [flags]
 |------|---------|-------------|
 | `--application` |   | Application name or id whose pipeline to act on |
 | `--failed-only` | `false` | Re-run only the steps that did not succeed, whatever depends on them, and the steps they build on (checkout included) |
+| `--full` | `false` | Run every stage: set the pipeline's path filters aside for the new run |
 | `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
 | `--repository` |   | Pipeline repository id to act on (mutually exclusive with `--application`) |
 | `--timeout` | `0s` | Give up waiting after this long and exit 5, e.g. 45m (default: wait until the run concludes) |
@@ -709,6 +755,10 @@ A checkout of any other repository never supplies the commit, so
 'ankra pipeline run `--application` other-app' from the wrong directory runs
 other-app's default branch, not your local HEAD.
 
+`--full` runs every stage: the pipeline's path filters (on.&lt;event&gt;.paths,
+when.paths and paths:) are set aside for this run, and the run records that
+you asked. A stage's if: still decides.
+
 ```bash
 ankra pipeline run [flags]
 ```
@@ -718,6 +768,7 @@ ankra pipeline run [flags]
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--application` |   | Application name or id whose pipeline to act on |
+| `--full` | `false` | Run every stage: set the pipeline's path filters aside for this run |
 | `--input` | `[]` | Dispatch input as key=value (repeatable) |
 | `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
 | `--reason` |   | Human note recorded on the run |
@@ -823,10 +874,17 @@ declared no reports says so: that is not a passing run.
 ankra pipeline tests <run>                          one run's summary
 ankra pipeline tests history <test key>             one test across the branch's runs
 ankra pipeline tests timings --stage <stage>        mean durations, for sharding
+ankra pipeline tests quarantine                     the repository's flaky test quarantine
 ```
 
 The test key is the one 'tests &lt;run&gt; -o json' prints for each test. -o
 json/yaml prints every field the server carries.
+
+A repository can quarantine a known-flaky test ('ankra pipeline tests
+quarantine `--help`'): a run step whose only failed tests are quarantined then
+succeeds. The run's summary still lists those tests under Failed, and lists
+them again in a "Quarantined failures" section that says whether each one's
+step was forgiven or failed anyway because another test failed too.
 
 ```bash
 ankra pipeline tests <run> [flags]
@@ -862,6 +920,188 @@ ankra pipeline tests history <test key> [flags]
 | `--repository` |   | Pipeline repository id to act on (mutually exclusive with `--application`) |
 | `--runs` | `0` | How many of the newest runs to look back over (1 to 100; default 30) |
 
+## ankra pipeline tests quarantine
+
+The flaky test quarantine lets a repository keep a known-flaky test from
+failing its pipeline runs while someone fixes it.
+
+It is off until you turn it on ('ankra pipeline tests quarantine settings
+`--enable`', pipelines.manage). A test may be quarantined when, over the default
+branch's own runs (never a pull request check) in the last 30 days, it ran in
+at least `--min-samples` runs (default 20) and was flaky - failed, then passed
+on a retry - in at least `--min-flaky-rate` of them (default 0.1, 10%).
+'candidates' lists exactly the tests that qualify; 'add' quarantines one.
+
+A quarantined test still runs and is still reported. What changes: a failing
+'run' step whose ONLY failed tests are quarantined, read from test reports
+the step uploaded whole, succeeds instead, and the steps after it run. A step
+that also failed another test, failed on a timeout or infrastructure error,
+or whose reports could not be read fails exactly as before.
+
+A quarantine releases itself after `--release-after` passes in a row on the
+default branch (default 10); a failed or flaky run starts the count again.
+'release' ends one by hand.
+
+Nothing is hidden: 'ankra pipeline tests &lt;run&gt;' still lists every failed
+test, and lists the quarantined failures in a section of their own whether or
+not they rescued their step. 'ankra pipeline get &lt;run&gt;' says which steps the
+quarantine forgave.
+
+With no subcommand, shows the settings, the quarantined tests and the ones
+released in the last 30 days (the same as 'quarantine list').
+
+```bash
+ankra pipeline tests quarantine [flags]
+```
+
+**Examples**
+
+```bash
+ankra pipeline tests quarantine
+  ankra pipeline tests quarantine candidates
+  ankra pipeline tests quarantine add <test key> --reason "times out on the shared runner"
+  ankra pipeline tests quarantine release <quarantine id or test key> --reason "fixed in #123"
+  ankra pipeline tests quarantine settings --enable --min-flaky-rate 0.2
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--application` |   | Application name or id whose pipeline to act on |
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+| `--repository` |   | Pipeline repository id to act on (mutually exclusive with `--application`) |
+
+## ankra pipeline tests quarantine add
+
+Quarantine one test, by the key 'quarantine candidates', 'tests &lt;run&gt; -o json'
+and 'tests history' print for it. `--reason` is required (1 to 500 characters)
+and is shown beside the quarantine.
+
+The platform refuses while the quarantine is off for the repository, for a
+test that is not flaky enough on the default branch (it says the test's rate
+and the thresholds), for a test already quarantined, and for a test with no
+default-branch result in the last 30 days. Needs pipelines.manage.
+
+```bash
+ankra pipeline tests quarantine add <test key> [flags]
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--application` |   | Application name or id whose pipeline to act on |
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+| `--reason` |   | Why the test is quarantined (required, 1 to 500 characters) |
+| `--repository` |   | Pipeline repository id to act on (mutually exclusive with `--application`) |
+
+## ankra pipeline tests quarantine candidates
+
+List the tests that qualify for quarantine, most flaky first: tests that, over
+the default branch's own runs in the last 30 days, ran in at least the
+repository's minimum number of runs and were flaky in at least its minimum
+share of them, and are not quarantined already. Quarantine one with
+'ankra pipeline tests quarantine add &lt;test key&gt; `--reason "..."`'.
+
+```bash
+ankra pipeline tests quarantine candidates [flags]
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--application` |   | Application name or id whose pipeline to act on |
+| `--limit` | `0` | How many candidates to list (1 to 100; default 50) |
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+| `--repository` |   | Pipeline repository id to act on (mutually exclusive with `--application`) |
+
+## ankra pipeline tests quarantine list
+
+Show the repository's quarantine settings, every quarantined test (how
+flaky it was when quarantined, its default-branch passes in a row towards its
+release, and who quarantined it), and the tests released in the last 30 days
+with why. -o json/yaml prints every field the server carries.
+
+```bash
+ankra pipeline tests quarantine list [flags]
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--application` |   | Application name or id whose pipeline to act on |
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+| `--repository` |   | Pipeline repository id to act on (mutually exclusive with `--application`) |
+
+## ankra pipeline tests quarantine release
+
+Release a quarantined test: from the next run on, a step that fails it fails.
+
+Name the quarantine by its id ('quarantine list' prints it) or by the test's
+key, which is looked up among the repository's live quarantines. `--reason` is
+optional (at most 500 characters). A quarantine also releases itself after
+enough default-branch passes in a row. Needs pipelines.manage.
+
+```bash
+ankra pipeline tests quarantine release <quarantine id or test key> [flags]
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--application` |   | Application name or id whose pipeline to act on |
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+| `--reason` |   | Why the quarantine is released (optional, at most 500 characters) |
+| `--repository` |   | Pipeline repository id to act on (mutually exclusive with `--application`) |
+
+## ankra pipeline tests quarantine settings
+
+Turn the repository's test quarantine on or off and set when a test may be
+quarantined and when one releases itself. Only the flags you pass are sent;
+the others keep their stored values. With no flag, prints the settings.
+
+```text
+--enable / --disable     whether a step whose only failed tests are
+                         quarantined succeeds (off by default)
+--min-flaky-rate 0.1     the share of default-branch runs a test must have
+                         been flaky in (greater than 0, at most 1)
+--min-samples 20         over at least this many observed runs (3 to 1000)
+--release-after 10       release after this many passes in a row (1 to 100)
+```
+
+Turning it off keeps the quarantined tests: their failures fail their steps
+again until it is turned back on. Needs pipelines.manage to change.
+
+```bash
+ankra pipeline tests quarantine settings [flags]
+```
+
+**Examples**
+
+```bash
+ankra pipeline tests quarantine settings
+  ankra pipeline tests quarantine settings --enable
+  ankra pipeline tests quarantine settings --min-flaky-rate 0.2 --min-samples 30 --release-after 15
+  ankra pipeline tests quarantine settings --disable
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--application` |   | Application name or id whose pipeline to act on |
+| `--disable` | `false` | Turn the quarantine off (the quarantined tests are kept) |
+| `--enable` | `false` | Turn the quarantine on |
+| `--min-flaky-rate` | `0` | Share of default-branch runs a test must have been flaky in to be quarantined (greater than 0, at most 1) |
+| `--min-samples` | `0` | Observed default-branch runs that rate must rest on (3 to 1000) |
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+| `--release-after` | `0` | Default-branch passes in a row that release a quarantine (1 to 100) |
+| `--repository` |   | Pipeline repository id to act on (mutually exclusive with `--application`) |
+
 ## ankra pipeline tests timings
 
 Show each file's (or, with `--group-by` test, each test's) mean recorded
@@ -885,6 +1125,44 @@ ankra pipeline tests timings --stage <stage> [flags]
 | `--repository` |   | Pipeline repository id to act on (mutually exclusive with `--application`) |
 | `--runs` | `0` | How many of the newest runs to sample (1 to 100; default 30) |
 | `--stage` |   | Stage whose tests to time (required) |
+
+## ankra pipeline time-saved
+
+Show how much CI time path filters and promoted publishes saved over the
+last 7 or 30 days: for one pipeline with `--application` or `--repository`, or
+for the whole organisation with neither.
+
+Each figure is an estimate the platform made when a run was planned or
+skipped, from the stage's own recent history in the repository: the median of
+its newest 20 successful runs. A stage with no history is counted as unknown
+and is never added to a total. The time is runner time (step-seconds), not
+wall-clock time. Only runs planned after the platform started recording this
+are counted.
+
+'ankra pipeline get &lt;run&gt;' shows what one run saved.
+
+```bash
+ankra pipeline time-saved [flags]
+```
+
+**Examples**
+
+```bash
+# The organisation over the last 30 days
+  ankra pipeline time-saved
+
+  # One application's pipeline over the last 7 days, as JSON
+  ankra pipeline time-saved --application my-app --window 7d -o json
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--application` |   | Application name or id whose pipeline to act on |
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+| `--repository` |   | Pipeline repository id to act on (mutually exclusive with `--application`) |
+| `--window` | `30d` | How far back to count: 7d or 30d |
 
 ## ankra pipeline train
 
@@ -1030,6 +1308,14 @@ names a dry-run diff so they decide for real:
 ankra pipeline validate --repository <id> --changed-file frontend/app.ts
 ```
 
+A stage that declares affected: (Go packages or pnpm workspace packages) is
+decided at run time by the run's checkout, from the dependency graph of the
+commit it checks out. With `--changed-file`, inside a git checkout, the CLI runs
+the same analysis against the working tree and shows which of those stages
+the change reaches ("graph: affected") and which it does not ("graph: not
+affected", skipped and satisfied for the stages that need it).
+`--no-local-graph` skips that and shows them as decided at run time.
+
 `--ref` reads the definition from a git reference in the current checkout
 instead of the working tree, so a candidate on a branch can be checked
 before it is merged:
@@ -1051,6 +1337,7 @@ ankra pipeline validate [file] [flags]
 |------|---------|-------------|
 | `--application` |   | Application name or id whose pipeline to act on |
 | `--changed-file` | `[]` | Plan as if this repository-relative path changed (repeatable), so path filters decide instead of passing |
+| `--no-local-graph` | `false` | Do not read the dependency graph of the local checkout for affected: stages |
 | `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
 | `--ref` |   | Read the definition from this git reference in the current checkout (for example origin/my-branch) instead of the working tree |
 | `--repository` |   | Pipeline repository id to act on (mutually exclusive with `--application`) |

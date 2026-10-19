@@ -40,6 +40,7 @@ A pipeline mistakenly committed under `.ankra/manifests/` is refused by the mani
 | `kind` | string | required | `Pipeline` |
 | `metadata.name` | string | required | The pipeline's name |
 | `on` | block | none | The triggers - see [Triggers](#triggers). A pipeline that declares none is still runnable by API dispatch. |
+| `full_run` | block | none | `events` and `branches` naming the runs on which no path filter applies, so every stage runs. See [Setting path filters aside](#setting-path-filters-aside). |
 | `concurrency.group` | string | none | Runs sharing a group serialise: a new run waits queued behind the group's holder. Expressions are allowed, for example `"${{ ankra.repository.provider }}:${{ ankra.repository.owner }}/${{ ankra.repository.name }}-${{ ankra.ref }}"`. |
 | `concurrency.cancel_in_progress` | flag | `false` | With a group, an in-flight run of the same group is superseded and cancelled when a new one arrives. Leave it off and the new run waits instead - on a per-branch group that means the branch queues behind itself, which the validator points out as advice; see [Newest commit wins](/guides/ankra-pipelines#newest-commit-wins). Set without a group it does nothing, and the validator warns. |
 | `workspace.size` | quantity | none | The per-run volume every stage shares, for example `"10Gi"` |
@@ -57,18 +58,51 @@ A pipeline mistakenly committed under `.ankra/manifests/` is refused by the mani
 | `credentials` | list | none | `name`, `from` (`cloud`, `git`, `registry` or `object_storage`) and `as`, the name it is materialised under. Declared once for the whole run and materialised for every step of it - there is no per-stage `credentials` block, and unlike `secrets`, a stage does not narrow which of them it receives. A `credentials:` key written on a stage is an unknown key: it is ignored, `validate` warns, and nothing is delivered. Protected, and refused for a fork run. |
 | `services` | map | none | Sidecars by name: `image` (required), `env`, `ports`, and `ready.tcp` (a port) or `ready.http` (a path, probed on the first declared port). Without a probe the stage starts as soon as the container does. A sidecar's image is held to the organisation's image policy and its `env` to the same reserved names a step's own is - either violation refuses the whole step rather than running it. Protected. |
 | `stages` | list | required | The main DAG |
-| `on_failure` | list | none | Stages that run only when the run is failing |
-| `finally` | list | none | Stages that run after everything else whatever the outcome, including a cancelled run |
+| `on_failure` | list | none | Stages that run after the main `stages` have all concluded, and only when one of them failed. See [Failure and cleanup stages](#failure-and-cleanup-stages) |
+| `finally` | list | none | Stages that run after every main and `on_failure` stage has concluded, whatever the outcome, and after a run that had started is cancelled. See [Failure and cleanup stages](#failure-and-cleanup-stages) |
+| `path_sets` | map | none | Named lists of path patterns. Any path filter list includes one with a `{set: <name>}` entry. See [Path sets](#path-sets) |
 | `environments` | map | none | The pipeline's half of each deployment environment binding: `data` (`none`, `restore_point` or `seed`), `verify` (stage names), `rollout` (`recreate`, `rolling`, `blue_green` or `canary`) and `gate` (`automatic`, `manual` or `custom`). Protected. |
 
 Stage names must be unique across `stages`, `on_failure` and `finally`, because the three share one run and one output namespace.
+
+### Failure and cleanup stages
+
+A run has three phases, in this order: the main `stages`, then `on_failure`, then `finally`. Every `on_failure` and `finally` stage waits on every stage of the phases before it without declaring it.
+
+- **`on_failure` runs only when the main stages failed.** Once every main stage has concluded, the stage runs if one of them failed, timed out, or was stopped by an infrastructure fault or by its agent. A failure that `continue_on_error` or `allow_failure` keeps from failing the run does not count. After a green run the stage is skipped with the reason "Skipped because the run did not fail, so this on_failure stage was not needed."
+- **`finally` runs whatever the outcome.** It starts once every main and `on_failure` stage has concluded: after a green run, after a failed one, and after `on_failure` stages that themselves failed.
+- **`needs:` inside a phase works as it does in `stages`.** An `on_failure` stage that `needs:` another `on_failure` stage runs only when that one succeeded, and the same holds between two `finally` stages. A `needs:` on a main stage only orders the stage and gives it that stage's `needs.<stage>.*` values; it never stops an `on_failure` or `finally` stage from running when the main stage failed.
+- **They count toward the run's outcome.** An `on_failure` stage that succeeds does not turn a failed run green. A `finally` stage that fails fails a run whose main stages passed; give it `allow_failure: true` when a failed cleanup should not do that.
+- **A failed-only re-run** repeats an `on_failure` stage together with the main stage it responds to, and runs it again only if that stage fails again. A `finally` stage that failed is repeated on its own.
+- **`finally` also runs when a run is cancelled.** See [Cancelling a run](#cancelling-a-run) below.
+
+#### Cancelling a run
+
+A run can be cancelled as a whole in five ways: a person cancels it from the portal, the CLI, the API or the check run's **Cancel** button; a newer run takes its concurrency group (`cancel_in_progress: true`); its pull request is merged or closed; the merge train stops testing its car; or `cancel_queued` replaces it before it starts.
+
+When the run had already started, it cancels the way GitHub Actions treats `if: always()` steps and GitLab treats `after_script`:
+
+1. Every main and `on_failure` stage that has not finished stops at once and concludes `cancelled`. Their pods are stopped. `on_failure` stages do not start, because a cancel is not a failure.
+2. The `finally` stages run once the stopped stages' pods have stopped (at most three minutes after the cancel, if a cluster does not answer). Each keeps its own `timeout`.
+3. The run concludes `cancelled`, whatever the `finally` stages did. Who cancelled it and why are recorded when you cancel, not at the end.
+
+While the `finally` stages run, the run reads `running` with `cancelling: true` in the API, `ankra pipeline get` and the check run, and the check run stays in progress. It never reports success. Its title says the run was cancelled and is running its finally stages. Cancelling it again answers that it is already cancelling.
+
+Some limits apply:
+
+- **A run that never started runs no `finally`.** A queued run, including one `cancel_queued` replaces, has done nothing to clean up, so it concludes `cancelled` at once.
+- **Cleanup has a budget of 15 minutes from the cancel.** `finally` stages still running after that are stopped and the run concludes `cancelled`.
+- **Force cancel skips cleanup.** `ankra pipeline cancel <run> --force`, or `POST .../pipeline-runs/{run_id}/cancel?force=true`, concludes the run at once. On a run that is already running its `finally` stages, it stops them.
+- **The concurrency group.** With `cancel_in_progress: false`, a cancelled run keeps its group while its `finally` stages run, so two runs of the group never overlap, cleanup included. The next run waits at most for the cleanup budget. With `cancel_in_progress: true`, a newer run takes the group at once and the cancelled run's `finally` stages finish outside it. Scope that cleanup to its own run, for example by naming what it creates and deletes after the `ANKRA_RUN_ID` variable every step has.
+
+Stopping a single stage where it ran is not a cancel of the run. An infrastructure fault or an agent stopping a stage counts as a failure: `on_failure` runs, then `finally`.
 
 ## Triggers
 
 | Key | Fields | Fires on |
 |-----|--------|----------|
 | `on.push` | `branches`, `paths` | A push to a matching branch whose changed files match `paths`. Empty `branches` matches every branch; empty `paths` matches every change. |
-| `on.pull_request` | `branches`, `paths`, `fork_policy` | A pull request opened, synchronised or reopened against a matching **base** branch. `fork_policy` is `none` (refuse), `read_only` (the default: no secrets, no credentials, no identity beyond reading the run) or `trusted`; it is a protected section. A run that ends up restricted is also budget-clamped - at most 8 matrix legs per stage, a 60-minute step timeout, 2 CPU and 4Gi per step, no sidecar services, no shared caches and 256 MiB of artifacts and logs per run - and the clamps are applied to the plan, so what a reviewer reads is what executes. See [Forks](/guides/ankra-pipelines#what-a-step-runs-as). |
+| `on.pull_request` | `branches`, `paths`, `fork_policy` | A pull request opened, synchronised or reopened against a matching **base** branch, or retargeted to one: a change of base branch plans a new run for the same head against the new base, and its check replaces the old one. `fork_policy` is `none` (refuse), `read_only` (the default: no secrets, no credentials, no identity beyond reading the run) or `trusted`; it is a protected section. A run that ends up restricted is also budget-clamped - at most 8 matrix legs per stage, a 60-minute step timeout, 2 CPU and 4Gi per step, no sidecar services, no shared caches and 256 MiB of artifacts and logs per run - and the clamps are applied to the plan, so what a reviewer reads is what executes. See [Forks](/guides/ankra-pipelines#what-a-step-runs-as). |
 | `on.tag` | `patterns` | A pushed tag matching one of the glob patterns |
 | `on.schedule` | list of `cron`, `branch`, `stages` | A five-field cron expression, numeric fields only (`MON` and `JAN` are refused, because the scheduler evaluates the fields numerically). `branch` defaults to the repository's default branch; `stages` restricts the run to a subset, which is how a nightly runs only the expensive suites. Schedules fire from a stored watermark, through the same trigger every push and pull request uses. |
 | `on.manual` | `inputs` | A dispatch from the CLI or the API with the declared inputs |
@@ -78,9 +112,52 @@ Stage names must be unique across `stages`, `on_failure` and `finally`, because 
 
 A manual input has a `name` (letters, digits and underscores, so it can be addressed as `${{ inputs.<name> }}`), a `type` (`string`, the default, `boolean`, `number` or `choice`), an optional `default`, an `enum` (required for `choice`, and the default must be one of its values), `required` and `description`. A dispatch whose inputs do not match is refused with the planner's diagnostics and records nothing.
 
-A path filter is decided on the event's changed files, and never excludes a run when the diff could not be read or was truncated - a file the planner could not see is not a file that did not change; the run records that it passed on incomplete information. A push carries its changed files in the delivery; a pull request's are read from the provider when the run is triggered (GitHub's pull request files, a GitLab merge request's diffs, Bitbucket's diffstat), up to 300 paths. The list is stored on the run, so the run is planned, admitted and dispatched against the same files, and a re-run reuses it. When a filter had to pass without a complete list, the run's `paths_unverified` says why: `provider_error` (the provider was asked and failed), `truncated` (more than 300 paths changed) or `unsupported_provider` (the provider or the event offers no list).
+A path filter is decided on the event's changed files, and never excludes a run when the diff could not be read or was truncated - a file the planner could not see is not a file that did not change; the run records that it passed on incomplete information. A push's changed files are read from the provider the same way on GitHub, GitLab and Bitbucket Cloud: from the head of the branch's last successful push run (the newest one that concluded `success` within 30 days) to the pushed commit, or from the push's previous head when the branch has no such run, up to 300 paths. Ankra uses GitHub's compare API, GitLab's repository compare and Bitbucket Cloud's diffstat, and first checks with the provider that the starting commit is still in the pushed commit's history. So a push that follows a cancelled or failed one still sees the files those pushes changed, and a force push is caught on every provider, GitLab included. When there is no range to read, because the push created the branch or because history was rewritten past that commit, no path filter excludes anything. A pull request's files are read from the provider when the run is triggered (GitHub's pull request files, a GitLab merge request's diffs, Bitbucket's diffstat), up to 300 paths. The list is stored on the run, and a re-run reuses it. When a filter had to pass without a complete list, the run's `paths_unverified` says why: `provider_error` (the provider was asked and failed), `truncated` (more than 300 paths changed), `unsupported_provider` (the provider or the event offers no list), `branch_created` (the push created its branch, so there is no earlier commit to compare with) or `forced_push` (the push rewrote the branch's history, so its commits do not name every file that differs).
+
+Every path list here, and every path list on a stage, can include a named list from `path_sets:` with a `{set: <name>}` entry. See [Path sets](#path-sets).
 
 The `on:` triggers decide whether a run starts at all, for the whole pipeline. To run one stage on a narrower set of changes for one event only - a component's checks on a pull request that touches it, but on every push - give the stage an [event-scoped `when`](#event-scoped-filters) block rather than a second trigger or a duplicate stage.
+
+### Setting path filters aside
+
+A path filter lets a run skip what a change did not touch. When you want to see every stage anyway, or want some stages never to be skipped, set the filters aside. Nothing here changes a stage's `if:`, which still decides.
+
+A **full run** runs every stage whatever the path filters say: `on.<event>.paths`, `when.paths` (and an [event block's](#event-scoped-filters) `paths`) and an [affected-only](#fields-common-to-every-stage) stage's `paths:` all pass. A run is a full run when one of these asks for it:
+
+| Who asks | How | Recorded as |
+|---|---|---|
+| A person or token starting a run | `ankra pipeline run --full`, or `"full_run": true` in the body of `POST …/pipeline-runs` | `dispatch`, with who asked |
+| A person re-running a run | `ankra pipeline rerun <run> --full`, or `?full_run=true` on `POST …/pipeline-runs/<run>/rerun` | `rerun`, with who asked. A re-run of a full run is a full run again without the flag |
+| The `ankra:full-run` label on a GitHub pull request | Add the label. A full run of the pull request's head starts at once, every later push to the pull request runs in full while the label stays on it, and so does its [merge train](/guides/ankra-pipelines#the-merge-train-test-every-pull-request-as-it-will-merge) car. Remove the label and the next run applies the filters again | `label`, with who added it |
+| Your organisation | `ci_full_run_on_default_branch` in the [organisation CI settings](/guides/ankra-pipelines#organisation-ci-settings) runs every push to a repository's default branch in full | `organisation_policy` |
+| The pipeline | A top-level `full_run` block naming the `events` and `branches` it covers. An empty `events` list covers every event and an empty `branches` list every branch; for a pull request the branch is the one it targets | `pipeline` |
+
+```yaml
+# Pull requests skip what they do not touch. Every push to main runs everything.
+full_run:
+  events: [push]
+  branches: [main]
+```
+
+The run records why it set its filters aside: `full_run_source`, `full_run_requested_by` and `full_run_message`, the sentence the run page and `ankra pipeline get` show, for example "Path filters were set aside: the pull request carries the ankra:full-run label." The plan carries a `plan_paths_set_aside:` diagnostic. A request for a full run never joins a run of the same commit that applied its filters; it queues a run of its own.
+
+**Always-run stages.** `ci_always_run_stages` in the [organisation CI settings](/guides/ankra-pipelines#organisation-ci-settings) names stages that run whatever their path filters say, together with every stage they need. It applies to every pipeline in the organisation that declares a stage of that name, and a name a pipeline does not declare changes nothing there. When the trigger's own `on.push.paths` or `on.pull_request.paths` matches none of the changed files, the run still starts for the always-run stages and what they need, and every other stage is skipped as `path_filter`. A stage that ran only because of the setting carries a `plan_paths_set_aside:` diagnostic. An always-run stage does not make the run a full run.
+
+`paths`, `when` and `if` are logic, not [protected sections](/guides/ankra-pipelines#logic-is-open-authority-is-closed): a pull request can change them, its own filters included. That is deliberate, because an author can rewrite a stage's script anyway. A stage a pull request must not be able to filter away belongs in `ci_always_run_stages`, which lives in the organisation's settings, outside every repository, and only an organisation administrator can change. `full_run` is logic too, and only ever makes a run do more.
+
+### Skipping a push with [skip ci]
+
+A pushed commit whose message carries `[skip ci]`, `[ci skip]`, `[no ci]`, `[skip ankra]` or `[ankra skip]` (in any case), or whose last paragraph has a `skip-checks: true` trailer, records a skipped run instead of queueing one: outcome `skipped`, error class `skip_marker`, and a message naming the marker. The skipped run still posts its check. `[skip ankra]` and `[ankra skip]` skip Ankra Pipelines alone; GitHub Actions' own `[skip actions]` does not skip Ankra.
+
+Only the head commit of a branch push counts. A tag push, a pull request run and a merge train car never honour a marker: a tag releases, and a pull request's check is what branch protection reads, so a line in a commit message must not turn it green. Where a branch push may be skipped is `ci_skip_markers` in the organisation CI settings:
+
+| `ci_skip_markers` | A marker skips a push to |
+|---|---|
+| `except_default_branch` (the default) | Any branch but the repository's default branch |
+| `everywhere` | Any branch, the default branch included |
+| `never` | Nothing. Markers are ignored |
+
+The default keeps every push to the default branch running, because that run is what releases and what catches whatever a pull request's path filters left out.
 
 ## Stages
 
@@ -96,7 +173,7 @@ Every stage has a `name` (lower-case letters, digits, dashes and underscores, st
 | `publish` | Re-tags an approved image digest in the registry | Executes end to end: re-tags the exact digest `gate` approved as `sha-<7>` in the application's real repository, then gives the same digest every tag under `publish.tags` (below); refuses by name when its run has no successful `gate` step, when the build's digest is not the one the gate recorded judging (or the gate recorded none), or - in a monorepo - when its own stage name matches neither the bare nor the component-suffixed convention, so it cannot tell which component's build it is publishing |
 | `preview` | Deploys the run's artefact into a per-pull-request environment, from inside the pipeline DAG | No executor yet: warned at validation, skipped by the planner - distinct from an Application's own pull-request preview, which already deploys an `ankra_pipeline` application's `build` digest without this stage kind existing (see [Ankra Pipelines](/guides/ankra-pipelines#how-a-run-happens)) |
 | `verify` | Runs one verification: `probe`, `smoke`, `load_test`, `assert_promql` or `restore_verify` | No runner image on this build, so the step could only fail to start: warned at validation, skipped by the planner rather than dispatched |
-| `deploy` | Applies the run's artefact to a bound environment | No executor yet: warned at validation, skipped by the planner |
+| `deploy` | Rolls a release out to the host targets of the stage's `environment`: machines outside Kubernetes that run `ankra-host-agent` (see [`ankra targets`](/reference/cli/targets)). `deploy.artifact` names the `publish` stage whose digest is deployed, which must be inside this stage's `needs`; `deploy.release` is the release name; `deploy.targets.match_labels` narrows the targets | Executes, settled by the platform: every active host target of the environment that matches the labels pulls the release, and the step concludes from what the hosts report, with the outputs `deployment_id`, `digest`, `environment`, `targets_succeeded` and `targets_failed` (see [`ankra deployments`](/reference/cli/deployments)). The artifact must be a signed release bundle (a `build` stage with `bundle`) that this run published. Concluded skipped when the stage has no `deploy` block or names an environment the organisation does not have; failed when the run's protected sections are not approved, the artifact is not such a bundle, or no target matches. A pull request run or a fork run never deploys: the planner skips the stage as `deploy_untrusted_event`. It does not deploy to a Kubernetes cluster; an application's push to deploy does that |
 | `agent` | An AI mission with a `goal`, `tool_profile`, `mode` (`ask` or `agent`), `budget` (`tool_calls`, `turns`, `minutes`) and `context` | No executor yet: warned at validation, skipped by the planner |
 | `approval` | Blocks the run on a human decision: `roles` (required), `min_approvals`, `timeout`, `message`. Never satisfiable by an AI or a service token | No executor yet: warned at validation, skipped by the planner - so it blocks nothing today, and everything downstream of it runs |
 | `webhook` | Posts a signed payload to `url` with `method`, optionally `wait_for_callback` within `timeout` | No executor yet: warned at validation, skipped by the planner |
@@ -108,7 +185,7 @@ A stage whose kind has no executor on this build is reported twice, in the same 
 
 ### Event-scoped filters
 
-A stage's `when` can name the event a filter belongs to. For the run's event, the stage's block for that event - `push`, `pull_request`, `tag`, `schedule` or `manual` - supplies the branches and paths, and the flat `when.branches` and `when.paths` do not apply to it at all; an empty block means that event is unfiltered. Events with no block keep the flat fields. `when.events` is unchanged and still has to include the event. A re-run is planned as its own `rerun` event, and an agent run as an `agent` event, with one exception: a re-run of a schedule run (or a re-run of such a re-run) is planned as that schedule firing again, so it runs the same `stages` subset and the same `schedule` blocks and `when.events` filters as the run it repeats. The `rerun` and `agent` events have no block, so both read the flat fields against the original run's stored change list: a stage filtered only by `when.pull_request.paths` runs on a re-run of that pull request. Give it flat `when.paths` as well if a re-run should keep the filter.
+A stage's `when` can name the event a filter belongs to. For the run's event, the stage's block for that event - `push`, `pull_request`, `tag`, `schedule` or `manual` - supplies the branches and paths, and the flat `when.branches` and `when.paths` do not apply to it at all; an empty block means that event is unfiltered. Events with no block keep the flat fields. `when.events` is unchanged and still has to include the event. A re-run is planned as the event the run it repeats was planned as, so its event blocks and `when.events` decide the same way they did the first time. A re-run of a pull request run reads the `pull_request` block, and so does a re-run of a [merge train](/guides/ankra-pipelines#the-merge-train-test-every-pull-request-as-it-will-merge) run, which is planned as a pull request. A re-run of a push reads the `push` block and plans the push-only stages that push planned, `publish` included. A re-run of a schedule run plans that schedule firing again, with the same `stages` subset. A re-run also reuses the original run's stored change list, so a stage filtered only by `when.pull_request.paths` is left out of a re-run of that pull request exactly when it was left out the first time. A re-run of any other run (a tag, a manual or API dispatch, an agent run) is planned as its own `rerun` event, and an agent run as an `agent` event. Neither has a block, so both read the flat fields against the stored change list, and a stage runs in such a re-run only when its `when.events` lists `rerun` or is empty.
 
 ```yaml
 stages:
@@ -132,6 +209,61 @@ stages:
 
 A block for an event the pipeline's `on:` does not trigger on, or that the stage's own `when.events` leaves out, can never apply and is a warning under `pipeline_trigger:`. Converted pipelines use these blocks: a GitHub Actions repository's workflows keep their own `on.pull_request.paths` and `on.push.paths` on their stages, and a GitLab rule whose `if:` tests `$CI_PIPELINE_SOURCE == "merge_request_event"` or `== "push"` becomes `when.pull_request` or `when.push`. The recipe for a monorepo is [PR-only checks, full builds on push](/guides/ankra-pipelines#monorepo-pr-only-checks-full-builds-on-push).
 
+### Path sets
+
+A monorepo filters many stages on the same few directories. `path_sets:` names a list of patterns once, and every path list includes it with a `{set: <name>}` entry: `on.push.paths`, `on.pull_request.paths`, a stage's `paths`, `when.paths`, `when.push.paths` and `when.pull_request.paths`. A set can include other sets the same way.
+
+```yaml
+apiVersion: ankra.io/v1
+kind: Pipeline
+metadata:
+  name: shop
+path_sets:
+  pipeline: [".ankra/**"]
+  backend:
+    - "backend/**"
+    - "!backend/**/*.md"
+    - set: pipeline
+  frontend: ["frontend/**", "packages/ui/**", {set: pipeline}]
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+defaults:
+  network: egress-https
+stages:
+  - name: checkout
+    kind: checkout
+  - name: test-backend
+    kind: run
+    image: golang:1.26
+    run: go test ./...
+    needs: [checkout]
+    paths:
+      - set: backend
+      - "go.work"
+  - name: test-frontend
+    kind: run
+    image: node:24
+    run: pnpm test
+    needs: [checkout]
+    when:
+      pull_request:
+        paths: [{set: frontend}]
+      push: {}
+```
+
+- A set name uses lower-case letters, digits, `-` and `_`, and starts with a letter or digit, like a stage name.
+- An entry is a pattern, with the same glob rules as any path list (`*`, `**`, `?`, a leading `!` to exclude), or `{set: <name>}`. A path list can also be a single `{set: <name>}` in place of a list.
+- A reference is replaced by the set's patterns, in order, where it stands. The list then means exactly what it would mean with the patterns written there, so the last pattern that matches a file still decides, and a `!` pattern in a set excludes from the list it lands in.
+- Ankra expands the sets when it reads the file. Plans, the stored definition and its hash are those of the expanded lists, so a file written with sets and the same file written out by hand are the same pipeline. Paths are not a protected section, so changing a set never needs an administrator's approval.
+- `{set: <name>}` is accepted only in the path lists above. In `needs`, `branches`, a cache's or an artifact's `paths` or any other list it is refused.
+
+Refused under `pipeline_path_sets:`: a reference to a set `path_sets:` does not declare (the message suggests the closest name), sets that include each other in a cycle, an invalid set name, a set declared twice, an entry that is neither a pattern nor `{set: <name>}`, and an empty pattern. A set nothing references, directly or through another set, and an empty set are warnings. A set entry spelled so that it can match no file is a `pipeline_paths:` warning that names the set and the entry, once, not again for every list the set is used in.
+
+`ankra pipeline validate` lists every set with its expanded patterns, the sets it includes and the lists that use it. The API answer carries the same as `path_sets`.
+
 ### Fields common to every stage
 
 | Field | Type | Default | Meaning |
@@ -142,7 +274,8 @@ A block for an event the pipeline's `on:` does not trigger on, or that the stage
 | `run` | string | none | The script; required on a `run` stage without `uses` |
 | `needs` | list | none | Stages this one waits for. Every name must exist and the graph must be acyclic. |
 | `skippable_needs` | list | none | The entries of `needs` this stage may run without. When a listed stage is left out because its own path filter (`when.paths`, or the [event block's](#event-scoped-filters) `paths` for this run's event) matches no changed file, this stage waits on what that stage would have waited on instead of being skipped with it. When the listed stage runs, it is an ordinary need: this stage runs after it, and only if it succeeded. Any other reason the listed stage is skipped - a branch or event filter, a false `if`, the fork policy - still skips this stage, unless this stage's own `if:` calls a status function (see `if`). Every entry must also be in `needs`; an entry naming a stage with no path filter has no effect and is a warning. |
-| `paths` | list | none | Makes the stage **affected-only**: it runs only when a changed file matches one of these globs (the `when.paths` dialect: `*`, `**`, `?`, a leading `!` to exclude). When none does, the stage is skipped as `path_filter` and **counts as satisfied** for every stage that needs it: each of them waits on what the skipped stage waited on instead of being skipped with it, so a monorepo can leave out the tests of the components a change did not touch and still build, gate and publish. That is the difference from `when.paths`, which skips the stages behind it unless each lists it in `skippable_needs`. A change list that could not be read in full never leaves the stage out. Only `paths` may be the reason it is out: when its `if` is false for the run, or can only be decided at dispatch, the stages behind it are skipped as for any other need. Refused (`pipeline_paths:`): a stage that reads its outputs, a `build` another stage needs, a `checkout`, `gate` or `approval`, a scan a gate names in `require_stages`, and `paths` together with a `when` path filter on one stage. See [Affected-only stages](/guides/ankra-pipelines#affected-only-stages-skip-what-a-change-did-not-touch). |
+| `paths` | list | none | Makes the stage **affected-only**: it runs only when a changed file matches one of these globs (the `when.paths` dialect: `*`, `**`, `?`, a leading `!` to exclude), or a [path set](#path-sets) the list includes. When none does, the stage is skipped as `path_filter` and **counts as satisfied** for every stage that needs it: each of them waits on what the skipped stage waited on instead of being skipped with it, so a monorepo can leave out the tests of the components a change did not touch and still build, gate and publish. That is the difference from `when.paths`, which skips the stages behind it unless each lists it in `skippable_needs`. A change list that could not be read in full never leaves the stage out. Only `paths` may be the reason it is out: when its `if` is false for the run, or can only be decided at dispatch, the stages behind it are skipped as for any other need. Refused (`pipeline_paths:`): a stage that reads its outputs, a `build` another stage needs, a `checkout`, `gate` or `approval`, a scan a gate names in `require_stages`, and `paths` together with a `when` path filter on one stage. See [Affected-only stages](/guides/ankra-pipelines#affected-only-stages-skip-what-a-change-did-not-touch). |
+| `affected` | map | none | Makes the stage **affected-only** from the code's dependency graph instead of, or as well as, globs. `go` lists Go package patterns (`./...`, `./internal/api` relative to the stage's `working_directory`, or import paths; only a trailing `/...` is a wildcard), `pnpm` lists pnpm workspace packages by name (`@acme/web`) or by `./directory`. The stage runs when a changed file is in the dependency closure of what it names, tests included, or matches its `paths` (an OR: list the files the code reads at run time there). Otherwise it is skipped as not affected (class `not_affected`) and counts as satisfied for every stage that needs it, as for `paths`. The run's checkout step reads the graph of the commit it checked out and answers per stage; a stage with no answer runs. Every `paths` refusal applies, and patterns may not carry `${{ }}`. See [Affected from the dependency graph](/guides/ankra-pipelines#affected-from-the-dependency-graph-affected). |
 | `if` | expression | none | Runs the stage only when the expression is true; see [Expressions](#expressions). As in GitHub Actions, an `if:` that calls a status function - `always()`, `success()`, `failure()`, `cancelled()`, `skipped()` - replaces the implicit "every need succeeded": such a stage is not skipped because a need was left out of the run. It waits on the nearest stages behind that need that do run, and its condition decides at dispatch, where `needs.<stage>.result` reads `skipped` and `skipped()` is true. |
 | `when.branches`, `when.paths`, `when.events` | lists | none | Filters on the event without an expression, decided before any expression context exists. `branches` and `paths` apply to every event that has no [event block](#event-scoped-filters) of its own; `events` always applies |
 | `when.push`, `when.pull_request` | `branches`, `paths` | absent | The branch and path filter for that one event, in place of the flat fields; an empty block (`{}`) means the event is unfiltered. See [Event-scoped filters](#event-scoped-filters) |
@@ -258,6 +391,7 @@ Reasons, sizes and times come from an agent that reports them. An older agent re
 | `scan` | `scanners` (`semgrep`, `checkov`, `trivy`) and `fail_on`, a map from scanner to a severity. `fail_on` is **read by the gate**: each scan stage the `gate` stage requires has its `fail_on` folded into the gate's policy, per scanner and tighten-only - it can raise that scanner's floor above the organisation's [`ci_image_gate`](/guides/ankra-pipelines#organisation-ci-settings) and a `gate` stage's own `with:`, and can never lower either, so a pull request head may add scrutiny to its own pipeline but not remove the organisation's. A value that is not that scanner's own severity vocabulary - Checkov's `none`, a Trivy image-gate word such as `app` - carries no floor rather than the loosest one. `with.semgrep_config` names the space-separated Semgrep registry packs to run (for example `"p/default p/docker p/golang"`); undeclared, Semgrep runs its own `--config=auto`. Each tool leg declares its own reports as artifacts, so they travel the vault like any other: a report that never uploaded, or that downloaded and would not parse, revises the step from `success` to `infra_error` / `report_unreadable` rather than letting an unread scan count as a clean one. Reports travel to the organisation's own ready vault, or to the [Ankra-managed default vault](/guides/ankra-pipelines#before-your-first-run) when it has none, so an organisation that never registered a vault still scans and still gates; with no ready vault on either side the step is refused before it runs, as `artifact_store_unavailable` (below). |
 | `gate` | No block of its own beyond `gate.approval_roles`/`gate.require_stages` (above) - a `kind: gate` stage's `with.image_gate` (`app`, `all` or `off`, case-insensitive, the same vocabulary as [`ci_image_gate`](/guides/ankra-pipelines#organisation-ci-settings)) and `with.severity` (`critical`, `high`, `medium` or `low`) may only make the organisation's policy *stricter*, never looser; `with.ignore_unfixed` (excludes a Trivy finding with no published fix) is floored the same way by the organisation's own [`ci_ignore_unfixed`](/guides/ankra-pipelines#organisation-ci-settings), which is `true` by default: an organisation that sets it `false` has every unfixed finding keep blocking, and a stage's `with:` may then only move toward `false` as well. A gate judges the findings the run *persisted*, and a required scanner that recorded none fails it by name rather than passing as clean - so a gate cannot pass at all in an organisation whose scan reports had nowhere to be stored. |
 | `publish` | `tags`: extra tags the published digest is given in the application's repository beside `sha-<7>` - a moving `latest`, a version such as `"0.2.${{ ankra.run.number }}"`. Each is a manifest re-tag of the one digest, in place: no blob is pushed again, and a tag that already points at the digest is left alone. Expressions resolve at plan time; a literal must be a tag a registry accepts (up to 128 letters, digits, `_`, `.`, `-`, not starting with `.` or `-`), and an entry listed twice or empty is refused at validation. The stage's `when:` governs the extra tags with the stage: a publish skipped for the branch writes none. A registry that refuses one of them - a tag-immutability rule on the project, say - fails the step naming the tag, so a `latest` that did not move never reads as published. The step's outputs carry them as `image_tags`. `with.image` is accepted and validated but not read: the real target is the organisation's own registry, resolved for the run's application and component exactly as `build`'s push target was - never a value a stage can name. It refuses by name unless a `gate` upstream concluded successfully and recorded the same digest `build` pushed, so the whole scan-to-registry chain rests on findings the run managed to persist. `promote_from: pull_request` lets a push publish the digest a pull request run already built and tested for exactly the same tree, instead of building and testing it again; see [Promote a tested image instead of rebuilding](#promote-a-tested-image-instead-of-rebuilding). It is a protected section. |
+| `deploy` | `artifact` (the `publish` stage whose digest is deployed, by name or as `${{ needs.<stage>.outputs.image_digest }}`; it must be inside the stage's `needs`), `release` (equal to `metadata.name` in the bundle's `ankra-release.yaml`), `targets.match_labels`. The environment is the stage's own `environment`. The artifact is a release bundle: a `build` stage with `bundle.path` (a workspace directory) and `bundle.manifest` (its `ankra-release.yaml`) packs one instead of building an image. Protected. |
 | `preview` | `database.enabled`, `database.extensions`, `database.seed_from_restore_point`, `migrate`, `ingress_path` |
 | `verify` | Exactly one of `probe` (`url`, `status`, `timeout`), `smoke` (`image`, `run`), `load_test` (`script`, `virtual_users`, `duration`, `thresholds`), `assert_promql` (`query`, `comparison`, `threshold`, `for`) or `restore_verify` (`restore_point`, `queries`) |
 | `agent` | `goal` (required), `tool_profile`, `mode`, `budget.tool_calls`, `budget.turns`, `budget.minutes`, `context` |
@@ -283,12 +417,13 @@ When a push arrives, Ankra reads the git tree of the pushed commit and looks for
 
 - A pull request run tested exactly that tree. A squash merge of a pull request that was up to date with its base has the tree the pull request tested; a merge of one that was behind does not, and builds in full - unless the [merge train](/guides/ankra-pipelines#the-merge-train-test-every-pull-request-as-it-will-merge) merged it, whose car run tested exactly the merged tree.
 - Every stage the push's `publish` needs passed in that run, on its newest attempt, and resolved to the same stage definition. A build argument or a value drawn from the event (`ankra.ref`, `ankra.sha`) makes the image differ, so the push builds.
+- A stage the run skipped counts only when the push would have skipped it too. A stage with [`affected:`](/guides/ankra-pipelines#affected-from-the-dependency-graph-affected) that the run skipped as not affected counts when every file the push changes is among the files that run's dependency graph was asked about: the tree is the same, so a change the graph already showed cannot reach the stage still cannot. A push that changes a file the run did not, such as one push that carries two merges, builds in full, and its own checkout reads the graph. A merge train car is asked about its pull request's files, which are the files its merge changes, so a train merge promotes past the skip. A stage a `paths:` filter left out needs no rule: the push applies the same filter to its own change, so either it leaves the stage out too, or its change reaches the stage and the push builds. Any other skip, such as a false `if:`, never counts.
 - The run's head is in the repository itself. A fork's run is never promoted.
 - Both runs executed under the same approved [authority](/guides/ankra-pipelines#logic-is-open-authority-is-closed), and the run's `gate` judged exactly the digest its `build` reported.
 - The run was queued within the last 72 hours.
 - Every stage of the push is `publish` or a stage `publish` needs, and every `publish` stage declares `promote_from`.
 
-A promoted push runs `publish` alone. It re-tags the pull request run's gate-approved digest as the push's own `sha-<7>` in the application's repository, and push-to-deploy rolls it out exactly as after a full run. Every stage it skipped shows as skipped on the run, naming the pull request run that passed it. Anything short of the list above builds and tests the push in full, as without the key, and the run records why.
+A promoted push runs `publish` alone. It re-tags the pull request run's gate-approved digest as the push's own `sha-<7>` in the application's repository, and push-to-deploy rolls it out exactly as after a full run. Every stage it skipped shows as skipped on the run, naming the pull request run that passed it, or that found it not affected. Anything short of the list above builds and tests the push in full, as without the key, and the run records why.
 
 Deploys still move forward in push order. If an older merge that built in full publishes after a newer promoted one, it gets its own `sha-<7>` but deploys nothing, and a moving tag such as `latest` stays on the newer release.
 
@@ -436,7 +571,7 @@ Every event that reaches the trigger is decided in order, and the answer is reco
 | `enqueued` | One run was queued | Yes |
 | `already_queued` | A run for this event is still queued; the redelivery joined it | No new run |
 | `already_recorded` | A run for the same commit, trigger, reference and pull request exists inside the recent-run window - running, or concluded skipped; the redelivery joined it | No new run |
-| `skipped` | The trigger matched but its branch, tag or path filter excluded the event | Yes, concluded with outcome `skipped` and the planner's sentence |
+| `skipped` | The trigger matched but its branch, tag or path filter excluded the event, or a pushed commit carries a [skip marker](#skipping-a-push-with-skip-ci) the organisation honours on that branch | Yes, concluded with outcome `skipped` and the planner's sentence, or error class `skip_marker` and a sentence naming the marker |
 | `refused` | A dispatch the planner refused - an undeclared `on.manual`, an input outside its declared type | No; the diagnostics go back to the caller |
 | `repository_not_onboarded` | The repository is not connected to a pipeline | No |
 | `no_ci_cluster` | The organisation has no CI cluster and no AI staging cluster | No, for a provider event; a dispatch still gets its run row |
@@ -448,9 +583,47 @@ Dispatches (`manual`, `api`, `agent`, `rerun`) are exempt from the recent-run de
 
 A dispatch is also the one entry point whose commit no provider delivery has already proven, so `POST …/pipeline-runs` resolves the `ref` it was given - or the repository's default branch - against the repository's own host and accepts a supplied `head_sha` only when it is that reference's current tip or, on GitHub, a provable ancestor of it. Anything else refuses the dispatch before a run row exists, and so does a host that could not be asked at all. A `rerun` is exempt: its commit is one Ankra itself recorded on the original run, which is what lets a fork pull request's run be repeated when the commit lives on no ref of this repository.
 
-Inside a run, a stage that is not planned carries a skip reason: `kind_unavailable` (the stage's kind has no executor on this build - decided first, because it is a fact about the stage rather than about the event), `event_filter`, `branch_filter`, `path_filter`, `schedule_subset`, `condition_false`, `condition_unreadable` (a condition nobody can read is not a condition that passed), `fork_policy` or `dependency_skipped`. A run refused as a whole carries one fixed sentence, for example "Every stage this pipeline declares is filtered out for this event, so the run would do nothing." or "A stage fans out over more matrix legs than the number one run may plan."
+Inside a run, a stage that is not planned carries a skip reason: `kind_unavailable` (the stage's kind has no executor on this build - decided first, because it is a fact about the stage rather than about the event), `event_filter`, `branch_filter`, `path_filter`, `schedule_subset`, `condition_false`, `condition_unreadable` (a condition nobody can read is not a condition that passed), `fork_policy`, `dependency_skipped`, `deploy_untrusted_event` (a `deploy` stage in a pull request run, or in a run of a head the repository does not own) or `promoted` (a push run publishes the image a pull request or merge train run already built and tested for the same tree, so this stage, which that run passed, is not run again; see [promotion](#promote-a-tested-image-instead-of-rebuilding)). A run refused as a whole carries one fixed sentence, for example "Every stage this pipeline declares is filtered out for this event, so the run would do nothing." or "A stage fans out over more matrix legs than the number one run may plan."
 
 A step that *was* planned can still be concluded without running. At dispatch, a deferred `if:` that evaluates false concludes the step `skipped` with the condition in the message, and a `${{ }}` reference dispatch cannot resolve concludes it `infra_error` naming the field. A step still `pending` once its run has outlived the sum of every step's `timeout` is concluded `infra_error` with error class `step_stranded`, never retried. A `kind: scan` step is refused at dispatch with error class `artifact_store_unavailable` - "This step's reports need a ready backup vault in the organisation, and there is none." - when its reports would have nowhere to go: no ready vault in the organisation *and* no Ankra-managed default vault designated. An organisation with no vault of its own ordinarily falls back to the platform's, so this is now the rare case rather than the first-run one. A `scan` step can also be concluded and then *revised*: one that succeeded but whose declared report Ankra could not read becomes `infra_error` with error class `report_unreadable`, because an unread scan is not a clean one - see [When something fails](/guides/ankra-pipelines#when-something-fails).
+
+## Time saved
+
+Every run records the CI time it did not spend because of a path filter, the dependency graph or a promoted publish, with an estimate for each piece of work it skipped. Only runs planned after this was released have a record. Older runs show nothing.
+
+### What counts
+
+| Saving | `reason` |
+|--------|----------|
+| A stage left out by a path filter (`when.paths`, the event block's `paths`, or the stage's affected-only `paths:`) | `path_filter` |
+| A stage skipped because a stage it needs was left out by a path filter. `cause_stage` names that stage | `dependency_skipped` |
+| A step a promoted publish (`publish.promote_from`) did not run again | `promoted` |
+| A step skipped as not affected by its stage's [`affected:`](/guides/ankra-pipelines#affected-from-the-dependency-graph-affected) dependency graph | `not_affected` |
+| A whole run that `on.<event>.paths` excluded | `run_paths_excluded` |
+
+A stage skipped by a branch filter or a condition is not counted, because it would not have run whatever the change touched. An `on_failure` stage is never counted.
+
+### How a saving is estimated
+
+Each estimate is made when the run is planned or skipped, or for a `not_affected` step when the step is skipped, from the history of the same repository.
+
+| Saving | Estimate | `basis` |
+|--------|----------|---------|
+| A skipped stage | The median time of the stage's newest 20 successful runs, read from the repository's newest 300 concluded runs. A matrix stage adds up its legs | `stage_history` |
+| A step skipped as not affected | The same median: from the stage's history when the stage has one step, or from the leg's own newest 20 successful runs for a matrix leg | `stage_history` or `step_history` |
+| A promoted step | The time the same step took in the run it was promoted from. When that run no longer has the step, or the step did not succeed there, the median of its own newest 20 successful runs: `step_history` for a matrix leg, `stage_history` for a stage with one step | `promoted_source_run`, else `step_history` or `stage_history` |
+| A whole run | The median total step time of the newest 20 successful runs of the same trigger | `run_history` |
+| Work with no usable history | Unknown. `saved_seconds` is null and the saving is not added to any total | `no_history` |
+
+The time is runner time, the seconds the skipped steps would have run added up. It is not wall-clock time, so two skipped stages that would have run side by side count twice. CPU-minutes are the requested CPU times that duration. A sample whose steps did not all carry a CPU request is left out of the CPU median, and CPU-minutes are null when no sample carried one. A promoted step estimated from its source run has CPU-minutes when the step carried a request there.
+
+### Where to read it
+
+<CliVersion since="0.40.0" command="pipeline time-saved" />
+
+- `ankra pipeline get <run-id>` prints a `Time saved` line under the run's steps, with one line per saving. It prints nothing for a run with no savings. With `-o json` or `-o yaml` the run's record is added as the `time_saved` field. A run with no record, including one planned before this was released, carries a `time_saved` object with `saved_seconds` 0 and an empty `savings` list. `time_saved` is null only when the platform does not serve the route yet or the read failed, and a failed read is reported on stderr.
+- `ankra pipeline time-saved` prints the total for the organisation over the last 30 days. `--window 7d` reads the last 7 days, and `--application` or `--repository` reads one application or repository.
+- The API has three routes. `GET …/pipeline-runs/{run_id}/time-saved` reads one run. `GET …/pipeline-time-saved?window=30d` reads one repository or application. `GET /api/v1/org/pipelines/time-saved?window=30d` reads the organisation. `window` is `7d` or `30d` and defaults to `30d`.
 
 ## Validation
 
@@ -496,10 +669,12 @@ A result has a severity - `ok`, `advice` (the pipeline does what it says, and th
 | `pipeline_retry:` | More than 5 attempts, a negative count, an unknown backoff or condition |
 | `pipeline_artifacts:` | An artifact without a name or paths; a negative retention (warning); an unknown test result format or a missing path |
 | `pipeline_environment:` | A stage targeting an environment the pipeline does not declare (warning) |
-| `pipeline_paths:` | An [affected-only](#fields-common-to-every-stage) stage on a shape where "satisfied" would be untrue: a stage reading its outputs (`needs.<stage>.outputs`, `steps.<stage>.outputs`, a deploy whose `artifact` names it), a `build` another stage needs, a `checkout`, `gate` or `approval`, a scan a gate requires, an empty pattern, or `paths` beside a `when` path filter (fatal). Warnings: an affected-only scan no gate requires, an affected-only `deploy`, `publish` or `preview` that another stage needs, and a `skippable_needs` entry the needed stage's own `paths` already covers |
+| `pipeline_paths:` | An `affected` block that names no package, a pattern it cannot read (an expression, a path above the repository root, a wildcard other than a trailing `/...`), or relative patterns under a `working_directory` that carries an expression (fatal); an `affected` stage in a pipeline with no checkout stage (warning: the graph is never read, so the stage always runs). An [affected-only](#fields-common-to-every-stage) stage (`paths` or `affected`) on a shape where "satisfied" would be untrue: a stage reading its outputs (`needs.<stage>.outputs`, `steps.<stage>.outputs`, a deploy whose `artifact` names it), a `build` another stage needs, a `checkout`, `gate` or `approval`, a scan a gate requires, an empty pattern, or `paths` beside a `when` path filter (fatal). Warnings: an affected-only scan no gate requires, an affected-only `deploy`, `publish` or `preview` that another stage needs, a `skippable_needs` entry the needed stage's own `paths` already covers, and any path pattern, in a path list or a [path set](#path-sets), spelled so that it can match no file (a leading `./` or `/`, a trailing `/`, a backslash or surrounding whitespace). A path set's entry is reported once, at `path_sets.<name>[i]` |
+| `pipeline_path_sets:` | The [`path_sets:`](#path-sets) block and its `{set: <name>}` references: a reference to an undeclared set, sets that include each other in a cycle, a reference in a list that is not a path filter, an invalid or duplicate set name, an entry that is neither a pattern nor a reference, an empty pattern (fatal). Warnings: a set nothing references, an empty set |
+| `pipeline_full_run:` | A [`full_run`](#setting-path-filters-aside) block naming an event no run is planned as, or naming no event and no branch, which sets every path filter aside on every run (both warnings) |
 | `pipeline_build_component:` | A `build.component` that is not a valid component name; one on a stage that is not `kind: build` (warning). Validated against an application: a build stage that belongs to no component, a `build.component` the application does not record, and two build stages that publish to the same repository - fatal when both always run, a warning when one of them runs only under a condition. See [Which component a build belongs to](/guides/ankra-pipelines#which-component-a-build-belongs-to) and the application's [declared components](/reference/application-descriptor#components) |
 
-The planner adds diagnostics with `plan_` keys (`plan_trigger:`, `plan_paths:`, `plan_matrix:`, `plan_condition:`, `plan_fork:`, `plan_fork_budget:`, `plan_concurrency:`, `plan_interpolation:`, `plan_timeout:`, `plan_needs:`, `plan_spec:`), and the step renderer records what it decided on incomplete information: `image_policy_open` when the organisation set no image policy, `resources_defaulted`, `service_without_readiness`, `service_undeclared`, `build_without_registry_auth`, `registry_push_withheld`, `build_namespace_workspace` and `multi_platform_build`. A step the renderer refuses outright - an image outside the policy, more compute than one step may have, a missing timeout, a `services` tier without services, host privilege - is a fixed sentence naming the field, and the same refusal at dispatch time is what a step that never started shows.
+The planner adds diagnostics with `plan_` keys (`plan_trigger:`, `plan_paths:`, `plan_paths_set_aside:`, `plan_matrix:`, `plan_condition:`, `plan_fork:`, `plan_fork_budget:`, `plan_concurrency:`, `plan_interpolation:`, `plan_timeout:`, `plan_needs:`, `plan_spec:`), and the step renderer records what it decided on incomplete information: `image_policy_open` when the organisation set no image policy, `resources_defaulted`, `service_without_readiness`, `service_undeclared`, `build_without_registry_auth`, `registry_push_withheld`, `build_namespace_workspace` and `multi_platform_build`. A step the renderer refuses outright - an image outside the policy, more compute than one step may have, a missing timeout, a `services` tier without services, host privilege - is a fixed sentence naming the field, and the same refusal at dispatch time is what a step that never started shows.
 
 ## A complete example
 

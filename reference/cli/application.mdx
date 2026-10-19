@@ -1236,7 +1236,15 @@ ankra application pipeline artifacts download <application-id> <artifact-id> [fl
 
 ## ankra application pipeline cancel
 
-Cancel a pipeline run that has not concluded
+Cancel a pipeline run that has not concluded.
+
+A run that had started stops its main and on_failure stages, then runs its
+finally stages before it concludes cancelled. While they run the run reads
+"running" and "cancelling". A run that never started concludes at once.
+
+`--force` skips the finally stages: the run concludes cancelled at once. On a
+run that is already cancelling it stops the finally stages still running.
+Cancelling such a run again without `--force` is refused.
 
 ```bash
 ankra application pipeline cancel <application-id> <run> [flags]
@@ -1246,6 +1254,7 @@ ankra application pipeline cancel <application-id> <run> [flags]
 
 | Flag | Default | Description |
 |------|---------|-------------|
+| `--force` | `false` | Skip the run's finally stages, or stop them if the run is already cancelling |
 | `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
 
 ## ankra application pipeline convert
@@ -1377,11 +1386,31 @@ Cancelled runs (-o json 'cancelled_by', 'cancel_reason', 'cancelled_at';
 the Cancelled line): who stopped a run, why and when. 'cancelled_by' is the actor
 in the same form 'requested_by' uses - "user:&lt;id&gt;" for a cancel pressed in
 the portal, the CLI or the API, "github:&lt;login&gt;" for the Cancel action on a
-pull request's check run, "concurrency:&lt;run id&gt;" for a supersession - and
-'cancel_reason' is one of "user_requested", "source_control", "superseded",
-"pull_request_closed" (the run's pull request merged or closed; no actor).
-All three are null for a run nobody cancelled and for one cancelled before
-Ankra recorded this, which is "not recorded", never "the platform did it".
+pull request's check run, "concurrency:&lt;run id&gt;" for a supersession,
+"merge_train:&lt;entry id&gt;" for the merge train - and 'cancel_reason' is one of:
+
+```text
+user_requested       somebody cancelled it in the portal, the CLI or the API
+source_control       the Cancel action on its check run
+superseded           a newer run took its concurrency group
+queued_replaced      a newer commit replaced it before it started
+merge_train          the merge train no longer needed this change tested
+pull_request_closed  its pull request merged or closed (no actor)
+step_cancelled       nobody cancelled it: a step was stopped where it ran,
+                     for example when the cluster's agent shut down, and
+                     the Error line carries that step's sentence (no actor)
+```
+
+superseded, queued_replaced and merge_train runs read 'superseded' (above).
+A reason this list does not name yet is printed as it is.
+All three fields are null for a run nobody cancelled and for one cancelled
+before Ankra recorded this, which is "not recorded", never "the platform
+did it".
+
+Steps that never started (error_class "never_scheduled"): a step whose time
+ran out while no node had room for what it requests concludes timed_out,
+and so does its run, but nothing ran. The Class line says so; free capacity
+on the cluster, add a node, or lower the stage's resources, then rerun.
 
 Authority (-o json 'authority_state', the Authority line): the protected
 authority the run executed under. 'approved' - the default branch's
@@ -1456,7 +1485,33 @@ ankra application pipeline logs <application-id> <run> [flags]
 
 ## ankra application pipeline rerun
 
-Re-run a concluded pipeline run
+Open a new run from a run that already happened.
+
+The new run is a fresh run, not a retry of the old one: the old run's outcome
+stays the record of what happened. The new run is recorded with trigger
+'rerun', and 'rerun_of_run_id' ties the two together.
+
+A re-run repeats the original event. A re-run of a push run is planned as a
+push, so its push-only stages run. A re-run of a pull request run (or of a
+merge train car) is planned as a pull request, and a re-run of a schedule run
+as that schedule. A re-run of a tag run or of a manual or API dispatch is
+planned as a plain re-run, so stages limited to other events are skipped.
+
+A re-run's publish pushes the sha- image, but that image does not become the
+push-to-deploy candidate, so a re-run does not roll the deployment.
+
+`--failed-only` restricts the new run to the steps that failed, the steps that
+were skipped because of a failure, whatever depends on them, and the steps
+they build on. The new run starts from an empty workspace, so the checkout and
+every upstream step whose output a repeated step reads run again with it;
+steps that succeeded and that nothing repeated needs do not. A failed-only
+re-run that would still skip one of those steps (for example a tag-only
+release behind a failed build, on a re-run of a tag run) is refused with the
+reason rather than passing without it.
+
+`--full` sets the pipeline's path filters aside for the new run, so every stage
+whose filters left it out runs, and the run records that you asked. A re-run
+of a run that was already a full run is one again without the flag.
 
 ```bash
 ankra application pipeline rerun <application-id> <run> [flags]
@@ -1467,6 +1522,7 @@ ankra application pipeline rerun <application-id> <run> [flags]
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--failed-only` | `false` | Re-run only the steps that did not succeed, whatever depends on them, and the steps they build on (checkout included) |
+| `--full` | `false` | Run every stage: set the pipeline's path filters aside for the new run |
 | `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
 | `--timeout` | `0s` | Give up waiting after this long and exit 5, e.g. 45m (default: wait until the run concludes) |
 | `--wait` | `false` | Wait for the new run to conclude before returning |
@@ -1483,6 +1539,7 @@ ankra application pipeline run <application-id> [flags]
 
 | Flag | Default | Description |
 |------|---------|-------------|
+| `--full` | `false` | Run every stage: set the pipeline's path filters aside for this run |
 | `--input` | `[]` | Dispatch input as key=value (repeatable) |
 | `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
 | `--reason` |   | Human note recorded on the run |
@@ -2123,7 +2180,19 @@ an application when the organisation does not have it yet (with exactly the
 'application add' flags), waits for the setup analysis, waits for a green
 image build of the tracked branch, deploys to the target cluster, and follows
 the installation until the workload is running - then prints the published
-URL when one exists.
+URL when one exists. The URL is printed as Live only once the Ingress that
+carries it is shown to route: every backend Service it names exists, exposes
+the port asked for and has a ready endpoint. A backend that does not resolve
+fails ship with what is wrong (state "unroutable" in -o json, with
+url_problem); a route ship cannot read is reported and left unverified.
+
+An existing application is reused only when it is registered for the same
+repository AND tracks the requested branch (`--branch`, else the checkout's
+branch); ship never builds or deploys a branch other than the one requested.
+When the repository's applications all track other branches, ship stops and
+names them: pass `--name` &lt;app&gt; `--branch` &lt;its branch&gt; to ship one of them, or
+`--name` &lt;new-name&gt; to register a separate application for the branch. `--name`
+selects among several applications on the same branch.
 
 The build it waits for is the one that actually builds the application:
 
@@ -2134,7 +2203,10 @@ The build it waits for is the one that actually builds the application:
   for it, the run a push would have started, which publishes the image.
   That needs the applications.deploy permission. A push during the wait
   moves ship on to the new head commit. A run whose publish step is skipped
-  stops ship and asks for a push.
+  stops ship and asks for a push. A run the pipeline skipped outright - no
+  trigger it declares accepts the push, typically because the setup pull
+  request that adds .ankra/pipeline.yaml is not merged yet - stops ship
+  with the pull request to merge, or the trigger the branch needs.
 - The repository's own GitHub Actions workflow: its latest run on the
   tracked branch.
 - The workflow Ankra generated: its latest run on the tracked branch, once
