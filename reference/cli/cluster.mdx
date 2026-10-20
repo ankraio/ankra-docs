@@ -846,11 +846,17 @@ ankra cluster ankracloud bastion status <cluster_id|name> [flags]
 
 ## ankra cluster ankracloud control-plane
 
-Inspect and change the control plane configuration. Only 1 or 3 controllers
-are allowed (etcd needs an odd number of voting members for quorum).
+Inspect and change the control plane configuration. The controller count
+is 1 or 3 (1, 3 or 5 on Proxmox VE): etcd needs an odd number of voting
+members for quorum.
 
-The controller count can only be changed while the cluster is stopped, and
-applies the next time the cluster is started.
+Growing the control plane may happen live on a running cluster: the new
+controllers join it one at a time, keeping the Kubernetes API up. The platform
+can refuse a live change (an operation already in flight, controllers still
+reconciling, a configuration that pins the API to one controller), and says
+why. Reducing it is applied offline: stop the cluster (its state is
+preserved), change the count, then start it. On a stopped cluster either
+change applies at the next start.
 
 The instance type can also be changed on a running cluster that has three
 controllers: they are then resized one at a time, keeping the Kubernetes API
@@ -875,7 +881,17 @@ ankra cluster ankracloud control-plane get <cluster_id|name> [flags]
 
 ## ankra cluster ankracloud control-plane set-count
 
-Change the controller count (1 or 3)
+Change the number of controllers (1 or 3; etcd needs an odd number of
+voting members for quorum).
+
+On a running cluster growing the count may happen live: the new controllers
+join one at a time and the command prints the operation to follow, unless the
+platform refuses the live change and says why. Reducing it is
+refused on a running cluster; stop the cluster (its state is preserved),
+change the count, then start it. On a stopped cluster the change applies at
+the next start.
+
+Run "control-plane get" to see whether a count change is possible right now.
 
 ```bash
 ankra cluster ankracloud control-plane set-count <cluster_id|name> <count> [flags]
@@ -1188,6 +1204,22 @@ ankra cluster ankracloud pricing [flags]
 | `--credential-id` |   | Ankra Cloud credential ID (required) |
 | `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
 
+## ankra cluster ankracloud quota
+
+Show the limits of the Ankra Cloud account behind an Ankra Cloud cluster, what the account already holds, and what is left: servers, cores, memory, storage, floating IPs, private networks and routers.
+
+Storage is shared by server disks and every PersistentVolumeClaim the Ankra Cloud CSI provisions, so a claim larger than what is left stays Pending. Applies and stack deploys that need more storage than is left say so in their warnings.
+
+```bash
+ankra cluster ankracloud quota <cluster_id|name> [flags]
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+
 ## ankra cluster ankracloud start
 
 Start a stopped Ankra Cloud cluster. Use `--scope` control_plane to bring up only the control plane.
@@ -1367,11 +1399,17 @@ ankra cluster aws bastion status <cluster_id|name> [flags]
 
 ## ankra cluster aws control-plane
 
-Inspect and change the control plane configuration. Only 1 or 3 controllers
-are allowed (etcd needs an odd number of voting members for quorum).
+Inspect and change the control plane configuration. The controller count
+is 1 or 3 (1, 3 or 5 on Proxmox VE): etcd needs an odd number of voting
+members for quorum.
 
-The controller count can only be changed while the cluster is stopped, and
-applies the next time the cluster is started.
+Growing the control plane may happen live on a running cluster: the new
+controllers join it one at a time, keeping the Kubernetes API up. The platform
+can refuse a live change (an operation already in flight, controllers still
+reconciling, a configuration that pins the API to one controller), and says
+why. Reducing it is applied offline: stop the cluster (its state is
+preserved), change the count, then start it. On a stopped cluster either
+change applies at the next start.
 
 The instance type can also be changed on a running cluster that has three
 controllers: they are then resized one at a time, keeping the Kubernetes API
@@ -1396,7 +1434,17 @@ ankra cluster aws control-plane get <cluster_id|name> [flags]
 
 ## ankra cluster aws control-plane set-count
 
-Change the controller count (1 or 3)
+Change the number of controllers (1 or 3; etcd needs an odd number of
+voting members for quorum).
+
+On a running cluster growing the count may happen live: the new controllers
+join one at a time and the command prints the operation to follow, unless the
+platform refuses the live change and says why. Reducing it is
+refused on a running cluster; stop the cluster (its state is preserved),
+change the count, then start it. On a stopped cluster the change applies at
+the next start.
+
+Run "control-plane get" to see whether a count change is possible right now.
 
 ```bash
 ankra cluster aws control-plane set-count <cluster_id|name> <count> [flags]
@@ -2303,7 +2351,10 @@ Delete one or more Kubernetes resources from the active cluster.
 The kind takes the kubectl spellings - pod, pods, po, deployment, deploy,
 statefulset, sts, configmap, cm, namespace, node, pvc, ... - and a custom
 resource is reachable with `--group` and `--api-version`, exactly like
-'cluster get resources' and 'cluster describe'.
+'cluster get resources' and 'cluster describe'. Cluster-scoped built-in
+kinds (namespace, node, storageclass, crd, priorityclass, the webhook
+configurations, ...) need no namespace; a cluster-scoped custom kind such as
+a ClusterIssuer or a ClusterPolicy takes `--cluster-scoped` instead.
 
 A pod owned by a controller (Deployment, StatefulSet, DaemonSet, Job) is
 recreated by that controller, so deleting it is how you restart a single
@@ -2324,6 +2375,8 @@ ankra cluster delete pod stuck-pod -n default --grace-period 0
 ankra cluster delete deployment web -n prod --dry-run
 ankra cluster delete namespace scratch
 ankra cluster delete Certificate web-tls -n prod --group cert-manager.io --api-version v1
+ankra cluster delete crd kafkas.kafka.strimzi.io kafkatopics.kafka.strimzi.io
+ankra cluster delete ClusterIssuer letsencrypt-staging --group cert-manager.io --api-version v1 --cluster-scoped
 ```
 
 ```bash
@@ -2335,10 +2388,12 @@ ankra cluster delete <kind> <name> [name...] [flags]
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--api-version` |   | API version for a kind outside the built-in set (e.g. v1, v1beta1) |
+| `--cluster-scoped` | `false` | Treat a kind outside the built-in set as cluster-scoped (e.g. ClusterIssuer, ClusterPolicy); no `--namespace` is needed |
 | `--dry-run` | `false` | Report what would be deleted without deleting anything |
 | `--grace-period` | `-1` | Seconds the object gets to shut down cleanly; 0 deletes it immediately, -1 keeps the object's own grace period |
 | `--group` |   | API group for a kind outside the built-in set (e.g. cert-manager.io) |
 | `-n`, `--namespace` |   | Kubernetes namespace (required for namespaced kinds) |
+| `--resource` |   | Exact API resource plural when a custom kind has an irregular plural (e.g. backuprepositories) |
 | `-y`, `--yes` | `false` | Skip the confirmation prompt |
 
 ## ankra cluster deprovision
@@ -2417,10 +2472,12 @@ ankra cluster describe <kind> <name> [flags]
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--api-version` |   | API version override (e.g. v1, v1beta1) |
-| `--group` |   | API group override (e.g. apps, networking.k8s.io) |
+| `--api-version` |   | API version for a kind outside the built-in set (e.g. v1, v1beta1) |
+| `--cluster-scoped` | `false` | Treat a kind outside the built-in set as cluster-scoped (e.g. ClusterIssuer, ClusterPolicy); no `--namespace` is needed |
+| `--group` |   | API group for a kind outside the built-in set (e.g. cert-manager.io) |
 | `-n`, `--namespace` |   | Kubernetes namespace |
 | `-o`, `--output` | `table` | Output format: table, json, yaml |
+| `--resource` |   | Exact API resource plural when a custom kind has an irregular plural (e.g. backuprepositories) |
 
 ## ankra cluster digitalocean
 
@@ -2524,11 +2581,17 @@ ankra cluster digitalocean bastion status <cluster_id|name> [flags]
 
 ## ankra cluster digitalocean control-plane
 
-Inspect and change the control plane configuration. Only 1 or 3 controllers
-are allowed (etcd needs an odd number of voting members for quorum).
+Inspect and change the control plane configuration. The controller count
+is 1 or 3 (1, 3 or 5 on Proxmox VE): etcd needs an odd number of voting
+members for quorum.
 
-The controller count can only be changed while the cluster is stopped, and
-applies the next time the cluster is started.
+Growing the control plane may happen live on a running cluster: the new
+controllers join it one at a time, keeping the Kubernetes API up. The platform
+can refuse a live change (an operation already in flight, controllers still
+reconciling, a configuration that pins the API to one controller), and says
+why. Reducing it is applied offline: stop the cluster (its state is
+preserved), change the count, then start it. On a stopped cluster either
+change applies at the next start.
 
 The instance type can also be changed on a running cluster that has three
 controllers: they are then resized one at a time, keeping the Kubernetes API
@@ -2553,7 +2616,17 @@ ankra cluster digitalocean control-plane get <cluster_id|name> [flags]
 
 ## ankra cluster digitalocean control-plane set-count
 
-Change the controller count (1 or 3)
+Change the number of controllers (1 or 3; etcd needs an odd number of
+voting members for quorum).
+
+On a running cluster growing the count may happen live: the new controllers
+join one at a time and the command prints the operation to follow, unless the
+platform refuses the live change and says why. Reducing it is
+refused on a running cluster; stop the cluster (its state is preserved),
+change the count, then start it. On a stopped cluster the change applies at
+the next start.
+
+Run "control-plane get" to see whether a count change is possible right now.
 
 ```bash
 ankra cluster digitalocean control-plane set-count <cluster_id|name> <count> [flags]
@@ -3868,11 +3941,17 @@ ankra cluster hetzner bastion status <cluster_id|name> [flags]
 
 ## ankra cluster hetzner control-plane
 
-Inspect and change the control plane configuration. Only 1 or 3 controllers
-are allowed (etcd needs an odd number of voting members for quorum).
+Inspect and change the control plane configuration. The controller count
+is 1 or 3 (1, 3 or 5 on Proxmox VE): etcd needs an odd number of voting
+members for quorum.
 
-The controller count can only be changed while the cluster is stopped, and
-applies the next time the cluster is started.
+Growing the control plane may happen live on a running cluster: the new
+controllers join it one at a time, keeping the Kubernetes API up. The platform
+can refuse a live change (an operation already in flight, controllers still
+reconciling, a configuration that pins the API to one controller), and says
+why. Reducing it is applied offline: stop the cluster (its state is
+preserved), change the count, then start it. On a stopped cluster either
+change applies at the next start.
 
 The instance type can also be changed on a running cluster that has three
 controllers: they are then resized one at a time, keeping the Kubernetes API
@@ -3897,7 +3976,17 @@ ankra cluster hetzner control-plane get <cluster_id|name> [flags]
 
 ## ankra cluster hetzner control-plane set-count
 
-Change the controller count (1 or 3)
+Change the number of controllers (1 or 3; etcd needs an odd number of
+voting members for quorum).
+
+On a running cluster growing the count may happen live: the new controllers
+join one at a time and the command prints the operation to follow, unless the
+platform refuses the live change and says why. Reducing it is
+refused on a running cluster; stop the cluster (its state is preserved),
+change the count, then start it. On a stopped cluster the change applies at
+the next start.
+
+Run "control-plane get" to see whether a count change is possible right now.
 
 ```bash
 ankra cluster hetzner control-plane set-count <cluster_id|name> <count> [flags]
@@ -5159,11 +5248,17 @@ ankra cluster morpheus clouds [flags]
 
 ## ankra cluster morpheus control-plane
 
-Inspect and change the control plane configuration. Only 1 or 3 controllers
-are allowed (etcd needs an odd number of voting members for quorum).
+Inspect and change the control plane configuration. The controller count
+is 1 or 3 (1, 3 or 5 on Proxmox VE): etcd needs an odd number of voting
+members for quorum.
 
-The controller count can only be changed while the cluster is stopped, and
-applies the next time the cluster is started.
+Growing the control plane may happen live on a running cluster: the new
+controllers join it one at a time, keeping the Kubernetes API up. The platform
+can refuse a live change (an operation already in flight, controllers still
+reconciling, a configuration that pins the API to one controller), and says
+why. Reducing it is applied offline: stop the cluster (its state is
+preserved), change the count, then start it. On a stopped cluster either
+change applies at the next start.
 
 The instance type can also be changed on a running cluster that has three
 controllers: they are then resized one at a time, keeping the Kubernetes API
@@ -5188,7 +5283,17 @@ ankra cluster morpheus control-plane get <cluster_id|name> [flags]
 
 ## ankra cluster morpheus control-plane set-count
 
-Change the controller count (1 or 3)
+Change the number of controllers (1 or 3; etcd needs an odd number of
+voting members for quorum).
+
+On a running cluster growing the count may happen live: the new controllers
+join one at a time and the command prints the operation to follow, unless the
+platform refuses the live change and says why. Reducing it is
+refused on a running cluster; stop the cluster (its state is preserved),
+change the count, then start it. On a stopped cluster the change applies at
+the next start.
+
+Run "control-plane get" to see whether a count change is possible right now.
 
 ```bash
 ankra cluster morpheus control-plane set-count <cluster_id|name> <count> [flags]
@@ -5893,11 +5998,17 @@ ankra cluster ovh bastion status <cluster_id|name> [flags]
 
 ## ankra cluster ovh control-plane
 
-Inspect and change the control plane configuration. Only 1 or 3 controllers
-are allowed (etcd needs an odd number of voting members for quorum).
+Inspect and change the control plane configuration. The controller count
+is 1 or 3 (1, 3 or 5 on Proxmox VE): etcd needs an odd number of voting
+members for quorum.
 
-The controller count can only be changed while the cluster is stopped, and
-applies the next time the cluster is started.
+Growing the control plane may happen live on a running cluster: the new
+controllers join it one at a time, keeping the Kubernetes API up. The platform
+can refuse a live change (an operation already in flight, controllers still
+reconciling, a configuration that pins the API to one controller), and says
+why. Reducing it is applied offline: stop the cluster (its state is
+preserved), change the count, then start it. On a stopped cluster either
+change applies at the next start.
 
 The instance type can also be changed on a running cluster that has three
 controllers: they are then resized one at a time, keeping the Kubernetes API
@@ -5922,7 +6033,17 @@ ankra cluster ovh control-plane get <cluster_id|name> [flags]
 
 ## ankra cluster ovh control-plane set-count
 
-Change the controller count (1 or 3)
+Change the number of controllers (1 or 3; etcd needs an odd number of
+voting members for quorum).
+
+On a running cluster growing the count may happen live: the new controllers
+join one at a time and the command prints the operation to follow, unless the
+platform refuses the live change and says why. Reducing it is
+refused on a running cluster; stop the cluster (its state is preserved),
+change the count, then start it. On a stopped cluster the change applies at
+the next start.
+
+Run "control-plane get" to see whether a count change is possible right now.
 
 ```bash
 ankra cluster ovh control-plane set-count <cluster_id|name> <count> [flags]
@@ -6175,6 +6296,8 @@ release left behind - without taking that object over or deleting it.
 The kind takes the kubectl spellings - pod, deployment, deploy, service, svc,
 configmap, cm, node, ... - and a custom resource is reachable with `--group`
 and `--api-version`, exactly like 'cluster get resources' and 'cluster delete'.
+Cluster-scoped built-in kinds (node, namespace, crd, storageclass, ...) need
+no namespace; a cluster-scoped custom kind takes `--cluster-scoped` instead.
 The patch goes through the cluster's Ankra agent: no kubeconfig is needed and
 the same organisation permissions as the portal apply.
 
@@ -6194,6 +6317,8 @@ ankra cluster patch deployment web -n prod --type json \
 ankra cluster patch node worker-1 --patch '{"metadata":{"labels":{"tier":"gpu"}}}' --dry-run
 ankra cluster patch Certificate web-tls -n prod --group cert-manager.io --api-version v1 \
   --patch '{"spec":{"renewBefore":"720h"}}'
+ankra cluster patch ClusterPolicy require-labels --group kyverno.io --api-version v1 --cluster-scoped \
+  --type merge --patch '{"spec":{"validationFailureAction":"Audit"}}'
 ```
 
 ```bash
@@ -6205,11 +6330,13 @@ ankra cluster patch <kind> <name> [name...] [flags]
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--api-version` |   | API version for a kind outside the built-in set (e.g. v1, v1beta1) |
+| `--cluster-scoped` | `false` | Treat a kind outside the built-in set as cluster-scoped (e.g. ClusterIssuer, ClusterPolicy); no `--namespace` is needed |
 | `--dry-run` | `false` | Report what would change without changing anything |
 | `--group` |   | API group for a kind outside the built-in set (e.g. cert-manager.io) |
 | `-n`, `--namespace` |   | Kubernetes namespace (required for namespaced kinds) |
 | `-p`, `--patch` |   | The patch document, inline, as JSON or YAML |
 | `--patch-file` |   | Read the patch document from a JSON or YAML file instead of `--patch` |
+| `--resource` |   | Exact API resource plural when a custom kind has an irregular plural (e.g. backuprepositories) |
 | `--type` | `strategic` | Patch type: strategic (default), merge (RFC 7386) or json (RFC 6902) |
 | `-y`, `--yes` | `false` | Skip the confirmation prompt |
 
@@ -6500,11 +6627,17 @@ ankra cluster proxmox bridges [flags]
 
 ## ankra cluster proxmox control-plane
 
-Inspect and change the control plane configuration. Only 1 or 3 controllers
-are allowed (etcd needs an odd number of voting members for quorum).
+Inspect and change the control plane configuration. The controller count
+is 1 or 3 (1, 3 or 5 on Proxmox VE): etcd needs an odd number of voting
+members for quorum.
 
-The controller count can only be changed while the cluster is stopped, and
-applies the next time the cluster is started.
+Growing the control plane may happen live on a running cluster: the new
+controllers join it one at a time, keeping the Kubernetes API up. The platform
+can refuse a live change (an operation already in flight, controllers still
+reconciling, a configuration that pins the API to one controller), and says
+why. Reducing it is applied offline: stop the cluster (its state is
+preserved), change the count, then start it. On a stopped cluster either
+change applies at the next start.
 
 The instance type can also be changed on a running cluster that has three
 controllers: they are then resized one at a time, keeping the Kubernetes API
@@ -6529,7 +6662,17 @@ ankra cluster proxmox control-plane get <cluster_id|name> [flags]
 
 ## ankra cluster proxmox control-plane set-count
 
-Change the controller count (1 or 3)
+Change the number of controllers (1, 3 or 5; etcd needs an odd number of
+voting members for quorum).
+
+On a running cluster growing the count may happen live: the new controllers
+join one at a time and the command prints the operation to follow, unless the
+platform refuses the live change and says why. Reducing it is
+refused on a running cluster; stop the cluster (its state is preserved),
+change the count, then start it. On a stopped cluster the change applies at
+the next start.
+
+Run "control-plane get" to see whether a count change is possible right now.
 
 ```bash
 ankra cluster proxmox control-plane set-count <cluster_id|name> <count> [flags]
@@ -6910,11 +7053,17 @@ ankra cluster scaleway bastion status <cluster_id|name> [flags]
 
 ## ankra cluster scaleway control-plane
 
-Inspect and change the control plane configuration. Only 1 or 3 controllers
-are allowed (etcd needs an odd number of voting members for quorum).
+Inspect and change the control plane configuration. The controller count
+is 1 or 3 (1, 3 or 5 on Proxmox VE): etcd needs an odd number of voting
+members for quorum.
 
-The controller count can only be changed while the cluster is stopped, and
-applies the next time the cluster is started.
+Growing the control plane may happen live on a running cluster: the new
+controllers join it one at a time, keeping the Kubernetes API up. The platform
+can refuse a live change (an operation already in flight, controllers still
+reconciling, a configuration that pins the API to one controller), and says
+why. Reducing it is applied offline: stop the cluster (its state is
+preserved), change the count, then start it. On a stopped cluster either
+change applies at the next start.
 
 The instance type can also be changed on a running cluster that has three
 controllers: they are then resized one at a time, keeping the Kubernetes API
@@ -6939,7 +7088,17 @@ ankra cluster scaleway control-plane get <cluster_id|name> [flags]
 
 ## ankra cluster scaleway control-plane set-count
 
-Change the controller count (1 or 3)
+Change the number of controllers (1 or 3; etcd needs an odd number of
+voting members for quorum).
+
+On a running cluster growing the count may happen live: the new controllers
+join one at a time and the command prints the operation to follow, unless the
+platform refuses the live change and says why. Reducing it is
+refused on a running cluster; stop the cluster (its state is preserved),
+change the count, then start it. On a stopped cluster the change applies at
+the next start.
+
+Run "control-plane get" to see whether a count change is possible right now.
 
 ```bash
 ankra cluster scaleway control-plane set-count <cluster_id|name> <count> [flags]
@@ -7503,9 +7662,11 @@ ankra cluster stacks delete <name> [flags]
 
 ## ankra cluster stacks deploy-draft
 
-Deploy a draft stack - the state a clone, a stack-profile instantiation or 'ankra cluster draft' leaves behind - on the active cluster.
+Deploy the pending draft of a stack on the active cluster: a stack that exists only as a draft (what a clone or a stack-profile instantiation leaves behind), or the draft of edits 'ankra cluster draft -f' or the stack builder left on a stack that is already deployed.
 
 The draft's contents are deployed exactly as they are stored. Review them first with 'ankra cluster stacks list &lt;stack name&gt;', and edit them in the stack builder if the clone warned that something has to change before it can come up.
+
+For a stack that is already deployed only the members the draft changes are written; members it does not mention keep running untouched.
 
 ```bash
 ankra cluster stacks deploy-draft <stack name> [flags]
@@ -8068,11 +8229,17 @@ ankra cluster upcloud bastion status <cluster_id|name> [flags]
 
 ## ankra cluster upcloud control-plane
 
-Inspect and change the control plane configuration. Only 1 or 3 controllers
-are allowed (etcd needs an odd number of voting members for quorum).
+Inspect and change the control plane configuration. The controller count
+is 1 or 3 (1, 3 or 5 on Proxmox VE): etcd needs an odd number of voting
+members for quorum.
 
-The controller count can only be changed while the cluster is stopped, and
-applies the next time the cluster is started.
+Growing the control plane may happen live on a running cluster: the new
+controllers join it one at a time, keeping the Kubernetes API up. The platform
+can refuse a live change (an operation already in flight, controllers still
+reconciling, a configuration that pins the API to one controller), and says
+why. Reducing it is applied offline: stop the cluster (its state is
+preserved), change the count, then start it. On a stopped cluster either
+change applies at the next start.
 
 The instance type can also be changed on a running cluster that has three
 controllers: they are then resized one at a time, keeping the Kubernetes API
@@ -8097,7 +8264,17 @@ ankra cluster upcloud control-plane get <cluster_id|name> [flags]
 
 ## ankra cluster upcloud control-plane set-count
 
-Change the controller count (1 or 3)
+Change the number of controllers (1 or 3; etcd needs an odd number of
+voting members for quorum).
+
+On a running cluster growing the count may happen live: the new controllers
+join one at a time and the command prints the operation to follow, unless the
+platform refuses the live change and says why. Reducing it is
+refused on a running cluster; stop the cluster (its state is preserved),
+change the count, then start it. On a stopped cluster the change applies at
+the next start.
+
+Run "control-plane get" to see whether a count change is possible right now.
 
 ```bash
 ankra cluster upcloud control-plane set-count <cluster_id|name> <count> [flags]
