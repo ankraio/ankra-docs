@@ -20,8 +20,9 @@ concurrency:
   group: "${{ ankra.repository.provider }}:${{ ankra.repository.owner }}/${{ ankra.repository.name }}-${{ ankra.ref }}"
   cancel_in_progress: true
 workspace:
+  mode: "per_step"
+  handoff: "changes"
   size: "10Gi"
-  access: "rwo"
 defaults:
   timeout: "30m"
   network: "egress-https"
@@ -30,6 +31,35 @@ permissions:
 stages:
   - name: "checkout"
     kind: "checkout"
+  # Soak of per-step workspaces (ankra-ojcig.16): produce changes the tree,
+  # consume proves it restored the checkout plus produce's changes layer.
+  - name: "produce"
+    kind: "run"
+    image: "alpine:3.20.3"
+    needs:
+      - "checkout"
+    network: "none"
+    run: |
+      set -eu
+      mkdir -p soak-out
+      echo "written by produce" > soak-out/marker.txt
+      echo "appended by produce" >> README.md
+      rm -f STYLEGUIDE.md
+      ln -s ../README.md soak-out/readme-link
+  - name: "consume"
+    kind: "run"
+    image: "alpine:3.20.3"
+    needs:
+      - "produce"
+    network: "none"
+    run: |
+      set -eu
+      test -f package.json
+      grep -qx "written by produce" soak-out/marker.txt
+      tail -n 1 README.md | grep -qx "appended by produce"
+      test ! -e STYLEGUIDE.md
+      test "$(readlink soak-out/readme-link)" = "../README.md"
+      echo "per-step handoff verified"
   - name: "build"
     kind: "build"
     needs:
