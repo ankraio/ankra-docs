@@ -41,7 +41,7 @@ flowchart LR
     Ankra inspects the repository, detects the language and framework, and generates the artifacts it needs: a Dockerfile, Kubernetes manifests, and a CI/CD workflow.
   </Step>
   <Step title="Merge the pull request">
-    The pull request runs its own checks first: it builds the image, scans it and runs the security gate. When they pass, review and merge it. Merging activates the CI/CD pipeline in your repository. When they fail, Ankra fixes the pull request itself - see below.
+    The pull request runs its own checks first: it builds the image, scans it and runs the security gate. When they pass, review and merge it. Merging activates the CI/CD pipeline in your repository. When they fail, Ankra fixes the pull request itself, and the [PR shepherd](#the-pr-shepherd) keeps it moving until you merge it - or merges it for you, if you opt in.
   </Step>
   <Step title="Build and publish">
     CI builds and pushes the container image to the organisation's private Ankra registry. Ankra surfaces the image URL and scans the published image.
@@ -71,6 +71,38 @@ A failed build on the application's tracked branch dispatches the same agent. Wh
 | **Agent** | The agent commits the fix and opens a pull request for you to review |
 
 A failed run on someone's own pull request is never committed to: the pull request gets the explanation and a **Fix with Ankra** link on the run page instead.
+
+### The PR shepherd
+
+Ankra watches the pull requests it opens in your repository - the setup pull request, and any [portability pull request](/use-cases/vercel-to-ankra) a Launch Plan opens - and drives each one to a state you can merge. You see it as an **Ankra PR shepherd** check on the pull request's latest commit. Its summary says where the pull request stands - waiting, ready, needs a person, or merged - and why, and it is updated as things change.
+
+What the shepherd does on its own:
+
+- **Your CI never starts.** When no CI check has started on the pull request after about 20 minutes - no runner picks the job up, or the Ankra agent on your CI cluster cannot run pipeline steps - Ankra starts a full Ankra pipeline run on the pull request's head, builds it on Ankra's builders and runs a proof of the application, so the pull request still gets an answer.
+- **The pull request falls behind its base branch.** Ankra merges the base branch into its own branch with a merge commit - never a force-push or a rebase. It waits until the head has sat for about 6 hours, or does it straight away when merging is opted in (below).
+- **The pull request conflicts with its base branch.** Ankra resolves the conflict only when every file in the pull request is one Ankra owns: the Dockerfile, `.dockerignore`, the `.ankra/` directory and the generated build workflow. Your own files are kept exactly as the base branch has them, and a conflict that touches them is left for you.
+- **A check fails.** When the pull request only changes Ankra's own files, Ankra AI fixes it on the same branch, up to 3 times, then reports it for a person. A failure in a pull request that changes your files is reported, never "fixed".
+
+#### Merging
+
+Ankra merges a pull request only when all of these hold:
+
+- merging is opted in for the application (below);
+- every check on the head has finished green, and the proof of the application passed;
+- GitHub reports the pull request mergeable. Branch protection is always honoured, never worked around.
+
+Otherwise the check reports the pull request as ready for a person to merge. Ankra never merges a pull request whose own CI never ran - Ankra's pipeline run and proof make it ready for you, not merged - and it never merges a portability pull request, because that changes your code.
+
+After a merge, the application deploys as usual. When your CI could not build the pull request, Ankra builds the merge commit on its own builders so the deploy has an image.
+
+#### Opting in to merging
+
+Merging is off by default. Two settings decide it:
+
+- **The organisation's setting**, `auto_merge_setup_pull_requests` on `PUT /org/applications/settings` (or `ankra_application_settings` in [Terraform](/integrations/terraform)). Only organisation admins can change it.
+- **The application's own setting**, which overrides the organisation's: on for this application, off for this application, or follow the organisation (the default). Read it with `GET /org/applications/{application_id}/auto-merge-setup-pull-requests` and change it with `PUT` and a body of `{"enabled": true}`, `{"enabled": false}`, or `{"enabled": null}` to follow the organisation again. Only organisation admins can change it. The answer carries the application's own value, the organisation's, and the `effective` one Ankra acts on.
+
+An application set to on is merged even when the organisation's setting is off, and one set to off never is. If a setting cannot be read, Ankra does not merge.
 
 ---
 
