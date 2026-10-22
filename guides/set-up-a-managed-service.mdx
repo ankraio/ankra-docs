@@ -24,8 +24,8 @@ Before you start, check the following:
 
 - **The service cluster uses the native deployment engine.** Services generate their credentials in the cluster, which only the [native engine](/concepts/deployment-engines) supports. New clusters use it by default. A cluster that still deploys with ArgoCD can be [migrated](/concepts/deployment-engines#migrating-a-cluster-to-the-native-engine).
 - **The service cluster has a default StorageClass.** Every service keeps its data on persistent volumes from the cluster's default StorageClass.
-- **Every cluster involved has a data policy.** That means the cluster the service runs on and the clusters of the environments it connects to. See [Declare a data policy](#declare-a-data-policy).
 - **The application is deployed.** Setup offers only the environments an application is actually deployed to, each one a namespace on a cluster. All environments that one service connects must be in the same data boundary.
+- **To be connected for you, the application runs on the service cluster.** Setup also accepts environments on other clusters, but Ankra delivers the service's connection only to environments on the cluster the service runs on. See [How your application receives the connection](/guides/connect-to-a-managed-service#how-your-application-receives-the-connection).
 - **Your role allows it:**
 
 | Permission | Needed to |
@@ -41,7 +41,7 @@ The built-in `owner`, `admin` and `operator` roles hold all of them. See [Roles 
 
 ## Declare a data policy
 
-A data policy says where a cluster keeps data. In the new portal, open the cluster's **Settings** and find **Where managed services may keep data**.
+A data policy says where a cluster keeps data. It is optional: a cluster without one takes services in the default location, region and data boundary `unspecified`. Declare one when services must keep data within a boundary; see [Data policies](/concepts/managed-services#data-policies) for what it then restricts. In the new portal, open the cluster's **Settings** and find **Where managed services may keep data**.
 
 <Steps>
   <Step title="Open the policy">
@@ -73,8 +73,8 @@ In the new Ankra portal, open the application. Its **Overview** has a **Services
   <Step title="Set it up for the application">
     The setup page says which application and environment it is for, and **Connect** starts with that environment's namespaces chosen. Continue with the [four steps](#set-up-the-service) below. If the application is not deployed to that environment yet, Connect says so: deploy it there first.
   </Step>
-  <Step title="Go back to the application">
-    After you confirm, the service's page reads **Setup confirmed.** with **Use it in &lt;application&gt;**. That opens the application's **Settings › Secrets** for the environment, where you add the service's connection: see [Connect to a managed service](/guides/connect-to-a-managed-service#wire-it-into-an-application).
+  <Step title="Deploy the application">
+    After you confirm, the service's page follows its deployment. Once the service is running, deploy the application to that environment: its next deploy connects it to the service, and its containers read the connection as environment variables such as `DATABASE_URL`. See [How your application receives the connection](/guides/connect-to-a-managed-service#how-your-application-receives-the-connection).
   </Step>
 </Steps>
 
@@ -94,17 +94,17 @@ Every one of these opens the same setup page, with the application and environme
     From an application, **Add a service** or a quick choice brings you here: see [Start from your application](#start-from-your-application). From **Managed services**, open the **Catalogue** tab, choose the service and choose **Set up**. Catalogue cards also carry a **Set up** button.
   </Step>
   <Step title="Connect: choose the application environments">
-    Find an application and tick the environments that will use the service. Each environment is listed as a namespace on a cluster, together with that cluster's data policy. You can add environments from several applications, up to 100. When you came from an application, its environment is already ticked.
+    Find an application and tick the environments that will use the service. Each environment is listed as a namespace on a cluster, together with that cluster's data policy when it declares one. You can add environments from several applications, up to 100. When you came from an application, its environment is already ticked.
 
-    **Continue** stays disabled while the chosen environments keep data in different boundaries, or while your role cannot operate one of their clusters. An application that is not deployed yet offers no environments: deploy it first.
+    **Continue** stays disabled while the chosen environments keep data in different boundaries, including a cluster that declares a policy beside one that does not, or while your role cannot operate one of their clusters. An application that is not deployed yet offers no environments: deploy it first.
   </Step>
   <Step title="Place: choose who runs it and where">
     **Your infrastructure** is how every service runs today: Ankra installs it on one of your clusters, and your team operates it.
 
-    Choose the **Service cluster** from the clusters your environments run on. The page shows its region and data boundary. A cluster without a data policy offers **Declare a data policy**, and your choices are kept while you declare it. An environment that cannot use a service on the chosen cluster is listed with the reason before you continue. The usual reasons are a different data boundary, or a cluster that keeps its services local.
+    Choose the **Service cluster** from the clusters your environments run on. When the cluster declares a data policy, the page shows its region and data boundary. An environment that cannot use a service on the chosen cluster is listed with the reason before you continue. The usual reasons are a different data boundary, or a cluster that keeps its services local.
 
     <Tip>
-    A service's addresses resolve only inside its own cluster. Place it on the cluster your environments run on, unless you provide a network path between clusters yourself.
+    A service's addresses resolve only inside its own cluster, and Ankra connects only the environments on that cluster. Place it on the cluster your environments run on. An environment on another cluster needs a network path you provide and the values set by hand: see [Connect from another cluster](/guides/connect-to-a-managed-service#connect-from-another-cluster).
     </Tip>
   </Step>
   <Step title="Configure: name it and size it">
@@ -138,9 +138,10 @@ The form checks the characters as you type. The platform checks the rest when it
 
 Confirming asks Ankra to install the service. It does not verify that the service is ready or that your applications can reach it. After you confirm:
 
-1. The service appears in **My services** and on the **Services** card of each application it serves, and its page opens with **Setup confirmed. Deployment submitted; readiness is not yet verified.** When the setup was for one application, **Use it in &lt;application&gt;** takes you to that application's **Settings › Secrets**.
+1. The service appears in **My services** and on the **Services** card of each application it serves, and its page opens with **Setup confirmed. Deployment submitted; readiness is not yet verified.**
 2. For PostgreSQL, Ankra makes sure the cluster runs the CloudNativePG operator. It is installed once per cluster, as its own stack `cloudnative-pg` in the `cnpg-system` namespace. A cluster that already runs CloudNativePG, installed by Ankra or any other way, keeps its operator. The operator is shared by every PostgreSQL service on the cluster, so leave it in place while any of them run.
 3. Ankra deploys the service as a stack named after the service, into a namespace of the same name.
+4. Each environment on the service cluster receives the service's connection on the application's next deploy after the service is running. Once that environment is waiting for a deploy, the service's page offers **Deploy &lt;application&gt;**.
 
 The first PostgreSQL service on a cluster can take a few minutes longer while its operator comes up.
 
@@ -184,10 +185,9 @@ A service is listed when its reviewed plan names one of the application's namesp
 
 | What you see | Cause | Remedy |
 |--------------|-------|--------|
-| `<cluster> has no data policy yet.` | The service cluster or an environment's cluster has no data policy | [Declare one](#declare-a-data-policy), then continue |
 | `<application> is not deployed to <environment> yet.` | You came from an application whose environment has no deployment yet | Deploy the application to that environment, then add the service again |
 | `The environment this link names is not one of <application>'s environments now.` | The link names an environment the application no longer has | Choose an environment in **Connect** |
-| `These environments keep data in different boundaries` | The chosen environments sit in more than one data boundary | Set up one service per data boundary |
+| `These environments keep data in different boundaries` | The chosen environments sit in more than one data boundary, or one cluster declares a data policy and another does not | Set up one service per data boundary, or declare the same boundary on each cluster |
 | `Services it uses must run on <cluster> itself.` | That environment's cluster keeps its services local | Place the service on that cluster, or set up a separate service for it |
 | `Your role cannot operate ...` | You lack `clusters.operate` on that cluster | Remove the environment, or ask an administrator for access |
 | `The platform refused these choices.` | The service name breaks a [name rule](#service-name-rules), usually by being longer than 36 characters, or a setting is out of range | Shorten or change the name, check the settings, and review again |
@@ -205,7 +205,7 @@ A service is listed when its reviewed plan names one of the application's namesp
 
 <CardGroup cols={2}>
   <Card title="Connect to a managed service" icon="plug" href="/guides/connect-to-a-managed-service">
-    Find the addresses and credentials, and wire them into your application.
+    How your application receives the connection, and the variables it reads.
   </Card>
   <Card title="Delete a managed service" icon="trash" href="/guides/delete-a-managed-service">
     Remove a service and its data through a reviewed plan.
