@@ -184,7 +184,38 @@ Three limits apply today:
 
 - **SOPS-encrypted files are not covered.** Their committed bytes are ciphertext that cannot be reproduced from the render, so Ankra keys them on the embedded content fingerprint instead, and re-encrypts the file whenever its stored values change. A hand edit to an encrypted file sealed under the cluster's `.sops.yaml` is imported like any other Git change and then re-sealed by Ankra's next write - the values survive, the ciphertext does not, so expect one re-seal commit after rotating a sealed Secret by hand (see [Rotating by API](/integrations/prometheus#rotating-by-api) and [SOPS](/guides/sops)).
 - **`.sops.yaml` in the cluster directory has its own rule.** Ankra rewrites the creation rules it generates there on every export, but it no longer replaces the file: rules you add by hand are kept, and kept above Ankra's own. See [Merging the SOPS configuration file](#merging-the-sops-configuration-file) below.
-- **Preservation is silent.** Ankra logs `Preserving git content the platform did not write` on its side, but the sync status still reads in sync and no portal, CLI or API surface lists the preserved paths yet. While a file is preserved, a change made to it in Ankra does not reach Git - make the change in Git instead, which also brings Ankra's copy back in line.
+- **Deciding a preserved file takes the API for now.** While a file is preserved, a change made to it in Ankra does not reach Git, and the cluster reads **Diverged** for as long as the two versions differ. The portal and the GitOps status name those files, but neither the portal, the CLI nor the MCP tools can show both versions or decide them yet. See [Diverged files](#diverged-files) below.
+
+### Diverged files
+
+A file you edited in Git stays yours: no later platform write replaces it. When a later change in Ankra would change that file - an edit through the portal, the CLI, the API, Ankra AI or an MCP client, or a change Ankra makes to the cluster itself - Ankra keeps your bytes, records the file as **preserved** with both versions, and the cluster's GitOps status reads `diverged` instead of `synced`, with the files in `preserved_paths`. The portal shows **Diverged: Git Edits Kept** and lists them.
+
+- **Nothing is paused.** Unlike a [conflict](#when-git-and-the-platform-both-change), a preserved file does not hold the sync. Commits to it and to every other file keep being applied, including a new stack or manifest you register in a preserved cluster file. Only Ankra's own change to that file waits.
+- **Only a difference in substance counts.** YAML and JSON are compared as decoded documents, so comments, key order and quoting alone never make a cluster diverged. Your file is still kept byte for byte.
+- **It clears when the two versions agree again** - you make the same change in Git, or Ankra's side changes back - or when a person decides it. It does not clear by waiting.
+
+To decide, list the preserved files with both versions, then record a decision for each one. Both calls take an [API token](/api-reference/introduction) (a token scoped to MCP is refused), and the decision needs `clusters.write` on the cluster:
+
+```sh
+curl -H "Authorization: Bearer $ANKRA_TOKEN" \
+  "https://platform.ankra.app/api/v1/org/clusters/<cluster-id>/gitops/preserved-paths"
+```
+
+Each entry carries the `path`, Git's version as `head_content` (read at `head_commit_sha`), Ankra's version as `render_content`, the digest of each as `head_content_hash` and `render_content_hash`, when the difference was first seen as `detected_at`, and any `resolution_choice` already made. A file that may hold a secret is listed with `content_redacted` and no content; its digests are still exact.
+
+```sh
+curl -X POST -H "Authorization: Bearer $ANKRA_TOKEN" -H "Content-Type: application/json" \
+  "https://platform.ankra.app/api/v1/org/clusters/<cluster-id>/gitops/preserved-paths/resolve" \
+  -d '{"path": "<path>", "resolution": "git", "head_content_hash": "<head_content_hash>", "render_content_hash": "<render_content_hash>"}'
+```
+
+| `resolution` | What the next sync does |
+|--------------|-------------------------|
+| `git` | Imports Git's version into Ankra: wherever your file differs from Ankra's version, yours replaces it. It runs only once every preserved file on the cluster has a decision. The file stays yours, so a later change to it in Ankra is preserved again. |
+| `cluster` | Writes Ankra's version over your file in Git, without your comments or layout, and the file is Ankra's to write again. Refused for a SOPS-encrypted file, which would put plaintext over ciphertext. |
+| `none` | Withdraws a decision that has not run yet. |
+
+A decision is pinned to the two digests it names. If either version has changed by the time you send it, the call answers `409` and you list again; if one changes before the sync runs it, the decision is cleared. A `git` import Ankra refuses - one that would lower a chart version, for example - records why in `import_refused_reason` and clears the decision, so you decide again. A `git` import never removes a stack: a stack Ankra declares and your file leaves out stays until you remove it through the platform.
 
 ### Merging the SOPS configuration file
 
@@ -296,6 +327,7 @@ Navigate to your cluster → **Settings** → **GitOps** to see the current sync
 | Status | Description |
 |--------|-------------|
 | **Synced** | All configurations are up-to-date with the repository |
+| **Diverged: Git Edits Kept** | The last sync succeeded, but Ankra kept one or more files you edited in Git instead of writing its own, different version over them. Nothing is paused. See [Diverged files](#diverged-files) |
 | **Syncing** | A sync is currently in progress |
 | **Error** | The last sync failed. Check error details below |
 | **Not Configured** | GitOps is not yet connected to a repository |
@@ -415,7 +447,8 @@ If Ankra isn't syncing as expected:
 | A `prometheus_metrics` or `log_source` block you deleted keeps coming back | Removing the block is not a disconnect - the platform re-renders it. Disconnect the source in the cluster's **Settings** → **Integrations** |
 | A field you added to a data source block fails the sync | Only the fields in the [ImportCluster schema](/reference/importcluster#observability-sources-in-git) are accepted; the error names the offending key. Credential fields (`username`, `password`, `token`, `auth_scheme`) are always refused - reference a credential by `credential_name` |
 | A value you set in Git is reverted by a platform write | Check that `.ankra-owned.json` exists in the cluster directory - without it the overwrite boundary is off ([What Ankra Writes Back to Git](#what-ankra-writes-back-to-git)). Restore it from history, and report the reverting commit: its author, `ankra-platform[bot]` or `Ankra Reconciler`, tells support which write path produced it |
-| A change made in the portal never reaches Git | The file is hand-maintained - its bytes in Git are not what Ankra last wrote, so Ankra preserves it. Make the change in Git; Ankra syncs it in and the file becomes writable again |
+| A change made in the portal never reaches Git | The file is hand-maintained - its bytes in Git are not what Ankra last wrote, so Ankra preserves it and the cluster reads **Diverged**. Make the change in Git, or [decide the file](#diverged-files) |
+| A cluster reads **Diverged** and nobody changed anything in Ankra | Something changed Ankra's side of a file you edited in Git. [List the preserved files](#diverged-files): `render_content` is Ankra's version, and a `Sync cluster state from Ankra` or `ankra-platform[bot]` commit near `detected_at`, when that change wrote other files too, shows what else it changed. Decide the file, and report it to support if the same file comes back after a `git` import |
 
 <Tip>
 Use the Ankra WebUI to see sync status and any errors. The Operations page shows deployment history and helps identify issues.
