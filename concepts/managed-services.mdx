@@ -8,7 +8,7 @@ tag: "Closed Beta"
 **Closed beta.** Managed services are in closed beta. They are part of the new Ankra portal and are enabled per organisation on request. [Contact support](/platform/support) to have managed services turned on for your organisation.
 </Warning>
 
-A managed service is a backing service your applications use, such as a database, a cache or a queue, set up from a package Ankra publishes. You add one from the application that will use it, or from the catalogue. You choose the application environments that will use it, the cluster it runs on and its size. Ankra prepares a plan from those choices, and nothing is installed until you confirm it. Ankra then installs the service on your cluster and shows its progress, its health and how to connect to it under **Managed services** and on the **Services** card of each application it serves. When you no longer need a service, you delete it through a reviewed plan.
+A managed service is a backing service your applications use, such as a database, a cache or a queue, set up from a package Ankra publishes. You add one from the application that will use it, or from the catalogue. You choose the application environments that will use it, the cluster it runs on and its size. Ankra prepares a plan from those choices, and nothing is installed until you confirm it. Ankra then installs the service on your cluster and shows its progress, its health and how to connect to it under **Managed services** and on the **Services** card of each application it serves. An application on the same cluster receives the service's connection as environment variables on its next deploy. When you no longer need a service, you delete it through a reviewed plan.
 
 While managed services are in the pilot, Ankra charges nothing for them. Their running time and storage are recorded as [usage](/platform/usage).
 
@@ -39,7 +39,8 @@ Every service in the catalogue runs on **Your infrastructure**: Ankra installs i
 - **One stack, one namespace.** Each service is deployed as a stack named after the service, into a namespace of the same name. Several services can share a cluster, including several of the same kind.
 - **The service owns its stack.** Deleting the stack on its own is refused. To remove the service, [delete it](/guides/delete-a-managed-service): that removes the stack and then deletes the namespace with its data, after you review the plan.
 - **Credentials are generated in the cluster.** When a service is first installed, it generates its own password or keys and keeps them in a Kubernetes Secret in its namespace. Every later apply reuses them. Ankra never sees or stores the values, and deleting the service deletes them with its namespace.
-- **Cluster-internal only.** Nothing is exposed outside the cluster. Applications reach the service at fixed in-cluster addresses; see [Connect to a Managed Service](/guides/connect-to-a-managed-service).
+- **Cluster-internal only.** Nothing is exposed outside the cluster. Applications reach the service at fixed in-cluster addresses.
+- **Connections are delivered inside the cluster.** Each application environment the service was set up for, on the service's cluster, receives a `<service>-connection` Secret in its own namespace on its next deploy, copied in the cluster from the service's credentials Secret, and its workloads read it as environment variables such as `DATABASE_URL`. Ankra never sees the values. See [Connect to a Managed Service](/guides/connect-to-a-managed-service).
 - **Native deployment engine.** The credentials are generated with a Helm lookup against the live cluster, which only Ankra's [native deployment engine](/concepts/deployment-engines) evaluates. On an ArgoCD cluster every sync would generate new credentials under running applications, so Ankra only places services on native-engine clusters.
 
 ## Health and readiness
@@ -83,7 +84,7 @@ The credentials never leave the cluster, and Ankra keeps no log of the check. A 
 
 | Readiness | Meaning |
 |-----------|---------|
-| `verifying` | No check has passed yet. None has run, or the latest failed or could not run while the service was still deploying, or within 10 minutes after its deployment finished. |
+| `verifying` | No check has passed yet. None has run, or the latest failed or could not run while the service was still deploying, or within the grace window after its deployment finished: 10 minutes for PostgreSQL and OpenSearch, 5 for the other services. |
 | `ready` | A check passed within the last 15 minutes. |
 | `degraded` | A check ran and failed after the service had its chance to start. Once a check has passed, a failure reads degraded straight away. |
 | `stale` | Readiness cannot be established right now. The check could not run - no agent, the cluster unavailable, or the pod refused or not finishing - or the last result is more than 15 minutes old. A check that could not run never reads as a failure, and the last result stands until it expires. |
@@ -93,18 +94,22 @@ Readiness is reported on the service in the API, as `readiness` and `readiness_c
 
 ## Data policies
 
-Every cluster a service touches needs a **data policy**: the region the cluster keeps data in and its data boundary. That covers the cluster the service runs on and the clusters of the application environments it connects to. Your organisation declares the policy in the cluster's settings. Ankra records who declared it and does not verify the location.
+A **data policy** declares the region a cluster keeps data in and its data boundary. It is optional: you can set up services without one. Declare a policy when services must keep data within a boundary. Your organisation declares it in the cluster's settings. Ankra records who declared it and does not verify the location.
 
-The policy decides where a service may run:
+A cluster without a declared policy reads region and data boundary `unspecified`. That boundary is shared by every cluster without a policy, and cannot be declared by hand.
 
-- One service connects only environments within one data boundary. Environments in two boundaries need two services.
+Once a cluster declares a policy, it decides where a service may run:
+
+- One service connects only environments within one data boundary. Environments in two boundaries need two services. A cluster that declares a policy and one that does not are in different boundaries, so one service cannot serve both.
 - A cluster can declare that services bound to it must run on that cluster only.
+
+A plan records the policy it was reviewed against. A review prepared before a cluster declares or changes its policy needs a new review.
 
 ## Limits and good to know
 
 - **A finished deployment is not yet a ready service.** A PostgreSQL service can report its deployment finished 30 to 100 seconds before the database accepts connections; any service's readiness reads `verifying` until a check passes.
 - **Readiness checks need a pod they can start.** The check pods pull their images from Docker Hub (`postgres:16-alpine` for PostgreSQL, `valkey/valkey`, `natsio/nats-box` and `curlimages/curl` for the others); a cluster that cannot pull the image in time cannot run the check, and readiness then reads `stale`. The PostgreSQL check pod sets no security context, so a namespace that enforces the `restricted` Pod Security Standard refuses it. The other check pods run as non-root with every capability dropped and a read-only root filesystem. On a cluster whose DNS domain is not `cluster.local` the checks fail, as the published addresses do.
-- **Credentials are not delivered to your applications.** Ankra shows where the credentials are, and applications in other namespaces must be given the values by you. Ankra will deliver credentials into application environments in a later release.
+- **Connections are delivered within one cluster, on a deploy.** An application environment receives a service's connection on its next deploy after the service is running, not when the service is set up. An application on another cluster than the service is not connected for you: give it the values yourself, as in [Connect from another cluster](/guides/connect-to-a-managed-service#connect-from-another-cluster).
 - **No backups.** Ankra does not back these services up yet. Do not keep data you cannot recreate in them without a backup of your own.
 - **Settings are fixed after setup.** Changing, upgrading or recovering a service from **Managed services** is not available yet. You can [delete a service](/guides/delete-a-managed-service) and set it up again, which starts it with new credentials and none of its data.
 - **NATS runs a single server.** The `nats` package has no clustered option yet.

@@ -1,6 +1,6 @@
 ---
 title: Connect to a Managed Service
-description: Find a managed service's in-cluster address and credentials Secret, read a value with the Ankra CLI, and wire it into an application running in another namespace.
+description: How an application on the service's cluster receives its connection as environment variables on its next deploy, the variable names for each service, and how to connect an application on another cluster by hand.
 tag: "Closed Beta"
 ---
 
@@ -10,7 +10,57 @@ import { CliVersion } from "/snippets/cli-version.jsx";
 **Closed beta.** Connecting to a service is part of [Managed services](/concepts/managed-services), which is in closed beta and enabled per organisation on request. [Contact support](/platform/support) to have it turned on for your organisation.
 </Warning>
 
-A managed service answers only inside its own cluster, at fixed addresses in its namespace. It keeps the credentials it generated in a Secret in that namespace. Ankra does not deliver those credentials into your application environments yet, so you give your application the values it needs yourself.
+A managed service answers only inside its own cluster, at fixed addresses in its namespace. It keeps the credentials it generated in a Secret in that namespace, and a workload can read a Secret only in its own namespace.
+
+Ankra connects your application for you when it runs on the same cluster as the service: the application's next deploy copies the connection into the application's namespace, and its containers read it as environment variables such as `DATABASE_URL`. The copy happens inside the cluster, and Ankra never sees the values. An application on another cluster is not connected for you: give it the values yourself, as in [Connect from another cluster](#connect-from-another-cluster).
+
+---
+
+## How your application receives the connection
+
+Every application environment a service was set up for, on the service's cluster, receives the service's connection on the application's next deploy:
+
+1. The deploy adds a Secret named `<service>-connection` to the application's namespace, with `<service>` standing for the service name. Ankra copies its values inside the cluster from the service's own credentials Secret.
+2. Every container and init container of the application's Deployments, StatefulSets and DaemonSets reads that Secret through `envFrom`, so each of its keys becomes an environment variable. The names are listed under [Variable names](#variable-names).
+
+Nothing reaches the application before it deploys again. Set the service up, wait for it to finish deploying, then deploy the application to that environment. A deploy that runs before the service has generated its credentials adds no Secret, and the application still starts, because the reference to the Secret is optional. Deploy again once the service is running.
+
+The service's page shows each environment's state under **Use it in &lt;application&gt;**:
+
+| In the portal | `connection_delivery.state` | Meaning |
+|---------------|-----------------------------|---------|
+| **Connected** | `delivered` | The `<service>-connection` Secret is in the application's namespace. |
+| **Connects on its next deploy** | `pending` | Not delivered yet: the service is still deploying, or the application has not deployed since the service was set up. **Deploy &lt;environment&gt;** opens the application to deploy it. |
+| **Connect by hand** | `unsupported` | Ankra does not connect this environment, usually because it runs on another cluster. The reason is shown. See [Connect from another cluster](#connect-from-another-cluster). |
+| **Not known** | `unknown` | Ankra could not read the delivery. It does not mean the connection is missing. |
+
+The same state is in the API, on each of `consumers` in [Get a managed service instance](/api-reference/services/get-a-managed-service-instance), as `connection_delivery` with the `secret_name`, the `variables` the application receives and a `reason`.
+
+A workload annotated `ankra.io/deploy-overrides: "none"` keeps the manifest you committed, so it gets no `envFrom` reference. The `<service>-connection` Secret is still written to its namespace: reference it from the workload yourself. Jobs and CronJobs are not given the reference either.
+
+When a service is [deleted](/guides/delete-a-managed-service), the application's next deploy removes its `<service>-connection` Secret and the reference to it.
+
+<Warning>
+**Do not also set a delivered variable as an environment secret.** If the application already has, say, `DATABASE_URL` as an [environment secret](/reference/cli/application#ankra-application-env-secrets), the container is given that variable from two places and Kubernetes keeps only one of the values, which may be the old copy. Once the environment reads **Connected**, delete the copy with `ankra application env-secrets delete <application-id> DATABASE_URL` and apply the secrets again with `ankra application env-secrets apply <application-id>`.
+</Warning>
+
+## Variable names
+
+Each service delivers the variables its kind of client conventionally reads:
+
+| Service | Variables | Values |
+|---------|-----------|--------|
+| PostgreSQL | `DATABASE_URL`, `JDBC_DATABASE_URL`, `PGHOST`, `PGPORT`, `PGDATABASE`, `PGUSER`, `PGPASSWORD` | `DATABASE_URL` and `JDBC_DATABASE_URL` carry the user and password, and name the read-write address. `PGHOST` is `postgresql-rw.<service>.svc.cluster.local`. |
+| Valkey | `REDIS_URL`, `REDIS_HOST`, `REDIS_PORT`, `REDIS_USERNAME`, `REDIS_PASSWORD` | `REDIS_URL` is a complete `redis://` URL for the primary. |
+| NATS | `NATS_URL`, `NATS_USER`, `NATS_PASSWORD` | `NATS_URL` carries no credentials. |
+| OpenSearch | `OPENSEARCH_URL`, `OPENSEARCH_USERNAME`, `OPENSEARCH_PASSWORD`, `OPENSEARCH_CA_CERT` | `OPENSEARCH_CA_CERT` is the PEM text of the service's CA certificate, not a file path. |
+| SeaweedFS (S3) | `S3_ENDPOINT`, `AWS_ENDPOINT_URL_S3`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_REGION`, `S3_FORCE_PATH_STYLE` | Both endpoint variables are `http://seaweedfs-all-in-one.<service>.svc.cluster.local:8333`. The key pair is the admin pair. `AWS_REGION` is `us-east-1` and `S3_FORCE_PATH_STYLE` is `true`. |
+| VictoriaLogs | `VICTORIA_LOGS_URL`, `VICTORIA_LOGS_USERNAME`, `VICTORIA_LOGS_PASSWORD` | |
+| VictoriaMetrics | `VICTORIA_METRICS_URL`, `VICTORIA_METRICS_USERNAME`, `VICTORIA_METRICS_PASSWORD` | |
+
+Every service also delivers each variable under its own prefix: the service name in capitals, with hyphens as underscores. A PostgreSQL service named `orders-db` delivers `ORDERS_DB_DATABASE_URL`, `ORDERS_DB_PGHOST` and so on.
+
+The names without a prefix go to one service of each kind per application environment: the one set up first. An application with one database reads `DATABASE_URL`. When a second PostgreSQL service is added for the same environment, `DATABASE_URL` keeps pointing at the first, and the second is read through its prefixed names only. Valkey and any other Redis-compatible service count as one kind, as they share `REDIS_URL`.
 
 ---
 
@@ -39,13 +89,13 @@ The same details are on the service in the API, as `connection` on [Get a manage
 | VictoriaLogs | `http://victoria-logs.<service>.svc.cluster.local:9428` | `victoria-logs-credentials` | `url`, `username`, `password` |
 | VictoriaMetrics | `http://victoria-metrics.<service>.svc.cluster.local:8428` | `victoria-metrics-credentials` | `url`, `username`, `password` |
 
-The addresses resolve from any namespace on the service's cluster, and not from outside it. On a cluster with a custom DNS domain, use the shorter `<name>.<service>.svc` form, for example `valkey.<service>.svc:6379`.
+The addresses resolve from any namespace on the service's cluster, and not from outside it. On a cluster with a custom DNS domain, use the shorter `<name>.<service>.svc` form, for example `valkey.<service>.svc:6379`. The delivered variables use the full `svc.cluster.local` form, so on such a cluster their addresses do not resolve and automatic delivery does not work yet: give the application the short-form values yourself, as in [Connect from another cluster](#connect-from-another-cluster), under variable names the delivery does not use.
 
 ## Read a value
 
 <CliVersion since="0.21.1" command="cluster get secrets --reveal" />
 
-Select the service's cluster, then read the Secret by name with `--reveal`, using the Secret and namespace from the table:
+You need a value only to connect something Ankra does not connect for you. Select the service's cluster, then read the Secret by name with `--reveal`, using the Secret and namespace from the table:
 
 ```bash
 ankra cluster select <cluster>
@@ -54,10 +104,10 @@ ankra cluster get secrets <secret> -n <service> --reveal -o json
 
 Without `--reveal`, every value comes back as a `sha256:` digest. `--reveal` needs the `kubernetes.secrets_reveal` permission on the cluster, which the operator, admin and owner roles carry, and every reveal is recorded in the organisation's audit log. Values under `data` stay base64-encoded.
 
-For a PostgreSQL service named `orders-db`, this prints its connection URI:
+For a PostgreSQL service named `orders-db`, this prints its password:
 
 ```bash
-ankra cluster get secrets postgresql-app -n orders-db --reveal -o json | jq -r '.data["fqdn-uri"]' | base64 -d
+ankra cluster get secrets postgresql-app -n orders-db --reveal -o json | jq -r '.data["password"]' | base64 -d
 ```
 
 A key with a dot in its name, such as OpenSearch's `ca.crt`, works the same way:
@@ -66,38 +116,32 @@ A key with a dot in its name, such as OpenSearch's `ca.crt`, works the same way:
 ankra cluster get secrets opensearch-credentials -n search --reveal -o json | jq -r '.data["ca.crt"]' | base64 -d > opensearch-ca.crt
 ```
 
-## Wire it into an application
+## Connect from another cluster
 
-A workload can only read Secrets in its own namespace, so an application in another namespace cannot use the service's Secret directly. Give the application the values it needs as environment secrets, from the portal or the CLI.
+An application on another cluster than the service is not connected for you, and the service's addresses do not resolve there. Reaching the service from another cluster needs a network path between the clusters that you provide, and the address that path exposes.
 
-### From the portal
-
-The service's page has a **Use it** section with a **Use it in &lt;application&gt;** button for each application it was set up for. The section names the address and the keys of the Secret to add, and each button opens that application's **Settings › Secrets**. [Read each value](#read-a-value), add it there as an environment secret, then apply the secrets to the environment. Saving a value and applying it to the workloads are separate steps.
-
-### With the CLI
-
-Store the value as an environment secret of the application, then apply the stored secrets to its deployments. For an application using the `orders-db` PostgreSQL service:
+Give the application the values as [environment secrets](/reference/cli/application#ankra-application-env-secrets), from the service page's **Use it in &lt;application&gt;** button, which opens the application's **Settings › Secrets**, or from the CLI. Piping the value keeps it out of your shell history:
 
 ```bash
 ankra cluster get secrets postgresql-app -n orders-db --reveal -o json \
-  | jq -r '.data["fqdn-uri"]' | base64 -d \
-  | ankra application env-secrets set <application-id> DATABASE_URL
+  | jq -r '.data["password"]' | base64 -d \
+  | ankra application env-secrets set <application-id> PGPASSWORD
 ankra application env-secrets apply <application-id>
 ```
 
-Piping the value keeps it out of your shell history. Storing a value does not reach a running workload: `env-secrets apply` seals the stored values into the application's deployments and rolls them.
+Storing a value does not reach a running workload: `env-secrets apply` seals the stored values into the application's deployments and rolls them. The URL keys, such as PostgreSQL's `fqdn-uri`, name the in-cluster address, so build the URL your application uses from your own network path's address rather than copying them.
 
-For a workload that is not an Ankra application, keep the Secret in Git and encrypt it with [SOPS](/guides/sops). Ankra will deliver credentials into application environments in a later release.
+For a workload that is not an Ankra application, keep the Secret in Git and encrypt it with [SOPS](/guides/sops).
 
 A value you copy this way is yours: [deleting the service](/guides/delete-a-managed-service) does not remove it from the application. Delete it yourself once the application no longer uses the service.
 
 ## Notes per service
 
-- **PostgreSQL.** From another namespace, use `fqdn-uri`, or `fqdn-jdbc-uri` for JDBC. The operator also writes `uri`, `jdbc-uri` and `host` keys, but they name the short host `postgresql-rw`, which resolves only inside the service's own namespace. You connect as `app`, the owner of the database `app`, and superuser access is off. The read-only address reaches replicas only, so it answers only when `instances` is above 1. The image includes the pgvector and pgaudit extensions.
-- **Valkey.** Authenticate as the `default` user with `password`; `url` is a complete `redis://` URL. Write to the primary address. The read-replicas address serves reads from every pod.
-- **NATS.** Connect as `app`. `url` carries no credentials, so pass `username` and `password` separately. JetStream is on; memory-backed streams are disabled.
-- **OpenSearch.** Use HTTPS with basic auth as `admin`, the only user. The certificate is signed by a private CA generated in the cluster: have your client trust `ca.crt`.
-- **SeaweedFS.** Use the S3 API over plain HTTP inside the cluster, with path-style addressing. The admin key pair can read, write, list and administer buckets. The read-only key pair can only read.
+- **PostgreSQL.** `DATABASE_URL` and `JDBC_DATABASE_URL` carry the operator's `fqdn-uri` and `fqdn-jdbc-uri`. The operator also writes `uri`, `jdbc-uri` and `host` keys, but they name the short host `postgresql-rw`, which resolves only inside the service's own namespace. You connect as `app`, the owner of the database `app`, and superuser access is off. The read-only address reaches replicas only, so it answers only when `instances` is above 1, and no variable names it. The image includes the pgvector and pgaudit extensions.
+- **Valkey.** Authenticate as the `default` user with the password; `REDIS_URL` is a complete `redis://` URL. Write to the primary address. The read-replicas address serves reads from every pod.
+- **NATS.** Connect as `app`. `NATS_URL` carries no credentials, so pass `NATS_USER` and `NATS_PASSWORD` separately. JetStream is on; memory-backed streams are disabled.
+- **OpenSearch.** Use HTTPS with basic auth as `admin`, the only user. The certificate is signed by a private CA generated in the cluster: have your client trust `OPENSEARCH_CA_CERT`, which holds that CA's certificate.
+- **SeaweedFS.** Use the S3 API over plain HTTP inside the cluster, with path-style addressing. The admin key pair, the one delivered, can read, write, list and administer buckets. The read-only key pair can only read, and is in the service's Secret only.
 - **VictoriaLogs.** Send logs over HTTP with basic auth, as JSON lines, Loki push, OpenTelemetry or Elasticsearch bulk, and query them with LogsQL. No log collector is installed, so ship logs with your own agent.
 - **VictoriaMetrics.** Push metrics with basic auth using Prometheus `remote_write`, OpenTelemetry, InfluxDB or another supported protocol, and query with PromQL or MetricsQL on the Prometheus HTTP API. It scrapes nothing itself, so push from vmagent, a Prometheus agent or an OpenTelemetry Collector.
 

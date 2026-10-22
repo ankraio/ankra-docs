@@ -3,6 +3,8 @@ title: Vercel to Ankra
 description: Move a Vercel project, usually Next.js, onto your own Kubernetes cluster - start from the Vercel project page with the Ankra Chrome extension, review one Launch Plan that says per service what stays at Vercel and what Ankra runs open source, approve once, and keep API routes, middleware, cron jobs and environment variables working.
 ---
 
+import { CliVersion } from "/snippets/cli-version.jsx";
+
 Vercel builds and serves your project from its own platform. Ankra builds the same GitHub repository and runs it on your own cluster, behind HTTPS, with every change built and scanned first.
 
 You keep pushing to the same repository. Ankra builds every commit.
@@ -18,7 +20,7 @@ You keep pushing to the same repository. Ankra builds every commit.
 | `vercel.json` crons | One Kubernetes CronJob per cron entry. It calls the same route on the same UTC schedule, with the `vercel-cron/1.0` user agent and `Authorization: Bearer <CRON_SECRET>` when the app has a `CRON_SECRET` secret, so a route that checks it keeps working |
 | `vercel.json` rewrites, redirects and headers | Listed in the setup pull request. Vercel applied them at its edge; on Ankra your own server serves every request, so move them into `next.config` (`rewrites()`, `redirects()`, `headers()`) before you move traffic |
 | Project environment variables | The application's environment secrets. Bring them over with the extension (below) or enter them in Ankra |
-| Preview deployments | [Preview demos](/concepts/applications#preview-demos) on a preview address |
+| Preview deployments | [Preview demos](/concepts/applications#preview-demos) on a preview address. The proof run of the setup pull request is compared with Vercel's preview of the same commit ([below](#compared-with-your-vercel-preview)) |
 | Your domain | Your own domain with its certificate on the cluster ([Applications](/concepts/applications)) |
 
 The setup pull request contains the Dockerfile, the Kubernetes manifests, the CronJobs, the deploy options (`.ankra/ankra.yaml`) and the build pipeline (`.ankra/pipeline.yaml`). Ankra's AI writes it when you add the repository. You review and merge it.
@@ -36,7 +38,72 @@ Ankra reads which Vercel storage the code uses and puts one card per service in 
 | Vercel Blob (`@vercel/blob`) | Keep it | A portability pull request moves uploads to the S3 API, backed by object storage in your cluster |
 | Edge Config (`@vercel/edge-config`) | Keep it | A portability pull request reads the same keys from environment variables, delivered as a ConfigMap |
 
-A portability pull request is opt-in. It adds the open-protocol path beside Vercel's, and the app keeps using Vercel until you set the new variables. Data is not copied for you.
+A portability pull request is opt-in. It adds the open-protocol path beside Vercel's, and the app keeps using Vercel until you set the new variables. Data is copied only when you start a [data migration](#moving-your-data-closed-beta).
+
+---
+
+## Moving your data (Closed Beta)
+
+<Warning>
+**Closed beta.** Data migration is in closed beta. Where Ankra cannot yet carry out a step for a service, the run stops before anything at the vendor changes, or rolls back, and gives the reason. [Contact support](/platform/support) before relying on it for a production move.
+</Warning>
+
+When you choose to move a service into your cluster, the Launch Plan carries a data migration for it. The migration plans the move in steps, and one plan-level approval covers all of them.
+
+Every service moves before one cutover:
+
+1. Ankra copies the data in while your app keeps running on Vercel.
+2. It makes each vendor source read-only.
+3. It copies what changed since the first copy and checks counts and checksums.
+4. It switches your app's variables to the services in your cluster in one change.
+
+The vendor sources then stay read-only for a rollback window, seven days by default. In that window, one command puts the previous variables back and makes the sources writable again. Ankra never deletes data at the vendor. When the window closes, you get a checklist of what to remove there yourself.
+
+| Service | How the data moves |
+|---|---|
+| Postgres | Ankra reads the source with the connection string you stored, to choose how it moves. It dumps the read-only source into one of your [backup vaults](/guides/backups) and restores the dump into CloudNativePG, then compares row counts and sequences |
+| S3-compatible object storage | Every object is copied with its checksum checked, then copied again right before the cutover |
+
+<CliVersion since="0.46.0" command="application data-migration" />
+
+```bash
+# follow the runs, and roll one back inside its window
+ankra application data-migration list <application>
+ankra application data-migration get <application> <run-id>
+ankra application data-migration rollback <application> <run-id>
+```
+
+Vercel Blob is not S3-compatible, so its data is not copied yet.
+
+---
+
+## Compared with your Vercel preview
+
+Before you merge the setup pull request, Ankra's proof run deploys it to an ankra.cc preview and requests its health routes and its home page. For a Vercel project, the proof then requests the same routes on the preview Vercel deployed of the same commit, and compares the two answers.
+
+The comparison looks at the shape of each answer, not its exact bytes:
+
+- the status code
+- the content type
+- for JSON, the keys two levels deep
+- for an HTML page, its title and which of `header`, `nav`, `main` and `footer` it has
+- the size, which counts as different only when one answer is more than twice the other
+
+Build ids, nonces and timestamps differ between any two deployments, so they are not compared.
+
+Each route gets one of three results on the proof card in the pull request:
+
+| Result | Meaning |
+|---|---|
+| **match** | Both previews answered with the same shape |
+| **differs** | Both answered, differently. The card names the first difference, for example a different status or page title |
+| **unknown** | The routes were not compared. The card says why, for example: Vercel deployed no preview of the commit, the preview was still building, the preview is protected, or a request timed out |
+
+An unknown route is never counted as a match.
+
+A difference is a warning. It does not fail the proof and does not block the pull request. A Vercel preview can differ for good reasons, such as variables set only for previews. Check each difference before you move your domain.
+
+Ankra finds the Vercel preview from the deployment status Vercel's GitHub integration posts on the commit, so the GitHub App Ankra uses must be able to read the repository's deployments. Ankra sends no credential to the Vercel preview. If the preview is protected by Vercel Authentication, its routes show as unknown.
 
 ---
 
@@ -72,7 +139,7 @@ The **Ankra — Chat & Deploy** extension for Chrome puts an **Ask Ankra** butto
 </Steps>
 
 <Note>
-Test on the Ankra address before you move your domain. Check the cron routes, the rewrites you moved into `next.config`, and every variable your app reads.
+Test on the Ankra address before you move your domain. Check every route the proof card shows as differing or unknown, the cron routes, the rewrites you moved into `next.config`, and every variable your app reads.
 </Note>
 
 ---
