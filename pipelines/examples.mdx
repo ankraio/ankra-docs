@@ -1,0 +1,509 @@
+---
+title: Pipeline examples
+sidebarTitle: Examples
+description: Complete, copy-ready .ankra/pipeline.yaml files for real shapes of repository - a Go service that builds once and promotes on merge, a pnpm and Go monorepo that tests only what changed, a Python API with a Postgres sidecar and a version matrix, a tests-only repository with no application, a nightly suite with a manual dispatch, and a tagged release.
+---
+
+import { CliVersion } from "/snippets/cli-version.jsx";
+
+Each example is a complete file. Copy one, change the names, and validate it before you commit:
+
+<CliVersion since="0.27.0" />
+
+```bash
+ankra pipeline validate .ankra/pipeline.yaml
+```
+
+For one stage per language, see [Starter pipelines](/guides/ankra-ci-starter-pipelines). For every key, see the [pipeline.yaml reference](/guides/pipeline-reference).
+
+## A Go service that builds once
+
+Tests run on every pull request and push. The image is built, scanned and gated on both, and published only on push. A merge publishes the image the pull request already tested instead of rebuilding it.
+
+```mermaid
+flowchart LR
+    checkout --> test[test<br/>go test, cached]
+    test --> build --> scan --> gate{gate}
+    gate -->|push| publish[[publish<br/>promote_from: pull_request]]
+```
+
+```yaml
+apiVersion: ankra.io/v1
+kind: Pipeline
+metadata:
+  name: "orders-api"
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+    fork_policy: "read_only"
+concurrency:
+  group: "${{ ankra.repository.provider }}:${{ ankra.repository.owner }}/${{ ankra.repository.name }}-${{ ankra.ref }}"
+  cancel_in_progress: true
+workspace:
+  size: "10Gi"
+  access: "rwo"
+defaults:
+  image: "golang:1.26"
+  timeout: "30m"
+  network: "egress-https"
+permissions:
+  contents: "read"
+stages:
+  - name: "checkout"
+    kind: "checkout"
+  - name: "test"
+    kind: "run"
+    needs: ["checkout"]
+    env:
+      GOMODCACHE: "/workspace/.ankra-go/mod"
+      GOCACHE: "/workspace/.ankra-go/cache"
+    run: "go run gotest.tools/gotestsum@v1.13.0 --jsonfile test-results.json -- ./... -race"
+    cache:
+      - key: "go-${{ hashFiles('go.mod', 'go.sum') }}"
+        paths: [".ankra-go/mod", ".ankra-go/cache"]
+        restore_keys: ["go-"]
+        fallback: "none"
+    artifacts:
+      - name: "test-results"
+        paths: ["test-results.json"]
+    test_results:
+      - format: "go-test"
+        path: "test-results.json"
+  - name: "build"
+    kind: "build"
+    needs: ["test"]
+    build:
+      dockerfile: "Dockerfile"
+      provenance: true
+      sbom: true
+  - name: "scan"
+    kind: "scan"
+    needs: ["build"]
+    scan:
+      scanners: ["semgrep", "checkov", "trivy"]
+      fail_on:
+        semgrep: "error"
+  - name: "gate"
+    kind: "gate"
+    needs: ["scan"]
+    gate:
+      require_stages: ["scan"]
+  - name: "publish"
+    kind: "publish"
+    needs: ["gate"]
+    when:
+      events: ["push"]
+    publish:
+      promote_from: "pull_request"
+```
+
+- `test_results` turns the JSON report into the run's **Tests** section, with flaky tests detected from retries. The report is also listed under `artifacts`, which is what uploads it.
+- `promote_from` is a protected section, so it takes effect once an administrator approves the definition on `main`.
+
+## A monorepo that tests only what changed
+
+A pnpm web app and a Go API in one repository. Each test stage follows its own dependency graph, so a change to a shared Go library runs the API tests and skips the web tests. A change to a shared pnpm package does the opposite.
+
+```mermaid
+flowchart LR
+    checkout --> tw[test-web<br/>affected: pnpm @acme/web]
+    checkout --> ta[test-api<br/>affected: go ./...]
+    tw --> bw[build-web] --> sw[scan-web] --> gw{gate-web} --> pw[[publish-web]]
+    ta --> ba[build-api] --> sa[scan-api] --> ga{gate-api} --> pa[[publish-api]]
+```
+
+```yaml
+apiVersion: ankra.io/v1
+kind: Pipeline
+metadata:
+  name: "shop"
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+concurrency:
+  group: "${{ ankra.repository.provider }}:${{ ankra.repository.owner }}/${{ ankra.repository.name }}-${{ ankra.ref }}"
+  cancel_in_progress: true
+defaults:
+  timeout: "30m"
+  network: "egress-https"
+path_sets:
+  pipeline: [".ankra/**"]
+  web: ["web/**", "packages/**", "pnpm-lock.yaml", { set: pipeline }]
+  api: ["api/**", "libs/**", "go.work", { set: pipeline }]
+stages:
+  - name: "checkout"
+    kind: "checkout"
+
+  - name: "test-web"
+    kind: "run"
+    image: "node:24"
+    needs: ["checkout"]
+    affected:
+      pnpm: ["@acme/web"]
+    env:
+      PNPM_STORE_DIR: "/workspace/.ankra-node-cache-web/pnpm-store"
+    run: |
+      corepack enable
+      pnpm install --frozen-lockfile --store-dir "$PNPM_STORE_DIR"
+      pnpm --filter @acme/web... test
+    cache:
+      - key: "pnpm-${{ hashFiles('pnpm-lock.yaml') }}"
+        paths: [".ankra-node-cache-web/pnpm-store"]
+        restore_keys: ["pnpm-"]
+        fallback: "none"
+
+  - name: "test-api"
+    kind: "run"
+    image: "golang:1.26"
+    needs: ["checkout"]
+    working_directory: "api"
+    affected:
+      go: ["./..."]
+    paths: ["migrations/**"]
+    env:
+      GOMODCACHE: "/workspace/.ankra-go-api/mod"
+      GOCACHE: "/workspace/.ankra-go-api/cache"
+    run: "go test ./..."
+    cache:
+      - key: "go-${{ hashFiles('api/go.mod', 'api/go.sum') }}"
+        paths: [".ankra-go-api/mod", ".ankra-go-api/cache"]
+        restore_keys: ["go-"]
+        fallback: "none"
+
+  - name: "build-web"
+    kind: "build"
+    needs: ["test-web"]
+    when:
+      paths: [{ set: web }]
+    build:
+      context: "web"
+      dockerfile: "web/Dockerfile"
+  - name: "scan-web"
+    kind: "scan"
+    needs: ["build-web"]
+    working_directory: "web"
+    scan:
+      scanners: ["semgrep", "trivy"]
+  - name: "gate-web"
+    kind: "gate"
+    needs: ["scan-web"]
+    gate:
+      require_stages: ["scan-web"]
+  - name: "publish-web"
+    kind: "publish"
+    needs: ["gate-web"]
+    when:
+      events: ["push"]
+
+  - name: "build-api"
+    kind: "build"
+    needs: ["test-api"]
+    when:
+      paths: [{ set: api }]
+    build:
+      context: "api"
+      dockerfile: "api/Dockerfile"
+  - name: "scan-api"
+    kind: "scan"
+    needs: ["build-api"]
+    working_directory: "api"
+    scan:
+      scanners: ["semgrep", "trivy"]
+  - name: "gate-api"
+    kind: "gate"
+    needs: ["scan-api"]
+    gate:
+      require_stages: ["scan-api"]
+  - name: "publish-api"
+    kind: "publish"
+    needs: ["gate-api"]
+    when:
+      events: ["push"]
+```
+
+- The `-web` and `-api` suffixes tie each build to its component, so `publish-web` can only ever re-tag the web image. The application has to record components named `web` and `api` (in [`.ankra/ankra.yaml`](/reference/application-descriptor#components), or from its analysis). Otherwise `ankra pipeline validate` warns that both builds would publish to one repository.
+- `when.paths` on each build skips that component's whole chain (build, scan, gate, publish) when nothing of it changed. `affected:` on the test stages goes deeper than paths: it follows imports.
+- Check the plan before you push: `ankra pipeline validate --changed-file libs/auth/token.go`.
+
+## A Python API with Postgres and a version matrix
+
+The tests run against a real Postgres sidecar on three Python versions, side by side.
+
+```mermaid
+flowchart LR
+    checkout --> t1[test 3.11] & t2[test 3.12] & t3[test 3.13]
+    pg[(postgres:16 sidecar)] -.-> t1 & t2 & t3
+```
+
+```yaml
+apiVersion: ankra.io/v1
+kind: Pipeline
+metadata:
+  name: "billing-api"
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+concurrency:
+  group: "${{ ankra.repository.provider }}:${{ ankra.repository.owner }}/${{ ankra.repository.name }}-${{ ankra.ref }}"
+  cancel_in_progress: true
+defaults:
+  timeout: "20m"
+  network: "egress-https"
+services:
+  postgres:
+    image: "postgres:16"
+    env:
+      POSTGRES_PASSWORD: "test"
+      POSTGRES_DB: "billing"
+    ports: ["5432"]
+    ready:
+      tcp: "5432"
+stages:
+  - name: "checkout"
+    kind: "checkout"
+  - name: "test"
+    kind: "run"
+    image: "python:${{ matrix.python }}-slim"
+    needs: ["checkout"]
+    matrix:
+      python: ["3.11", "3.12", "3.13"]
+    services: ["postgres"]
+    network: "services"
+    env:
+      DATABASE_URL: "postgresql://postgres:test@postgres:5432/billing"
+      PIP_CACHE_DIR: "/workspace/.ankra-python-cache/pip"
+    run: |
+      pip install -r requirements.txt
+      pytest --junitxml=reports/junit.xml
+    cache:
+      - key: "pip-${{ matrix.python }}-${{ hashFiles('requirements.txt') }}"
+        paths: [".ankra-python-cache/pip"]
+        restore_keys: ["pip-${{ matrix.python }}-"]
+        fallback: "none"
+    artifacts:
+      - name: "junit"
+        paths: ["reports/junit.xml"]
+    test_results:
+      - format: "pytest"
+        path: "reports/junit.xml"
+    resources:
+      cpu: "2"
+      memory: "2Gi"
+```
+
+- `network: services` lets the stage reach its sidecar by name. It is a protected tier, so it applies after an administrator approves the definition.
+- The matrix value is part of the cache key, so each Python version keeps its own wheels.
+
+## A repository with no application
+
+A library, a docs site or a platform repository needs tests, not a deploy. Connect it as a bare repository, and the pipeline needs no `build` or `publish` at all.
+
+```bash
+ankra pipeline repositories connect --provider github --owner my-org --name my-library \
+  --credential <git-credential> --default-branch main
+```
+
+```yaml
+apiVersion: ankra.io/v1
+kind: Pipeline
+metadata:
+  name: "my-library"
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+concurrency:
+  group: "${{ ankra.repository.provider }}:${{ ankra.repository.owner }}/${{ ankra.repository.name }}-${{ ankra.ref }}"
+  cancel_in_progress: true
+defaults:
+  image: "rust:1.85"
+  timeout: "30m"
+  network: "egress-https"
+stages:
+  - name: "checkout"
+    kind: "checkout"
+  - name: "lint"
+    kind: "run"
+    needs: ["checkout"]
+    run: |
+      rustup component add clippy rustfmt
+      cargo fmt --check
+      cargo clippy --locked -- -D warnings
+  - name: "test"
+    kind: "run"
+    needs: ["checkout"]
+    env:
+      CARGO_HOME: "/workspace/.ankra-cargo/home"
+      CARGO_TARGET_DIR: "/workspace/.ankra-cargo/target"
+    run: "cargo test --locked"
+    cache:
+      - key: "cargo-registry-${{ hashFiles('Cargo.toml', 'Cargo.lock') }}"
+        paths: [".ankra-cargo/home/registry", ".ankra-cargo/home/git"]
+        restore_keys: ["cargo-registry-"]
+        fallback: "none"
+      - key: "cargo-target-${{ hashFiles('Cargo.toml', 'Cargo.lock') }}"
+        paths: [".ankra-cargo/target"]
+        restore_keys: ["cargo-target-"]
+        fallback: "none"
+  - name: "audit"
+    kind: "scan"
+    needs: ["checkout"]
+    scan:
+      scanners: ["semgrep", "trivy"]
+```
+
+`lint` and `test` start together. A `scan` without a `build` scans the source tree.
+
+## A nightly suite and a manual dispatch
+
+Pull requests run the fast tests. A schedule runs the slow end-to-end suite every weekday night, and anyone can dispatch it by hand against a chosen environment.
+
+```mermaid
+flowchart LR
+    subgraph PR["Every pull request"]
+        c1[checkout] --> unit
+    end
+    subgraph Nightly["Weekday nights, or manual"]
+        c2[checkout] --> e2e[e2e against inputs.environment]
+    end
+```
+
+```yaml
+apiVersion: ankra.io/v1
+kind: Pipeline
+metadata:
+  name: "storefront"
+on:
+  pull_request:
+    branches: ["main"]
+  schedule:
+    - cron: "0 2 * * 1-5"
+      branch: "main"
+      stages: ["checkout", "e2e"]
+  manual:
+    inputs:
+      - name: "environment"
+        type: "choice"
+        enum: ["staging", "production"]
+        default: "staging"
+defaults:
+  image: "mcr.microsoft.com/playwright:v1.56.0-noble"
+  network: "egress-https"
+stages:
+  - name: "checkout"
+    kind: "checkout"
+  - name: "unit"
+    kind: "run"
+    needs: ["checkout"]
+    when:
+      events: ["pull_request"]
+    run: "npm ci && npm test"
+  - name: "e2e"
+    kind: "run"
+    needs: ["checkout"]
+    when:
+      events: ["schedule", "manual"]
+    timeout: "90m"
+    env:
+      TARGET_ENVIRONMENT: "${{ inputs.environment }}"
+    run: |
+      npm ci
+      npx playwright test --reporter=json > reports/playwright.json
+    artifacts:
+      - name: "playwright"
+        paths: ["reports/playwright.json"]
+    test_results:
+      - format: "playwright"
+        path: "reports/playwright.json"
+on_failure:
+  - name: "collect-traces"
+    kind: "run"
+    run: "tar czf reports/traces.tgz test-results || true"
+    artifacts:
+      - name: "traces"
+        paths: ["reports/traces.tgz"]
+```
+
+Dispatch it by hand:
+
+```bash
+ankra pipeline run --input environment=production --wait
+```
+
+- `stages` on the schedule names exactly what the nightly runs, `checkout` included. A re-run of a red nightly repeats the nightly, not the whole pipeline.
+- Cron fields are numeric only (`1-5`, not `MON-FRI`).
+- `on_failure` stages run after the main stages, and only when one of them failed. Here it keeps the Playwright traces of a red night. A failed run already raises `pipeline_run_failed`, which your [notification rules](/guides/notification-routing) send to Slack or Teams.
+
+## A tagged release
+
+A push of a `v*` tag builds, scans and gates, then publishes with a moving `latest` tag and a numbered version tag beside the usual `sha-` tag.
+
+```yaml
+apiVersion: ankra.io/v1
+kind: Pipeline
+metadata:
+  name: "agent"
+on:
+  push:
+    branches: ["main"]
+  tag:
+    patterns: ["v*"]
+defaults:
+  timeout: "30m"
+  network: "egress-https"
+stages:
+  - name: "checkout"
+    kind: "checkout"
+  - name: "build"
+    kind: "build"
+    needs: ["checkout"]
+    build:
+      dockerfile: "Dockerfile"
+      provenance: true
+      sbom: true
+  - name: "scan"
+    kind: "scan"
+    needs: ["build"]
+    scan:
+      scanners: ["trivy", "semgrep"]
+  - name: "gate"
+    kind: "gate"
+    needs: ["scan"]
+    gate:
+      require_stages: ["scan"]
+  - name: "publish"
+    kind: "publish"
+    needs: ["gate"]
+    when:
+      events: ["tag"]
+    publish:
+      tags: ["latest", "1.${{ ankra.run.number }}.0"]
+```
+
+Each extra tag is a manifest re-tag of the one gate-approved digest. No layer is pushed again. A registry that refuses a tag, for example through a tag-immutability rule, fails the step and names the tag, so a `latest` that did not move never reads as published.
+
+## A matrix across operating systems and architectures
+
+`runs_on` places one leg per architecture on matching nodes of your CI cluster.
+
+```yaml
+- name: "test"
+  kind: "run"
+  image: "golang:1.26"
+  needs: ["checkout"]
+  matrix:
+    arch: ["amd64", "arm64"]
+  runs_on:
+    node_selector:
+      kubernetes.io/arch: "${{ matrix.arch }}"
+  run: "go test ./..."
+```
+
+`runs_on` is a protected section, and the organisation's pipeline policy decides which node selectors a pipeline may ask for. Your CI cluster needs nodes of each architecture.
