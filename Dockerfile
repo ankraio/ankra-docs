@@ -35,10 +35,13 @@ COPY . .
 
 # The export also carries non-page repository files and Mintlify's own
 # local-viewer launchers. Only web assets are kept: an allowlist of extensions
-# (the same set serve.mjs answers for) and no dotfiles, so a file added to the
-# repository later is not served by default. Text assets are then stored
-# gzipped (the OpenAPI pages are ~1 MB of HTML each and compress about 7:1);
-# serve.mjs sends them with Content-Encoding: gzip.
+# (the set serve.mjs answers for; JSON only from the Next.js build under
+# _next/) and no dotfiles, so a file added to the repository later is not
+# served by default. URLs `mint dev` resolves without a page (docs.json
+# redirects, directories without a page) go to /redirects.json beside the site
+# for serve.mjs to answer; see scripts/export-redirects.mjs. Text assets are
+# then stored gzipped (the OpenAPI pages are ~1 MB of HTML each and compress
+# about 7:1); serve.mjs sends them with Content-Encoding: gzip.
 RUN pnpm exec mint export --output /tmp/docs.zip \
  && mkdir /site \
  && unzip -q /tmp/docs.zip -d /site \
@@ -47,14 +50,14 @@ RUN pnpm exec mint export --output /tmp/docs.zip \
  && rm -rf serve.js scripts \
  && find . -mindepth 1 -name '.*' -prune -exec rm -rf {} + \
  && find . -type f ! \( -name '*.html' -o -name '*.css' -o -name '*.js' \
-      -o -name '*.json' -o -name '*.txt' -o -name '*.xml' -o -name '*.svg' \
+      -o -path './_next/*.json' -o -name '*.txt' -o -name '*.xml' -o -name '*.svg' \
       -o -name '*.png' -o -name '*.jpg' -o -name '*.jpeg' -o -name '*.gif' \
       -o -name '*.webp' -o -name '*.ico' -o -name '*.woff' -o -name '*.woff2' \
       -o -name '*.ttf' -o -name '*.mp4' -o -name '*.webm' \
       -o -name '*.webmanifest' \) -delete \
- && rm -f package.json \
  && find . -mindepth 1 -type d -empty -delete \
  && test -f index.html \
+ && node /app/scripts/export-redirects.mjs /app/docs.json /site /redirects.json \
  && find . -type f \( -name '*.html' -o -name '*.js' -o -name '*.css' \
       -o -name '*.json' -o -name '*.svg' -o -name '*.txt' -o -name '*.xml' \) \
       -exec gzip -9 {} +
@@ -78,6 +81,7 @@ RUN rm -rf /usr/local/lib/node_modules /opt/yarn-* \
 # Root-owned and read-only to the server; it runs as the image's `node` user
 # (uid 1000, the uid the application's Deployment runs as).
 COPY --from=export /site ./site
+COPY --from=export /redirects.json ./redirects.json
 COPY scripts/serve.mjs ./serve.mjs
 
 USER node
@@ -85,6 +89,6 @@ USER node
 EXPOSE 3000
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-  CMD node -e "fetch('http://127.0.0.1:3000/').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+  CMD node -e "fetch('http://127.0.0.1:'+(process.env.PORT||3000)+'/').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
 
 CMD ["node", "serve.mjs"]

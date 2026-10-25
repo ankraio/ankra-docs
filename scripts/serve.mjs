@@ -4,13 +4,17 @@
 // the image gate to scan. Text assets are gzipped at build time and stored only
 // as `<file>.gz`; they are sent as-is to clients that accept gzip and inflated
 // on the fly for the rest.
-import { createReadStream, realpathSync, statSync } from 'node:fs';
+//
+// The export has no pages for docs.json `redirects`, so they are answered here
+// from the list the build extracts, with a 307 as `mint dev` answers them.
+import { createReadStream, readFileSync, realpathSync, statSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { extname, join, resolve, sep } from 'node:path';
 import { createGunzip } from 'node:zlib';
 
 const ROOT = realpathSync(resolve(process.env.SITE_DIR || '/app/site'));
 const PORT = Number(process.env.PORT || 3000);
+const REDIRECTS = loadRedirects(process.env.REDIRECTS_FILE || '/app/redirects.json');
 
 const TYPES = {
   '.html': 'text/html; charset=utf-8',
@@ -34,6 +38,75 @@ const TYPES = {
   '.webmanifest': 'application/manifest+json',
 };
 
+function trimSlash(path) {
+  return path.length > 1 ? path.replace(/\/+$/, '') : path;
+}
+
+// docs.json redirects use exact sources plus Next.js-style `:name*` segments
+// (zero or more path segments, substituted into the destination). A colon not
+// followed by a name, as in some generated API slugs, is literal.
+function loadRedirects(file) {
+  const exact = new Map();
+  const patterns = [];
+  let list = [];
+  try {
+    list = JSON.parse(readFileSync(file, 'utf8'));
+  } catch {
+    return { exact, patterns };
+  }
+  const param = /(\/?:[A-Za-z_]\w*\*)/;
+  for (const { source, destination } of list) {
+    if (typeof source !== 'string' || typeof destination !== 'string') continue;
+    if (!param.test(source)) {
+      exact.set(trimSlash(source), destination);
+      continue;
+    }
+    const names = [];
+    const pattern = source
+      .split(param)
+      .map((part) => {
+        const name = /^(\/?):([A-Za-z_]\w*)\*$/.exec(part);
+        if (!name) return part.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        names.push(name[2]);
+        return name[1] ? '(?:/(.*))?' : '(.*)';
+      })
+      .join('');
+    patterns.push({ re: new RegExp(`^${pattern}$`), names, destination });
+  }
+  return { exact, patterns };
+}
+
+function redirectFor(pathname) {
+  const path = trimSlash(pathname);
+  const hit = REDIRECTS.exact.get(path);
+  if (hit) return hit;
+  for (const { re, names, destination } of REDIRECTS.patterns) {
+    const match = re.exec(path);
+    if (!match) continue;
+    return names.reduce(
+      (dest, name, i) =>
+        dest
+          .replace(`/:${name}*`, () => (match[i + 1] ? `/${match[i + 1]}` : ''))
+          .replace(`:${name}*`, () => match[i + 1] || ''),
+      destination,
+    );
+  }
+  return undefined;
+}
+
+// True unless the client gave gzip (or `*`) no weight; `gzip;q=0` refuses it.
+function acceptsGzip(header = '') {
+  let weight;
+  for (const entry of header.toLowerCase().split(',')) {
+    const [coding, ...params] = entry.trim().split(';');
+    if (coding !== 'gzip' && coding !== '*') continue;
+    const q = params.map((p) => p.trim()).find((p) => p.startsWith('q='));
+    const value = q ? Number(q.slice(2)) : 1;
+    if (coding === 'gzip' || weight === undefined) weight = value;
+  }
+  return weight > 0;
+}
+
 // A regular file whose real path (symlinks resolved) is still inside ROOT.
 function isFile(path) {
   try {
@@ -50,7 +123,9 @@ function isFile(path) {
 function lookup(urlPath) {
   const base = resolve(ROOT, `.${urlPath}`);
   if (base !== ROOT && !base.startsWith(ROOT + sep)) return undefined;
-  for (const candidate of [base, join(base, 'index.html'), `${base}.html`]) {
+  // The last candidate is a docs page named index (`a/index.mdx` is exported
+  // as `a/index/index.html`), which `mint dev` serves at /a.
+  for (const candidate of [base, join(base, 'index.html'), `${base}.html`, join(base, 'index', 'index.html')]) {
     const type = TYPES[extname(candidate).toLowerCase()];
     if (!type) continue;
     if (isFile(candidate)) return { path: candidate, gzipped: false, type };
@@ -65,12 +140,22 @@ const server = createServer((req, res) => {
     return;
   }
 
-  let file;
+  let pathname;
   try {
-    file = lookup(decodeURIComponent(new URL(req.url, 'http://docs').pathname));
+    pathname = decodeURIComponent(new URL(req.url, 'http://docs').pathname);
   } catch {
-    file = undefined;
+    res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' }).end('404 Not Found');
+    return;
   }
+
+  // Redirects win over files and drop the query string, as `mint dev` does.
+  const location = redirectFor(pathname);
+  if (location) {
+    res.writeHead(307, { Location: encodeURI(location), 'Cache-Control': 'no-cache' }).end();
+    return;
+  }
+
+  const file = lookup(pathname);
   if (!file) {
     res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' }).end('404 Not Found');
     return;
@@ -84,7 +169,7 @@ const server = createServer((req, res) => {
       ? 'public, max-age=31536000, immutable'
       : 'no-cache',
   };
-  const sendGzip = file.gzipped && /\bgzip\b/.test(req.headers['accept-encoding'] || '');
+  const sendGzip = file.gzipped && acceptsGzip(req.headers['accept-encoding']);
   if (file.gzipped) headers.Vary = 'Accept-Encoding';
   if (sendGzip) headers['Content-Encoding'] = 'gzip';
   res.writeHead(200, headers);
@@ -107,5 +192,9 @@ server.listen(PORT, () => console.log(`serving ${ROOT} on :${PORT}`));
 // Node as PID 1 ignores SIGTERM by default; exit promptly so a rollout does
 // not wait out the termination grace period.
 for (const signal of ['SIGTERM', 'SIGINT']) {
-  process.on(signal, () => server.close(() => process.exit(0)));
+  process.on(signal, () => {
+    server.close(() => process.exit(0));
+    // close() waits for open keep-alive sockets; drop the idle ones now.
+    server.closeIdleConnections();
+  });
 }
