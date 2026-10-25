@@ -48,15 +48,15 @@ function trimSlash(path) {
 function loadRedirects(file) {
   const exact = new Map();
   const patterns = [];
-  let list = [];
-  try {
-    list = JSON.parse(readFileSync(file, 'utf8'));
-  } catch {
-    return { exact, patterns };
-  }
+  // The build always writes this manifest. Missing or malformed data must not
+  // turn documented links into a healthy server's silent 404s.
+  const list = JSON.parse(readFileSync(file, 'utf8'));
+  if (!Array.isArray(list)) throw new Error('Redirect manifest must be an array');
   const param = /(\/?:[A-Za-z_]\w*\*)/;
   for (const { source, destination } of list) {
-    if (typeof source !== 'string' || typeof destination !== 'string') continue;
+    if (typeof source !== 'string' || typeof destination !== 'string' || !source || !destination) {
+      throw new Error('Redirect manifest contains an invalid entry');
+    }
     if (!param.test(source)) {
       exact.set(trimSlash(source), destination);
       continue;
@@ -187,13 +187,25 @@ const server = createServer((req, res) => {
   }
 });
 
-server.listen(PORT, () => console.log(`serving ${ROOT} on :${PORT}`));
+server.listen(PORT, () => console.log(`serving ${ROOT} on :${server.address().port}`));
 
 // Node as PID 1 ignores SIGTERM by default; exit promptly so a rollout does
 // not wait out the termination grace period.
+let stopping = false;
 for (const signal of ['SIGTERM', 'SIGINT']) {
   process.on(signal, () => {
-    server.close(() => process.exit(0));
+    if (stopping) return;
+    stopping = true;
+    // Allow active transfers to drain, then bound termination even if a client
+    // stops reading. Idle connections still close immediately.
+    const deadline = setTimeout(() => {
+      server.closeAllConnections();
+      process.exit(0);
+    }, 10_000).unref();
+    server.close(() => {
+      clearTimeout(deadline);
+      process.exit(0);
+    });
     // close() waits for open keep-alive sockets; drop the idle ones now.
     server.closeIdleConnections();
   });
