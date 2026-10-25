@@ -48,12 +48,10 @@ function trimSlash(path) {
 function loadRedirects(file) {
   const exact = new Map();
   const patterns = [];
-  let list = [];
-  try {
-    list = JSON.parse(readFileSync(file, 'utf8'));
-  } catch {
-    return { exact, patterns };
-  }
+  // The build always writes this file, so a missing or unreadable one is a
+  // broken image: refuse to start rather than serve every redirect as a 404.
+  const list = JSON.parse(readFileSync(file, 'utf8'));
+  if (!Array.isArray(list)) throw new Error(`${file}: expected a JSON array of redirects`);
   const param = /(\/?:[A-Za-z_]\w*\*)/;
   for (const { source, destination } of list) {
     if (typeof source !== 'string' || typeof destination !== 'string') continue;
@@ -194,7 +192,9 @@ server.listen(PORT, () => console.log(`serving ${ROOT} on :${PORT}`));
 for (const signal of ['SIGTERM', 'SIGINT']) {
   process.on(signal, () => {
     server.close(() => process.exit(0));
-    // close() waits for open keep-alive sockets; drop the idle ones now.
+    // close() waits for open keep-alive sockets; drop the idle ones now and
+    // give in-flight responses 10 s before exiting regardless.
     server.closeIdleConnections();
+    setTimeout(() => process.exit(0), 10_000).unref();
   });
 }
