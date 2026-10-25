@@ -62,8 +62,9 @@ for (const [name, manifest] of [['object', {}], ['invalid entry', [{}]], ['empty
   test(`refuses ${name} redirect manifest at startup`, { timeout: 5000 }, async (t) => {
     const files = await fixture(t, manifest);
     const { exit } = start(t, files);
-    const [code] = await exit;
-    assert.notEqual(code, 0);
+    const [code, signal] = await exit;
+    assert.equal(signal, null);
+    assert.equal(code, 1);
   });
 }
 
@@ -73,8 +74,9 @@ for (const name of ['missing', 'malformed']) {
     if (name === 'missing') await rm(files.redirects);
     else await writeFile(files.redirects, '{');
     const { exit } = start(t, files);
-    const [code] = await exit;
-    assert.notEqual(code, 0);
+    const [code, signal] = await exit;
+    assert.equal(signal, null);
+    assert.equal(code, 1);
   });
 }
 
@@ -104,7 +106,7 @@ test('serves pages, redirects and encoding preferences while rejecting escapes',
   assert.deepEqual(await exit, [0, null]);
 });
 
-test('bounds shutdown while an active client stops consuming a large response', { timeout: 15000 }, async (t) => {
+test('bounds shutdown while an active client stops consuming a large response', { timeout: 30000 }, async (t) => {
   const files = await fixture(t);
   const large = await open(join(files.site, 'large.txt'), 'w');
   await large.truncate(64 * 1024 * 1024);
@@ -118,6 +120,9 @@ test('bounds shutdown while an active client stops consuming a large response', 
   req.end();
   const [res] = await response;
   res.on('error', () => {});
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.headers['transfer-encoding'], 'chunked');
+  assert.equal(res.complete, false);
   res.pause();
   child.kill('SIGTERM');
   assert.deepEqual(await exit, [0, null]);

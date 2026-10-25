@@ -51,11 +51,11 @@ function loadRedirects(file) {
   // The build always writes this manifest. Missing or malformed data must not
   // turn documented links into a healthy server's silent 404s.
   const list = JSON.parse(readFileSync(file, 'utf8'));
-  if (!Array.isArray(list)) throw new Error('Redirect manifest must be an array');
+  if (!Array.isArray(list)) throw new Error(`${file}: redirect manifest must be an array`);
   const param = /(\/?:[A-Za-z_]\w*\*)/;
   for (const { source, destination } of list) {
     if (typeof source !== 'string' || typeof destination !== 'string' || !source || !destination) {
-      throw new Error('Redirect manifest contains an invalid entry');
+      throw new Error(`${file}: redirect manifest contains an invalid entry`);
     }
     if (!param.test(source)) {
       exact.set(trimSlash(source), destination);
