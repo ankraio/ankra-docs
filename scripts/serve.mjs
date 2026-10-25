@@ -79,16 +79,17 @@ function loadRedirects(file) {
 function redirectFor(pathname) {
   const path = trimSlash(pathname);
   const hit = REDIRECTS.exact.get(path);
-  if (hit) return hit;
+  if (hit) return encodeURI(hit);
   for (const { re, names, destination } of REDIRECTS.patterns) {
     const match = re.exec(path);
     if (!match) continue;
     return names.reduce(
-      (dest, name, i) =>
-        dest
-          .replace(`/:${name}*`, () => (match[i + 1] ? `/${match[i + 1]}` : ''))
-          .replace(`:${name}*`, () => match[i + 1] || ''),
-      destination,
+      (dest, name, i) => {
+        // Captured path data must not become a destination query or fragment.
+        const capture = (match[i + 1] || '').split('/').map(encodeURIComponent).join('/');
+        return dest.replace(`/:${name}*`, () => (capture ? `/${capture}` : '')).replace(`:${name}*`, () => capture);
+      },
+      encodeURI(destination),
     );
   }
   return undefined;
@@ -151,7 +152,7 @@ const server = createServer((req, res) => {
   // Redirects win over files and drop the query string, as `mint dev` does.
   const location = redirectFor(pathname);
   if (location) {
-    res.writeHead(307, { Location: encodeURI(location), 'Cache-Control': 'no-cache' }).end();
+    res.writeHead(307, { Location: location, 'Cache-Control': 'no-cache' }).end();
     return;
   }
 

@@ -94,7 +94,7 @@ test('serves pages, redirects and encoding preferences while rejecting escapes',
   assert.equal(zipped.headers['content-encoding'], 'gzip');
   assert.equal(gunzipSync(zipped.body).toString(), 'fixture page');
   assert.equal((await get(port, '/', {}, 'HEAD')).body.length, 0);
-  for (const path of ['/escape.html', '/%2e%2e%2fprivate.html', '/%00', '/missing']) {
+  for (const path of ['/escape.html', '/%2e%2e%2fprivate.html', '/%00', '/missing', '/old/a%0D%0Ab']) {
     assert.equal((await get(port, path)).status, 404, path);
   }
   assert.equal((await get(port, '/', {}, 'POST')).status, 405);
@@ -102,6 +102,9 @@ test('serves pages, redirects and encoding preferences while rejecting escapes',
   assert.equal(redirect.status, 307);
   assert.equal(redirect.headers.location, '/new/a/b');
   assert.equal((await get(port, '/old')).headers.location, '/new');
+  for (const path of ['a%3Fb', 'a%23b', 'a%25b', 'a%20b', 'a/b%3Fc']) {
+    assert.equal((await get(port, `/old/${path}`)).headers.location, `/new/${path}`);
+  }
   child.kill('SIGTERM');
   assert.deepEqual(await exit, [0, null]);
 });
