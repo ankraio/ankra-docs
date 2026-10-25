@@ -31,6 +31,7 @@ const TYPES = {
   '.ttf': 'font/ttf',
   '.mp4': 'video/mp4',
   '.webm': 'video/webm',
+  '.webmanifest': 'application/manifest+json',
 };
 
 function isFile(path) {
@@ -42,12 +43,14 @@ function isFile(path) {
 }
 
 // Maps a URL path to { path, gzipped, type }: the file itself, its index.html,
-// or `<path>.html`, each either plain or as the build's `.gz` copy.
+// or `<path>.html`, each either plain or as the build's `.gz` copy. Only the
+// extensions in TYPES are served, so nothing but web assets ever leaves.
 function lookup(urlPath) {
   const base = resolve(ROOT, `.${urlPath}`);
   if (base !== ROOT && !base.startsWith(ROOT + sep)) return undefined;
   for (const candidate of [base, join(base, 'index.html'), `${base}.html`]) {
-    const type = TYPES[extname(candidate).toLowerCase()] || 'application/octet-stream';
+    const type = TYPES[extname(candidate).toLowerCase()];
+    if (!type) continue;
     if (isFile(candidate)) return { path: candidate, gzipped: false, type };
     if (isFile(`${candidate}.gz`)) return { path: `${candidate}.gz`, gzipped: true, type };
   }

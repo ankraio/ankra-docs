@@ -33,17 +33,27 @@ FROM deps AS export
 # Docs content: .mdx pages, docs.json navigation, images, logos, styles.
 COPY . .
 
-# The export also carries every non-page repository file and Mintlify's own
-# local-viewer launchers; drop them so only the site is served. Text assets are
-# then stored gzipped (the OpenAPI pages are ~1 MB of HTML each and compress
-# about 7:1); serve.mjs sends them with Content-Encoding: gzip.
+# The export also carries non-page repository files and Mintlify's own
+# local-viewer launchers. Only web assets are kept: an allowlist of extensions
+# (the same set serve.mjs answers for) and no dotfiles, so a file added to the
+# repository later is not served by default. Text assets are then stored
+# gzipped (the OpenAPI pages are ~1 MB of HTML each and compress about 7:1);
+# serve.mjs sends them with Content-Encoding: gzip.
 RUN pnpm exec mint export --output /tmp/docs.zip \
  && mkdir /site \
  && unzip -q /tmp/docs.zip -d /site \
  && rm /tmp/docs.zip \
  && cd /site \
- && rm -rf serve.js 'Start Docs.bat' 'Start Docs.command' Dockerfile \
-      .dockerignore .gitignore .vale .vale.ini scripts \
+ && rm -rf serve.js scripts \
+ && find . -mindepth 1 -name '.*' -prune -exec rm -rf {} + \
+ && find . -type f ! \( -name '*.html' -o -name '*.css' -o -name '*.js' \
+      -o -name '*.json' -o -name '*.txt' -o -name '*.xml' -o -name '*.svg' \
+      -o -name '*.png' -o -name '*.jpg' -o -name '*.jpeg' -o -name '*.gif' \
+      -o -name '*.webp' -o -name '*.ico' -o -name '*.woff' -o -name '*.woff2' \
+      -o -name '*.ttf' -o -name '*.mp4' -o -name '*.webm' \
+      -o -name '*.webmanifest' \) -delete \
+ && rm -f package.json \
+ && find . -mindepth 1 -type d -empty -delete \
  && test -f index.html \
  && find . -type f \( -name '*.html' -o -name '*.js' -o -name '*.css' \
       -o -name '*.json' -o -name '*.svg' -o -name '*.txt' -o -name '*.xml' \) \
