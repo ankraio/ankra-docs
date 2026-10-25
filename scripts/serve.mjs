@@ -48,13 +48,15 @@ function trimSlash(path) {
 function loadRedirects(file) {
   const exact = new Map();
   const patterns = [];
-  // The build always writes this file, so a missing or unreadable one is a
-  // broken image: refuse to start rather than serve every redirect as a 404.
+  // The build always writes this manifest. Missing or malformed data must not
+  // turn documented links into a healthy server's silent 404s.
   const list = JSON.parse(readFileSync(file, 'utf8'));
-  if (!Array.isArray(list)) throw new Error(`${file}: expected a JSON array of redirects`);
+  if (!Array.isArray(list)) throw new Error(`${file}: redirect manifest must be an array`);
   const param = /(\/?:[A-Za-z_]\w*\*)/;
   for (const { source, destination } of list) {
-    if (typeof source !== 'string' || typeof destination !== 'string') continue;
+    if (typeof source !== 'string' || typeof destination !== 'string' || !source || !destination) {
+      throw new Error(`${file}: redirect manifest contains an invalid entry`);
+    }
     if (!param.test(source)) {
       exact.set(trimSlash(source), destination);
       continue;
@@ -77,16 +79,17 @@ function loadRedirects(file) {
 function redirectFor(pathname) {
   const path = trimSlash(pathname);
   const hit = REDIRECTS.exact.get(path);
-  if (hit) return hit;
+  if (hit) return encodeURI(hit);
   for (const { re, names, destination } of REDIRECTS.patterns) {
     const match = re.exec(path);
     if (!match) continue;
     return names.reduce(
-      (dest, name, i) =>
-        dest
-          .replace(`/:${name}*`, () => (match[i + 1] ? `/${match[i + 1]}` : ''))
-          .replace(`:${name}*`, () => match[i + 1] || ''),
-      destination,
+      (dest, name, i) => {
+        // Captured path data must not become a destination query or fragment.
+        const capture = (match[i + 1] || '').split('/').map(encodeURIComponent).join('/');
+        return dest.replace(`/:${name}*`, () => (capture ? `/${capture}` : '')).replace(`:${name}*`, () => capture);
+      },
+      encodeURI(destination),
     );
   }
   return undefined;
@@ -149,7 +152,7 @@ const server = createServer((req, res) => {
   // Redirects win over files and drop the query string, as `mint dev` does.
   const location = redirectFor(pathname);
   if (location) {
-    res.writeHead(307, { Location: encodeURI(location), 'Cache-Control': 'no-cache' }).end();
+    res.writeHead(307, { Location: location, 'Cache-Control': 'no-cache' }).end();
     return;
   }
 
@@ -185,16 +188,26 @@ const server = createServer((req, res) => {
   }
 });
 
-server.listen(PORT, () => console.log(`serving ${ROOT} on :${PORT}`));
+server.listen(PORT, () => console.log(`serving ${ROOT} on :${server.address().port}`));
 
 // Node as PID 1 ignores SIGTERM by default; exit promptly so a rollout does
 // not wait out the termination grace period.
+let stopping = false;
 for (const signal of ['SIGTERM', 'SIGINT']) {
   process.on(signal, () => {
-    server.close(() => process.exit(0));
-    // close() waits for open keep-alive sockets; drop the idle ones now and
-    // give in-flight responses 10 s before exiting regardless.
+    if (stopping) return;
+    stopping = true;
+    // Allow active transfers to drain, then bound termination even if a client
+    // stops reading. Idle connections still close immediately.
+    const deadline = setTimeout(() => {
+      server.closeAllConnections();
+      process.exit(0);
+    }, 10_000).unref();
+    server.close(() => {
+      clearTimeout(deadline);
+      process.exit(0);
+    });
+    // close() waits for open keep-alive sockets; drop the idle ones now.
     server.closeIdleConnections();
-    setTimeout(() => process.exit(0), 10_000).unref();
   });
 }

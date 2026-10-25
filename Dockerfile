@@ -33,6 +33,9 @@ FROM deps AS export
 # Docs content: .mdx pages, docs.json navigation, images, logos, styles.
 COPY . .
 
+# Exercise the actual dependency-free runtime before publishing its export.
+RUN node --test scripts/serve.test.mjs
+
 # The export also carries non-page repository files and Mintlify's own
 # local-viewer launchers. Only web assets are kept: an allowlist of extensions
 # (the set serve.mjs answers for; JSON only from the Next.js build under
