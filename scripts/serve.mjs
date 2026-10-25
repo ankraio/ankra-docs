@@ -4,12 +4,12 @@
 // the image gate to scan. Text assets are gzipped at build time and stored only
 // as `<file>.gz`; they are sent as-is to clients that accept gzip and inflated
 // on the fly for the rest.
-import { createReadStream, statSync } from 'node:fs';
+import { createReadStream, realpathSync, statSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { extname, join, resolve, sep } from 'node:path';
 import { createGunzip } from 'node:zlib';
 
-const ROOT = resolve(process.env.SITE_DIR || '/app/site');
+const ROOT = realpathSync(resolve(process.env.SITE_DIR || '/app/site'));
 const PORT = Number(process.env.PORT || 3000);
 
 const TYPES = {
@@ -34,9 +34,11 @@ const TYPES = {
   '.webmanifest': 'application/manifest+json',
 };
 
+// A regular file whose real path (symlinks resolved) is still inside ROOT.
 function isFile(path) {
   try {
-    return statSync(path).isFile();
+    const real = realpathSync(path);
+    return real.startsWith(ROOT + sep) && statSync(real).isFile();
   } catch {
     return false;
   }
