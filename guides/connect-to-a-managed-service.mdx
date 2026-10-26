@@ -1,6 +1,6 @@
 ---
 title: Connect to a Managed Service
-description: How an application on the service's cluster receives its connection as environment variables on its next deploy, the variable names for each service, and how to connect an application on another cluster by hand.
+description: How an application on the service's cluster receives its connection as environment variables, when Ankra delivers it without a redeploy and when a deploy does, the variable names for each service, and how to connect an application on another cluster by hand.
 tag: "Closed Beta"
 ---
 
@@ -12,36 +12,53 @@ import { CliVersion } from "/snippets/cli-version.jsx";
 
 A managed service answers only inside its own cluster, at fixed addresses in its namespace. It keeps the credentials it generated in a Secret in that namespace, and a workload can read a Secret only in its own namespace.
 
-Ankra connects your application for you when it runs on the same cluster as the service: the application's next deploy copies the connection into the application's namespace, and its containers read it as environment variables such as `DATABASE_URL`. The copy happens inside the cluster, and Ankra never sees the values. An application on another cluster is not connected for you: give it the values yourself, as in [Connect from another cluster](#connect-from-another-cluster).
+Ankra connects your application for you when it runs on the same cluster as the service: once the service is ready, Ankra copies the connection into the application's namespace, and the application's containers read it as environment variables such as `DATABASE_URL`. The copy happens inside the cluster, and Ankra never sees the values. An application on another cluster is not connected for you: give it the values yourself, as in [Connect from another cluster](#connect-from-another-cluster).
 
 ---
 
 ## How your application receives the connection
 
-Every application environment a service was set up for, on the service's cluster, receives the service's connection on the application's next deploy:
+Every application environment a service was set up for, on the service's cluster, receives the service's connection in two parts:
 
-1. The deploy adds a Secret named `<service>-connection` to the application's namespace, with `<service>` standing for the service name. Ankra copies its values inside the cluster from the service's own credentials Secret.
-2. Every container and init container of the application's Deployments, StatefulSets and DaemonSets reads that Secret through `envFrom`, so each of its keys becomes an environment variable. The names are listed under [Variable names](#variable-names).
+1. A Secret named `<service>-connection` in the application's namespace, with `<service>` standing for the service name. Ankra copies its values inside the cluster from the service's own credentials Secret.
+2. A reference to that Secret, which a deploy of the application adds to every container and init container of its Deployments, StatefulSets and DaemonSets through `envFrom`, so each of the Secret's keys becomes an environment variable. The names are listed under [Variable names](#variable-names). A deploy adds the reference while the service is still being set up too. The reference is optional, so the application starts while the Secret does not exist yet.
 
-Nothing reaches the application before it deploys again. Set the service up, wait for it to finish deploying, then deploy the application to that environment. A deploy that runs before the service has generated its credentials adds no Secret, and the application still starts, because the reference to the Secret is optional. Deploy again once the service is running.
+Once the service has generated its credentials, Ankra writes the Secret by itself, without redeploying or restarting anything, but only while no running pod of the application references the Secret: pods restarting one by one would otherwise read different values. What the application needs then depends on its state:
+
+- **The workloads reference the Secret but none of their pods runs**, for example because they are scaled to zero: Ankra writes the Secret, and each pod reads the variables when it starts.
+- **The workloads do not reference the Secret**, because the application was deployed before the service was connected: Ankra writes the Secret, and the application reads it after its next deploy adds the reference.
+- **Running pods reference the Secret**, for example because the application was deployed while the service was being set up: Ankra leaves the Secret to a deploy. Deploy the application once the service is ready: the deploy writes the Secret and rolls the workloads that reference it together onto it.
+- **Running pods read the Secret but started before it existed**: they run without its variables until they restart. Ankra never restarts them by itself.
+- **A variable the connection would add is defined twice**, by the connection and by another source the workloads read, such as one of the application's environment secrets: the connection is not delivered, by Ankra on its own or by a deploy, until you remove the other definition or choose another service, or none, to provide those names, as under [Variable names](#variable-names).
 
 The service's page shows each environment's state under **Use it in &lt;application&gt;**:
 
 | In the portal | `connection_delivery.state` | Meaning |
 |---------------|-----------------------------|---------|
 | **Connected** | `delivered` | The `<service>-connection` Secret is in the application's namespace. |
-| **Connects on its next deploy** | `pending` | Not delivered yet: the service is still deploying, or the application has not deployed since the service was set up. **Deploy &lt;environment&gt;** opens the application to deploy it. |
+| **Connects on its next deploy** | `pending` | Not delivered yet. Despite the label, it does not always need a deploy: `pickup`, below, says what it waits for. **Deploy &lt;environment&gt;** opens the application to deploy it. |
 | **Connect by hand** | `unsupported` | Ankra does not connect this environment, usually because it runs on another cluster. The reason is shown. See [Connect from another cluster](#connect-from-another-cluster). |
 | **Not known** | `unknown` | Ankra could not read the delivery. It does not mean the connection is missing. |
 
-The same state is in the API, on each of `consumers` in [Get a managed service instance](/api-reference/services/get-a-managed-service-instance), as `connection_delivery` with the `secret_name`, the `variables` the application receives and a `reason`.
+The same state is in the API, on each of `consumers` in [Get a managed service instance](/api-reference/services/get-a-managed-service-instance), as `connection_delivery` with the `secret_name`, the `variables` the application receives and a `reason`. Its `pickup` says how far the environment is from running with the connection, and `reason` says what to do:
+
+| `pickup` | Meaning |
+|----------|---------|
+| `waiting_for_service` | The service is still being set up or has not generated its credentials. Ankra delivers the connection once it has. |
+| `delivering` | The credentials exist and no running pod references the connection, so Ankra is writing it into the application's namespace, without a redeploy or a restart. |
+| `holder_gone` | Delivery waits for you to choose which service provides the names without a prefix, as under [Variable names](#variable-names). |
+| `redeploy_needed` | Deploy the application. If `name_collisions` lists variables, first remove their other definition or choose another service, or none, to provide them: until then a deploy does not deliver the connection either. Otherwise the cause is one of these, and a deploy resolves each: the Secret is there but no running workload references it yet; running pods already reference it, so Ankra does not write it on its own; or another connection written with it is left to a deploy. |
+| `restart_needed` | Running pods read the Secret but started before it existed, so they lack its variables until they restart. Ankra never restarts them by itself. |
+| `in_use` | Every running pod that reads the Secret started after it existed. |
+
+`pickup` is absent when Ankra could not read it, and for a consumer it does not connect, such as one on another cluster.
 
 A workload annotated `ankra.io/deploy-overrides: "none"` keeps the manifest you committed, so it gets no `envFrom` reference. The `<service>-connection` Secret is still written to its namespace: reference it from the workload yourself. Jobs and CronJobs are not given the reference either.
 
 When a service is [deleted](/guides/delete-a-managed-service), the application's next deploy removes its `<service>-connection` Secret and the reference to it.
 
 <Warning>
-**Do not also set a delivered variable as an environment secret.** If the application already has, say, `DATABASE_URL` as an [environment secret](/reference/cli/application#ankra-application-env-secrets), the container is given that variable from two places and Kubernetes keeps only one of the values, which may be the old copy. Once the environment reads **Connected**, delete the copy with `ankra application env-secrets delete <application-id> DATABASE_URL` and apply the secrets again with `ankra application env-secrets apply <application-id>`.
+**Do not also set a delivered variable as an environment secret.** If the application already has, say, `DATABASE_URL` as an [environment secret](/reference/cli/application#ankra-application-env-secrets), Ankra does not deliver the connection, on its own or in a deploy, and `name_collisions` names the variable. Delete the copy with `ankra application env-secrets delete <application-id> DATABASE_URL` and apply the secrets again with `ankra application env-secrets apply <application-id>`, or choose another service, or none, to provide `DATABASE_URL`. If a name is set twice after the connection was delivered, `reason` says how to resolve it.
 </Warning>
 
 ## Variable names
@@ -98,7 +115,9 @@ The same details are on the service in the API, as `connection` on [Get a manage
 | VictoriaLogs | `http://victoria-logs.<service>.svc.cluster.local:9428` | `victoria-logs-credentials` | `url`, `username`, `password` |
 | VictoriaMetrics | `http://victoria-metrics.<service>.svc.cluster.local:8428` | `victoria-metrics-credentials` | `url`, `username`, `password` |
 
-The addresses resolve from any namespace on the service's cluster, and not from outside it. On a cluster with a custom DNS domain, use the shorter `<name>.<service>.svc` form, for example `valkey.<service>.svc:6379`. The delivered variables use the full `svc.cluster.local` form, so on such a cluster their addresses do not resolve and automatic delivery does not work yet: give the application the short-form values yourself, as in [Connect from another cluster](#connect-from-another-cluster), under variable names the delivery does not use.
+The addresses resolve from any namespace on the service's cluster, and not from outside it. On a cluster with a custom DNS domain, use the shorter `<name>.<service>.svc` form, for example `valkey.<service>.svc:6379`. Of the delivered variables, `DATABASE_URL`, `JDBC_DATABASE_URL`, `PGHOST`, `S3_ENDPOINT` and `AWS_ENDPOINT_URL_S3`, and their prefixed copies, use the full `svc.cluster.local` form, so on such a cluster they do not resolve: give the application short-form values for them yourself, as in [Connect from another cluster](#connect-from-another-cluster), under variable names the delivery does not use. The other delivered addresses, in `REDIS_URL`, `REDIS_HOST`, `NATS_URL`, `OPENSEARCH_URL`, `VICTORIA_LOGS_URL` and `VICTORIA_METRICS_URL`, already use the short form and resolve there.
+
+Resolving is not reaching: on their current package versions, PostgreSQL, Valkey, NATS, OpenSearch and SeaweedFS admit their client port only from the service's own namespace, the namespace of the cluster's Ankra agent and the namespaces of the applications connected to the service, where the cluster's network plugin enforces NetworkPolicy. See [How a service runs](/concepts/managed-services#how-a-service-runs).
 
 ## Read a value
 
@@ -127,7 +146,7 @@ ankra cluster get secrets opensearch-credentials -n search --reveal -o json | jq
 
 ## Connect from another cluster
 
-An application on another cluster than the service is not connected for you, and the service's addresses do not resolve there. Reaching the service from another cluster needs a network path between the clusters that you provide, and the address that path exposes.
+An application on another cluster than the service is not connected for you, and the service's addresses do not resolve there. Reaching the service from another cluster needs a network path between the clusters that you provide, and the address that path exposes. A service whose client port admits only the namespaces named under [Addresses and Secrets](#addresses-and-secrets) also needs a NetworkPolicy of your own in its namespace that admits the traffic of that path.
 
 Give the application the values as [environment secrets](/reference/cli/application#ankra-application-env-secrets), from the service page's **Use it in &lt;application&gt;** button, which opens the application's **Settings › Secrets**, or from the CLI. Piping the value keeps it out of your shell history:
 
@@ -147,7 +166,7 @@ A value you copy this way is yours: [deleting the service](/guides/delete-a-mana
 ## Notes per service
 
 - **PostgreSQL.** `DATABASE_URL` and `JDBC_DATABASE_URL` carry the operator's `fqdn-uri` and `fqdn-jdbc-uri`. The operator also writes `uri`, `jdbc-uri` and `host` keys, but they name the short host `postgresql-rw`, which resolves only inside the service's own namespace. You connect as `app`, the owner of the database `app`, and superuser access is off. The read-only address reaches replicas only, so it answers only when `instances` is above 1, and no variable names it. The image includes the pgvector and pgaudit extensions.
-- **Valkey.** Authenticate as the `default` user with the password; `REDIS_URL` is a complete `redis://` URL. Write to the primary address. The read-replicas address serves reads from every pod.
+- **Valkey.** Authenticate as the `app` user, which `REDIS_USERNAME` carries, with `REDIS_PASSWORD`; `REDIS_URL` is a complete `redis://` URL that carries both. Write to the primary address. The read-replicas address serves reads from every pod.
 - **NATS.** Connect as `app`. `NATS_URL` carries no credentials, so pass `NATS_USER` and `NATS_PASSWORD` separately. JetStream is on; memory-backed streams are disabled.
 - **OpenSearch.** Use HTTPS with basic auth as `admin`, the only user. The certificate is signed by a private CA generated in the cluster: have your client trust `OPENSEARCH_CA_CERT`, which holds that CA's certificate.
 - **SeaweedFS.** Use the S3 API over plain HTTP inside the cluster, with path-style addressing. The admin key pair, the one delivered, can read, write, list and administer buckets. The read-only key pair can only read, and is in the service's Secret only.
