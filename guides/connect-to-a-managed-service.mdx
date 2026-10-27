@@ -31,14 +31,23 @@ Once the service has generated its credentials, Ankra writes the Secret by itsel
 - **Running pods read the Secret but started before it existed**: they run without its variables until they restart. Ankra never restarts them by itself.
 - **A variable the connection would add is defined twice**, by the connection and by another source the workloads read, such as one of the application's environment secrets: the connection is not delivered, by Ankra on its own or by a deploy, until you remove the other definition or choose another service, or none, to provide those names, as under [Variable names](#variable-names).
 
-The service's page shows each environment's state under **Use it in &lt;application&gt;**:
+The service's page shows each environment's state under **Use it in &lt;application&gt;**, with the platform's reason beside it. The label follows `pickup`, described below, when the platform sent one, and the delivery's `state` when it did not:
 
-| In the portal | `connection_delivery.state` | Meaning |
-|---------------|-----------------------------|---------|
-| **Connected** | `delivered` | The `<service>-connection` Secret is in the application's namespace. |
-| **Connects on its next deploy** | `pending` | Not delivered yet. Despite the label, it does not always need a deploy: `pickup`, below, says what it waits for. **Deploy &lt;environment&gt;** opens the application to deploy it. |
-| **Connect by hand** | `unsupported` | Ankra does not connect this environment, usually because it runs on another cluster. The reason is shown. See [Connect from another cluster](#connect-from-another-cluster). |
-| **Not known** | `unknown` | Ankra could not read the delivery. It does not mean the connection is missing. |
+| In the portal | In the API | Meaning |
+|---------------|------------|---------|
+| **Connects when the service is ready** | `pickup` `waiting_for_service` | Ankra delivers the connection once the service has generated its credentials. Nothing to do. |
+| **Ankra is connecting it now** | `pickup` `delivering` | Ankra is writing the Secret into the application's namespace, without a redeploy or a restart. Nothing to do. |
+| **Waiting for someone to choose a service** | `pickup` `holder_gone`, or a `holder_gone` entry on the delivery | The service that gave the environment names such as `DATABASE_URL` no longer serves it. **Choose the service** opens the application, where you choose which service provides them, or none, as under [Variable names](#variable-names). |
+| **Waits for its next deploy** | `pickup` `redeploy_needed`, not delivered yet | Ankra leaves the connection to a deploy. **Deploy &lt;environment&gt;** opens the application to deploy it. |
+| **Delivered, its workloads do not read it yet** | `pickup` `redeploy_needed`, `state` `delivered` | The Secret is in the application's namespace, but the running workloads do not read it yet. **Deploy &lt;environment&gt;** opens the application to deploy it. |
+| **Waiting for a variable defined twice to be resolved** | `pickup` `redeploy_needed` with `name_collisions`, not delivered yet | A deploy would not deliver it either, so none is offered. Remove the other definition, or choose another service, or none, to provide those names, as under [Variable names](#variable-names). |
+| **Connected, its workloads need a restart** | `pickup` `restart_needed` | Running pods read the Secret but started before it existed. Restart them: Ankra never restarts them by itself. |
+| **Connected** | `pickup` `in_use`, or `state` `delivered` without a `pickup` | The `<service>-connection` Secret is in the application's namespace. |
+| **Not connected yet** | `state` `pending` without a `pickup` | Not delivered yet. The reason says what it waits for. |
+| **Connect by hand** | `state` `unsupported` | Ankra does not connect this environment, usually because it runs on another cluster. The reason is shown. See [Connect from another cluster](#connect-from-another-cluster). |
+| **Not known** | `state` `unknown`, or a `pickup` the portal does not recognise on a connection not delivered yet | Ankra could not read the delivery. It does not mean the connection is missing. |
+
+A deploy usually connects the workloads, but not every one: see the note on Jobs, CronJobs and `ankra.io/deploy-overrides` below.
 
 The same state is in the API, on each of `consumers` in [Get a managed service instance](/api-reference/services/get-a-managed-service-instance), as `connection_delivery` with the `secret_name`, the `variables` the application receives and a `reason`. Its `pickup` says how far the environment is from running with the connection, and `reason` says what to do:
 
@@ -86,6 +95,8 @@ The names without a prefix never move to another service by themselves. If the s
 
 If no other service of that kind serves the environment, the deploy goes ahead without the names and says so on its result. A service of that kind connected later then provides them.
 
+The refusal starts as soon as the deletion of the service that provides the names has begun, not only once it has finished: from then on, while another service of that kind serves the environment, its deploys are refused, so the running application keeps what it read at its last deploy. While no other service of that kind serves it, deploys keep delivering the names from the service being deleted until its credentials are removed, and the deploy that stops delivering them says so.
+
 A service set up again under the name of a retired one is a new service, not the old one: it does not hold the retired service's data. If the retired one provided `DATABASE_URL`, the deploy is refused in the same way and says so; choose the new service explicitly once you have moved the data. Removing the application's deployment from the namespace forgets which service Ankra recorded as providing the names, so a new deployment there starts fresh; a service you chose yourself stays chosen.
 
 ---
@@ -97,7 +108,7 @@ Open the service in **My services**. Its **Connect** section shows:
 - the namespace, which is the service name;
 - each address, with a **Copy** button;
 - the name of the Secret that holds the credentials;
-- for each key in that Secret, a command that prints its value, with a **Copy** button.
+- under **Read a credential yourself**, for each key in that Secret, an Ankra CLI command that prints its value, with a **Copy** button. The command names the service's cluster and also uses `jq`, as in [Read a value](#read-a-value).
 
 The portal never shows the values themselves. The details are derived from the service's package, not observed on the cluster, so they are shown as soon as the service is set up: the addresses answer once the service is running. The section is not shown for a deleted service or while a service is being deleted.
 
