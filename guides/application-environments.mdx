@@ -1,0 +1,184 @@
+---
+title: Environments and Branch Rules
+sidebarTitle: Environments and Branch Rules
+description: Deploy one application to production, staging and development, and choose which branches' pushes reach each environment.
+---
+
+import { CliVersion } from "/snippets/cli-version.jsx";
+
+An application can run in several environments. Each environment is a cluster and a namespace with a name, such as `production`, `staging` or `development`. A **branch rule** on an environment lists the branches whose pushes deploy to it. With rules in place, a merge to `main` reaches production, a push to `develop` reaches development, and a `release/*` branch reaches staging, from one application and one pipeline.
+
+This page builds on [push to deploy](/guides/deliver-your-app#how-a-merge-redeploys). Push to deploy has to be on for an environment before its rule deploys anything.
+
+---
+
+## What a branch rule is
+
+A branch rule is a list of branch patterns. A push to a branch the list matches deploys to the environment.
+
+An environment with **no rule** follows the application's tracked branch, which is how every environment behaves until you give it a rule.
+
+Pull requests never deploy to an environment, whatever the rule says. They get [PR preview environments](/guides/pr-preview-environments) instead.
+
+### Typical setups
+
+| Environment | Rule | Deploys pushes to |
+|---|---|---|
+| `production` | `main` | `main` only |
+| `staging` | `release/*` | Release branches such as `release/2.4` |
+| `development` | `develop` | `develop` only |
+| `development` | `**`, `!main` | Every branch except `main` |
+
+### Pattern syntax
+
+Patterns use the same matching as a pipeline stage's [`when.branches`](/guides/pipeline-reference#fields-common-to-every-stage), so a pattern means the same thing in a pipeline and in an environment.
+
+| Pattern | Matches | Does not match |
+|---|---|---|
+| `main` | `main` | `main-v2`, `feature/main` |
+| `release/*` | `release/2.4` | `release/2.4/hotfix`, `release` |
+| `release/**` | `release/2.4`, `release/2.4/hotfix` | `releases/2.4` |
+| `**` | Every branch | Nothing |
+| `!main` | Every branch except `main` | `main` |
+
+- `*` matches within one path segment. It never crosses `/`.
+- `**` matches across `/`.
+- `!pattern` removes the branches the pattern matches.
+- Patterns are evaluated in order, and the last pattern that matches a branch decides. So `**`, `!main` is every branch except `main`, while `!main`, `**` is every branch.
+- A list whose first pattern is negated starts from every branch. `!main` on its own therefore means every branch except `main`.
+
+An invalid pattern is refused when you save the rule, with a sentence that names the problem.
+
+---
+
+## How a build reaches an environment
+
+1. **A push builds.** The pipeline runs for the pushed branch. When its `publish` stage succeeds, Ankra records the image it published, `sha-<7>`, as that branch's newest build.
+2. **Each environment picks its build.** An environment deploys the newest published build of any branch its rule matches. An environment with no rule deploys the newest build of the tracked branch, as before.
+3. **Older builds never win.** A build of an older commit that finishes late never moves a branch back to that commit.
+
+Only a push run whose `publish` stage succeeded records a build. A run that fails, is skipped, or never reaches `publish` deploys nothing anywhere.
+
+<Note>
+The [generated pipeline](/pipelines/generated-pipelines#what-the-generated-pipeline-contains) triggers pushes on the tracked branch only. Before another branch can reach an environment, add it to `on.push.branches` in `.ankra/pipeline.yaml`, for example `branches: [main, develop, "release/*"]`, so its pushes run and publish.
+</Note>
+
+**Changing a rule is never a deploy.** Neither is turning push to deploy on. Ankra notes the newest build the rule already matches, and the environment moves on the next matching push. To deploy right away, deploy a tag by hand.
+
+**Deploying by hand still works.** A person can promote or roll back an environment to any tag with `ankra application deploy`, as before. The next matching push moves the environment on again.
+
+---
+
+## Set it up
+
+<CliVersion since="0.49.0" command="application environments" note="Older CLI releases have no environments command; use the portal or the API." />
+
+### From the CLI
+
+List the application's environments. The `FOLLOWS` column shows each environment's rule, `<branch> (tracked)` when it has none, or `manual` when pushes do not deploy to it:
+
+```bash
+ankra application environments my-app
+```
+
+Give an environment a rule, remove it, or turn push to deploy on or off for that environment alone. `--branches` takes a comma-separated list, and the environment is named by its name or its id:
+
+```bash
+ankra application environments set my-app production --branches main
+ankra application environments set my-app development --branches '**,!main'
+ankra application environments set my-app staging --branches 'release/*'
+ankra application environments set my-app staging --clear
+ankra application environments set my-app staging --enable
+ankra application environments set my-app production --disable
+```
+
+`--clear` removes the rule, so the environment follows the tracked branch again. Without `--enable` or `--disable`, the environment keeps its current push to deploy setting.
+
+Create a new environment that follows a branch from its first deploy:
+
+```bash
+ankra application deploy my-app \
+  --cluster my-cluster \
+  --namespace my-app-dev \
+  --environment development \
+  --follow-branches develop
+```
+
+### In the portal
+
+Each environment card on the application shows what it follows, such as **Follows main** or **Follows every branch except main**. To change a rule, open the application's **Settings** → **Push to deploy**. Each environment has a **Follows** editor with presets for the common setups and a field for your own patterns.
+
+### From the API
+
+Set a rule on one environment with `PUT /org/applications/{application_id}/auto-deploy`:
+
+```json
+{
+  "enabled": true,
+  "environment_id": "<environment-id>",
+  "branches": ["develop"]
+}
+```
+
+- `branches` needs `environment_id`.
+- `"branches": []` removes the rule.
+- Leaving `branches` out leaves the rule as it is.
+- An invalid pattern returns `422` with a sentence that names it.
+
+`GET /org/applications/{application_id}/auto-deploy` lists every environment with its `branches`. `null` means the environment follows the tracked branch.
+
+`POST /org/applications/{application_id}/deploy` accepts `environment_name` and `follow_branches`, to create a named environment that follows those branches from the start.
+
+Changing a rule needs permission to deploy applications. Reading it does not.
+
+---
+
+## Adjust a pipeline to where a push is going
+
+A pipeline can ask which environments the current push deploys to. [`ankra.environments`](/guides/pipeline-reference#where-a-push-deploys) is the sorted list of environment names whose rules match the run's branch:
+
+```yaml
+stages:
+  - name: smoke-production
+    kind: run
+    if: "'production' in ankra.environments"
+    run: ./scripts/smoke.sh https://app.example.com
+  - name: seed-demo-data
+    kind: run
+    if: "'development' in ankra.environments"
+    run: ./scripts/seed.sh
+```
+
+Use `ankra.environments` for steps that depend on where the image is going. To change steps by branch, keep using `when.branches`.
+
+---
+
+## FAQ
+
+**I pushed to `develop` and development did not move.**
+Check the push's pipeline run. Development moves only when that run's `publish` stage succeeded and pushed a `sha-<7>` image. A failed or skipped `publish` records no build for `develop`, and neither does a pipeline whose `on.push.branches` leaves `develop` out, which is how the generated pipeline starts. Then check that push to deploy is on for development, and that its rule matches `develop`: `ankra application environments my-app` shows `manual` for an environment that pushes do not deploy to.
+
+**An environment has no rule. What does it deploy?**
+The newest build of the application's tracked branch, exactly as before branch rules existed.
+
+**I changed a rule and nothing deployed.**
+That is expected. Changing a rule is never a deploy. The next push that the rule matches deploys, or you can deploy a tag by hand.
+
+**Does a pull request deploy to development if its branch matches?**
+No. Pull requests never deploy to environments. They get a [PR preview](/guides/pr-preview-environments).
+
+**Two branches match one rule. Which build wins?**
+The newest published build of any matching branch.
+
+---
+
+## Related
+
+<CardGroup cols={2}>
+  <Card title="Ship your app" icon="rocket" href="/guides/deliver-your-app">
+    Register an application and turn on push to deploy.
+  </Card>
+  <Card title="Pipeline reference" icon="file-code" href="/guides/pipeline-reference#expressions">
+    The expression context, including `ankra.environments`.
+  </Card>
+</CardGroup>
