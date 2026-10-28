@@ -1,0 +1,130 @@
+---
+title: Projects
+description: A project is a room inside your organisation. Clusters, applications and their cost live in one project each, a member can be limited to one project, and people, roles and billing stay organisation-wide.
+---
+
+A **project** is a room inside an [organisation](/concepts/organisations). The organisation keeps everything that is about people and money - members, roles, invitations, billing, single sign-on, the AI provider. A project owns a slice of the resource estate: its clusters, applications, environments, stack profiles, pipeline repositories, AI tickets, workspaces and automations, incidents, and the cost those produce.
+
+Projects are on for every organisation. Every organisation has a **Default** project, and every cluster, application, environment, stack profile, pipeline, AI ticket, workspace and automation you already had is in it. Nothing changes until someone creates a second project: the lists, links, tokens and scripts you use today keep working as they did.
+
+Projects exist for the organisation that holds several teams, products or stages that should not see or change each other's clusters, without splitting into several organisations and several invoices.
+
+<Note>
+A project is not a cluster group. A [cluster group](/guides/roles-and-access#cluster-groups) is a named or label-selected set of clusters used as an assignment scope and nothing more. A project is a tenancy boundary: a resource belongs to exactly one, listings and cost are per project, members can be limited to one, and tokens can be pinned to one.
+</Note>
+
+## What lives where
+
+| Level | Holds |
+| --- | --- |
+| **Organisation** | Members and invitations, role definitions, billing (customer, plan, invoices, activation), single sign-on, the AI provider and AI configuration (MCP servers, custom tools, skills, playbooks), the image registry, support tickets, cluster groups |
+| **Project** (always exactly one) | Clusters and everything reached through a cluster, applications, environments, stack profiles, pipeline repositories, AI tickets, workspaces and automations, incidents, cost budgets and autopilot defaults |
+| **In a project, or organisation-wide** | Credentials, Helm and OCI registries, backup vaults and object storage buckets, organisation variables, notification routes, DNS zones |
+
+The third row holds the **shared kinds**. Each credential, registry, vault, bucket, variable, notification route or DNS zone is either **in one project**, where only that project sees and uses it, or **organisation-wide** (no project), where every project sees and uses it. The ones you had before projects were released are organisation-wide. When you create a new one you choose **This project** or **Whole organisation**, and a move can change it later.
+
+Reading an organisation-wide resource needs only the ordinary read permission. Changing, revealing or deleting one needs the matching permission held **on the organisation**: a role assigned in a project can create, change and delete that project's own credentials and variables, and can read the organisation-wide ones, but cannot change them. The refusal says so: `403 Organisation-wide resources require an organisation-level grant`.
+
+## The Default project
+
+Every organisation carries a reserved project whose short name is `default`. It is created with the organisation and cannot be deleted. Everything that existed before projects were released is in it, so nobody lost sight of anything on the day they arrived. You create further projects and move resources into them deliberately.
+
+A project has a name (up to 128 characters), a short name or slug (`a-z`, `0-9` and hyphens, up to 63 characters, unique within the organisation, never shaped like a UUID) and an optional description. The short name cannot change once the project exists, because links, the CLI and kubeconfig files use it. Projects are managed under **Settings → People and access → Projects** in the console, or with [`ankra project`](/integrations/ankra-cli#projects).
+
+## Your current project
+
+Every request acts in one project. It is resolved once, when the request is authenticated, in this order:
+
+1. **The token's pin.** A token minted in a project stays in it. See [Tokens and projects](#tokens-and-projects).
+2. **The `X-Ankra-Project-Id` header** on a bearer-token request, naming a project of the current organisation by id. An id that is not a project of this organisation is refused with `403 Project not found in this organisation` - a `403` rather than a `404`, so the answer is the same whether the id belongs to another organisation or to nothing - and a pinned token that names a different project is refused outright.
+3. **Your current project** in this organisation. Each organisation you belong to remembers its own current project, and switching it is server-side, like switching organisations: after a switch, every surface - console, API, CLI, MCP - reads and writes in the new project.
+
+Switch with the project switcher beside the organisation switcher in the console, with `ankra project switch <name>`, or with `POST /api/v1/org/projects/switch`. `GET /api/v1/org/projects/current` tells you where you are, and `GET /api/v1/org/projects` lists the projects you can reach, each with `is_current` and `is_default`.
+
+<Tip>
+Older CLIs, Terraform and scripts that send no project header run in the current project of the token's owner, the same project that person sees in the console. There is no separate fallback for them: if they stop seeing a cluster, that person's current project is not the cluster's project, or an administrator has moved the cluster.
+</Tip>
+
+## Roles at project scope
+
+A project is the fourth [assignment scope](/guides/roles-and-access#scopes), beside the organisation, a cluster and a cluster group. A role assigned in a project grants its resource permissions on every cluster the project holds now and later, and on the project's applications, environments, profiles, repositories and shared resources.
+
+A project assignment can never confer the permissions that are about the organisation as a whole. Whatever role is assigned, these are dropped from a project grant: `organisation.*`, `members.*`, `billing.*`, `tokens.*`, `audit.*`, `projects.*`, `kube_access.manage`, `kube_access.policy`, `sops.manage`, `secrets.manage`, `git.manage`, `security.manage`, `ai.manage`, `workspaces.manage` and `profiles.share`. An `admin` assigned in one project is the resource half of admin inside that project, and cannot invite members, see invoices or create projects.
+
+Creating, renaming, deleting and moving between projects needs `projects.manage`, which owners and admins hold at organisation scope. Listing projects needs `projects.read`, which every built-in role holds.
+
+### Project-only members
+
+A member's organisation role is a floor that reaches every project: a `viewer` on the organisation sees every project, read-only, whatever else is assigned. To give someone one project and nothing else, invite them with the membership role **Project only**. It holds nothing organisation-wide:
+
+- The member reaches only the projects they are assigned a role in - `admin`, `operator`, `member` or `viewer` in that project - and sees nothing of the others.
+- They can never hold an organisation-level permission: members, billing, tokens, the audit log and organisation settings stay out of reach whatever role they are given in a project.
+- When they sign in they land in the first project they reach.
+
+Invitations and the **People** page offer **Project only** beside the organisation roles, and `ankra org invite <email> --role project --project <project> --project-role operator` invites one from the CLI (`--project-role` is `admin`, `operator`, `member` or `viewer`, `member` by default). Change a member to or from it on their row in People. A project-only member whose last project assignment is removed can sign in but reaches nothing until they are assigned again.
+
+<Warning>
+Ankra Cloud console access needs organisation-wide membership for now. A project-only member who opens the Ankra Cloud console is refused rather than shown the whole account. Everything in the Ankra platform itself works for them.
+</Warning>
+
+## Tokens and projects
+
+A token is **pinned** to a project when it is minted with one: an MCP token or a [service token](/guides/service-tokens) created in the console is pinned to the project chosen in the create dialog, which defaults to the project you are working in; `ankra tokens create --project <name>` pins from the CLI; and any token minted by a pinned token, or by a project-only member, is pinned to that project. A pinned token:
+
+- reads and writes in that project only, however the request is phrased - `project_id=all` on a cost route and `X-Ankra-Project-Id` naming another project are both refused;
+- cannot switch organisations either, as before;
+- stops authenticating, with `403 The project this token is pinned to no longer exists`, if its project is deleted. Mint a new one in the project that replaced it.
+
+Tokens minted before projects were released, and REST tokens minted without a project, are not pinned. A personal REST token follows its owner's current project and accepts `X-Ankra-Project-Id`; an unpinned service token acts in the project the header names and otherwise in the Default project. See [API tokens](/reference/tokens).
+
+## Moving resources between projects
+
+A move takes one resource into another project of the organisation, or makes a shared kind organisation-wide. It is one transaction, audited as `move_to_project`. Move from the resource's settings page (**Move to another project**), with `ankra project move --kind <kind> --id <id> --to <project|org-wide>`, or with `POST /api/v1/org/projects/{project_id}/move`.
+
+The kinds a move accepts are exactly these: `cluster`, `application`, `environment`, `stack_profile`, `pipeline_repository`, `ai_automation`, `ai_workspace`, `credential`, `registry`, `backup_vault`, `object_storage_bucket`, `organisation_variable`, `notification_route` and `dns_zone`. Only the shared kinds - the last seven - may be made organisation-wide.
+
+The move carries the rows whose project is derived from the resource:
+
+- a **cluster** takes its DNS zones, incidents, AI tickets and the notification routes pinned to it;
+- an **application** takes its connected pipeline repositories;
+- a **stack profile** takes its open drafts.
+
+Three things refuse a move, each with a code the console, CLI and API all show:
+
+| Code | Why |
+| --- | --- |
+| `same_project` | The resource is already in that project, or already organisation-wide |
+| `operations_in_flight` | Operations are still running on the cluster. Wait for them to finish, then move it |
+| `follows_cluster` | The DNS zone is bound to a cluster and follows that cluster's project. Move the cluster instead |
+
+Cost already metered stays attributed to the project the cluster was in at the time; only hours from the move onwards count against the destination.
+
+## Deleting a project
+
+A project can be deleted only once nothing is in it: every cluster, application and other strictly scoped resource moved out, and no shared resource still pinned to it. The refusal lists what remains, per kind. Deleting a project retires the role assignments made at its scope, moves every member whose current project it was back to the Default project, removes its budgets and autopilot defaults, and stops the tokens pinned to it. The Default project cannot be deleted.
+
+## Cost by project
+
+Cost is metered per project, so a report for a month in which a cluster moved shows its cost split between the two projects. The Cost pages filter by project, and the fleet view shows **By project**: each project's run rate and cluster count, with an **unattributed** bucket for spend no project can claim, such as waste found on a credential rather than a cluster. The projects reconcile to the fleet total only together with that bucket.
+
+Every cost route and tool takes `project_id`: a project id for one project, `all` for the whole organisation, and nothing for your current project. Cost budgets take a `project` scope, and the cost autopilot takes per-project defaults between the organisation's policy and a cluster's own override. From the CLI, the global `--project` flag reads another project, `--all-projects` on the fleet cost commands reads the whole organisation, and `ankra org usage --group-by project` gives the showback. [Cloud Cost](/platform/cloud-cost#by-project) has the detail.
+
+Billing is never split. The invoice stays one per organisation. The **By project** view under Billing is a showback: each project's share of worker vCPU-hours over a window, for charging teams back internally. See [Billing](/platform/billing#showback-by-project).
+
+## The API, Ankra's AI and the MCP server
+
+- Bearer requests name a project for one call with `X-Ankra-Project-Id: <project-id>`, as described under [Your current project](#your-current-project).
+- Portal links Ankra hands you - in notifications, AI answers and MCP results - carry `?project=<project-id>` beside `?org=`, so a link to a cluster in another project opens in that project and offers to switch you to it. See [Portal URLs](/platform/portal-urls).
+- The [MCP server](/platform/mcp-server) and the AI Assistant act in the current project of the token or session. `list_projects` and `get_current_project` say where a session is, `move_cluster_to_project` and `move_application_to_project` are the moves, `get_organisation` reports the current project, and the cost tools take the same `project_id` as the routes. See [MCP Tools](/platform/mcp-tools#projects).
+
+## Ankra Cloud
+
+For organisations that also use [Ankra Cloud](/guides/ankra-cloud-clusters), the platform is the source of truth for projects and the Cloud keeps a mirror: it learns the project list and each member's reach when they sign in, and between sign-ins the platform pushes every change. Servers the platform creates for a cluster carry the project in the `platform.ankra.io/project-id` label beside the cluster label. Projects are never created, renamed or deleted from the Cloud, and a project-only member is refused there for now.
+
+## Related
+
+- [Organisations](/concepts/organisations) - the level above a project.
+- [Roles & Access](/guides/roles-and-access) - scopes, project-only members and what each role holds.
+- [Service tokens](/guides/service-tokens) and [API tokens](/reference/tokens) - pinned credentials.
+- [Ankra CLI](/integrations/ankra-cli#projects) - `ankra project`, `--project` and `ANKRA_PROJECT`.
+- [Cloud Cost](/platform/cloud-cost#by-project) and [Billing](/platform/billing#showback-by-project) - cost by project and the showback.
