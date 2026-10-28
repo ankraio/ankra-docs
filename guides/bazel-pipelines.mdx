@@ -1,0 +1,211 @@
+---
+title: Build a Bazel Repository with Ankra Pipelines
+sidebarTitle: Bazel
+description: "Run Bazel builds and tests on Ankra Pipelines - Bazelisk and the Bazel output tree on the shared workspace, a disk and repository cache that survives between runs, JUnit test results from bazel-testlogs, an optional remote cache, and a Bazel-built binary turned into an image that is scanned, gated and published."
+---
+
+Bazel runs on Ankra Pipelines as an ordinary `run` stage. Ankra brings what Bazel itself leaves to the CI system: a cluster to run on, caches kept between runs, test results in the run's check, and an image build that is scanned and gated before it is published. Bazel brings hermetic builds and an action cache, so a run with a warm cache only rebuilds what changed.
+
+This guide assumes the repository is already connected to Ankra Pipelines. If it is not, start with [Get started with Ankra CI](/get-started/ankra-ci).
+
+## What Bazel needs from a pipeline step
+
+A pipeline step differs from a laptop or a hosted CI runner in a few ways, and each one matters for Bazel. The [three rules](/guides/ankra-ci-starter-pipelines#three-rules-every-step-follows) apply to every step; this is what they mean here:
+
+- **The Bazel output tree goes under `/workspace`.** `HOME` is `/tmp`, which is 256 MiB and held in memory. Bazel's default output root is under `HOME` and outgrows that within one build, so pass `--output_user_root=/workspace/.ankra-bazel/root` on every Bazel command.
+- **Bazel comes from Bazelisk.** The root filesystem is read-only, so nothing can be installed into the image. The step installs Bazelisk into the workspace, and Bazelisk downloads the Bazel version pinned in `.bazelversion`.
+- **Downloads need network.** A `run` stage has no network by default. `defaults.network: "egress-https"` lets Bazel fetch toolchains and external dependencies from public hosts.
+- **Bazel needs more than the default size.** A step gets 500m of CPU and 1Gi of memory unless it asks for more. Give the Bazel stage a few cores and several gigabytes, and a longer timeout for the first cold build.
+
+## Add a CI config to `.bazelrc`
+
+Keep the CI flags in a named config, so the pipeline only says `--config=ci` and you can run the same build locally:
+
+```bash
+# .bazelrc
+build:ci --disk_cache=/workspace/.ankra-bazel/disk-cache
+build:ci --repository_cache=/workspace/.ankra-bazel/repository-cache
+build:ci --color=no
+build:ci --curses=no
+build:ci --show_progress_rate_limit=10
+test:ci --test_output=errors
+```
+
+`test` inherits every `build` flag, so the caches apply to tests too. On Bazel 7.4 or later, add `build:ci --experimental_disk_cache_gc_max_size=20G` to keep the disk cache from growing without limit.
+
+## The pipeline
+
+This `.ankra/pipeline.yaml` tests every target on each pull request and push to `main`, and reports each test in the run:
+
+```yaml
+apiVersion: ankra.io/v1
+kind: Pipeline
+metadata:
+  name: "my-repo"
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+  manual: {}
+workspace:
+  size: "30Gi"
+defaults:
+  network: "egress-https"
+stages:
+  - name: "checkout"
+    kind: "checkout"
+  - name: "test"
+    kind: "run"
+    image: "golang:1.26"
+    needs: ["checkout"]
+    resources:
+      cpu: "4"
+      memory: "8Gi"
+    timeout: "90m"
+    env:
+      GOPATH: "/workspace/.ankra-go"
+      GOCACHE: "/workspace/.ankra-go/cache"
+      GOFLAGS: "-buildvcs=false"
+      BAZELISK_HOME: "/workspace/.ankra-bazel/bazelisk"
+    cache:
+      - key: "bazel-${{ hashFiles('MODULE.bazel.lock', '.bazelversion') }}"
+        paths:
+          - ".ankra-bazel/disk-cache"
+          - ".ankra-bazel/repository-cache"
+          - ".ankra-bazel/bazelisk"
+          - ".ankra-go/bin"
+        restore_keys: ["bazel-"]
+    test_results:
+      - format: "junit"
+        path: "test-results"
+    run: |
+      go install github.com/bazelbuild/bazelisk@v1.25.0
+      bazel() { /workspace/.ankra-go/bin/bazelisk --output_user_root=/workspace/.ankra-bazel/root "$@"; }
+
+      status=0
+      bazel test --config=ci //... || status=$?
+
+      mkdir -p /workspace/test-results
+      cd "$(bazel info --config=ci bazel-testlogs)"
+      find . -name test.xml | while read -r report; do
+        cp "$report" "/workspace/test-results/$(echo "${report#./}" | tr / _)"
+      done
+      exit "$status"
+```
+
+What each part does:
+
+- **`golang:1.26`** is the image because it has the C toolchain Bazel's default rules expect and lets `go install` fetch Bazelisk. Any image your organisation's image policy allows works the same way, as long as it has a shell and a compiler.
+- **The cache** keeps Bazel's disk cache, repository cache and downloaded Bazel binary between runs, keyed on the module lock file and the Bazel version. A repository still on `WORKSPACE` keys on the files that pin its external dependencies instead. Bazel's own cache decides what to rebuild, so a run where little changed finishes in a fraction of the cold time.
+- **`test_results`** reads the JUnit `test.xml` Bazel writes for every test target. The script copies them out of `bazel-testlogs` into one directory before the step ends, flattening each path into a file name so two targets never overwrite each other's report.
+- **`status`** holds Bazel's exit code while the reports are copied, so a failing test still reports its results and still fails the step.
+
+<Note>
+`cache`, `resources` and `timeout` are protected settings. They take effect once an administrator approves the pipeline on the default branch, so the first run before that approval is cold and uses the default size. A large repository can run out of memory or time on that first run - approve the definition and run it again.
+</Note>
+
+## Use a remote cache
+
+Bazel's remote cache shares results between runs, branches and developers' machines. Ankra does not host one, but a step can reach any cache that speaks Bazel's remote cache protocol over HTTPS. Store the cache's API key as an organisation variable, which the CLI reads from standard input:
+
+```bash
+ankra org variables set BAZEL_REMOTE_CACHE_KEY -
+```
+
+Declare it in the pipeline and name it on the stage. The value arrives as a file under `/run/agent-secrets`:
+
+```yaml
+secrets:
+  - name: "bazel_remote_cache_key"
+    from: "org_variable"
+    key: "BAZEL_REMOTE_CACHE_KEY"
+stages:
+  - name: "test"
+    kind: "run"
+    secrets: ["bazel_remote_cache_key"]
+    run: |
+      bazel() { /workspace/.ankra-go/bin/bazelisk --output_user_root=/workspace/.ankra-bazel/root "$@"; }
+      bazel test --config=ci \
+        --remote_cache=grpcs://<your-remote-cache-host> \
+        --remote_header="<your-cache-header>=$(cat /run/agent-secrets/bazel_remote_cache_key)" \
+        //...
+```
+
+The header name depends on the cache you use. `secrets` is a protected section too, so the binding reaches the step once the definition that declares it is approved on the default branch.
+
+## Build an image from a Bazel target
+
+For a repository linked to an [Ankra application](/concepts/applications), a `kind: "build"` stage builds an image from a Dockerfile, then a `scan` and a `gate` judge it before `publish` gives it an immutable `sha-` tag. To ship a Bazel-built binary, build it in a `run` stage, copy it into the workspace, and let the Dockerfile pick it up from there.
+
+Add these stages after `test`:
+
+```yaml
+  - name: "bazel-build"
+    kind: "run"
+    image: "golang:1.26"
+    needs: ["test"]
+    resources:
+      cpu: "4"
+      memory: "8Gi"
+    env:
+      GOPATH: "/workspace/.ankra-go"
+      BAZELISK_HOME: "/workspace/.ankra-bazel/bazelisk"
+    run: |
+      bazel() { /workspace/.ankra-go/bin/bazelisk --output_user_root=/workspace/.ankra-bazel/root "$@"; }
+      bazel build --config=ci //cmd/server
+      mkdir -p /workspace/dist
+      cp "$(bazel cquery --config=ci --output=files //cmd/server)" /workspace/dist/server
+  - name: "build"
+    kind: "build"
+    needs: ["bazel-build"]
+    build:
+      dockerfile: "Dockerfile"
+      context: "."
+      provenance: true
+      sbom: true
+  - name: "scan"
+    kind: "scan"
+    needs: ["build"]
+    scan:
+      scanners: ["semgrep", "checkov", "trivy"]
+  - name: "gate"
+    kind: "gate"
+    needs: ["scan"]
+    gate:
+      require_stages: ["scan"]
+  - name: "publish"
+    kind: "publish"
+    needs: ["gate"]
+    when:
+      events: ["push"]
+```
+
+`bazel cquery --output=files` prints where Bazel put the target's output, so the copy keeps working when the rule set changes its output layout. `//cmd/server` is an example; use your own target. The Dockerfile copies the binary in:
+
+```dockerfile
+FROM gcr.io/distroless/static-debian12:nonroot
+COPY dist/server /server
+ENTRYPOINT ["/server"]
+```
+
+A pull request builds, scans and gates the image but never publishes it. A push to `main` publishes it to the application's registry, and that tag is what push to deploy rolls out.
+
+## Make it faster
+
+- **Let Bazel skip unchanged work.** With the cache warm, `bazel test //...` reruns only the tests whose inputs changed. That is usually faster than narrowing the target list by hand.
+- **Skip runs that touch nothing Bazel builds.** `affected:` reads Go and pnpm import graphs, not Bazel's, so use path filters instead: `on.pull_request.paths: ["!docs/**", "!*.md"]` records a docs-only change as skipped. See [Fast CI](/pipelines/fast-ci).
+- **Split slow suites onto a schedule.** Tag long tests `slow`, leave them out with `--test_tag_filters=-slow` on pull requests and pushes, and run them from an `on.schedule` stage at night.
+
+## Troubleshooting
+
+| Symptom | Cause | Fix |
+| --- | --- | --- |
+| `No space left on device` early in the build | Bazel's output root is still under `HOME` (`/tmp`) | Pass `--output_user_root=/workspace/.ankra-bazel/root` before the command, on every Bazel call |
+| The step fails with the diagnosis `out_of_memory` | Bazel and its workers outgrew the step's memory | Raise `resources.memory`, or run fewer actions at once with `build:ci --jobs=4` |
+| `fetching ... failed` or a download times out | The stage has no network, or the host is private | Set `defaults.network: "egress-https"`; a private mirror needs an administrator to allow its address range |
+| Every run is cold | The pipeline definition is not approved yet, or the cache key changes on every run | Approve the definition on the default branch; check the step's **CACHE** column in `ankra pipeline get` |
+| A sandbox error such as `linux-sandbox failed` | The step's container does not allow the namespaces Bazel's Linux sandbox uses | Add `build:ci --spawn_strategy=processwrapper-sandbox,local` to `.bazelrc` |
+| Tests pass but the run shows no test results | The reports were not copied before the step ended | Keep the copy loop after `bazel test`, and point `test_results.path` at the directory it writes |
+
+[Caches](/pipelines/caching) explains keys, trust scopes and retention, and the [pipeline reference](/guides/pipeline-reference) lists every field used here.
