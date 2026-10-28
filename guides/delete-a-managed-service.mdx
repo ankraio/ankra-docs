@@ -96,19 +96,28 @@ After you confirm, the service's page shows **Deletion confirmed.** and the dele
 
 When the namespace is gone, the page becomes a **Service deleted** receipt with the status **Deleted**: the stack was removed, the namespace was deleted and seen gone from the cluster, and the name was released. The receipt lists what is kept, and **My services** shows the service as **Retired**.
 
-To check the cluster yourself (see [Kubeconfig](/guides/kubeconfig) for access):
+To check the cluster yourself, select it and look for the namespace and the volumes:
 
 ```bash
-kubectl get namespace <service>
+ankra cluster select <cluster>
+ankra cluster get namespaces --name <service>
+ankra cluster get resources PersistentVolume -o json
 ```
 
-The answer is `NotFound`. On a StorageClass with reclaim policy `Retain`, the service's volumes are left with status `Released`. Delete them once you no longer need their data:
-
-```bash
-kubectl get pv
-```
+The namespace is no longer listed. On a StorageClass with reclaim policy `Retain`, the service's volumes are left with status `Released`. Delete them once you no longer need their data.
 
 The name is free again. A new service set up under the same name on the same cluster generates new credentials and starts with none of the old data.
+
+### When data may remain
+
+A deletion can release the service's name while Ankra cannot show that its data is gone. The receipt then reads **Service deleted, but its data may remain**, and **My services** shows the service as **Deleted, data may remain**. The status says which case it is:
+
+| Status | What it means |
+|--------|---------------|
+| **Deleted, data kept** | When Ankra looked after deleting the namespace, at least one of the service's persistent volumes still held its data, because the volume's reclaim policy kept it. |
+| **Deleted, data not confirmed gone** | Ankra cannot show that the data is gone: a volume could not be read, a volume claim had no volume when the deletion was reviewed, not every claim could be listed, the service had no namespace of its own, or its cluster was deleted in Ankra, which does not prove its storage was destroyed. |
+
+Its **Data that may remain** section says what to do and lists the volumes that may still hold the data, with Ankra CLI commands to copy: one to see what a volume holds, one to list the cluster's persistent volumes when Ankra could not name every one, and, for a volume Ankra saw kept, one to delete it with its data. Ankra looks once, after the namespace is gone, and does not check again, so a listed volume may have been removed since. Before you delete a volume, inspect it and confirm that its `spec.claimRef.namespace` is the service's namespace and its `status.phase` is `Released`.
 
 ---
 
@@ -139,6 +148,16 @@ Delete the service instead, as above.
 Removing a service's stack from the cluster's GitOps repository is not refused yet. It removes the service's deployment while the service and its name stay in **My services**. Delete the service from its page instead.
 </Note>
 
+## A cluster or application a service depends on
+
+While a managed service has not been deleted, deleting the cluster it runs on, or an application it serves, is refused too: through the API with `409`, with `ankra cluster delete`, and by the AI Assistant and MCP tools `delete_cluster` and `delete_application`. The refusal names the services, for example:
+
+```text
+This cluster hosts managed service 'orders-db'. Retire it before deleting the cluster, so its data is removed through a reviewed retirement. Retiring needs the applications.deploy permission, clusters.read, clusters.operate and stacks.delete on the service's cluster, and clusters.read on the cluster of every application it serves; the operator, admin and owner roles have them. If the retirement itself keeps being refused, contact Ankra support. If the cluster cannot be reached, deleting it is allowed once its agent has been offline for 15 minutes; retiring it afterwards releases its name.
+```
+
+Delete the services first, as above, then delete the cluster or the application. A cluster whose agent has been offline for 15 minutes can be deleted with its services in place, since no deletion could reach them; deleting such a service afterwards only releases its name, and it reads **Deleted, data not confirmed gone**. Destroying a playground is never refused for the services on it.
+
 ---
 
 ## Delete through the API
@@ -146,9 +165,9 @@ Removing a service's stack from the cluster's GitOps repository is not refused y
 The API calls a deletion a **retirement**. It takes the same two steps, with an [API token](/api-reference/introduction) whose holder has the permissions above:
 
 1. Read the service with [Get a managed service instance](/api-reference/services/get-a-managed-service-instance) for its `generation` and the `id` of each of its `consumers`.
-2. [Prepare a managed-service retirement review](/api-reference/services/prepare-a-managed-service-retirement-review) with `expected_generation`, `disconnect_consumer_ids` (every consumer id, each once) and `acknowledge_data_loss: true`. The answer carries the plan, its `digest` and its `expires_at`, 10 minutes later. Nothing changes on the cluster.
+2. [Prepare a managed-service retirement review](/api-reference/services/prepare-a-managed-service-retirement-review) with `expected_generation`, `disconnect_consumer_ids` (every consumer id, each once) and `acknowledge_data_loss: true`. The answer carries the plan, its `digest` and its `expires_at`, 10 minutes later. Nothing changes on the cluster. It also carries `connection_names`, whose `environments` lists each application environment on the service's cluster that reads names such as `DATABASE_URL` from this service, with a `statement` of what happens to them: read each one before you confirm. `complete` is `false` when an environment could not be read. See [Variable names](/guides/connect-to-a-managed-service#variable-names).
 3. [Confirm a managed-service retirement by its digest](/api-reference/services/confirm-a-managed-service-retirement-by-its-digest) with that `digest`. Confirming again with the same digest returns the same receipt, never a second deletion.
-4. Follow `retirement` on the service, or [Get a managed-service retirement](/api-reference/services/get-a-managed-service-retirement): its `phase` while it runs, then its `outcome` and `reason`. Only the outcome `retired` deleted the service.
+4. Follow `retirement` on the service, or [Get a managed-service retirement](/api-reference/services/get-a-managed-service-retirement): its `phase` while it runs, then its `outcome` and `reason`. Only the outcome `retired` deleted the service. With that outcome, `data_disposal` says what became of the data: `complete` only when Ankra can show it is gone, and `data_kept` or `unconfirmed` when it may remain, as under [When data may remain](#when-data-may-remain). `kept_data` then lists the volumes and the Ankra CLI `commands` for them.
 
 ---
 
