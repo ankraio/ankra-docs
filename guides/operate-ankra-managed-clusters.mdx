@@ -72,7 +72,7 @@ Clusters also keep a single default worker pool that predates node groups. `ankr
 
 - **Growing the count is live.** Going from 1 to 3 controllers (3 to 5 on Proxmox VE) provisions the new controllers and joins them to the running cluster.
 - **Reducing the count is offline.** Stop the cluster (its state is kept and restored on start), apply the change, then start it.
-- **The instance type** changes live, one controller at a time, when the cluster has three or more controllers. A single controller is resized offline, because resizing it takes the Kubernetes API down while it reboots.
+- **The instance type** changes in one of three ways, described below. `control-plane get` and the **Control plane** tab say which one applies to your cluster right now.
 - A cluster spread across several zones or hosts keeps at least three controllers.
 
 ```bash
@@ -80,6 +80,57 @@ ankra cluster <provider> control-plane get <cluster>
 ankra cluster <provider> control-plane set-count <cluster> 3
 ankra cluster <provider> control-plane set-instance-type <cluster> <instance-type>
 ```
+
+### Change the control plane instance type
+
+How Ankra changes the instance type depends on how many controllers the cluster has and whether it is running:
+
+| Mode | When it applies | What happens |
+|---|---|---|
+| `rolling` | A running cluster with three or more controllers, on any provider | Ankra drains and resizes one controller at a time and waits for each to be healthy before the next. The Kubernetes API stays up. |
+| `live_with_api_downtime` | A running Hetzner cluster with one controller | Ankra resizes the only controller in place. The Kubernetes API is down for a few minutes while that server reboots on the new type. You have to accept the downtime first. |
+| `offline` | A stopped cluster, on any provider | The new type is saved and used when you next start the cluster. A default stop deletes the servers, so the start creates every server again. |
+
+A running cluster with one controller on any other provider, or with two controllers, cannot change its instance type live. Either grow it to three controllers first and then resize it with no downtime, or stop it and change the type offline.
+
+#### What the API downtime means
+
+While the only controller reboots, the Kubernetes API is not available:
+
+- Pods that are already running on the workers keep running.
+- `kubectl`, deployments, Stack and add-on changes, controllers and operators, and the Ankra agent pause until the API is back. Anything that needs the API, such as scaling a Deployment or rescheduling a pod, waits until then.
+- Before it changes the server, Ankra takes an etcd snapshot on the node and drains it. Hetzner changes the server type and keeps its disk and IP address, so the node comes back as the same machine with the same cluster state. Ankra then waits for the node to be Ready again.
+
+In a test on 2026-10-28, a Hetzner cluster resized from `cpx22` to `cpx32` finished the whole step in about two and a half minutes, and the workloads on the workers were not restarted. Plan for a few minutes of API downtime. To avoid any downtime, grow the cluster to three controllers first.
+
+Ankra does not start the resize while another change is running on the cluster, for example a [scheduled Cluster State Snapshot](/guides/kubernetes-upgrades#scheduled-cluster-state-snapshots). Start it again when that change has finished.
+
+#### Resize the only controller
+
+**In the dashboard:** open **Nodes → Control plane** and pick the new type. The tab says the Kubernetes API will be unavailable for a few minutes. **Resize with API downtime** in the review dialog accepts the downtime and starts the resize.
+
+**On the CLI:** `control-plane get` shows the change as `Change type: yes - live with a few minutes of API downtime (single controller)`. `set-instance-type` refuses the change unless you pass `--accept-api-downtime`:
+
+<CliVersion since="0.49.0" command="cluster hetzner control-plane set-instance-type --accept-api-downtime" />
+
+```bash
+ankra cluster hetzner control-plane get <cluster>
+ankra cluster hetzner control-plane set-instance-type <cluster> cpx32 --accept-api-downtime
+ankra cluster operations list <operation-id>
+```
+
+**From the AI or MCP:** the `change_control_plane` tool takes `accept_api_downtime`. The AI tells you about the downtime and sets it only after you have accepted it.
+
+**On the API:** send `accept_api_downtime: true` with the new type. Without it, the request is refused with `409 Conflict` and a message that describes the downtime.
+
+```bash
+curl -X PUT https://platform.ankra.app/api/v1/clusters/hetzner/<cluster-id>/control-plane/instance-type \
+  -H "Authorization: Bearer $ANKRA_API_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"instance_type": "cpx32", "accept_api_downtime": true}'
+```
+
+Sending the type the controller already has changes nothing and needs no acceptance.
 
 ---
 
