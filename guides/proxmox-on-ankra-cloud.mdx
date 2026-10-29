@@ -74,6 +74,8 @@ if [ "$stage" = 1 ]; then
   gateway6=$(ip -o -6 route show default | awk '{print $3}' | head -1)
   mtu=$(cat "/sys/class/net/$interface/mtu")
   host=$(hostname -s)
+  # Keep the resolvers the server was given; public ones only as a fallback.
+  nameservers=$(resolvectl dns "$interface" 2>/dev/null | cut -d: -f2- | tr ' ' '\n' | command grep -v '^$' || true)
 
   # Proxmox needs the hostname to resolve to the public address, and cloud-init must stop managing it.
   sed -i "/[[:space:]]${host}\$/d;/[[:space:]]${host}[[:space:]]/d" /etc/hosts
@@ -133,7 +135,12 @@ EOF
   systemctl disable systemd-networkd.socket systemd-networkd systemd-networkd-wait-online systemd-resolved 2>/dev/null || true
   systemctl enable networking
   rm -f /etc/resolv.conf
-  printf 'search local\nnameserver 1.1.1.1\nnameserver 8.8.8.8\n' > /etc/resolv.conf
+  {
+    echo "search local"
+    for nameserver in $nameservers 1.1.1.1 8.8.8.8; do
+      echo "nameserver $nameserver"
+    done
+  } | awk '!seen[$0]++' | head -4 > /etc/resolv.conf
   update-initramfs -u -k all
   echo "stage 1 done: reboot, then run stage 2"
 fi
@@ -197,7 +204,7 @@ ssh debian@<server-ip> "sudo useradd -m -s /usr/sbin/nologin ankra-jump && \
 
 ## 5. Connect the server to Ankra
 
-<CliVersion since="0.34.0" />
+<CliVersion since="0.9.0" />
 
 ```bash
 ankra credentials proxmox create \
