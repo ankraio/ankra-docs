@@ -1,0 +1,303 @@
+---
+title: Proxmox VE on an Ankra Cloud Server
+description: Turn a single Ankra Cloud server into a Proxmox VE host with nested virtualisation, connect it to Ankra with a least-privilege API token and an SSH jumphost, and build a Kubernetes cluster on it.
+icon: "server"
+---
+
+import { CliVersion } from "/snippets/cli-version.jsx";
+
+An Ankra Cloud server runs Proxmox VE well: its vCPUs expose hardware virtualisation (`vmx`), so Proxmox runs KVM guests at native speed rather than in emulation. That makes one server a full Proxmox lab, a place to rehearse an on-premises estate, or the host for a [Proxmox VE cluster](/guides/proxmox-clusters) that Ankra builds and operates.
+
+This guide takes a fresh Debian 13 server to Proxmox VE 9, connects it to Ankra and builds a small kubeadm cluster on it. The same steps work on any provider that hands out a single public address per server. The parts specific to Ankra Cloud are the network layout (a `/32` address, an on-link gateway and an MTU of 1370) and the serial console you fall back on if a network change goes wrong.
+
+## Before you start
+
+- An [Ankra Cloud](https://cloud.ankra.app) account and API token, or the console, to create one server.
+- An Ankra organisation, an [SSH key credential](/platform/credentials/ssh-key), and the `ankra` CLI.
+- A local SSH key pair to reach the server.
+
+Size the server for what you will run on it. Proxmox itself needs about 1 GB of memory, and an Ankra cluster on one host with a `px-small` bastion, a `px-small` control plane and a `px-medium` worker needs 8 vCPUs and 16 GB. `starter-12c-24g` with 200 GiB of storage leaves headroom for that. VM disks are thin, so they only use the space their guests write.
+
+## 1. Create the server
+
+Create a Debian 13 server with a public IPv4 address. Ankra reaches the Proxmox API and the cluster's bastion through this address.
+
+```bash
+read -rs ANKRA_CLOUD_TOKEN && export ANKRA_CLOUD_TOKEN   # paste the token; it stays out of shell history
+ankra-cloud servers create \
+  --zone se-sto1 \
+  --hostname pve-1 \
+  --plan starter-12c-24g \
+  --template debian-13 \
+  --storage-gibibytes 200 \
+  --public-ipv4 \
+  --ssh-key-file ~/.ssh/id_ed25519.pub \
+  --wait
+```
+
+Note the server's ID and public address (`ankra-cloud servers list` shows them again later). Check that nested virtualisation is available before you install anything:
+
+```bash
+ssh debian@<server-ip> 'grep -c -E "vmx|svm" /proc/cpuinfo; ls /dev/kvm'
+```
+
+A non-zero count and `/dev/kvm` mean KVM guests will run accelerated.
+
+<Warning>
+Set a root password before you change any networking (`sudo passwd root`). The server has no other login on the serial console (`ankra-cloud api get_server_console` / `stream_server_console`), and that console is your only way back in if a network change cuts you off.
+</Warning>
+
+## 2. Install Proxmox VE
+
+Proxmox VE installs on top of Debian 13 (trixie) from its own package repository. A cloud image needs three adjustments that a bare-metal install does not:
+
+- **The network moves from netplan to ifupdown2.** Proxmox reads and writes `/etc/network/interfaces`; the image configures its NIC through netplan and systemd-networkd.
+- **The NIC name is pinned.** Netplan renames the NIC to `eth0` by MAC address. Without netplan the kernel names it `ens3`, the `eth0` stanza no longer matches anything, and the server boots with no network. A systemd `.link` file keeps the name.
+- **GRUB gets its install device.** The image carries both `grub-pc` and `grub-efi`, and the Proxmox kernel upgrade stops at `grub-pc` until it is told which disk to install to.
+
+Run the install in two stages with a reboot between them. Stage 1 installs the Proxmox kernel and switches the network to ifupdown2 for the next boot. Stage 2 installs Proxmox VE.
+
+```bash install-proxmox-ve.sh
+#!/bin/bash
+# Turns a fresh Debian 13 cloud server (one NIC, cloud-init + netplan) into a Proxmox VE 9 host.
+# Stage 1 installs the Proxmox kernel and moves networking to ifupdown2; reboot, then run stage 2.
+set -euo pipefail
+export DEBIAN_FRONTEND=noninteractive
+stage="${1:?usage: $0 1|2}"
+
+if [ "$stage" = 1 ]; then
+  interface=$(ip -o -4 route show default | awk '{print $5}' | head -1)
+  mac=$(cat "/sys/class/net/$interface/address")
+  ipv4=$(ip -o -4 addr show dev "$interface" scope global | awk '{print $4}' | head -1)
+  gateway4=$(ip -o -4 route show default | awk '{print $3}' | head -1)
+  ipv6=$(ip -o -6 addr show dev "$interface" scope global | awk '{print $4}' | head -1)
+  gateway6=$(ip -o -6 route show default | awk '{print $3}' | head -1)
+  mtu=$(cat "/sys/class/net/$interface/mtu")
+  host=$(hostname -s)
+  # Keep the resolvers the server was given; public ones only as a fallback.
+  nameservers=$(resolvectl dns "$interface" 2>/dev/null | cut -d: -f2- | tr ' ' '\n' | command grep -v '^$' || true)
+
+  # Proxmox needs the hostname to resolve to the public address, and cloud-init must stop managing it.
+  sed -i "/[[:space:]]${host}\$/d;/[[:space:]]${host}[[:space:]]/d" /etc/hosts
+  echo "${ipv4%/*} $host.local $host" >> /etc/hosts
+  cat > /etc/cloud/cloud.cfg.d/99-proxmox.cfg <<'EOF'
+manage_etc_hosts: false
+preserve_hostname: true
+network: {config: disabled}
+EOF
+
+  curl -fsSL https://enterprise.proxmox.com/debian/proxmox-archive-keyring-trixie.gpg \
+    -o /usr/share/keyrings/proxmox-archive-keyring.gpg
+  cat > /etc/apt/sources.list.d/pve-install-repo.sources <<'EOF'
+Types: deb
+URIs: http://download.proxmox.com/debian/pve
+Suites: trixie
+Components: pve-no-subscription
+Signed-By: /usr/share/keyrings/proxmox-archive-keyring.gpg
+EOF
+  root_source=$(findmnt -no SOURCE /)
+  boot_disk=$(lsblk -no PKNAME "$root_source" | head -1)
+  boot_disk=${boot_disk:+/dev/$boot_disk}
+  echo "grub-pc grub-pc/install_devices multiselect ${boot_disk:-$root_source}" | debconf-set-selections
+  apt-get update
+  apt-get -y full-upgrade
+  apt-get -y install proxmox-default-kernel ifupdown2
+
+  cat > "/etc/systemd/network/10-$interface.link" <<EOF
+[Match]
+MACAddress=$mac
+
+[Link]
+Name=$interface
+EOF
+  {
+    echo "auto lo"
+    echo "iface lo inet loopback"
+    echo
+    echo "auto $interface"
+    echo "iface $interface inet static"
+    echo "	address $ipv4"
+    echo "	gateway $gateway4"
+    echo "	mtu $mtu"
+    if [ -n "$ipv6" ]; then
+      echo
+      echo "iface $interface inet6 static"
+      echo "	address $ipv6"
+      if [ -n "$gateway6" ]; then
+        echo "	gateway $gateway6"
+      fi
+    fi
+    echo
+    echo "source /etc/network/interfaces.d/*"
+  } > /etc/network/interfaces
+  mkdir -p /etc/network/interfaces.d
+  mkdir -p /root/netplan-backup && mv /etc/netplan/*.yaml /root/netplan-backup/ 2>/dev/null || true
+  systemctl disable systemd-networkd.socket systemd-networkd systemd-networkd-wait-online systemd-resolved 2>/dev/null || true
+  systemctl enable networking
+  rm -f /etc/resolv.conf
+  {
+    echo "search local"
+    for nameserver in $nameservers 1.1.1.1 8.8.8.8; do
+      echo "nameserver $nameserver"
+    done
+  } | awk '!seen[$0]++' | head -4 > /etc/resolv.conf
+  update-initramfs -u -k all
+  echo "stage 1 done: reboot, then run stage 2"
+fi
+
+if [ "$stage" = 2 ]; then
+  echo "postfix postfix/main_mailer_type select Local only" | debconf-set-selections
+  echo "postfix postfix/mailname string $(hostname -f)" | debconf-set-selections
+  apt-get -y install proxmox-ve postfix open-iscsi chrony dnsmasq
+  # Proxmox SDN runs its own dnsmasq per zone; the system-wide instance must stay off.
+  systemctl disable --now dnsmasq
+  apt-get -y remove os-prober || true
+  apt-get -y remove 'linux-image-*-cloud-amd64' || true
+  update-grub
+  rm -f /etc/apt/sources.list.d/pve-enterprise.sources /etc/apt/sources.list.d/ceph.sources
+  pveversion
+fi
+```
+
+```bash
+scp install-proxmox-ve.sh debian@<server-ip>:
+ssh debian@<server-ip> 'sudo bash install-proxmox-ve.sh 1 && sudo systemctl reboot'
+# wait about a minute for the server to come back
+ssh debian@<server-ip> 'uname -r; ip -br a'          # a -pve kernel, eth0 with the public address
+ssh debian@<server-ip> 'sudo bash install-proxmox-ve.sh 2'
+```
+
+The stage 1 file keeps the server's own addressing, so the `/32` address and its on-link gateway (`169.254.0.2` on Ankra Cloud) carry over unchanged: ifupdown2 adds the `onlink` default route itself. The MTU of 1370 carries over too.
+
+The web interface now answers on `https://<server-ip>:8006` with a self-signed certificate. Log in as `root` with the password you set.
+
+## 3. Create an API token for Ankra
+
+Give Ankra its own Proxmox user with a role that holds exactly what provisioning needs:
+
+```bash
+ssh debian@<server-ip> 'sudo bash -s' <<'EOF'
+pveum role add AnkraProvisioner --privs "VM.Allocate,VM.Audit,VM.Backup,VM.Clone,VM.Config.CDROM,VM.Config.CPU,VM.Config.Cloudinit,VM.Config.Disk,VM.Config.HWType,VM.Config.Memory,VM.Config.Network,VM.Config.Options,VM.Console,VM.GuestAgent.Audit,VM.Migrate,VM.PowerMgmt,VM.Snapshot,VM.Snapshot.Rollback,Datastore.Allocate,Datastore.AllocateSpace,Datastore.AllocateTemplate,Sys.Audit,Sys.Modify,SDN.Allocate,SDN.Use"
+pveum user add ankra@pve --comment "Ankra platform"
+pveum acl modify / --users ankra@pve --roles AnkraProvisioner
+pveum user token add ankra@pve ankra --privsep 0
+EOF
+```
+
+The last command prints the token secret once; keep it for the next step. The token ID is `ankra@pve!ankra`. [Proxmox VE Credentials](/platform/credentials/proxmox#what-ankra-accesses) explains why each privilege is needed.
+
+## 4. Add a jumphost user
+
+Ankra puts the cluster's VMs on a private network, `ankra` (10.20.0.0/16), behind the host's NAT. The server has a single public address, so nothing on that network is reachable from outside, including the bastion Ankra provisions. Ankra reaches it through an [SSH jumphost](/guides/proxmox-clusters#hybrid-connectivity-ssh-jumphost), and the Proxmox host itself is the natural one.
+
+Create a user that can forward ports and do nothing else, with a key pair dedicated to Ankra:
+
+```bash
+ssh-keygen -t ed25519 -N "" -C ankra-jump -f ./ankra-jump
+ssh debian@<server-ip> "sudo useradd -m -s /usr/sbin/nologin ankra-jump && \
+  sudo install -d -m 700 -o ankra-jump -g ankra-jump /home/ankra-jump/.ssh && \
+  echo 'restrict,port-forwarding $(cat ./ankra-jump.pub)' | sudo tee /home/ankra-jump/.ssh/authorized_keys >/dev/null && \
+  sudo chown ankra-jump: /home/ankra-jump/.ssh/authorized_keys && sudo chmod 600 /home/ankra-jump/.ssh/authorized_keys"
+```
+
+`restrict,port-forwarding` gives the key no shell, no agent and no X11 forwarding, only TCP forwarding. To narrow it further, add `permitopen="<server-ip>:8006"` and one `permitopen="<bastion-ip>:22"` per cluster once you know the bastion's address.
+
+## 5. Connect the server to Ankra
+
+<CliVersion since="0.9.0" />
+
+```bash
+ankra credentials proxmox create \
+  --name pve-1 \
+  --api-url https://<server-ip>:8006 \
+  --token-id 'ankra@pve!ankra' \
+  --tls-insecure \
+  --jumphost-host <server-ip> \
+  --jumphost-username ankra-jump \
+  --jumphost-private-key-file ./ankra-jump
+```
+
+The CLI asks for the token secret. `--tls-insecure` accepts the self-signed certificate Proxmox generated; with a DNS name for the server you can order a Let's Encrypt certificate from **Datacenter → ACME** instead and leave the flag off.
+
+Saving the credential sets up what the host is missing, which takes a few minutes the first time:
+
+- `vmbr0` - the NIC becomes the port of a Linux bridge that keeps the host's address, gateway and MTU
+- the `ankra` SDN zone, vnet and subnet, with SNAT and dnsmasq DHCP. The zone takes the uplink's MTU (1370 here), and every cluster VM's NIC inherits it
+- `images`, `rootdir` and `import` content on the `local` storage
+- the `ankra-ubuntu-24-04` cloud-init template, built from the Ubuntu 24.04 cloud image
+
+Check what Ankra now sees:
+
+```bash
+ankra credentials list | grep pve-1                        # note the credential ID
+ankra cluster proxmox hosts --credential-id <credential-id>
+ankra cluster proxmox storages --credential-id <credential-id> --node pve-1
+ankra cluster proxmox bridges --credential-id <credential-id> --node pve-1
+ankra cluster proxmox templates --credential-id <credential-id> --node pve-1
+```
+
+Expect one online host, the `local` directory storage, the `vmbr0` and `ankra` bridges, and the `ankra-ubuntu-24-04` template.
+
+## 6. Create a cluster
+
+```bash
+ankra cluster proxmox create \
+  --name my-cluster \
+  --credential-id <credential-id> \
+  --ssh-key-credential-id <ssh-key-credential-id> \
+  --node pve-1 \
+  --storage local \
+  --bridge ankra \
+  --bastion-instance-type px-small \
+  --control-plane-instance-type px-small \
+  --worker-instance-type px-medium \
+  --worker-count 1 \
+  --include-dns=false
+```
+
+Pass `--storage local`: a Proxmox VE installed on Debian has no `local-lvm`, which is the CLI's default. `--include-dns=false` skips the generated public domain, because Traefik on a single-host Proxmox cluster has no public load balancer for the domain to point at.
+
+Follow the build:
+
+```bash
+ankra cluster operations list --cluster my-cluster
+ankra cluster list | grep my-cluster
+```
+
+The cluster reads `online` once the agent connects. On this host a `px-small` control plane and a `px-medium` worker reach `Ready` about fifteen minutes after the create:
+
+```bash
+ankra cluster select my-cluster
+ankra cluster get nodes
+ankra cluster get pods -A
+```
+
+<Warning>
+Persistent volumes are not available yet. The bundled Proxmox CSI node plugin needs `topology.kubernetes.io/region` and `topology.kubernetes.io/zone` labels on every node, which Ankra does not set on Proxmox nodes today, so its pods restart with `Failed to get region or zone for node`. Run stateless workloads, or bring your own storage, until this is fixed.
+</Warning>
+
+From then on it is an ordinary Proxmox VE cluster. [Proxmox VE Clusters](/guides/proxmox-clusters#operate-it) covers node groups, upgrades, stop and start, and teardown.
+
+## Clean up
+
+Terminate the cluster first so Ankra deletes its VMs, then delete the credential and the server:
+
+```bash
+ankra cluster deprovision my-cluster
+ankra credentials delete <credential-id>
+ankra-cloud servers list                  # find the server ID
+ankra-cloud servers delete <server-id> --wait
+```
+
+## Troubleshooting
+
+| Issue | Solution |
+|-------|----------|
+| The server does not come back after the stage 1 reboot | The NIC came up under a different name than the one in `/etc/network/interfaces`. Log in as root on the serial console, check `ip -br link`, and fix the name in `/etc/systemd/network/10-eth0.link` or in the interfaces file |
+| `grub-pc` fails to configure during the kernel install | Run `echo "grub-pc grub-pc/install_devices multiselect /dev/vda" \| sudo debconf-set-selections && sudo dpkg --configure -a` |
+| `ifreload` or `ifup` says "Another instance of this program is already running" | `/run/network` does not exist until `networking.service` has run once. `mkdir -p /run/network` and retry, or reboot |
+| Saving the credential fails with `status 403` | The token lacks a privilege. The message names it, for example `Permission check failed (/sdn/zones, SDN.Allocate)`; add it to the `AnkraProvisioner` role |
+| Saving the credential fails at `staging management interface eth0 for bridge conversion` | Fixed on the platform side. Until the fix reaches you, create `vmbr0` yourself in **Node → System → Network** (a Linux bridge with `eth0` as its port, moving the address and gateway from `eth0`) and save again |
+| The CLI stops with `http2: timeout awaiting response headers` while saving | The CLI gave up while the platform was still building the template. Releases after v0.50.1 wait up to five minutes. Otherwise run `ankra credentials list`; if the credential is missing, check that the template VM was converted (`qm list` on the host, delete a half-built `ankra-ubuntu-24-04` that is not a template), then save again |
+| Provisioning times out downloading helm or packages, while small requests work | The VMs run MTU 1500 over the 1370 uplink, so large TLS responses are dropped. Credentials saved before the platform fix need it set by hand: `pvesh set /cluster/sdn/zones/ankra --mtu 1370 && pvesh set /cluster/sdn`, then on each cluster VM `qm set <vmid> --net0 virtio=<mac>,bridge=ankra,mtu=1` and reboot it. Check inside a VM with `cat /sys/class/net/eth0/mtu` |
+| Cluster VMs never get past provisioning | Ankra cannot reach the bastion on the `ankra` network. Check the credential has the jumphost set and that `ankra-jump` can forward: `ssh -i ./ankra-jump -N -L 18006:127.0.0.1:8006 ankra-jump@<server-ip>` |
