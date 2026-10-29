@@ -84,6 +84,7 @@ Each service delivers the variables its kind of client conventionally reads:
 | SeaweedFS (S3) | `S3_ENDPOINT`, `AWS_ENDPOINT_URL_S3`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_REGION`, `S3_FORCE_PATH_STYLE` | Both endpoint variables are `http://seaweedfs-all-in-one.<service>.svc.cluster.local:8333`. The key pair is the admin pair. `AWS_REGION` is `us-east-1` and `S3_FORCE_PATH_STYLE` is `true`. |
 | VictoriaLogs | `VICTORIA_LOGS_URL`, `VICTORIA_LOGS_USERNAME`, `VICTORIA_LOGS_PASSWORD` | |
 | VictoriaMetrics | `VICTORIA_METRICS_URL`, `VICTORIA_METRICS_USERNAME`, `VICTORIA_METRICS_PASSWORD` | |
+| GPU chat | `OPENAI_BASE_URL`, `OPENAI_API_KEY`, `OPENAI_MODEL` | See [OpenAI-compatible inference](#openai-compatible-inference). |
 
 Every service also delivers each variable under its own prefix: the service name in capitals, with hyphens as underscores. A PostgreSQL service named `orders-db` delivers `ORDERS_DB_DATABASE_URL`, `ORDERS_DB_PGHOST` and so on.
 
@@ -125,6 +126,7 @@ The same details are on the service in the API, as `connection` on [Get a manage
 | OpenSearch | `https://opensearch.<service>.svc.cluster.local:9200` | `opensearch-credentials` | `url`, `username`, `password`, `ca.crt` |
 | SeaweedFS (S3) | `http://seaweedfs-all-in-one.<service>.svc.cluster.local:8333` | `seaweedfs-s3-secret` | `admin_access_key_id`, `admin_secret_access_key`, `read_access_key_id`, `read_secret_access_key` |
 | VictoriaLogs | `http://victoria-logs.<service>.svc.cluster.local:9428` | `victoria-logs-credentials` | `url`, `username`, `password` |
+| GPU chat | `http://litellm.<service>.svc.cluster.local:4000` | `gpu-chat-credentials` | `url`, `api-key`, `model` |
 | VictoriaMetrics | `http://victoria-metrics.<service>.svc.cluster.local:8428` | `victoria-metrics-credentials` | `url`, `username`, `password` |
 
 The addresses resolve from any namespace on the service's cluster, and not from outside it. On a cluster with a custom DNS domain, use the shorter `<name>.<service>.svc` form, for example `valkey.<service>.svc:6379`. Of the delivered variables, `DATABASE_URL`, `JDBC_DATABASE_URL`, `PGHOST`, `S3_ENDPOINT` and `AWS_ENDPOINT_URL_S3`, and their prefixed copies, use the full `svc.cluster.local` form, so on such a cluster they do not resolve: give the application short-form values for them yourself, as in [Connect from another cluster](#connect-from-another-cluster), under variable names the delivery does not use. The other delivered addresses, in `REDIS_URL`, `REDIS_HOST`, `NATS_URL`, `OPENSEARCH_URL`, `VICTORIA_LOGS_URL` and `VICTORIA_METRICS_URL`, already use the short form and resolve there.
@@ -184,6 +186,39 @@ A value you copy this way is yours: [deleting the service](/guides/delete-a-mana
 - **SeaweedFS.** Use the S3 API over plain HTTP inside the cluster, with path-style addressing. The admin key pair, the one delivered, can read, write, list and administer buckets. The read-only key pair can only read, and is in the service's Secret only.
 - **VictoriaLogs.** Send logs over HTTP with basic auth, as JSON lines, Loki push, OpenTelemetry or Elasticsearch bulk, and query them with LogsQL. No log collector is installed, so ship logs with your own agent.
 - **VictoriaMetrics.** Push metrics with basic auth using Prometheus `remote_write`, OpenTelemetry, InfluxDB or another supported protocol, and query with PromQL or MetricsQL on the Prometheus HTTP API. It scrapes nothing itself, so push from vmagent, a Prometheus agent or an OpenTelemetry Collector.
+
+## OpenAI-compatible inference
+
+A `gpu-chat` service speaks the OpenAI API, so any OpenAI client library or tool that accepts a base URL works against it unchanged. A connected application receives:
+
+| Variable | Value |
+|----------|-------|
+| `OPENAI_BASE_URL` | The service's in-cluster endpoint, ending in `/v1` |
+| `OPENAI_API_KEY` | The key the service generated for its clients |
+| `OPENAI_MODEL` | The name of the model the service runs, set by `model_tier` |
+
+Most OpenAI SDKs read `OPENAI_BASE_URL` and `OPENAI_API_KEY` from the environment by themselves. From a pod in a connected namespace:
+
+```bash
+curl "$OPENAI_BASE_URL/chat/completions" \
+  -H "Authorization: Bearer $OPENAI_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d "{\"model\": \"$OPENAI_MODEL\", \"messages\": [{\"role\": \"user\", \"content\": \"Hello\"}]}"
+```
+
+```python
+import os
+from openai import OpenAI
+
+client = OpenAI()  # reads OPENAI_BASE_URL and OPENAI_API_KEY
+response = client.chat.completions.create(
+    model=os.environ["OPENAI_MODEL"],
+    messages=[{"role": "user", "content": "Hello"}],
+)
+print(response.choices[0].message.content)
+```
+
+With `embeddings` set to 1, the same endpoint also answers `POST /v1/embeddings` with the bge-m3 model. The endpoint is not exposed outside the cluster. `api-key` is a client key the service creates for its consumers; it cannot mint, change or revoke keys. With `chat_ui` set to 1 the service also runs the Open WebUI chat UI, reachable from inside the service's namespace only. See [Managed Service Settings](/reference/managed-services#gpu-chat) for the models each `model_tier` runs.
 
 ## Check that the service answers
 
