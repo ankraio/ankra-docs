@@ -66,17 +66,17 @@ export DEBIAN_FRONTEND=noninteractive
 stage="${1:?usage: $0 1|2}"
 
 if [ "$stage" = 1 ]; then
-  interface=$(ip -o -4 route show default | awk '{print $5}')
+  interface=$(ip -o -4 route show default | awk '{print $5}' | head -1)
   mac=$(cat "/sys/class/net/$interface/address")
   ipv4=$(ip -o -4 addr show dev "$interface" scope global | awk '{print $4}' | head -1)
-  gateway4=$(ip -o -4 route show default | awk '{print $3}')
+  gateway4=$(ip -o -4 route show default | awk '{print $3}' | head -1)
   ipv6=$(ip -o -6 addr show dev "$interface" scope global | awk '{print $4}' | head -1)
-  gateway6=$(ip -o -6 route show default | awk '{print $3}')
+  gateway6=$(ip -o -6 route show default | awk '{print $3}' | head -1)
   mtu=$(cat "/sys/class/net/$interface/mtu")
   host=$(hostname -s)
 
   # Proxmox needs the hostname to resolve to the public address, and cloud-init must stop managing it.
-  sed -i "/[[:space:]]$host\$/d;/[[:space:]]$host[[:space:]]/d" /etc/hosts
+  sed -i "/[[:space:]]${host}\$/d;/[[:space:]]${host}[[:space:]]/d" /etc/hosts
   echo "${ipv4%/*} $host.local $host" >> /etc/hosts
   cat > /etc/cloud/cloud.cfg.d/99-proxmox.cfg <<'EOF'
 manage_etc_hosts: false
@@ -93,8 +93,10 @@ Suites: trixie
 Components: pve-no-subscription
 Signed-By: /usr/share/keyrings/proxmox-archive-keyring.gpg
 EOF
-  echo "grub-pc grub-pc/install_devices multiselect $(lsblk -no PKNAME "$(findmnt -no SOURCE /)" | sed 's|^|/dev/|')" \
-    | debconf-set-selections
+  root_source=$(findmnt -no SOURCE /)
+  boot_disk=$(lsblk -no PKNAME "$root_source" | head -1)
+  boot_disk=${boot_disk:+/dev/$boot_disk}
+  echo "grub-pc grub-pc/install_devices multiselect ${boot_disk:-$root_source}" | debconf-set-selections
   apt-get update
   apt-get -y full-upgrade
   apt-get -y install proxmox-default-kernel ifupdown2
@@ -119,7 +121,9 @@ EOF
       echo
       echo "iface $interface inet6 static"
       echo "	address $ipv6"
-      [ -n "$gateway6" ] && echo "	gateway $gateway6"
+      if [ -n "$gateway6" ]; then
+        echo "	gateway $gateway6"
+      fi
     fi
     echo
     echo "source /etc/network/interfaces.d/*"
