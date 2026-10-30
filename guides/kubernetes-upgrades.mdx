@@ -41,21 +41,17 @@ Total time grows with the node count and with how long your pods take to stop an
 
 ## Backups and restore points
 
-An upgrade has three kinds of restore point for the cluster's state, and none of them covers application data.
+An upgrade has up to three kinds of restore point for the cluster's state, and none of them covers application data.
 
 ### Scheduled Cluster State Snapshots
 
 Ankra captures an encrypted etcd snapshot of every running cluster it provisions - every Secret, ConfigMap, custom resource and PersistentVolume binding - as a **Cluster State Snapshot**: once right after the cluster is created, then every 6 hours. It is stored off the cluster in your [backup vault](/concepts/backup-vaults), or in an Ankra-managed default vault when you have registered none. Each capture appears in `ankra cluster operations list` as **Scheduled etcd Snapshot**. This is the same snapshot a [stop and start](/platform/cluster-power-schedules#what-a-stop-does) uses. Scheduled captures pause while an operation such as an upgrade is running.
 
-Ankra keeps the 4 newest snapshots plus the newest of each UTC day for 7 days.
+Ankra keeps the 4 newest snapshots plus the newest of each UTC day for 7 days, or for the window you set below. The newest snapshot from before the cluster's last start or recovery is kept whatever the window.
 
 #### Set the retention window
 
-<Note>
-**Not released yet.** A per-cluster retention window is part of the next platform release and CLI, and is announced in the [changelog](/changelog) when it reaches your organisation. Until then every cluster keeps the default above.
-</Note>
-
-You can set the window per cluster, between 1 and 90 days. The newest snapshot from before the cluster's last start or recovery is kept whatever the window.
+You can set the window per cluster, between 1 and 90 days.
 
 <CliVersion since="0.49.0" command="cluster state-snapshots retention" />
 
@@ -66,17 +62,13 @@ ankra cluster state-snapshots retention --days 30    # keep 30 days of daily sna
 
 A longer window keeps snapshots from then on; it cannot bring back ones already deleted. A shorter window deletes the daily snapshots outside it from the vault, so the command asks first (`--yes` skips the question). Setting the window needs permission to change cluster settings.
 
-### A verified copy before each control-plane hop
+### A verified copy before each control-plane hop (Hetzner k3s)
 
-<Note>
-**Not released yet.** The verified copy before each control-plane hop is part of the next platform release and is announced in the [changelog](/changelog) when it reaches your organisation. Until then, the scheduled snapshots above and the local snapshot below are the restore points.
-</Note>
+On Hetzner clusters running k3s, before it upgrades the first control plane of a hop, Ankra writes an off-cluster copy of the cluster state to the vault and reads it back to check it. The other control planes of the hop, and a retry, reuse that verified copy for an hour. If the copy or the check fails, the step stops before the node is drained or its Kubernetes binary is replaced, and Ankra retries it on its own with backoff. Fix the cause, usually the backup vault; to retry at once, run `ankra cluster operations retry <operation-id>`. The step result shows the copy's id and checksum: `ankra cluster operations steps <operation-id> --results`. Other providers and kubeadm clusters take no copy before the hop; the scheduled snapshots above and the local snapshot below are their restore points.
 
-Before it touches each control plane, Ankra writes an off-cluster copy of the cluster state to the vault and reads it back to check it. If the copy or the check fails, the hop stops before anything on the cluster has changed. Fix the cause - usually the backup vault - and resume the upgrade. A retry of the same hop within an hour reuses the copy it already verified. The step result shows the copy's id and checksum: `ankra cluster operations steps <operation-id> --results`.
+### A local snapshot on the node's disk
 
-### A local snapshot on each control plane
-
-Each control plane also saves an etcd snapshot on its own disk before it is upgraded, named `ankra-pre-upgrade-<timestamp>`. The newest three are kept.
+On k3s, each control plane saves an etcd snapshot on its own disk before it is upgraded, named `ankra-pre-upgrade-<timestamp>`. On kubeadm, only the cluster's first control plane saves one, before it is upgraded; with a dedicated etcd cluster, each etcd node saves its own before it is upgraded instead. The newest three are kept on each node.
 
 ### Application data is yours to protect
 
@@ -107,7 +99,7 @@ ankra cluster backups status --cluster my-cluster
 
 <CliVersion since="0.49.0" command="cluster upgrade preflight" />
 
-`ankra cluster upgrade preflight my-cluster <version>` checks the hop without changing anything: the hop plan per node, running operations, PodDisruptionBudgets that would park the drain, CloudNativePG settings, control-plane memory, restore points, control-plane reachability and, on k3s, the address pins. Each check answers pass, warn, block or skipped. A block exits with code 8. `ankra cluster upgrade` runs the same preflight first and stops on a block; `--force` goes past only a PodDisruptionBudget block. If the preflight cannot run, the upgrade stops and changes nothing. The preflight is part of the next platform release and CLI, and is announced in the [changelog](/changelog) when it reaches your organisation.
+`ankra cluster upgrade preflight my-cluster <version>` checks the hop without changing anything: the hop plan per node, running operations, PodDisruptionBudgets that would park the drain, CloudNativePG settings, control-plane memory, restore points, control-plane reachability and, on k3s, the address pins. Each check answers pass, warn, block or skipped. A block exits with code 8. The MCP `upgrade_preflight` tool returns the same report. Ankra runs the same preflight first on every upgrade you start, however you start it, and a block stops the upgrade before anything changes; `--force` goes past only a PodDisruptionBudget block. If the preflight cannot run, the upgrade stops and changes nothing.
 
 ---
 
@@ -149,16 +141,14 @@ ankra cluster operations retry <operation-id>
 | What happened | What Ankra does | What you do |
 |---|---|---|
 | A drain is blocked by a PodDisruptionBudget | Retries the drain for about 10 minutes, then parks the upgrade at that node and uncordons it. The other workers' steps are cancelled and planned again on their own within about 10 minutes; they park too while the blocker remains | Relax the budget or add replicas, then `ankra cluster operations retry <operation-id>` |
-| You cancelled the upgrade (`ankra cluster operations cancel <operation-id>`) | Marks the run cancelled at once, but the node being upgraded finishes its whole upgrade (about 3 minutes) and is uncordoned | When you are ready, `ankra cluster operations retry <operation-id>` |
+| You cancelled the upgrade (`ankra cluster operations cancel <operation-id>`) | Marks the run cancelled at once, but the node being upgraded finishes its whole upgrade (about 3 minutes) and is uncordoned. A cancel does not stop the upgrade for good: Ankra plans the remaining nodes again on its own, usually within about 10 minutes | Nothing, or `ankra cluster operations retry <operation-id>` to resume at once; keeping the upgrade stopped needs an operations hold, which only Ankra staff can place |
 | Any other failure | Retries automatically with backoff | Follow it with `ankra cluster operations steps <operation-id>` |
 
 <Warning>
 `ankra cluster upgrade --force` drains past PodDisruptionBudgets. That can take down quorum-based workloads such as etcd, ZooKeeper or a replicated database. Use it only when you accept evicting past the budget. The MCP `upgrade_cluster` tool never forces.
 </Warning>
 
-<Note>
-**Not released yet.** Refusing upgrades during a recovery is part of the next platform release and is announced in the [changelog](/changelog) when it reaches your organisation. With it, while Ankra holds a cluster for a recovery, a new upgrade request is refused with a message naming when the hold ends; run it again after that time.
-</Note>
+While Ankra holds a cluster for a recovery, a new upgrade request is refused with a message naming when the hold ends; run it again after that time.
 
 If a node is still cordoned after you have fixed the cause and nothing is running, put it back with `ankra cluster uncordon <node>`.
 
@@ -169,11 +159,11 @@ If a node is still cordoned after you have fixed the cause and nothing is runnin
 Downgrades are not offered through the dashboard, the CLI or the API. If a control plane does not come back on the new version, [contact Ankra support](/platform/support). Ankra performs the rollback in one of two ways:
 
 - **Put the previous binary back.** The control plane returns to the previous Kubernetes version with its data kept, in seconds. This works only when the old and new Kubernetes versions ship the same etcd minor version. 1.35 to 1.36 does. 1.36 to 1.37 does not: 1.37 moves to etcd 3.7 and converts the data as soon as it starts, so 1.36 can no longer read it.
-- **Restore the cluster state.** Otherwise Ankra restores the cluster state from the newest snapshot taken before the hop, at the matching Kubernetes version. Until the verified copy before each hop is released, that is the local `ankra-pre-upgrade-<timestamp>` snapshot when the control plane's disk is still readable, or else the newest scheduled snapshot, which can be up to 6 hours old because scheduled captures pause while the upgrade runs. In testing the Kubernetes API was unavailable for about 40 seconds.
+- **Restore the cluster state.** Otherwise Ankra restores the cluster state from the newest snapshot taken before the hop, at the matching Kubernetes version: the local `ankra-pre-upgrade-<timestamp>` snapshot when the control plane's disk is still readable; else, on Hetzner k3s, the verified copy taken before the hop; or else the newest scheduled snapshot, which can be up to 6 hours old because scheduled captures pause while the upgrade runs. In testing the Kubernetes API was unavailable for about 40 seconds.
 
 A state restore reverts every change made through the Kubernetes API after the snapshot, including where pods run: a stateful pod that moved to another node after the snapshot is restarted on its old node, and its volume is reattached there. Data on volumes is not touched. Apply again any changes you made through the API after the snapshot.
 
-With a single control plane there is nothing to fail over to, so a failed control plane is always recovered this way, and the API is unavailable until it completes.
+With a single control plane there is nothing to fail over to, so the Kubernetes API is unavailable until one of these two ways has brought the control plane back.
 
 After a rollback the cluster reads its previous version and Ankra does not upgrade it again by itself. Fix what made the hop fail, then start the upgrade again when you are ready.
 
