@@ -66,7 +66,11 @@ ankra cluster logs <proxmox-csi-plugin-node-pod> -n csi-proxmox -c proxmox-csi-p
 # Failed to get region or zone for node: <node>, region: , zone: , see documentation about topology labels
 ```
 
-Ankra corrects the API address in the `proxmox-csi-plugin-config` Secret on the next reconcile, and restarts the controller when the Secret changes. A node's providerID cannot change once it has registered, though, so existing nodes cannot be repaired in place. Replace them: new nodes get the labels and the providerID.
+To repair such a cluster:
+
+1. Add `Datastore.Audit` to the role of the cluster's Proxmox token (`pveum role modify <role> --append 1 --privs Datastore.Audit` on the Proxmox host).
+2. Let Ankra correct the API address in the `proxmox-csi-plugin-config` Secret. It does so on the next reconcile, and restarts the controller when the Secret changes.
+3. Replace the worker nodes. A node's providerID cannot change once it has registered, so existing nodes cannot be repaired in place, and new nodes get the labels and the providerID:
 
 <CliVersion since="0.9.0" />
 
@@ -76,13 +80,13 @@ ankra cluster node-group add <cluster-id> --name workers-v2 --instance-type px-m
 ankra cluster node-group delete <cluster-id> default
 ```
 
-Control-plane nodes run no storage workloads by default, so they can stay as they are. If you run workloads on them, recreate the cluster instead.
+Control-plane nodes carry the control-plane taint, which the node plugin does not tolerate, so no node plugin runs there and they can stay as they are. If you removed that taint to run workloads on them, recreate the cluster instead.
 
 ## Troubleshooting
 
 | Issue | Solution |
 |-------|----------|
 | `proxmox-csi-plugin-node` pods in `CrashLoopBackOff` with `Failed to get region or zone for node` | The node predates the fix. Replace it, as described in [Clusters created before the fix](#clusters-created-before-the-fix) |
-| A claim stays `Pending` with `did not have enough free storage` | The driver publishes no capacity. Its controller log names the reason: `500 no such file '/cluster/resources'` is the bare API address (the controller predates the fix - `ankra cluster restart deployment proxmox-csi-plugin-controller -n csi-proxmox` reloads it), `failed to get proxmox storage config: not found` is a token without `Datastore.Audit`, and a connection error means the cluster's VMs cannot reach the API URL |
+| A claim stays `Pending` with `did not have enough free storage` | The driver publishes no capacity. Its controller log names the reason: `500 no such file '/cluster/resources'` is the bare API address: the Secret has not been corrected yet, or the controller started before Ankra began restarting it on a config change (on clusters reconciled before 30 October 2026), in which case `ankra cluster restart deployment proxmox-csi-plugin-controller -n csi-proxmox` reloads it, `failed to get proxmox storage config: not found` is a token without `Datastore.Audit`, and a connection error means the cluster's VMs cannot reach the API URL |
 | A claim stays `Pending` without an event | Nothing uses it yet. With `WaitForFirstConsumer` the disk is created only when a pod is scheduled |
 | A pod is stuck in `ContainerCreating` with an attach error | The token lacks `VM.Config.Disk` on the VM, or the disk's storage is not available on the VM's host |
