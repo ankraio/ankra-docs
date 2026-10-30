@@ -1,0 +1,92 @@
+---
+title: Persistent Volumes on Proxmox VE Clusters
+description: How Ankra-built Proxmox VE clusters provision PersistentVolumes through the bundled Proxmox CSI driver, which StorageClass to use, how volumes follow Proxmox hosts, and how to fix a cluster whose CSI node plugin keeps restarting.
+icon: "hard-drive"
+---
+
+import { CliVersion } from "/snippets/cli-version.jsx";
+
+Every [Proxmox VE cluster](/guides/proxmox-clusters) Ankra builds ships with a CSI driver, so a `PersistentVolumeClaim` gets a real virtual disk on your Proxmox storage. That disk is attached to the VM that runs the pod. There is no extra install and no extra credential: the driver uses the same Proxmox API token the cluster was built with. That token needs `Datastore.Audit` on top of what provisioning uses - see [Proxmox VE Credentials](/platform/credentials/proxmox#what-ankra-accesses).
+
+## What Ankra installs
+
+The `proxmox-csi` Stack on each cluster holds:
+
+| Part | Name | What it does |
+|------|------|--------------|
+| Namespace | `csi-proxmox` | Labelled for the privileged Pod Security profile, because the node plugin mounts host paths |
+| Secret | `proxmox-csi-plugin-config` | The Proxmox API URL, token and TLS setting, SOPS-encrypted in the Stack |
+| Add-on | `proxmox-csi-plugin` (chart from `oci://ghcr.io/sergelogvinov/charts`) | The controller, which creates, attaches and resizes disks through the Proxmox API, and a node plugin on every node, which mounts them |
+| StorageClass | `proxmox-csi` | The default class, backed by the storage the cluster's VM disks live on |
+
+When the cluster's disks span more than one Proxmox storage, each further storage gets its own class, named `proxmox-csi-<storage>`.
+
+The driver reaches the Proxmox API from inside the cluster at the credential's API URL. If that address is not reachable from the cluster's VMs, for example on a routed SDN where guest traffic is SNATed, create the credential through the API with `internal_api_url` set to an address the VMs can reach. The driver then uses that address and Ankra keeps using `api_url`.
+
+## Use a volume
+
+An unqualified claim lands on the default class:
+
+```yaml
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: data
+  namespace: my-app
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 10Gi
+```
+
+Ship it as a manifest in one of the cluster's Stacks, like any other resource. See [Stacks](/concepts/stacks). The claim stays `Pending` until a pod uses it, because the class binds with `WaitForFirstConsumer`: a Proxmox disk is created on one host, so Kubernetes first picks the node, then the driver creates the disk on that node's host.
+
+Volumes are `ReadWriteOnce` disks attached to one VM at a time, as an extra SCSI disk on the VM (`scsi1`, `scsi2`, ...). On directory storage such as `local` each volume is a raw image file; on LVM-thin, ZFS or Ceph it is a volume of that storage.
+
+## How volumes follow Proxmox hosts
+
+Ankra labels every node with:
+
+- `topology.kubernetes.io/region: proxmox`, the name the driver uses for the Proxmox installation
+- `topology.kubernetes.io/zone: <proxmox host>`, the host the VM runs on
+
+It also registers each node with the providerID `proxmox://proxmox/<vmid>`, which is how the driver finds the VM to attach a disk to.
+
+On a single-host cluster this is invisible. On a [host-spread cluster](/guides/proxmox-clusters#host-spread-placement) a volume on local storage belongs to one host, so a pod that uses it can only run on a node on that host. Kubernetes enforces this through the zone label. Use shared storage (Ceph RBD, for example) when a stateful pod must be able to move between hosts.
+
+## Clusters created before the fix
+
+Before 30 October 2026, Ankra set neither the topology labels nor the providerID on nodes of **kubeadm** Proxmox clusters, and pointed the driver at the bare API address instead of `/api2/json`. On those clusters the node plugin restarts endlessly, and every claim stays `Pending`:
+
+```bash
+ankra cluster get pods -n csi-proxmox
+# proxmox-csi-plugin-node-...   CrashLoopBackOff
+ankra cluster logs <proxmox-csi-plugin-node-pod> -n csi-proxmox -c proxmox-csi-plugin-node --previous
+# Failed to get region or zone for node: <node>, region: , zone: , see documentation about topology labels
+```
+
+To repair such a cluster:
+
+1. Add `Datastore.Audit` to the role of the cluster's Proxmox token (`pveum role modify <role> --append 1 --privs Datastore.Audit` on the Proxmox host).
+2. Let Ankra correct the API address in the `proxmox-csi-plugin-config` Secret. It does so on the next reconcile, and restarts the controller when the Secret changes.
+3. Replace the worker nodes. A node's providerID cannot change once it has registered, so existing nodes cannot be repaired in place, and new nodes get the labels and the providerID:
+
+<CliVersion since="0.9.0" />
+
+```bash
+# a new worker group, then retire the old one
+ankra cluster node-group add <cluster-id> --name workers-v2 --instance-type px-medium --count 2 --wait
+ankra cluster node-group delete <cluster-id> default
+```
+
+Control-plane nodes carry the control-plane taint, which the node plugin does not tolerate, so no node plugin runs there and they can stay as they are. If you removed that taint to run workloads on them, recreate the cluster instead.
+
+## Troubleshooting
+
+| Issue | Solution |
+|-------|----------|
+| `proxmox-csi-plugin-node` pods in `CrashLoopBackOff` with `Failed to get region or zone for node` | The node predates the fix. Replace it, as described in [Clusters created before the fix](#clusters-created-before-the-fix) |
+| A claim stays `Pending` with `did not have enough free storage` | The driver publishes no capacity. Its controller log names the reason: `500 no such file '/cluster/resources'` is the bare API address: the Secret has not been corrected yet, or the controller started before Ankra began restarting it on a config change (on clusters reconciled before 30 October 2026), in which case `ankra cluster restart deployment proxmox-csi-plugin-controller -n csi-proxmox` reloads it, `failed to get proxmox storage config: not found` is a token without `Datastore.Audit`, and a connection error means the cluster's VMs cannot reach the API URL |
+| A claim stays `Pending` without an event | Nothing uses it yet. With `WaitForFirstConsumer` the disk is created only when a pod is scheduled |
+| A pod is stuck in `ContainerCreating` with an attach error | The token lacks `VM.Config.Disk` on the VM, or the disk's storage is not available on the VM's host |
