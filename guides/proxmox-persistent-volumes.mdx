@@ -40,7 +40,7 @@ spec:
       storage: 10Gi
 ```
 
-Ship it as a manifest in one of the cluster's Stacks, like any other resource. See [Stacks](/concepts/stacks). The claim stays `Pending` until a pod uses it, because the class binds with `WaitForFirstConsumer`: a Proxmox disk is created on one host, so Kubernetes first picks the node, then the driver creates the disk on that node's host.
+Ship it as a manifest in one of your own Stacks, like any other resource - not in the `proxmox-csi` Stack, which Ankra owns. See [Stacks](/concepts/stacks). On teardown Ankra removes every other Stack's volume users before the CSI driver, so their volumes detach cleanly; a pod placed inside `proxmox-csi` itself gets no such ordering and can hang in `Terminating` once the driver is gone. The claim stays `Pending` until a pod uses it, because the class binds with `WaitForFirstConsumer`: a Proxmox disk is created on one host, so Kubernetes first picks the node, then the driver creates the disk on that node's host.
 
 Volumes are `ReadWriteOnce` disks attached to one VM at a time, as an extra SCSI disk on the VM (`scsi1`, `scsi2`, ...). On directory storage such as `local` each volume is a raw image file; on LVM-thin, ZFS or Ceph it is a volume of that storage.
 
@@ -54,6 +54,19 @@ Ankra labels every node with:
 It also registers each node with the providerID `proxmox://proxmox/<vmid>`, which is how the driver finds the VM to attach a disk to.
 
 On a single-host cluster this is invisible. On a [host-spread cluster](/guides/proxmox-clusters#host-spread-placement) a volume on local storage belongs to one host, so a pod that uses it can only run on a node on that host. Kubernetes enforces this through the zone label. Use shared storage (Ceph RBD, for example) when a stateful pod must be able to move between hosts.
+
+## Deleting a cluster deletes its volumes
+
+The disks the driver provisioned do not belong to any of the cluster's VMs - the driver parks them on a placeholder VM ID, 9999 - so deleting the VMs alone would leave them on your storage. A deprovision therefore deletes them too, after the VMs are gone, but only once you accept it: the CLI and the dashboard list the volumes and ask, and a scripted deprovision passes `--accept-volume-data-loss`.
+
+<CliVersion since="0.9.0" />
+
+```bash
+ankra cluster deprovision my-cluster                                   # lists the volumes, then asks
+ankra cluster deprovision my-cluster --yes --accept-volume-data-loss   # non-interactive
+```
+
+Without the acceptance the volumes are kept and reported, and you delete them in Proxmox when you no longer need them (**Datacenter → Storage → *your storage* → VM Disks**, owner `9999`). Only disks the driver named after a PersistentVolume of this cluster are deleted; nothing else on the host is touched.
 
 ## Clusters created before the fix
 
