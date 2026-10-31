@@ -11,7 +11,8 @@ Choose Proxmox VE when the cluster has to run on hardware you already own, on-pr
 
 - A **Proxmox VE API credential**: the API URL and an API token with VM management privileges. If Ankra needs to initialise storage, networking or the template, the token also needs `Datastore.Allocate`, `Datastore.AllocateTemplate`, `Sys.Modify` and `SDN.Allocate`. Persistent volumes also need `Datastore.Audit`. [Proxmox VE Credentials](/platform/credentials/proxmox#what-ankra-accesses) lists every privilege with a ready-made `pveum` role.
 - An **SSH key credential** for VM access - your own public key, or one Ankra generates. A Proxmox cluster takes a single key. See [SSH Key Credentials](/platform/credentials/ssh-key).
-- **A cloud-init VM template.** If a node has none, Ankra creates one during credential setup: it downloads the Ubuntu 24.04 cloud image and registers it as the `ankra-ubuntu-24-04` template. You can bring your own and pin it with `template` - see [Creating a cloud-init template](#creating-a-cloud-init-template).
+- **A cloud-init VM template.** During credential setup Ankra downloads the Ubuntu 24.04 cloud image and registers it as the `ankra-ubuntu-24-04` template on every node that lacks it. You can bring your own and pin it with `template` - see [Creating a cloud-init template](#creating-a-cloud-init-template).
+- **Room next to your own VMs.** On an installation that already runs VMs, VMID 9999 must be free and the selected hosts need free memory for every cluster VM. See [Connecting a Proxmox VE that already runs VMs](/platform/credentials/proxmox#connecting-a-proxmox-ve-that-already-runs-vms).
 - **A network bridge.** Use an existing active Linux bridge, or let Ankra convert the single active management Ethernet or bond interface (static or `manual` method) to `vmbr0`. Ankra also creates a private NAT network `ankra` (10.20.0.0/16) through Proxmox SDN - see [Networking](#networking).
 - **The `dnsmasq` package** on each node for the private network's DHCP (`apt install dnsmasq && systemctl disable --now dnsmasq`), and `source /etc/network/interfaces.d/*` in `/etc/network/interfaces` (present by default on standard installs).
 - **Free local disk or existing VM storage.** If no active storage supports VM images, Ankra enables `images` and `rootdir` on the `local` directory storage, or creates it at `/var/lib/vz`. The `import` content type is enabled on `local` for cloud-image downloads. A Proxmox VE installed on top of Debian has only `local`, no `local-lvm`, so pass `--storage local` to the CLI.
@@ -122,7 +123,7 @@ Many Proxmox environments are not reachable from the internet. If Ankra cannot r
 ## What Ankra created on your hosts
 
 - **A bastion VM** - the only SSH access point Ankra uses to reach the nodes. It carries no workload or egress traffic. With a jumphost on the credential, Ankra reaches both the Proxmox API and the bastion through it.
-- **Control plane and worker VMs** (QEMU), cloned from the cloud-init template and attached to the network you picked, plus dedicated etcd VMs for a kubeadm cluster with external etcd.
+- **Control plane and worker VMs** (QEMU), cloned from the cloud-init template and attached to the network you picked, plus dedicated etcd VMs for a kubeadm cluster with external etcd. Each is tagged `ankra` and `ankra-cluster-<id>`.
 - **The `vmbr0` bridge and the `ankra` SDN network**, when they did not exist, set up during credential setup.
 
 There is no cloud controller manager: `LoadBalancer` Services are not provisioned. Expose workloads with `NodePort` Services, an ingress controller, or a load balancer you deploy yourself. The [Proxmox VE Reference](/reference/proxmox#architecture) has the full layout.
@@ -146,7 +147,7 @@ When you save a Proxmox VE credential, Ankra initialises two networks when they 
 
 ### Creating a cloud-init template
 
-Ankra clones a cloud-init VM template for every cluster VM. **Nodes without any template get one automatically**: during credential setup Ankra downloads the Ubuntu 24.04 cloud image and registers it as the `ankra-ubuntu-24-04` template. Nodes that already carry a template are left untouched, so a custom template always wins.
+Ankra clones a cloud-init VM template for every cluster VM. **Every node gets Ankra's template automatically**: during credential setup Ankra downloads the Ubuntu 24.04 cloud image and registers it as the `ankra-ubuntu-24-04` template. Your own templates are left untouched, and Ankra clones one of them only when you name it with `template`.
 
 Create your own template when you need a different distribution, a hardened image, or pre-installed packages. The steps below use Ubuntu 24.04. Adjust the image URL and VM ID for your environment.
 
@@ -186,7 +187,7 @@ qm template 9000
 ```
 
 <Note>
-The template VM ID (9000 in this example) must be unique on your node. Ankra auto-picks the template with the lowest VMID unless you pin one with the `template` option at cluster creation time.
+The template VM ID (9000 in this example) must be unique on your node. Ankra uses `ankra-ubuntu-24-04` unless you pin your template with the `template` option (by name or VMID) at cluster creation time.
 </Note>
 
 For **host-spread placement**, create the same-named template on every selected node before provisioning the cluster.
@@ -280,6 +281,9 @@ Day-2 tasks work the same way on every Ankra Managed provider, with the CLI name
 | TLS certificate errors (self-signed) | Enable the **TLS insecure** toggle (`tls_insecure`) on the Proxmox VE credential |
 | Nodes never get an IP address | On the `ankra` SDN network, verify the zone is healthy (`dnsmasq` installed, zone status *available* under **Datacenter → SDN**). On your own bridge, verify a DHCP server answers there |
 | Provisioning fails waiting for a VM's IP address | On the `ankra` SDN network, addresses come from the PVE IPAM automatically. On other bridges the cloned template must ship the **QEMU guest agent** - rebuild the template with `qemu-guest-agent` and retry |
+| Ankra's template `ankra-ubuntu-24-04` is not on the node | Re-save the Proxmox credential to build it, or name your own template with `template` |
+| VMID 9999 is in use | A guest of yours has the VMID the persistent volume driver files cluster volumes under - move it to another VMID and retry |
+| The cluster needs more memory than the selected hosts have free | Choose smaller instance types, fewer nodes, or more hosts - Ankra does not overcommit hosts that run your VMs |
 | No VM templates found on the node | Re-save the Proxmox credential to run the automatic setup (it creates the `ankra-ubuntu-24-04` template), or create one yourself - see [Creating a cloud-init template](#creating-a-cloud-init-template) |
 | Cluster stuck in provisioning | Check the API token privileges (see [Proxmox VE Credentials](/platform/credentials/proxmox)) and free capacity on the selected node and storage |
 | VM creation fails with a permission error | The API token is missing privileges (e.g., `VM.Allocate`, `Datastore.AllocateSpace`) on the selected node, storage, or bridge |
