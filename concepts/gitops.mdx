@@ -1,6 +1,6 @@
 ---
 title: GitOps
-description: Manage your clusters with GitOps using YAML files and include paths
+description: Manage your clusters with GitOps using one directory of YAML files per cluster in Git
 ---
 
 import { CliVersion } from "/snippets/cli-version.jsx";
@@ -32,19 +32,19 @@ my-repo/
 
 Edit these files and push; Ankra applies the change. [What Ankra Writes Back to Git](#what-ankra-writes-back-to-git) explains how it avoids overwriting your edits.
 
-**A layout you write by hand.** If you author the cluster definition yourself, for example to [import a cluster from YAML](/guides/import-cluster), you choose the layout and point at it with `include` paths:
+**Files you add by hand.** Ankra reads one directory per cluster, the directory shown above. The file in it named after the cluster, `my-cluster.yaml`, is the cluster file, and it is the only file Ankra reads as a cluster definition. Every other file in the directory is content: it takes effect when an entry in the cluster file names it with `from_file`. You can add your own files anywhere in the directory except under `argocd/`, in subdirectories too:
 
 ```
 my-repo/
-  manifests/
-    namespace.yaml
-    namespace.AGENTS.md
-    rbac.yaml
-  addons/
-    ingress.yaml
-    ingress.AGENTS.md
-    monitoring.yaml
-  import-cluster.yaml
+  clusters/
+    my-cluster-<short-id>/
+      my-cluster.yaml              # the cluster file
+      manifests/
+        logging-namespace.yaml
+        logging-namespace.AGENTS.md
+        logging-rbac.yaml
+      values/
+        fluent-bit.yaml
 ```
 
 The optional `AGENTS.md` sibling files hold per-manifest and per-add-on operational learnings for your team and Ankra's AI - see [Teach Your Agents with AGENTS.md](/platform/agents-md).
@@ -53,7 +53,7 @@ The optional `AGENTS.md` sibling files hold per-manifest and per-add-on operatio
 
 ## Cluster Definition Example
 
-Your `import-cluster.yaml` references files using `include` paths:
+The cluster file lists every manifest and add-on by `name` and points at its file with `from_file`. For the directory above, `my-cluster.yaml` reads:
 
 ```yaml
 apiVersion: v1
@@ -67,26 +67,41 @@ spec:
     branch: main
     repository: my-org/my-repo
   stacks:
-  - name: platform-stack
+  - name: logging
     manifests:
-    - include: manifests/
+    - name: logging-namespace
+      from_file: manifests/logging-namespace.yaml
+      agents_md_from_file: manifests/logging-namespace.AGENTS.md
+    - name: logging-rbac
+      from_file: manifests/logging-rbac.yaml
+      parents:
+      - name: logging-namespace
+        kind: manifest
     addons:
-    - include: addons/
+    - name: fluent-bit
+      chart_name: fluent-bit
+      chart_version: 0.49.1
+      registry_name: fluent
+      registry_url: https://fluent.github.io/helm-charts
+      namespace: logging
+      configuration:
+        from_file: values/fluent-bit.yaml
+      parents:
+      - name: logging-namespace
+        kind: manifest
 ```
 
-When Ankra syncs this file from the repository, it loads and applies all YAML files from the `manifests/` and `addons/` folders. Include paths are resolved only by that sync: `ankra cluster apply -f` refuses an `include` entry, so a file you apply from your machine lists its entries inline. You can also include individual files for more control:
+Each `from_file`, `agents_md_from_file` and `description_from_file` is a path relative to the cluster directory, and Ankra looks it up exactly as written among the files in that directory. There is no folder or wildcard form, a path that leaves the directory never matches, and Ankra never follows a symlink. When a manifest, an add-on's values, an application or a stack description names a file that is not there, the sync stops with an error ending `which is not in the repository snapshot` and applies nothing; a missing `AGENTS.md` file is skipped. An entry without a `name` stops the sync too: every manifest, add-on and application entry needs one.
 
-```yaml
-manifests:
-- include: manifests/namespace.yaml
-- include: manifests/rbac.yaml
-```
+One kind of file needs no entry. A file at `stacks/<stack>/manifests/<name>.yaml` (or `.yml`) that no entry already names, for a stack the cluster file declares, is added to that stack as a manifest called `<name>`, unless a stack already lists that name. If two declared stacks hold a file with the same unlisted name, the sync stops until you list it under the stack you mean.
+
+`ankra cluster apply -f` reads the same keys on your machine. It resolves each path against the directory the applied file is in and refuses a path that is absolute or contains `..`, so running it on the cluster file in its cluster directory resolves the same `from_file` paths a sync does; it does not add unlisted manifest files. [Files in the cluster directory](/reference/importcluster#files-in-the-cluster-directory) lists every key that names a file.
 
 ---
 
 ## Single-File Cluster Definition
 
-For small or self-contained setups you can skip include paths and define everything inline in one file. Manifest and values content is embedded as base64:
+A cluster file you apply with `ankra cluster apply -f` can instead carry everything inline, with manifest and values content embedded as base64. This form is for the CLI only: a sync from Git refuses a cluster file whose manifests carry `manifest_base64`, and reads a manifest's content only from its file:
 
 ```yaml
 apiVersion: v1
@@ -122,7 +137,7 @@ spec:
         kind: manifest
 ```
 
-Use `parents` to control deployment order - a resource only deploys after its parents succeed. Prefer include paths once a cluster definition grows beyond a couple of resources.
+Use `parents` to control deployment order: a resource deploys only after its parents succeed. When Ankra writes a cluster like this to Git, it moves each manifest's and add-on's content into a file in the cluster directory and names it with `from_file`, as in the [cluster definition example](#cluster-definition-example).
 
 Every field of this file - stacks, manifests, add-ons, applications, parents, and encrypted paths - is documented in the [ImportCluster YAML Schema](/reference/importcluster).
 
@@ -148,12 +163,12 @@ Credentials stay out of Git: a `username`, `password`, `token` or `auth_scheme` 
 
 1. You update or add YAML files in your Git repository
 2. Ankra detects the change and automatically syncs your cluster
-3. All included manifests and add-ons are applied in the order you specify
+3. Ankra reads the cluster file and the files it names with `from_file`, and applies the manifests and add-ons in the order you specify
 
 ```mermaid
 flowchart LR
     A[Git Push] --> B[Ankra Detects Change]
-    B --> C[Parse Include Paths]
+    B --> C[Read Cluster Directory]
     C --> D[Apply Manifests]
     D --> E[Deploy Add-ons]
     E --> F[Cluster Updated]
@@ -202,6 +217,8 @@ curl -H "Authorization: Bearer $ANKRA_TOKEN" \
 ```
 
 Each entry carries the `path`, Git's version as `head_content` (read at `head_commit_sha`), Ankra's version as `render_content`, the digest of each as `head_content_hash` and `render_content_hash`, when the difference was first seen as `detected_at`, and any `resolution_choice` already made. A file that may hold a secret is listed with `content_redacted` and no content; its digests are still exact.
+
+Each entry also carries `structural_diff`, even when its content is withheld: the key path of every key or list member where the two versions differ, each marked `added`, `removed`, `changed` or `reordered` from Git's version to Ankra's. A value is shown only where Ankra's checks find nothing sensitive in it, and only to a caller holding `kubernetes.secrets_reveal` on the cluster; where a side holds a value that is not shown, the change reads `value_masked: true`, and a key name that may itself be a secret reads `<masked>`.
 
 ```sh
 curl -X POST -H "Authorization: Bearer $ANKRA_TOKEN" -H "Content-Type: application/json" \
@@ -449,7 +466,7 @@ If Ankra isn't syncing as expected:
 | Issue | Solution |
 |-------|----------|
 | Sync not triggering | Check that Git credentials are valid and have repo access |
-| Files not found | Verify all `include` paths exist in the repository |
+| A sync fails with `which is not in the repository snapshot` | An entry's `from_file` or `description_from_file` names a path no file in the cluster directory has. Write it relative to the cluster directory, exactly as the file is named, and commit the file itself rather than a symlink. See [Cluster Definition Example](#cluster-definition-example) |
 | Invalid configuration | Ensure YAML files are syntactically correct |
 | Wrong branch | Confirm the branch name in your cluster definition matches |
 | Unsure which repository or commit a cluster deploys from | Run `ankra cluster gitops status --cluster <name>`. It prints the configured repository, branch and credential, and the **Applied Commit** and **Git Head Checked** with their times ([Applied Commit and Git Head](#applied-commit-and-git-head)). The repository the last successful sync actually read is `observed_source` in `GET /api/v1/clusters/{cluster_id}/gitops/status` and the `get_gitops_status` [MCP tool](/platform/mcp-tools); `source_mismatch` is `true` when it differs from the configured repository |
@@ -457,7 +474,7 @@ If Ankra isn't syncing as expected:
 | A field you added to a data source block fails the sync | Only the fields in the [ImportCluster schema](/reference/importcluster#observability-sources-in-git) are accepted; the error names the offending key. Credential fields (`username`, `password`, `token`, `auth_scheme`) are always refused - reference a credential by `credential_name` |
 | A value you set in Git is reverted by a platform write | Check that `.ankra-owned.json` exists in the cluster directory - without it the overwrite boundary is off ([What Ankra Writes Back to Git](#what-ankra-writes-back-to-git)). Restore it from history, and report the reverting commit: its author, `ankra-platform[bot]` or `Ankra Reconciler`, tells support which write path produced it |
 | A change made in the portal never reaches Git | The file is hand-maintained - its bytes in Git are not what Ankra last wrote, so Ankra preserves it and the cluster reads **Diverged**. Make the change in Git, or [decide the file](#diverged-files) |
-| A cluster reads **Diverged** and nobody changed anything in Ankra | Something changed Ankra's side of a file you edited in Git. `ankra cluster gitops status` lists the preserved files, each with when it was detected and whether it has a decision. For both versions, [list them through the API](#diverged-files): `render_content` is Ankra's version, and a `Sync cluster state from Ankra` or `ankra-platform[bot]` commit near `detected_at`, when that change wrote other files too, shows what else it changed. Decide the file through the API, and report it to support if the same file comes back after a `git` import |
+| A cluster reads **Diverged** and nobody changed anything in Ankra | Something changed Ankra's side of a file you edited in Git. `ankra cluster gitops status` lists the preserved files, each with when it was detected and whether it has a decision. For both versions, [list them through the API](#diverged-files): `render_content` is Ankra's version, `structural_diff` names the keys that differ even when the content is withheld, and a `Sync cluster state from Ankra` or `ankra-platform[bot]` commit near `detected_at`, when that change wrote other files too, shows what else it changed. Decide the file through the API, and report it to support if the same file comes back after a `git` import |
 
 <Tip>
 Use the Ankra WebUI to see sync status and any errors. The Operations page shows deployment history and helps identify issues.
