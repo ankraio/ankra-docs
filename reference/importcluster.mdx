@@ -16,7 +16,7 @@ ankra cluster apply -f cluster.yaml --cluster my-cluster
 `--cluster` targets the cluster you name, by name or id; without it the target is the manifest's `metadata.name`. `cluster apply` honours `--cluster` from CLI v0.16.0 - earlier versions ignore it and use `metadata.name`. The same schema is what Ankra reads from a connected [GitOps repository](/concepts/gitops).
 
 <Note>
-`spec.helm_registries` and `spec.log_source` take effect only when Ankra syncs the file from the connected Git repository. `ankra cluster apply -f` does not send them. Use them only in a file Ankra syncs from Git. File paths such as `from_file` resolve against the cluster directory in a sync, and against the applied file's own directory in `ankra cluster apply -f`; see [Files in the cluster directory](#files-in-the-cluster-directory).
+`ankra cluster apply -f` sends neither `spec.log_source` nor `spec.helm_registries`. A sync from the connected Git repository reads `spec.log_source`, so put that block in a file Ankra syncs from Git. A sync does not read `spec.helm_registries`; the `spec.helm_registries[]` section below says what does. File paths such as `from_file` resolve against the cluster directory in a sync, and against the applied file's own directory in `ankra cluster apply -f`; see [Files in the cluster directory](#files-in-the-cluster-directory).
 </Note>
 
 ## Full Example
@@ -58,9 +58,7 @@ spec:
               name: configmap-fluent-bit
           agents_md_from_file: "addons/fluent-bit/AGENTS.md"
           configuration:
-            values: |-
-              service:
-                enabled: true
+            from_file: "values/fluent-bit.yaml"
 ```
 
 ## Top Level
@@ -154,7 +152,11 @@ spec:
 
 ## `spec.helm_registries[]`
 
-Declare the Helm registries the file's add-ons depend on, so the repository is self-contained: when Ankra syncs the file from Git, it connects any registry that is not already present before add-ons deploy. A declaration matching an existing registry (same name, same URL - org-scoped or global) is an idempotent no-op; a declaration whose name is taken by a registry with a different URL fails the sync before anything is written. `ankra cluster apply -f` does not send this block; connect the registry with the CLI or the portal first when you apply from a local file. Credentials are referenced by name and must already exist, so secrets stay out of Git.
+Declare the Helm registries the file's add-ons depend on. The import API reads this block: an import request to `POST /api/v1/clusters/import` that carries it, or a manifest applied with the `apply_cluster_manifest` [MCP tool](/platform/mcp-tools) (inline content only: the tool refuses `from_file`), connects any registry that is not already present before add-ons deploy. A declaration matching an existing registry (same name, same URL - org-scoped or global) is an idempotent no-op; a declaration whose name is taken by a registry with a different URL fails the import before anything is written. Credentials are referenced by name and must already exist, so secrets stay out of Git.
+
+<Warning>
+A sync from Git does not read `spec.helm_registries`, and `ankra cluster apply -f` does not send it. Connect the registry first with `ankra helm registries create` or in the portal; see [Adding a Registry](/guides/registries#adding-a-registry). Keep the block out of the cluster file in Git: the sync ignores it, and a cluster file you edited in Git stays yours, so a later change made in Ankra is applied to the cluster but does not reach that file, and the cluster reads **Diverged** until the two versions agree again or a person decides the file; see [Diverged files](/concepts/gitops#diverged-files). When a sync merges such a change with your commit, the regenerated file no longer carries the block.
+</Warning>
 
 | Field | Required | Description |
 |-------|----------|-------------|
@@ -336,7 +338,7 @@ Helm releases.
 | `registry_url` | yes | URL of that registry, e.g. `https://fluent.github.io/helm-charts` |
 | `namespace` | yes | Target namespace for the release. Must be a valid Kubernetes namespace name ([RFC 1123 DNS label](https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#dns-label-names)): 1-63 characters, lowercase letters, digits and `-`, starting and ending with a letter or digit. Short names like `ory` are fine. `ankra cluster validate` enforces the same rules as apply |
 | `registry_credential_name` | no | Credential for private registries |
-| `configuration.values` / `values_base64` | no | Helm values, inline |
+| `configuration.values` / `values_base64` | no | Helm values, inline: `values` as YAML text, `values_base64` base64-encoded. A sync from Git reads `values_base64` and does not read `values`; `ankra cluster apply -f` accepts both |
 | `configuration.from_file` | no | Path of a values file, relative to the cluster directory |
 | `configuration.encrypted_paths` | no | Values paths that are SOPS-encrypted; see [SOPS](/guides/sops). Same empty-versus-absent rule as a manifest's `encrypted_paths` |
 | `parents` | no | [Dependency edges](#parents) |
@@ -376,6 +378,7 @@ Deployments of [Applications](/concepts/applications) created in Ankra.
 | `name` | yes | Application resource name |
 | `platform_application_id` | no | The Ankra application to deploy |
 | `platform_application_version` | no | Pinned application version |
+| `from_file` | no | Path of the YAML file holding the application's Kubernetes manifest, relative to the cluster directory. Ankra writes an application's manifest to `stacks/<stack>/applications/<name>/manifest.yaml` unless this names another path. A sync from Git reads an application's content only from this file. See [Files in the cluster directory](#files-in-the-cluster-directory) |
 | `namespace` | no | Target namespace |
 | `parameters` | no | Map of application parameters |
 | `parents` | no | [Dependency edges](#parents) |
