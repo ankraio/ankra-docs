@@ -1,7 +1,7 @@
 ---
 title: Build a Bazel Repository with Ankra Pipelines
 sidebarTitle: Bazel
-description: "Run Bazel builds and tests on Ankra Pipelines - Bazelisk and the Bazel output tree on the shared workspace, a disk and repository cache that survives between runs, JUnit test results from bazel-testlogs, an optional remote cache, and a Bazel-built binary turned into an image that is scanned, gated and published."
+description: "Run Bazel builds and tests on Ankra Pipelines - Bazelisk and the Bazel output tree on the shared workspace, a disk and repository cache that survives between runs, JUnit test results from bazel-testlogs, an optional remote cache, and how a Bazel-built binary gets into an image."
 ---
 
 Bazel runs on Ankra Pipelines as an ordinary `run` stage. Ankra brings what Bazel itself leaves to the CI system: a cluster to run on, caches kept between runs, test results in the run's check, and an image build that is scanned and gated before it is published. Bazel brings hermetic builds and an action cache, so a run with a warm cache only rebuilds what changed.
@@ -32,6 +32,13 @@ test:ci --test_output=errors
 ```
 
 `test` inherits every `build` flag, so the caches apply to tests too. On Bazel 7.4 or later, add `build:ci --experimental_disk_cache_gc_max_size=20G` to keep the disk cache from growing without limit.
+
+The caches, Bazel's output root and the Go tools all sit under `/workspace`, which is also the root of the checkout, so `bazel test //...` would walk into them. List them in a `.bazelignore` at the repository root:
+
+```text
+.ankra-bazel
+.ankra-go
+```
 
 ## The pipeline
 
@@ -107,7 +114,7 @@ What each part does:
 
 ## Use a remote cache
 
-Bazel's remote cache shares results between runs, branches and developers' machines. Ankra does not host one, but a step can reach any cache that speaks Bazel's remote cache protocol over HTTPS. Store the cache's API key as an organisation variable, which the CLI reads from standard input:
+Bazel's remote cache shares results between runs, branches and developers' machines. Ankra does not host one, but a step can reach any cache that speaks Bazel's remote cache protocol over HTTPS on port 443. Store the cache's API key as an organisation variable, which the CLI reads from standard input:
 
 ```bash
 ankra org variables set BAZEL_REMOTE_CACHE_KEY -
@@ -136,60 +143,11 @@ The header name depends on the cache you use. `secrets` is a protected section t
 
 ## Build an image from a Bazel target
 
-For a repository linked to an [Ankra application](/concepts/applications), a `kind: "build"` stage builds an image from a Dockerfile, then a `scan` and a `gate` judge it before `publish` gives it an immutable `sha-` tag. To ship a Bazel-built binary, build it in a `run` stage, copy it into the workspace, and let the Dockerfile pick it up from there.
+A `kind: "build"` stage cannot use a binary that an earlier `run` stage built. It does not read the workspace the other stages share: it runs in its own namespace and fetches the commit itself, so it sees only what is in the repository at that commit. See [where a build's paths are resolved from](/guides/pipeline-reference#where-a-builds-paths-are-resolved-from).
 
-Add these stages after `test`:
+To ship a Bazel-built binary as an image, build the binary inside the image build: a multi-stage Dockerfile whose first stage installs Bazelisk and runs `bazel build`, and whose final stage copies the binary out of the first one. The build stage then needs nothing from earlier stages. A `build` stage has `egress-https` by default, so Bazel can fetch its dependencies there, but it does not see the caches under `/workspace`.
 
-```yaml
-  - name: "bazel-build"
-    kind: "run"
-    image: "golang:1.26"
-    needs: ["test"]
-    resources:
-      cpu: "4"
-      memory: "8Gi"
-    env:
-      GOPATH: "/workspace/.ankra-go"
-      BAZELISK_HOME: "/workspace/.ankra-bazel/bazelisk"
-    run: |
-      bazel() { /workspace/.ankra-go/bin/bazelisk --output_user_root=/workspace/.ankra-bazel/root "$@"; }
-      bazel build --config=ci //cmd/server
-      mkdir -p /workspace/dist
-      cp "$(bazel cquery --config=ci --output=files //cmd/server)" /workspace/dist/server
-  - name: "build"
-    kind: "build"
-    needs: ["bazel-build"]
-    build:
-      dockerfile: "Dockerfile"
-      context: "."
-      provenance: true
-      sbom: true
-  - name: "scan"
-    kind: "scan"
-    needs: ["build"]
-    scan:
-      scanners: ["semgrep", "checkov", "trivy"]
-  - name: "gate"
-    kind: "gate"
-    needs: ["scan"]
-    gate:
-      require_stages: ["scan"]
-  - name: "publish"
-    kind: "publish"
-    needs: ["gate"]
-    when:
-      events: ["push"]
-```
-
-`bazel cquery --output=files` prints where Bazel put the target's output, so the copy keeps working when the rule set changes its output layout. `//cmd/server` is an example; use your own target. The Dockerfile copies the binary in:
-
-```dockerfile
-FROM gcr.io/distroless/static-debian12:nonroot
-COPY dist/server /server
-ENTRYPOINT ["/server"]
-```
-
-A pull request builds, scans and gates the image but never publishes it. A push to `main` publishes it to the application's registry, and that tag is what push to deploy rolls out.
+To ship the binary to machines outside Kubernetes instead, a `build` stage with `build.bundle` packs a directory an earlier stage left in the workspace into a release bundle rather than building an image. The `deploy` row of [kind-specific blocks](/guides/pipeline-reference#kind-specific-blocks) describes it.
 
 ## Make it faster
 
