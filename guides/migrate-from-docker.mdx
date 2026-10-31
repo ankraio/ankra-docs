@@ -10,7 +10,7 @@ import { YouTube } from "/snippets/youtube.jsx";
 `ankra migrate up` takes a directory holding a Docker Compose file and moves the whole deployment into a cluster Ankra runs: it converts the services into a stack, applies the stack, and then moves the data out of the deployment's PostgreSQL, MySQL and MariaDB databases into the databases it just deployed. A bare `Dockerfile` and the running Docker daemon work as sources too.
 </Note>
 
-The command is re-runnable, so the usual shape is to rehearse it against a live source, check the result, and then run it once more with `--stop-source` to cut over.
+The command is re-runnable, so the usual shape is to rehearse it against a live source, check the result, and then run it once more with `--stop-source` to cut over, adding `--overwrite-database` for each database an earlier run restored.
 
 ## Prerequisites
 
@@ -32,7 +32,7 @@ ankra migrate up ./app --cluster production --plan
 The plan names:
 
 - The **module** detected in the source directory, the **target cluster**, the **stack** (new, or an existing one that will be updated) and the **namespace**. The stack defaults to the source directory's name and the namespace to the stack's name. `ankra migrate detect ./app` reports which modules recognise a directory, and `ankra migrate modules` lists the ones available.
-- The **output directory** (`--out`, default `ankra-migration`): the conversion is written to `<out>/stack` and the dumps to `<out>/data`. A directory holding nothing but an earlier run's `stack/` and `data/` is reused, so running the same command again needs no extra flag.
+- The **output directory** (`--out`, default `ankra-migration`): the conversion is written to `<out>/stack` and the dumps to `<out>/data`. A directory holding nothing but an earlier run's `stack/` and `data/` is reused, so running the same command again needs no `--force`.
 - Every **database server** it found, with its engine, version and user, and each database on it with the size read from the running container (`pg_database_size` on PostgreSQL, `information_schema` on MySQL and MariaDB).
 - The **estimated dump size** against the free disk where the dumps will be written. The run refuses rather than filling the disk.
 - **Warnings**, such as a database above 625 GiB (more than a single upload can carry), or the `postgres` maintenance database being skipped. If `postgres` really is your application database, say so with `--option databases.<workload>=postgres`.
@@ -92,6 +92,7 @@ ankra migrate up ./app --cluster production \
 | `--force` | Overwrite an output directory that holds files no earlier run of this command wrote |
 | `--no-data` | Deploy the workloads only; carry no data over |
 | `--stop-source` | Stop the source's non-database services before the export, so the dump is final |
+| `--overwrite-database` | Repeatable; a database the restore may replace although an earlier restore into this cluster already loaded it, as `<server>/<database>`, or the database name when only one server has it |
 | `-y, --yes` | Skip the confirmation prompt |
 | `--plan` | Print the plan and stop; change nothing |
 | `--timeout` | How long to wait for the run to finish (default `10m`) |
@@ -99,21 +100,26 @@ ankra migrate up ./app --cluster production \
 
 ## Rehearse, then cut over
 
-Nothing about the run requires the source to be stopped, so rehearse with it live, look at what landed in the cluster, and repeat until you are happy. When you are, cut over:
+Nothing about the run requires the source to be stopped, so rehearse with it live, look at what landed in the cluster, and repeat until you are happy. A restore replaces everything in a database with the export, so once any earlier run has started a restore into a database in the cluster, whether or not it finished, Ankra refuses to restore into it again unless you name it with `--overwrite-database <server>/<database>`, or the database name alone when only one server has it. Repeat the flag for each database. The check runs before anything is uploaded, and the refusal names every database to add. `ankra migrate restore` and `ankra migrate data` take the same flag. When you are happy, cut over:
+
+<CliVersion since="0.49.0" command="migrate up --overwrite-database" />
 
 ```bash
-# rehearse, as often as you like, with the source still serving
+# first rehearsal, with the source still serving
 ankra migrate up ./app --cluster production
 
+# every later rehearsal replaces what the earlier one restored
+ankra migrate up ./app --cluster production --overwrite-database db/shop
+
 # cut over
-ankra migrate up ./app --cluster production --stop-source --yes
+ankra migrate up ./app --cluster production --stop-source --overwrite-database db/shop --yes
 ```
 
 <Note>
-Running again over the same output directory needs no extra flag: a directory holding nothing but an earlier run's `stack/` and `data/` is reused. `--force` is only for an output directory that holds something else, and the refusal names the file that is in the way: `<out> holds notes.txt, which no earlier run of this command wrote; pass --force to overwrite it or --out for another directory`.
+Running again over the same output directory needs no `--force`: a directory holding nothing but an earlier run's `stack/` and `data/` is reused. `--force` is only for an output directory that holds something else, and the refusal names the file that is in the way: `<out> holds notes.txt, which no earlier run of this command wrote; pass --force to overwrite it or --out for another directory`.
 </Note>
 
-`--stop-source` stops the source's non-database services before the final dump is taken, so nothing writes to the source databases while they are being read. The databases themselves stay up for the dump. The summary prints the `docker start ...` command that brings the source back if you need to roll back. Once you are satisfied, move DNS to the cluster.
+`--stop-source` stops the source's non-database services before the final dump is taken, so nothing writes to the source databases while they are being read. The databases themselves stay up for the dump. The summary prints the `docker start ...` command that brings the source back if you need to roll back. A run that stops before the restore, such as one missing an `--overwrite-database`, leaves those services stopped; the progress output printed the same command when it stopped them. Once you are satisfied, move DNS to the cluster.
 
 ## Running the steps separately
 
@@ -183,7 +189,7 @@ Ankra never holds your data: it goes from your source to your vault's bucket to 
 
 ## The dumps a restore leaves in the vault
 
-Every restore keeps its upload under `imports/<import-id>/` in the vault, so the same import can be restored again without dumping the source a second time. The dumps stay there until you remove them.
+Every restore keeps its upload under `imports/<import-id>/` in the vault, so the same import can be restored again without dumping the source a second time. That restore replaces what the earlier one loaded, so it is refused until the restore request names each database in `confirmed_overwrite_databases`, the API's form of `--overwrite-database`. The dumps stay there until you remove them.
 
 ```bash
 ankra migrate imports list                  # what the vault holds
