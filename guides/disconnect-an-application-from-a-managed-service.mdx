@@ -1,0 +1,295 @@
+---
+title: Disconnect an Application from a Managed Service
+description: Take one application environment off a managed service that keeps running for its other applications - what the review shows, why nothing changes until the application's next deploy, when Ankra removes the connection Secret and the network access, and what disconnecting cannot do for each service.
+tag: "Closed Beta"
+---
+
+import { CliVersion } from "/snippets/cli-version.jsx";
+
+<Warning>
+**Closed beta.** Disconnecting an application is part of [Managed services](/concepts/managed-services), which is in closed beta and enabled per organisation on request. [Contact support](/platform/support) to have it turned on for your organisation.
+</Warning>
+
+Disconnecting takes one application environment off a managed service, while the service keeps running for its other applications. It takes two steps: Ankra prepares a review of exactly what the disconnection does, and you confirm it. Nothing changes until you confirm, and the running application is not touched until its next deploy. To remove the service itself, with its data, [delete it](/guides/delete-a-managed-service) instead.
+
+<Note>
+The Ankra CLI disconnects an application, as under [Disconnect with the Ankra CLI](#disconnect-with-the-ankra-cli), and so does the API, as under [Disconnect through the API](#disconnect-through-the-api). You can also ask the AI Assistant or an MCP client, which use the tools `prepare_service_disconnection` and `confirm_service_disconnection`. In the AI Assistant, confirming always asks for your approval first, whatever its mode. The portal cannot disconnect an application yet; it will follow.
+</Note>
+
+<Warning>
+**Disconnecting does not revoke the application's credential.** All the applications connected to a service share one credential. The application keeps the one it has, and it can still use the service from any namespace the network still admits. To make sure it can no longer authenticate, rotate the service's credential, which changes it for every connected application. Ankra has no rotation for managed services yet. See [What disconnecting can and cannot do](#what-disconnecting-can-and-cannot-do).
+</Warning>
+
+---
+
+## Prerequisites
+
+- **The service is installed and not being deleted.** A service whose installation has not finished, or whose deletion was confirmed, cannot have an application disconnected from it.
+- **No deploy of the application environment is in progress.** Wait for it to finish.
+- **Your role allows it.** Disconnecting needs exactly what connecting the environment needed:
+
+| Permission | Where |
+|------------|-------|
+| `applications.deploy` | Your organisation |
+| `clusters.operate` | The cluster the service runs on |
+| `clusters.operate` and `clusters.read` | The cluster the application environment runs on |
+
+The built-in `owner`, `admin` and `operator` roles hold all of them. An API token needs them too, and its own scopes must allow them. See [Roles and access](/guides/roles-and-access).
+
+---
+
+## What happens, in order
+
+1. **You confirm.** The service stops counting the environment among the applications it serves at once: it is no longer among the service's `consumers`, and it is listed under the service's `disconnections` until the disconnection has finished. Nothing changes on the cluster yet. The application keeps running with the connection it has.
+2. **The application environment's next deploy.** The deploy removes the workloads' reference to the `<service>-connection` Secret and rolls them, as any deploy rolls a changed workload. When the environment had received the Secret, the deploy writes it again exactly as it was, so a pod started before the disconnection that restarts during the rollout still finds the values it started with. After this deploy, the workloads no longer receive the service's variables. Deploy the application now to finish sooner, or let its next deploy do it.
+3. **Ankra removes the Secret once no pod reads it.** Every 15 seconds, Ankra checks whether any pod in the namespace reads the Secret, through `envFrom`, an environment variable's `secretKeyRef`, or a Secret or projected volume, terminating pods included, and whether any workload in the application's deployed manifest still refers to it. When two checks in a row, at least 10 seconds apart, find nothing, Ankra removes the Secret from the application's namespace. Removing it restarts nothing.
+4. **Ankra takes the namespace off the service's client port**, unless you chose to keep network access or there is nothing to narrow, as under [Network access](#network-access). The disconnection has then finished, and records what Ankra observed.
+
+Ankra restarts nothing by itself. The only pods that roll are the application environment's own workloads, in the deploy you run.
+
+Ankra checks for readers only while the application's cluster is online, while no deploy of the environment is in progress, and while its view of the cluster's pods and Secrets is current, synced within the last 15 minutes. In a few cases it also waits for something else to settle first, for example the deletion of another service connected to the environment. Until then, the Secret stays.
+
+<Warning>
+**A workload whose reference to the Secret was written by hand keeps it in place.** Ankra removes only the reference a deploy attached. A workload that reads `<service>-connection` through a reference someone wrote keeps the disconnection waiting, and with it the Secret, because removing the Secret is the change that would break that workload. Nothing times out: change or remove such workloads yourself. Ankra also cannot see a workload deployed some other way that has no running pod, such as a CronJob between runs or a Deployment scaled to zero. Once the Secret is gone, such a workload starts without its values.
+</Warning>
+
+Disconnecting at once, before the next deploy, is not offered. The application would keep the shared credential it has, so cutting it off at once would only break it without revoking anything. A request with `timing` set to `now` is refused.
+
+---
+
+## What the review shows
+
+The review is a plan the platform resolved for this environment. Each part carries a `statement`, the platform's own words for what the disconnection does. Read each one before you confirm.
+
+| Part of the plan | What it says |
+|------------------|--------------|
+| `credential` | That the credential is shared, how many other application environments use it (`other_consumers`), and that Ankra cannot revoke it for this application alone. `cannot_guarantee` says what the application can still do with it, for this kind of service. |
+| `rotation` | How to make sure the application can no longer authenticate: rotate the service's credential, which changes it for every connected application. |
+| `connection_names` | Every variable the application stops receiving (`variables`). When this service gives names such as `DATABASE_URL`, who gives them from now on, as under [Names such as DATABASE_URL](#names-such-as-database_url). |
+| `connection_secret` | Whether the environment's deploys delivered the `<service>-connection` Secret (`delivered`). If they did, Ankra keeps it exactly as it is while pods still read it, and removes it once none does. If not, there is no Secret to remove. |
+| `workloads` | The deployed workloads that read the Secret. Those in `attached_by_ankra` read it through the reference a deploy attached: the next deploy removes it and rolls them. Those in `written_by_hand` read it through a reference someone wrote: change them yourself, or they start without its values once it is gone, and a reference that is not optional keeps them from starting at all. `state` reads `not_stored` when Ankra has no copy of the deployed manifest and so cannot list them, and `not_deployed` when nothing is deployed in the environment. |
+| `network` | Whether the namespace loses access to the service's client port, and why, as under [Network access](#network-access). |
+| `data` | That nothing is deleted from the service. |
+| `timing` | That the disconnection takes effect with the next deploy. `deploy_now_offered` is `true` when the environment has a deployment to deploy again. |
+| `kept` | What stays after the disconnection has finished, as under [What stays](#what-stays). |
+
+Beside the plan, `running_pods` lists the pods that read the Secret right now, read when the answer is served. It is not part of the plan, so it can change without the review changing.
+
+An environment on another cluster than the service never received a connection from Ankra: `on_service_cluster` is `false`, confirming removes only the service's record of it, and the disconnection finishes at once.
+
+---
+
+## What disconnecting can and cannot do
+
+Every service Ankra publishes gives all the applications connected to it one shared credential. A disconnection removes the connection Ankra delivered, the workloads' reference to it and, for most services, the namespace's network access. It never changes the credential.
+
+| Service | The shared credential | Disconnecting removes | Disconnecting cannot guarantee |
+|---------|-----------------------|-----------------------|--------------------------------|
+| PostgreSQL | The password of `app`, the owner of the database | The delivered connection, the workloads' reference to it, and the namespace's access to port 5432 | The application keeps the owner's password and its full rights from any namespace the network still admits. The data it wrote stays in the database. |
+| Valkey | The password of the `app` user | The delivered connection, the reference, and the namespace's access to port 6379 | The password does not change, and the keys the application wrote stay. |
+| NATS | The password of the `app` user | The delivered connection, the reference, and the namespace's access to port 4222 | The password does not change, and the streams and consumers the application created stay. |
+| OpenSearch | The `admin` password | The delivered connection, the reference, and the namespace's access to port 9200 | The admin password does not change, so from a namespace the network still admits the application could still administer the search cluster. Its indices stay. |
+| SeaweedFS (S3) | The admin access keys | The delivered connection, the reference, and the namespace's access to port 8333 | The access keys do not change, and the objects the application wrote stay. |
+| VictoriaLogs | The basic-auth password | The delivered connection and the reference | The client port is open to every namespace by design, so nothing changes on the network. The password does not change. |
+| VictoriaMetrics | The basic-auth password | The delivered connection and the reference | The client port is open to every namespace by design, so nothing changes on the network. The password does not change. |
+
+For every service:
+
+- **Rotating the credential affects every connected application.** It is the only way to make sure the disconnected application can no longer authenticate, and Ankra has no rotation for these services yet.
+- **The network change holds only where the cluster's network plugin enforces NetworkPolicy.** New connections from the namespace are then refused. Connections already open may stay open until they close, depending on the plugin. A service installed on an earlier package version admits every namespace on its client port, so nothing changes on the network.
+- **Nothing is deleted from the service.** For PostgreSQL the database and everything the application wrote stay. For the other services Ankra cannot tell which keys, streams, indices, objects, logs or metrics the application wrote, so nothing is deleted.
+
+### What stays
+
+- Earlier copies of the connection Secret, in the namespace's Helm release history (`<application>-services`, up to 10 revisions), until newer revisions replace them.
+- The shared credential, which stays valid: the application can still use the one it has wherever the network admits it.
+- For PostgreSQL, the service's backups, which keep whatever the application wrote until their retention ends.
+
+While the disconnection has not finished, a service newly connected to the same environment reaches it only with the environment's next deploy, not on its own.
+
+---
+
+## Network access
+
+By default, Ankra takes the application's namespace off the service's client port once no pod reads the connection Secret. Choose to keep network access (`keep_network_access`) when something else in that namespace still needs to reach the service, for example a workload someone wired to it by hand, which would otherwise lose access too.
+
+The namespace keeps its access while the disconnection waits for pods to stop reading the Secret and for the Secret to be gone. `network.reason` in the review says what happens after that:
+
+| `reason` | What happens |
+|----------|--------------|
+| `narrows` | Ankra takes the namespace off the service's port. |
+| `keep_requested` | You chose to keep network access: anything running in the namespace can still reach the service. |
+| `still_needed` | The namespace keeps its access for now, because the service itself, Ankra's agent or another connected application runs there, or another application there is also being disconnected. When this disconnection finishes, Ankra takes the namespace off unless something still needs it then. Of two disconnections in one namespace, whichever finishes last takes it off. |
+| `open_by_design` | VictoriaLogs and VictoriaMetrics admit every namespace by design. Nothing changes. |
+| `open` | The service's port admits every namespace, because its package version predates the narrowing or because it was opened by hand. Ankra leaves it as it is. |
+| `changed_by_hand` | The service's client access was changed by hand, so Ankra does not change it. Take the namespace off yourself if it should lose access. |
+| `not_admitted` | The port does not admit the namespace now. Nothing changes. |
+| `not_rendered` | The service's stack is not on the cluster, so there is no network policy to change. |
+| `other_cluster` | The environment runs on another cluster, and the service admits only namespaces on its own cluster. Nothing changes. |
+
+---
+
+## Names such as DATABASE_URL
+
+Of each kind of service connected to an application environment, one gives the names without a prefix, such as `DATABASE_URL` or `REDIS_URL`, as under [Variable names](/guides/connect-to-a-managed-service#variable-names). Ankra never moves those names to another service by itself: that would make the application read and write a different database without anyone choosing it. So when the service you disconnect gives them:
+
+- **No other service of that kind is connected to the environment.** The next deploy stops delivering those names, with the service's other variables.
+- **Another service of that kind is connected.** The review asks you to choose which service gives the names from now on, or none: `choice_required` is `true` and `choices` lists the services you can choose. Prepare the review again with your choice, in `connection_names_instance_id` or with `connection_names_none` set to `true`. Confirming without a choice is refused. Ankra records the choice for the environment when you confirm. From the next deploy the chosen service gives the names, or none does, and that deploy rolls the workloads onto the change. A choice marked `installing` is a service still being set up, so it is a new, empty service.
+
+A choice in a review that does not ask for one is refused.
+
+---
+
+## Disconnect with the Ankra CLI
+
+`ankra services disconnect` takes both steps in one command. It prepares the review and prints every part of it in the platform's own words, then asks you to confirm. Preparing changes nothing.
+
+<CliVersion since="0.53.0" />
+
+```bash
+ankra services disconnect <service> --application <application>
+```
+
+The application is disconnected only when you confirm the review: at the prompt, or with `--yes`. Answering no, or running without a terminal and without `--yes`, exits with status 4 and changes nothing.
+
+- `--application` takes the application's name or id, and `--environment` chooses the environment when the application uses the service from more than one. `--consumer` names one consumer by its id instead, for example a namespace no environment is deployed to; `ankra services get <service>` lists them.
+- `--review-only` shows the review and confirms nothing. A review you do not confirm expires after 10 minutes and changes nothing.
+- When the review asks who gives names such as `DATABASE_URL` from now on, nothing is confirmed until you choose: run the command again with `--names-from <service>`, or with `--names-from none` for no service. See [Names such as DATABASE_URL](#names-such-as-database_url).
+- `--keep-network-access` keeps the application's namespace allowed on the service's port, as under [Network access](#network-access).
+- `-o json` or `-o yaml` prints the review, or the confirmed disconnection, on stdout.
+
+```bash
+ankra services disconnect orders-db --application storefront --environment staging --review-only
+ankra services disconnect orders-db --application storefront --names-from orders-db-v2 --yes
+```
+
+Then deploy the application environment, or let its next deploy run. Until the disconnection has finished, `ankra services get <service>` lists the application under `Disconnecting`, with its phase. Every flag is in the [CLI reference](/reference/cli/services#ankra-services-disconnect).
+
+---
+
+## Disconnect through the API
+
+Disconnecting takes two calls, a prepare and a confirm, with an [API token](/api-reference/introduction) whose holder has the [permissions](#prerequisites) above.
+
+<Steps>
+  <Step title="Read the service">
+    Read the service with [Get a managed service instance](/api-reference/services/get-a-managed-service-instance) for its `generation` and the `id` of the environment among its `consumers`.
+  </Step>
+  <Step title="Prepare the review">
+    [Prepare a managed-service disconnection review](/api-reference/services/prepare-a-managed-service-disconnection-review). Every field is required:
+
+    ```bash
+    curl -X POST https://platform.ankra.app/api/v1/org/service-admission/instances/<instance-id>/disconnections \
+      -H "Authorization: Bearer <your-token>" \
+      -H "Content-Type: application/json" \
+      -d '{"consumer_id": "<consumer-id>", "expected_generation": <generation>, "timing": "after_next_deploy", "keep_network_access": false, "connection_names_instance_id": null, "connection_names_none": false}'
+    ```
+
+    The answer carries the disconnection's `id`, its `plan`, its `digest` and its `expires_at`, 10 minutes later. Nothing changes. If `plan.connection_names.choice_required` is `true`, prepare it again with your choice, as under [Names such as DATABASE_URL](#names-such-as-database_url).
+  </Step>
+  <Step title="Confirm it by its digest">
+    [Confirm a managed-service disconnection by its digest](/api-reference/services/confirm-a-managed-service-disconnection-by-its-digest) within the 10 minutes:
+
+    ```bash
+    curl -X POST https://platform.ankra.app/api/v1/org/service-admission/instances/<instance-id>/disconnections/<disconnection-id>/confirm \
+      -H "Authorization: Bearer <your-token>" \
+      -H "Content-Type: application/json" \
+      -d '{"digest": "<digest>"}'
+    ```
+
+    The platform resolves the plan again and refuses when anything it covers changed since the review. Confirming again with the same digest returns the same disconnection, never a second one.
+  </Step>
+  <Step title="Deploy the application">
+    Deploy the application environment, or let its next deploy run. Until then the application keeps working against the service.
+  </Step>
+</Steps>
+
+Each person can hold at most 10 disconnection reviews waiting for confirmation, and each organisation 50. A review you do not confirm expires on its own and changes nothing.
+
+---
+
+## Follow the disconnection
+
+While the disconnection has not finished, [Get a managed service instance](/api-reference/services/get-a-managed-service-instance) lists it under `disconnections`, with its `phase`:
+
+| `phase` | Meaning |
+|---------|---------|
+| `draining` | The environment's deploys keep the connection Secret while pods started before the disconnection still read it. `keeps_connection_secret` is `true` while those deploys keep writing that Secret unchanged, and `false` when the environment's deploys never delivered one. |
+| `removing` | Ankra is removing the connection Secret and waits to see it gone. |
+| `revoking` | Ankra is taking the namespace off the service's client port. |
+
+`disconnections.state` reads `unknown` when the platform could not read them; `items` is then empty and says nothing about whether a disconnection is in progress. A finished disconnection leaves the list.
+
+The person who prepared the disconnection can read it at any time, while they still hold the [permissions](#prerequisites), by confirming it again with the same digest. The answer carries its `state` (`in_progress`, then `settled`), its `phase`, the `running_pods` that still read the Secret while it waits, and, once it has finished, its `outcome`. The outcome records only what Ankra observed:
+
+| Field | Values |
+|-------|--------|
+| `connection_secret` | `removed`: the Secret was removed and seen gone. `not_delivered`: there was no Secret to remove. `record_only`: the environment is on another cluster, so only the service's record of it was removed. `not_confirmed`: Ankra could not observe it, and claims nothing. |
+| `network` | `narrowed`: the namespaces in `removed_namespaces` were taken off the service's port. `left`: nothing was changed, and `network_reason` says why, with a `reason` from [Network access](#network-access). `not_confirmed`: Ankra could not observe it. |
+
+## Verify
+
+Once the outcome reads `removed`, check the application's namespace yourself:
+
+```bash
+ankra cluster select <cluster>
+ankra cluster get secrets -n <namespace>
+```
+
+`<service>-connection` is no longer listed.
+
+---
+
+## What is refused
+
+### While you prepare or confirm
+
+| What you see | Cause | Remedy |
+|--------------|-------|--------|
+| `The service's installation has not finished; disconnect the application once it has` | The service is still being installed | Wait until the installation has finished |
+| `The service is being retired, which disconnects every application` | The service's deletion was confirmed | Nothing to do: deleting the service disconnects every application |
+| `The service is retired, so there is nothing to disconnect` | The service was deleted | Nothing to do |
+| `A deploy of this application environment is in progress; disconnect it once the deploy has finished` | A deploy of the environment was accepted or is running | Wait for the deploy to finish, then review again |
+| `This application environment is already being disconnected from the service` | A disconnection of the environment has not finished | [Follow it](#follow-the-disconnection) |
+| `The service does not serve this application environment` | The consumer is not one of the service's | Read the service again for its `consumers` |
+| `The service changed since it was read; reload it and review the disconnection again` | The service's `generation` moved | Read the service again and prepare a new review |
+| `The disconnection review has expired; review it again` | The 10-minute window passed | Prepare a new review |
+| `The disconnection changed since it was reviewed; review it again` | Something the review covers changed, or the digest is not the one prepared | Prepare a new review |
+| `Disconnecting now is not available: ...` | `timing` was `now` | Use `after_next_deploy` |
+| `This service gives the application its conventional connection names (such as DATABASE_URL) and another service of the same kind is connected; ...` | The review asks for a choice and none was made | Prepare the review again with a choice |
+| `Choose one of the services the disconnection review lists for the connection names, or none, and only when the review asks for it` | The choice is not one the review offers, or the review asks for none | Prepare the review again without it, or with one of `choices` |
+| `Too many open disconnection reviews; confirm one or let it expire before preparing another` | 10 reviews of yours, or 50 in the organisation, are waiting | Confirm one, or let them expire after 10 minutes |
+| `Ankra cannot tell what the application's connection release renders for this service ...` | The release that delivers the application's connections was changed outside Ankra, or cannot be read back, so Ankra cannot keep the Secret in place while pods stop reading it | Deploy the application again, then review the disconnection again |
+
+### While a disconnection is in progress
+
+- **Connecting the same environment to the service again** is refused with `This application environment is still being disconnected from the service; connect it again once the disconnection has finished`.
+- **Deleting the service** is refused with `An application is still being disconnected from the service; retire it once the disconnection has finished`. Deleting the service would remove the source of the Secret the disconnection keeps in place for pods that still read it.
+- **A deploy of the environment** is refused, and deploys nothing, when the release that delivers the application's connections renders the Secret in another form than the one kept when the service was disconnected, because its values were changed outside Ankra. The refusal names the release and the Secret. Restore the release's values from the stack's version history, the version before the change, and deploy again. If they cannot be restored, contact Ankra support.
+
+### Deleting an application or removing its binding
+
+While a service still serves an application environment, deleting the application is refused, and so is removing the environment's binding (`ankra services consumers unbind`, or the MCP tool `unbind_service_consumer`). The refusals say to disconnect first:
+
+```text
+This application uses managed service 'orders-db'. Disconnect the application from it (or retire it) before deleting the application, so no service is left serving an application that is gone. Disconnecting needs the applications.deploy permission, clusters.operate on the service's cluster, and clusters.operate and clusters.read on the application's cluster; the operator, admin and owner roles have them.
+```
+
+```text
+A service still uses this binding; disconnect the application from the service (or retire the service) before removing it
+```
+
+Disconnect each of the application's environments from each service the refusal names, or delete those services. A confirmed disconnection takes the environment off the service at once, so that service no longer holds the deletion or the binding.
+
+---
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Connect to a managed service" icon="plug" href="/guides/connect-to-a-managed-service">
+    How applications receive a connection, and the variable names for each service.
+  </Card>
+  <Card title="Delete a managed service" icon="trash" href="/guides/delete-a-managed-service">
+    Remove the service itself, with its data, through a reviewed plan.
+  </Card>
+</CardGroup>
