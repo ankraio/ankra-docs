@@ -1,6 +1,6 @@
 ---
 title: ankra.yaml reference
-description: Every key of .ankra/ankra.yaml, the application descriptor - metadata, the deploy options that drive the deploy form, and the components block that declares a monorepo's deployable apps.
+description: Every key of .ankra/ankra.yaml, the application descriptor - metadata, the deploy options that drive the deploy form, the components block that declares a monorepo's deployable apps, and the health block the readiness gate reads.
 ---
 
 `.ankra/ankra.yaml` is an [application's](/concepts/applications) descriptor. Ankra writes it into the setup pull request beside `.ankra/manifests/` and [`.ankra/pipeline.yaml`](/guides/pipeline-reference), and reads it back from the tracked branch on every analysis run, so what the file says in Git is what the application is:
@@ -8,6 +8,7 @@ description: Every key of .ankra/ankra.yaml, the application descriptor - metada
 - **`metadata`** describes the application, in the shape of a Helm `Chart.yaml`.
 - **`options`** is the application's deploy-time contract: the inputs the deploy form asks for and the deploy endpoint validates.
 - **`components`** (optional) declares the application's deployable components, for a repository whose layout Ankra cannot infer correctly on its own.
+- **`health`** (optional) declares the application's liveness and readiness routes and a latency budget. The readiness gate, a platform setting, reads the readiness routes and the budget.
 
 ## Full example
 
@@ -50,7 +51,7 @@ components:
     container_port: 3000
 ```
 
-A generated descriptor lists all thirteen default options (below); the example shows two to stay short.
+A generated descriptor lists all fourteen default options (below); the example shows two to stay short.
 
 ## Top-level keys
 
@@ -61,12 +62,24 @@ A generated descriptor lists all thirteen default options (below); the example s
 | `metadata` | block | required | See [Metadata](#metadata). `metadata.name` is required. |
 | `options` | list | none | The deploy options - see [Options](#options) |
 | `components` | list | none | The declared components - see [Components](#components) |
+| `health` | block | none | The health routes and latency budget - see [Health](#health) |
 
 Any other top-level key is ignored.
 
-A descriptor with the wrong `apiVersion` or `kind`, an `options` value that is not a list, or an option without a name does not parse. Ankra reports the parse failure on the run and reads nothing from the file: the deploy options stay as they were, and so do the recorded components.
-
 Keep the file at `.ankra/ankra.yaml`, outside `.ankra/manifests/`: the files in that directory are the manifests a deploy applies to the cluster.
+
+### A file Ankra cannot read
+
+A descriptor does not parse when it is empty or not valid YAML, has the wrong `apiVersion` or `kind`, has an `options` value that is not a list, has an option without a name or whose name uses anything but letters, digits and underscores, has an option whose `default` or `description` is not a single value, or has a value of the wrong type, such as a list where a string belongs. A refused `components` or `health` block does not stop the rest of the file parsing (see [A declaration Ankra cannot honour](#a-declaration-ankra-cannot-honour) and [Health](#health)).
+
+Every analysis run reads the file from the tracked branch, and what the run could read decides the deploy options and the components:
+
+| `.ankra/ankra.yaml` | Deploy options | Components |
+|---|---|---|
+| Not in the repository | The option set Ankra generates (see [Default options](#default-options)). The generated file goes into the setup pull request. | Decided by the other signals, in the order under [The declaration outranks inference](#the-declaration-outranks-inference). |
+| In the repository, but this run could not fetch it | The option set Ankra generates, until a run reads the file. Nothing is generated or committed over the file, and the run reports the failed task `read_ankra_descriptor`. | The components the application already records. An application with none recorded has them decided by the other signals, as if the file were absent. |
+| Fetched, but does not parse | The option set Ankra generates, until the file parses. Nothing is generated or committed over the file, and the run reports the failed task `read_ankra_descriptor`: `.ankra/ankra.yaml could not be parsed: <reason>; falling back to the default option set`. | The components the application already records. An application with none recorded has them decided by the other signals, as if the file were absent. |
+| Parses | A non-empty `options` list. An empty or absent one keeps the option set Ankra generates (see [Options](#options)). | See [Components](#components). |
 
 ## Metadata
 
@@ -103,7 +116,7 @@ A non-empty `options` list replaces the application's stored contract on the nex
 
 ### Default options
 
-A generated descriptor declares these thirteen options. `target_port` defaults to the port the analysis detected.
+A generated descriptor declares these fourteen options. `target_port` defaults to the port the analysis detected.
 
 | Option | Type | Default | Meaning |
 |--------|------|---------|---------|
@@ -118,6 +131,7 @@ A generated descriptor declares these thirteen options. `target_port` defaults t
 | `ingress_host` | string | `""` | Ingress hostname, required when the Ingress is enabled. |
 | `ingress_class` | string | `""` | IngressClass name, for example `traefik`. Empty uses the cluster's default IngressClass. |
 | `ingress_extra_hosts` | string | `""` | Comma-separated extra hostnames the Ingress also serves, each with its own rule and TLS host beside `ingress_host`. At most 5. |
+| `redirect_hosts` | string | `""` | Comma-separated hostnames that permanently redirect to `ingress_host`, keeping the path and query, for example an old or misspelled domain. Each gets its own DNS record and certificate. At most 5. Needs the `traefik` ingress class. |
 | `env_from_secrets` | string | `""` | Comma-separated names of Secrets in the application's namespace whose keys become environment variables. |
 | `ingress_tls_issuer` | string | `letsencrypt-prod` | cert-manager ClusterIssuer that mints the Ingress certificate. Empty serves plain HTTP. Ankra checks the name against the target cluster at deploy time. |
 
@@ -145,7 +159,9 @@ Ankra decides an application's components in this order, and the first signal th
 3. The apps the analysis proposed on this run.
 4. The repository's structure.
 
-So a declaration outranks the existing workflows, the AI proposal and structural detection. It is also the only signal that can remove a component: when inference finds fewer components than a monorepo already records, Ankra keeps the recorded ones, because finding less is not evidence that a component is gone. To drop a component, declare the ones you keep.
+So a declaration outranks the existing workflows, the AI proposal and structural detection. Two signals can leave a monorepo with fewer components than it records: a declaration, and two or more of Ankra's per-component build workflows for fewer components than the record (an application built by Ankra Pipelines has no per-component workflows). The AI proposal and structural detection cannot: when they find fewer components than a monorepo already records, Ankra keeps the recorded ones, because finding less is not evidence that a component is gone. To drop a component, declare the ones you keep.
+
+When a run's components no longer include one the monorepo recorded before, because a signal dropped or renamed it, the run records the new set and reports the change as the failed task `record_components`, naming the components it dropped and the ones it now records. A pipeline stage, image repository or registry mapping key that names a dropped component builds nothing until it is renamed.
 
 A declaration of one component at the repository root is a single-app application, and the component takes the repository's name.
 
@@ -157,19 +173,74 @@ The block is validated on its own and is refused as a whole, never partly applie
 - an entry is not a mapping, has no `name`, or has a key other than `name`, `subdir`, `app_subdir`, `dockerfile`, `container_port` and `port`
 - a name is not lower-case letters and digits joined by hyphens or periods
 - two entries share a name, or build from the same `subdir`
-- an entry sets both `subdir` and `app_subdir`, or both `container_port` and `port`, to different values
+- an entry sets both `subdir` and `app_subdir`, or both `container_port` and `port`, to different values (the same value in both is accepted)
+- `subdir`, `app_subdir` or `dockerfile` is not a single path, such as a list or a mapping
 - a path is absolute or leaves the repository with `..`
 - a port is not a number from 1 to 65535
 
-A refused declaration is reported as the failed setup task `read_declared_components`, with the reason, in the application's jobs. The run keeps the components the application already records rather than inferring new ones over a declaration it could not read, and the deploy options are still read from the same file. Fix the block and reconcile the application. A successful read reports the same task as `Using the 2 component(s) declared in .ankra/ankra.yaml: api, web`.
+Ankra reports the first problem it finds, so a block with several problems shows the next one once the first is fixed.
+
+A refused declaration is reported as the failed setup task `read_declared_components`, with the reason, in the application's jobs. When the application already records components, the run keeps them rather than inferring new ones over a declaration it could not read; an application with none recorded has its components decided by the other signals, as if the block were absent. The deploy options are still read from the same file. Fix the block and reconcile the application. A successful read reports the same task as `Using the 2 component(s) declared in .ankra/ankra.yaml: api, web`.
 
 A declared `dockerfile` that the repository does not contain is reported rather than built, and Ankra does not generate a Dockerfile over it.
 
-When Ankra rewrites the descriptor, for example to change the generated options, it copies your `components` block back exactly as you wrote it, refused or not.
+When Ankra rewrites the descriptor, for example to change the generated options, it copies your `components` and `health` blocks back exactly as you wrote them, refused or not.
 
 ### Declared components and the pipeline
 
 Each declared component gets its own build in `.ankra/pipeline.yaml`, attributed by its `build-<component>` stage name or by [`build.component`](/guides/ankra-pipelines#which-component-a-build-belongs-to). `ankra pipeline validate` reports two `kind: build` stages that publish to the same repository as a fatal `pipeline_build_component:` finding when both always run, because each run's commit tag would be overwritten by whichever stage publishes last. When at least one of them runs only under a condition (`if`, `when` or `matrix`, or an `on_failure` or `finally` stage), the finding is a warning. See [Validation](/guides/pipeline-reference#validation).
+
+## Health
+
+`health` declares the application's liveness and readiness routes and a latency budget. The readiness gate, a platform setting, reads the readiness routes and the budget; liveness routes are kept on the application's contract.
+
+```yaml
+health:
+  liveness:
+    - /health
+  readiness:
+    - /health/db
+    - /health/s3
+  latency_budget_ms: 1000
+```
+
+| Key | Type | Default | Meaning |
+|-----|------|---------|---------|
+| `liveness` | list of paths | none | Routes that say the process is up. |
+| `readiness` | list of paths | none | Routes that each say one dependency is reachable. |
+| `latency_budget_ms` | number | no budget | How long, in milliseconds, any readiness route the gate probes may take to answer, from 1 to 5000. The same budget applies to every check the gate makes for the deployment, the asset checks of a single-page application included. |
+
+Ankra adds the declared routes to the health routes it finds in the source and treats each as the kind its list names, whatever the path looks like. A path listed twice in one list counts once.
+
+Where the readiness gate is switched off, nothing is probed. Ankra validates the block either way.
+
+### A health block Ankra cannot honour
+
+The block is validated on its own and is refused as a whole, never partly applied. Ankra refuses it when:
+
+- `health` is empty, is not a mapping, or declares no route and no budget
+- `liveness` or `readiness` is not a list, or one of its entries is not a path
+- a path is empty, does not start with a single `/` (a relative path or a URL), contains whitespace, or contains any of `{ } [ ] * : < >`, the marks of a template rather than a single path
+- one path is in both `liveness` and `readiness`
+- `latency_budget_ms` is not a whole number of milliseconds, is zero or less, or is over 5000
+
+Ankra reports the first problem it finds. Keys other than `liveness`, `readiness` and `latency_budget_ms` inside the block are ignored.
+
+A refused block declares nothing: the health routes Ankra finds in the source stand, and the deploy options and components are still read from the same file. The refusal is reported as a `descriptor_health:` finding when Ankra validates the file before a commit of its own (see [Validation](#validation)); an analysis run does not report it.
+
+## Validation
+
+Before Ankra commits a descriptor itself, in the setup pull request or in a commit or pull request Ankra's AI makes, it validates the file and refuses the commit on a problem. Every problem is fatal, and only the first one found is reported, under one of these keys:
+
+| Key | Reported for |
+|-----|--------------|
+| `descriptor_parse:` | An empty file, invalid YAML, a value of the wrong type, an option whose `default` or `description` is not a single value, a missing `metadata.name` |
+| `descriptor_kind:` | The wrong `apiVersion` or `kind` |
+| `descriptor_options:` | An `options` value that is not a list, an option without a name, an option name that uses anything but letters, digits and underscores |
+| `descriptor_components:` | A refused `components` block - see [A declaration Ankra cannot honour](#a-declaration-ankra-cannot-honour) |
+| `descriptor_health:` | A refused `health` block - see [A health block Ankra cannot honour](#a-health-block-ankra-cannot-honour) |
+
+The same validation applies to a file directly under `.ankra/` whose name ends in `-ankra.yaml`, such as `.ankra/web-ankra.yaml`, the per-component descriptor of a multi-app setup. An analysis run reads only `.ankra/ankra.yaml`.
 
 ## Related
 
