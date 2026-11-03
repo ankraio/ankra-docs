@@ -64,6 +64,9 @@ Creating a credential is deliberately **not** available over MCP or chat. Creati
 | `delete_resource` | `mcp:write` | Yes | Delete any Kubernetes resource, including custom resources |
 | `apply_manifest` | `mcp:write` | Yes | Apply a Kubernetes manifest to create or update resources |
 | `patch_resource` | `mcp:write` | Yes | Patch a Kubernetes resource (strategic merge or JSON patch) |
+| `create_storage_class` | `mcp:write` | Yes | Create a StorageClass for a CSI driver installed on the cluster; never edits an existing class and never makes the new one the default (kubernetes.write) |
+| `delete_storage_class` | `mcp:write` | Yes | Delete a StorageClass no claim or volume uses; the default class is refused, and volumes already provisioned from it are not touched (kubernetes.write) |
+| `delete_persistent_volumes` | `mcp:write` | Yes | Delete up to 20 Released or Available PersistentVolumes no claim is bound to, snapshotting each CSI volume first where the cluster can; a volume that cannot be snapshotted loses its data for good (kubernetes.write) |
 | `add_helm_registry` | `mcp:write` | No | Add a Helm chart registry to the organisation's catalog |
 | `cancel_execution_step` | `mcp:write` | No | Cancel one step of a running execution while the rest continues |
 | `cancel_execution` | `mcp:write` | No | Cancel a running platform execution; a mid-flight cancellation can leave the resource between versions until the next reconcile |
@@ -392,8 +395,8 @@ Day-2 operations for Ankra-provisioned clusters on every self-managed provider (
 | `add_node_group` | `mcp:write` | No | Add a node group with instance type, count, and optional labels, taints, and autoscaling |
 | `update_node_group` | `mcp:write` | No | Change a node group's autoscaling bounds, labels and taints in one call, or its instance type on its own (that replaces every node). Scales nodes, not pods |
 | `delete_node_group` | `mcp:write` | No | Delete a node group and its nodes |
-| `change_control_plane` | `mcp:write` | No | Change the control plane's node count or instance type (cluster must be stopped) |
-| `stop_cluster` | `mcp:write` | No | Stop a cluster: its virtual machines are terminated while configuration is preserved |
+| `change_control_plane` | `mcp:write` | No | Change the control plane's node count or instance type. Growing the count and resizing three or more controllers run live; reducing the count runs on a stopped cluster. Resizing the only controller of a running Hetzner cluster takes the Kubernetes API down for a few minutes and needs `accept_api_downtime: true` |
+| `stop_cluster` | `mcp:write` | No | Stop a cluster and keep its configuration: on Hetzner, OVHcloud, UpCloud, DigitalOcean, Proxmox VE and HPE Morpheus the virtual machines are deleted after an etcd snapshot (a Hetzner, UpCloud or DigitalOcean k3s cluster can pause instead and keep them powered off); AWS EC2, Scaleway and Ankra Cloud power the servers off and keep them |
 | `start_cluster` | `mcp:write` | No | Start (re-provision) a stopped cluster, optionally control plane only |
 | `upgrade_cluster` | `mcp:write` | No | Upgrade the cluster's Kubernetes version |
 | `delete_cluster` | `mcp:write` | No | Deprovision a cluster entirely; requires re-typing the cluster name to confirm |
@@ -401,8 +404,8 @@ Day-2 operations for Ankra-provisioned clusters on every self-managed provider (
 | `set_cluster_agent_auto_upgrade` | `mcp:write` | No | Turn automatic upgrades of the Ankra agent on a cluster on or off |
 | `move_cluster_to_organisation` | `mcp:write` | No | Move a cluster into another existing organisation (administrator of both organisations only) |
 | `list_power_schedules` | `mcp:read` | No | A cluster's scheduled one-off or repeating stop and start actions, with their next run and last outcome |
-| `create_power_schedule` | `mcp:write` | No | Schedule a stop or start of an Ankra-provisioned cluster once or on a cron expression in a time zone |
-| `update_power_schedule` | `mcp:write` | No | Replace a power schedule's action, timing and enabled flag, restating every field |
+| `create_power_schedule` | `mcp:write` | No | Schedule a stop or start of an Ankra-provisioned cluster once or on a cron expression in a time zone. An enabled `scale_to_zero` stop is refused unless a person has confirmed the cluster is not production |
+| `update_power_schedule` | `mcp:write` | No | Replace a power schedule's action, timing and enabled flag, restating every field. An update that results in an enabled `scale_to_zero` stop is refused unless a person has confirmed the cluster is not production |
 | `delete_power_schedule` | `mcp:write` | No | Delete a power schedule without touching the cluster itself |
 
 ## Managed Kubernetes
@@ -480,7 +483,7 @@ The organisation a token is bound to, who has access, what is parked awaiting a 
 
 | Tool | Scope | Cluster-scoped | Description |
 | --- | --- | --- | --- |
-| `get_organisation` | `mcp:read` | No | The bound organisation: id, name, slug, member counts and organisation-wide settings |
+| `get_organisation` | `mcp:read` | No | The bound organisation: id, name, slug, member counts, organisation-wide settings and the current project |
 | `list_organisation_members` | `mcp:read` | No | Who has access: members, pending invites and Ankra's service principals, with roles |
 | `list_organisation_roles` | `mcp:read` | No | Built-in and custom roles with the permissions each grants |
 | `list_organisation_custom_dns_zones` | `mcp:read` | No | The DNS zones the organisation's clusters serve with their own credentials |
@@ -499,6 +502,17 @@ The organisation a token is bound to, who has access, what is parked awaiting a 
 | `set_registry_retention` | `mcp:write` | No | Change which images the organisation's registry keeps, organisation-wide or per repository |
 | `run_registry_retention` | `mcp:write` | No | Run the organisation's registry retention now instead of at its daily time |
 | `set_registry_storage_addon` | `mcp:write` | No | Buy or return paid registry storage blocks, billed monthly |
+
+## Projects
+
+Every tool acts in one [project](/concepts/projects): an MCP token minted while the organisation has projects is pinned to the project it was created in, and a chat session follows the member's current project. An MCP token minted before that is not pinned (`get_current_project` answers `pinned: false`) and never follows a switch: for an organisation-wide member it acts in the Default project whatever its owner switches to, and a project-only member's acts in the oldest project they reach. `get_organisation` reports that project, list results carry each resource's `project_id`, and the cost tools below take `project_id` (a project id, `all` for the whole organisation, or nothing for the current project; a pinned token refuses `all` and other projects).
+
+| Tool | Scope | Cluster-scoped | Description |
+| --- | --- | --- | --- |
+| `list_projects` | `mcp:read` | No | The organisation's projects with id, name, slug, whether each is the reserved default and which is current |
+| `get_current_project` | `mcp:read` | No | The project this token or session acts in, and whether the token is pinned to it |
+| `move_cluster_to_project` | `mcp:write` | No | Move a cluster into another project of the organisation (`projects.manage`); its DNS zones, incidents, AI tickets and pinned notification routes follow; confirmed before it runs |
+| `move_application_to_project` | `mcp:write` | No | Move an application into another project of the organisation (`projects.manage`); its connected pipeline repositories follow; confirmed before it runs |
 
 ## Memory & Miscellaneous
 
@@ -540,7 +554,7 @@ Cloud cost estimates, budgets and the cost autopilot, plus the organisation's us
 
 | Tool | Scope | Cluster-scoped | Description |
 | --- | --- | --- | --- |
-| `get_fleet_cloud_cost` | `mcp:read` | No | The organisation-wide cloud cost rollup, split by provider, with the costliest clusters |
+| `get_fleet_cloud_cost` | `mcp:read` | No | The cloud cost rollup of the current project (or `project_id`), split by provider and by project, with the costliest clusters |
 | `get_object_cost` | `mcp:read` | No | What one cluster, namespace, stack, application or cloud credential costs |
 | `get_namespace_cost_history` | `mcp:read` | Yes | How the cluster's cost was allocated to each namespace over time |
 | `get_cloud_savings` | `mcp:read` | No | The organisation's cloud savings recommendations, the same model the portal's Cost page shows |
@@ -548,15 +562,15 @@ Cloud cost estimates, budgets and the cost autopilot, plus the organisation's us
 | `get_cost_settings` | `mcp:read` | No | The organisation's cost display currency, discount, egress estimate and analysed cluster limit |
 | `update_cost_settings` | `mcp:write` | No | Replace the organisation's cost pricing settings, restating every value |
 | `get_cost_budgets` | `mcp:read` | No | The organisation's monthly cost budgets with spend so far and the projected month end |
-| `set_cost_budget` | `mcp:write` | No | Create a monthly cost budget for the organisation, a cluster, an environment or an application, or change one |
+| `set_cost_budget` | `mcp:write` | No | Create a monthly cost budget for the organisation, a project, a cluster, an environment or an application, or change one |
 | `delete_cost_budget` | `mcp:write` | No | Delete one of the organisation's cost budgets (organisation admins only) |
 | `get_cost_autopilot` | `mcp:read` | No | The organisation's cost autopilot policy, which decides how much Ankra may do about cost unasked |
-| `update_cost_autopilot` | `mcp:write` | No | Change the cost autopilot policy, or one cluster's tier |
+| `update_cost_autopilot` | `mcp:write` | No | Change the cost autopilot policy, one project's defaults, or one cluster's tier |
 | `get_usage` | `mcp:read` | No | The organisation's usage of Ankra per meter and period, such as worker vCPU-hours, hosted logs and AI tokens |
 
 ## Managed Services
 
-Managed services such as PostgreSQL, Valkey and OpenSearch set up for an application, the same surface as `ankra services`. Setup and retirement are two steps, a prepared review and a confirmation.
+Managed services such as PostgreSQL, Valkey and OpenSearch set up for an application, the same surface as `ankra services`. Setup, retirement and disconnecting one application are two steps each, a prepared review and a confirmation.
 
 | Tool | Scope | Cluster-scoped | Description |
 | --- | --- | --- | --- |
@@ -575,6 +589,8 @@ Managed services such as PostgreSQL, Valkey and OpenSearch set up for an applica
 | `prepare_service_retirement` | `mcp:write` | No | Prepare the retirement of a managed service, listing everything it would remove and keep without removing anything |
 | `confirm_service_retirement` | `mcp:write` | No | Confirm a prepared retirement and delete the managed service and its data, which cannot be undone |
 | `get_service_retirement` | `mcp:read` | No | One retirement of a managed service with its plan, state and outcome |
+| `prepare_service_disconnection` | `mcp:write` | No | Prepare disconnecting one application environment from a managed service that keeps running for its other applications, returning the review without changing anything |
+| `confirm_service_disconnection` | `mcp:write` | No | Confirm a prepared disconnection: the application keeps working until its next deploy, and Ankra removes its connection Secret once no pod reads it. The shared credential is not revoked |
 
 ## Cluster Mesh
 

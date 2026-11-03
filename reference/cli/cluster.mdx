@@ -499,15 +499,26 @@ builder - pulled on every node pipeline steps can land on, so a node that
 just joined pulls them as it joins rather than while a step waits: off (the
 default) or on.
 
+The step workspaces setting decides whether a pipeline that declares
+workspace.mode: per_step gets a workspace for each step, so its steps can run
+on different nodes, rather than one volume that keeps the whole run on one
+node: off (the default), shadow (recorded, nothing changes) or on.
+
+The Ankra Workspace class is the storage class the cluster's Ankra Workspaces
+cut their volume from, when they cannot share the one pipeline steps use. Left
+empty, they inherit it.
+
 ## ankra cluster agent ci get
 
 Show the stored worker count, storage class and placement, the agent version
 that has to honour them, whether that agent currently advertises it can run
 pipeline steps, and how the last write was applied. The placement block names
 the node group, node selector, tolerations and mode, and how many Ready nodes
-it admits right now. The run reservation and image pre-pull modes are shown
-with whether the agent advertises each; a platform that predates a setting
-shows neither of its lines.
+it admits right now. The run reservation, image pre-pull and step workspaces
+modes are shown with whether the agent advertises each; a platform that
+predates a setting shows neither of its lines. The Ankra Workspace class is
+the storage class the cluster's Ankra Workspaces use, and says when they
+inherit it; a platform that predates it shows no such line.
 
 An agent that has not yet re-rendered its release reports pipeline steps as
 not advertised even with a non-zero worker count stored: the capability is
@@ -539,6 +550,21 @@ class its step workspaces are carved from, and where its pipeline pods run.
 its agent and everything else it does. `--storage-class` is only sent when you
 pass it, so setting the worker count alone keeps the storage class already
 stored; pass an empty value to fall back to the cluster's default class.
+
+`--storage-class` reaches two things at different times. Pipeline steps take it
+at the agent's next re-render. Ankra Workspaces on the cluster that have no
+workspace class of their own read it at their next use, so changing it replaces
+each of them then, and whatever runs in one stops. An Ankra Workspace stays off
+the nodes pipeline steps run on, so a class only those nodes can use would leave
+it Pending for good.
+
+`--ankra-workspace-storage-class` gives the cluster's Ankra Workspaces a class of
+their own, so that cannot happen. To move pipeline steps to such a class with
+no workspace replaced, first pass the class the workspaces use now, which
+changes nothing for them, and then change `--storage-class`. Naming a different
+class replaces each workspace at its next use. It reaches no pipeline step and
+restarts no agent. Pass an empty value to inherit `--storage-class` again; a
+workspace is replaced then if that is a different class.
 
 `--workers` is the agent's CI slots: how many pipeline steps it watches at
 once. A slot is not a node; the nodes steps run on come from the cluster's
@@ -591,6 +617,19 @@ next step dispatched. Each node keeps about 0.9 GB of images it would
 otherwise pull on demand. It needs an agent that advertises image pre-pull;
 off (the default) removes it with the next step dispatched.
 
+`--step-workspaces` off|shadow|on decides whether a pipeline that declares
+workspace.mode: per_step gets a workspace for each step, so its steps can run
+on different nodes, rather than one volume that keeps the whole run on one
+node. off (every cluster's default) runs every pipeline on the shared volume,
+whatever it declares. shadow still does, and records the mode each per_step
+run would have taken under on: use it to check a cluster first. on gives each
+step its own workspace; it needs an agent that advertises step workspaces and
+a ready backup vault to hand files between steps through, and a run without
+either stays on the shared volume. A pipeline that does not declare per_step
+never changes. A run takes its mode at its first step, with no agent restart,
+and keeps it, so off is the way back for new runs and a run already started
+finishes in the mode it has.
+
 `--build-apparmor-profile` &lt;name&gt; runs the rootless image builder under a
 Localhost AppArmor profile installed on the cluster's nodes under that name.
 On nodes whose container runtime confines the builder with its default
@@ -614,11 +653,13 @@ ankra cluster agent ci set [flags]
 ankra cluster agent ci set
 ankra cluster agent ci set --workers 50 --storage-class proxmox-csi
 ankra cluster agent ci set --workers 0 --cluster edge-01
+ankra cluster agent ci set --ankra-workspace-storage-class ankra-ci-disposable --cluster ci-01
 ankra cluster agent ci set --node-group pipelines
 ankra cluster agent ci set --node-selector pool=ci --toleration dedicated=ci:NoSchedule --placement preferred
 ankra cluster agent ci set --clear-placement
 ankra cluster agent ci set --run-reservation shadow --cluster ci-01
 ankra cluster agent ci set --image-prepull on --cluster ci-01
+ankra cluster agent ci set --step-workspaces shadow --cluster ci-01
 ankra cluster agent ci set --build-apparmor-profile ankra-rootless-buildkit --cluster ci-01
 ```
 
@@ -626,6 +667,7 @@ ankra cluster agent ci set --build-apparmor-profile ankra-rootless-buildkit --cl
 
 | Flag | Default | Description |
 |------|---------|-------------|
+| `--ankra-workspace-storage-class` |   | Storage class for the cluster's Ankra Workspaces, apart from pipeline steps; a different class replaces each workspace on next use; pass empty to inherit `--storage-class` (omit the flag to keep the stored value) |
 | `--build-apparmor-profile` |   | Node-installed AppArmor profile the rootless image builder runs under (Localhost); pass empty to use the runtime's default (omit the flag to keep the stored value) |
 | `--clear-placement` | `false` | Remove the cluster's CI placement |
 | `--image-prepull` |   | Image pre-pull: off (default) pulls the platform's step images on demand, on keeps them pulled on every node pipeline steps can land on |
@@ -634,7 +676,8 @@ ankra cluster agent ci set --build-apparmor-profile ankra-rootless-buildkit --cl
 | `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
 | `--placement` |   | Placement mode: required (default) keeps pipeline pods on the selected nodes, preferred favours them |
 | `--run-reservation` |   | Run reservation: off (default) reserves nothing, shadow sizes and records each run's reservation without holding it, on holds a run's room on its node between its steps |
-| `--storage-class` |   | Storage class for pipeline step workspaces; pass empty to use the cluster default (omit the flag to keep the stored value) |
+| `--step-workspaces` |   | Step workspaces: off (default) runs every pipeline on one shared volume, shadow records the mode each per_step run would take without changing it, on gives each step of a per_step pipeline its own workspace |
+| `--storage-class` |   | Storage class for pipeline step workspaces: pipeline steps take it at the next agent re-render, and Ankra Workspaces on the cluster that have no workspace class of their own are replaced on next use; pass empty to use the cluster default (omit the flag to keep the stored value) |
 | `--toleration` | `[]` | Taint every pipeline pod tolerates, as key[=value]:Effect with Effect NoSchedule, PreferNoSchedule or NoExecute (repeatable) |
 | `--workers` | `0` | CI slots: pipeline steps the agent watches at once, not nodes (nodes come from the node group autoscaler); up to 128 on agents that support live resize, 32 otherwise; 0 disables the scheduler; omitted with no other flag on a cluster with pipeline steps off, 50 |
 
@@ -864,8 +907,9 @@ change applies at the next start.
 
 The instance type can also be changed on a running cluster that has three
 controllers: they are then resized one at a time, keeping the Kubernetes API
-up. With a single controller it still needs a stopped cluster, because
-resizing the only controller takes the API down while it reboots.
+up. With a single controller, resizing the only controller takes the API down
+for a few minutes while it reboots: where the platform supports that live
+resize it needs `--accept-api-downtime`, otherwise it needs a stopped cluster.
 
 Run "control-plane get" to see which of the two is available right now.
 
@@ -924,6 +968,14 @@ stopped cluster's offline resize drains nothing and ignores it, and so does a
 request the rolling resize refuses (fewer than three controllers) or has
 nothing to do for (the controllers already run that type).
 
+A running cluster with a single controller can be resized in place where the
+platform supports it, but the Kubernetes API is down for a few minutes while
+that server reboots on the new type. Workloads on the workers keep running;
+kubectl, deploys, the Ankra agent and controllers pause until it is back. That
+resize needs `--accept-api-downtime`: without it the command refuses before
+sending anything. Scale the control plane to three controllers first for a
+resize without downtime, or stop the cluster and resize it offline.
+
 List the instance types that do exist with:
 
 ```bash
@@ -938,8 +990,37 @@ ankra cluster ankracloud control-plane set-instance-type <cluster_id|name> <inst
 
 | Flag | Default | Description |
 |------|---------|-------------|
+| `--accept-api-downtime` | `false` | Accept that resizing the only controller of a running cluster takes the Kubernetes API down for a few minutes while it reboots on the new type. Required for that resize; has no effect on a stopped cluster or one with three controllers |
 | `--force-drain` | `false` | Bypass PodDisruptionBudgets for the rolling resize's drain of each control plane: pods whose disruption budget refuses eviction are evicted anyway. It only matters for a live rolling resize of a running cluster and has no effect on a stopped cluster's offline resize |
 | `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+
+## ankra cluster ankracloud cpu-pools
+
+List the CPU pools of an Ankra Cloud zone: compute nodes grouped by exact CPU.
+
+A server is placed in one pool and only moves within it, and its guest sees the
+host's CPU, so the pool decides which instructions a workload may use. The
+x86-64 level column is the microarchitecture level every CPU of the pool meets:
+3 or more has AVX2, which images built for x86-64-v3 (duckdb, pyarrow, numba
+wheels and many ML runtimes) need or they crash with SIGILL.
+
+Pin a node group to a pool with 'ankra cluster node-group add `--cpu-pool` &lt;name&gt;'.
+
+Pass `--cluster` to list the pools of an existing cluster's zone under its own
+credential, or `--credential-id` with `--zone` to browse before creating one.
+
+```bash
+ankra cluster ankracloud cpu-pools [flags]
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--cluster` |   | List the CPU pools of an existing cluster's zone under its own credential instead |
+| `--credential-id` |   | Ankra Cloud credential ID (required unless `--cluster` is given) |
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+| `--zone` |   | Zone whose CPU pools to list (required with `--credential-id`) |
 
 ## ankra cluster ankracloud create
 
@@ -1096,6 +1177,32 @@ ankra cluster ankracloud nodes cloud-init-log <cluster_id|name> <node_id> [flags
 | Flag | Default | Description |
 |------|---------|-------------|
 | `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+
+## ankra cluster ankracloud nodes diagnose
+
+Dispatch the platform's read-only node diagnose job and wait for its report:
+over the bastion SSH lane it snapshots the node's OS-level state - the
+Kubernetes service unit and its journal, disk, memory, uptime, the kernel log
+and the firewall path to the API server - and names the symptoms it finds.
+Nothing on the node is changed. This is what to reach for when a node is
+NotReady or its kubelet stopped posting status, below what 'cluster get' can
+see. The same diagnosis the Ankra assistant runs as ssh_diagnose_node.
+
+The platform waits up to two minutes for the job; a slower run hands back the
+operation id to poll with 'cluster operations list', and repeated calls attach
+to the run already in flight. Find node ids with 'nodes list'. Needs the
+clusters.operate permission on the cluster.
+
+```bash
+ankra cluster ankracloud nodes diagnose <cluster_id|name> <node_id> [flags]
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+| `--timeout` | `3m0s` | Maximum time to wait for the diagnosis report |
 
 ## ankra cluster ankracloud nodes get
 
@@ -1340,9 +1447,11 @@ ankra cluster apply [flags]
 |------|---------|-------------|
 | `--allow-repoint` | `false` | Allow this apply to change the cluster's GitOps repository or branch. Ankra writes the cluster's current state to the new source first, then syncs from it; anything that later leaves that source is pruned. A target that cannot be written leaves the cluster unchanged |
 | `--allow-repoint-destroying-data` | `false` | Additionally allow a repoint on a cluster holding PersistentVolumeClaims, whose data is destroyed if the new source stops defining their workloads. Requires `--allow-repoint` |
+| `--confirm-removal` | `[]` | Allow the apply to remove this member, which the file no longer lists, as kind/name (kind addon, manifest or application; repeatable) |
 | `--dry-run` | `false` | Validate the ImportCluster YAML locally without calling the API |
 | `-f`, `--file` |   | Path to the ImportCluster YAML file to apply |
 | `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+| `--prune` | `false` | Remove the members (add-ons, manifests, applications) of the file's stacks that the file no longer lists. Use it when the file is the complete, current definition of those stacks; without it, or `--confirm-removal`, such an apply is refused and changes nothing |
 | `--timeout` | `10m0s` | Maximum time to wait when `--wait` is set |
 | `--wait` | `false` | Wait for the configuration write to be applied and report its result. Add-on deploys are dispatched afterwards and are NOT covered by this flag - watch them with 'ankra cluster operations list' |
 
@@ -1444,8 +1553,9 @@ change applies at the next start.
 
 The instance type can also be changed on a running cluster that has three
 controllers: they are then resized one at a time, keeping the Kubernetes API
-up. With a single controller it still needs a stopped cluster, because
-resizing the only controller takes the API down while it reboots.
+up. With a single controller, resizing the only controller takes the API down
+for a few minutes while it reboots: where the platform supports that live
+resize it needs `--accept-api-downtime`, otherwise it needs a stopped cluster.
 
 Run "control-plane get" to see which of the two is available right now.
 
@@ -1504,6 +1614,14 @@ stopped cluster's offline resize drains nothing and ignores it, and so does a
 request the rolling resize refuses (fewer than three controllers) or has
 nothing to do for (the controllers already run that type).
 
+A running cluster with a single controller can be resized in place where the
+platform supports it, but the Kubernetes API is down for a few minutes while
+that server reboots on the new type. Workloads on the workers keep running;
+kubectl, deploys, the Ankra agent and controllers pause until it is back. That
+resize needs `--accept-api-downtime`: without it the command refuses before
+sending anything. Scale the control plane to three controllers first for a
+resize without downtime, or stop the cluster and resize it offline.
+
 List the instance types that do exist with:
 
 ```bash
@@ -1518,6 +1636,7 @@ ankra cluster aws control-plane set-instance-type <cluster_id|name> <instance_ty
 
 | Flag | Default | Description |
 |------|---------|-------------|
+| `--accept-api-downtime` | `false` | Accept that resizing the only controller of a running cluster takes the Kubernetes API down for a few minutes while it reboots on the new type. Required for that resize; has no effect on a stopped cluster or one with three controllers |
 | `--force-drain` | `false` | Bypass PodDisruptionBudgets for the rolling resize's drain of each control plane: pods whose disruption budget refuses eviction are evicted anyway. It only matters for a live rolling resize of a running cluster and has no effect on a stopped cluster's offline resize |
 | `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
 
@@ -1714,6 +1833,32 @@ ankra cluster aws nodes cloud-init-log <cluster_id|name> <node_id> [flags]
 | Flag | Default | Description |
 |------|---------|-------------|
 | `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+
+## ankra cluster aws nodes diagnose
+
+Dispatch the platform's read-only node diagnose job and wait for its report:
+over the bastion SSH lane it snapshots the node's OS-level state - the
+Kubernetes service unit and its journal, disk, memory, uptime, the kernel log
+and the firewall path to the API server - and names the symptoms it finds.
+Nothing on the node is changed. This is what to reach for when a node is
+NotReady or its kubelet stopped posting status, below what 'cluster get' can
+see. The same diagnosis the Ankra assistant runs as ssh_diagnose_node.
+
+The platform waits up to two minutes for the job; a slower run hands back the
+operation id to poll with 'cluster operations list', and repeated calls attach
+to the run already in flight. Find node ids with 'nodes list'. Needs the
+clusters.operate permission on the cluster.
+
+```bash
+ankra cluster aws nodes diagnose <cluster_id|name> <node_id> [flags]
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+| `--timeout` | `3m0s` | Maximum time to wait for the diagnosis report |
 
 ## ankra cluster aws nodes get
 
@@ -2626,8 +2771,9 @@ change applies at the next start.
 
 The instance type can also be changed on a running cluster that has three
 controllers: they are then resized one at a time, keeping the Kubernetes API
-up. With a single controller it still needs a stopped cluster, because
-resizing the only controller takes the API down while it reboots.
+up. With a single controller, resizing the only controller takes the API down
+for a few minutes while it reboots: where the platform supports that live
+resize it needs `--accept-api-downtime`, otherwise it needs a stopped cluster.
 
 Run "control-plane get" to see which of the two is available right now.
 
@@ -2686,6 +2832,14 @@ stopped cluster's offline resize drains nothing and ignores it, and so does a
 request the rolling resize refuses (fewer than three controllers) or has
 nothing to do for (the controllers already run that type).
 
+A running cluster with a single controller can be resized in place where the
+platform supports it, but the Kubernetes API is down for a few minutes while
+that server reboots on the new type. Workloads on the workers keep running;
+kubectl, deploys, the Ankra agent and controllers pause until it is back. That
+resize needs `--accept-api-downtime`: without it the command refuses before
+sending anything. Scale the control plane to three controllers first for a
+resize without downtime, or stop the cluster and resize it offline.
+
 List the instance types that do exist with:
 
 ```bash
@@ -2700,6 +2854,7 @@ ankra cluster digitalocean control-plane set-instance-type <cluster_id|name> <in
 
 | Flag | Default | Description |
 |------|---------|-------------|
+| `--accept-api-downtime` | `false` | Accept that resizing the only controller of a running cluster takes the Kubernetes API down for a few minutes while it reboots on the new type. Required for that resize; has no effect on a stopped cluster or one with three controllers |
 | `--force-drain` | `false` | Bypass PodDisruptionBudgets for the rolling resize's drain of each control plane: pods whose disruption budget refuses eviction are evicted anyway. It only matters for a live rolling resize of a running cluster and has no effect on a stopped cluster's offline resize |
 | `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
 
@@ -2784,6 +2939,32 @@ ankra cluster digitalocean nodes cloud-init-log <cluster_id|name> <node_id> [fla
 | Flag | Default | Description |
 |------|---------|-------------|
 | `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+
+## ankra cluster digitalocean nodes diagnose
+
+Dispatch the platform's read-only node diagnose job and wait for its report:
+over the bastion SSH lane it snapshots the node's OS-level state - the
+Kubernetes service unit and its journal, disk, memory, uptime, the kernel log
+and the firewall path to the API server - and names the symptoms it finds.
+Nothing on the node is changed. This is what to reach for when a node is
+NotReady or its kubelet stopped posting status, below what 'cluster get' can
+see. The same diagnosis the Ankra assistant runs as ssh_diagnose_node.
+
+The platform waits up to two minutes for the job; a slower run hands back the
+operation id to poll with 'cluster operations list', and repeated calls attach
+to the run already in flight. Find node ids with 'nodes list'. Needs the
+clusters.operate permission on the cluster.
+
+```bash
+ankra cluster digitalocean nodes diagnose <cluster_id|name> <node_id> [flags]
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+| `--timeout` | `3m0s` | Maximum time to wait for the diagnosis report |
 
 ## ankra cluster digitalocean nodes get
 
@@ -3699,8 +3880,11 @@ ankra cluster gitops conflicts resolve --all --keep git --yes -o json
 ## ankra cluster gitops status
 
 Show the GitOps sync status of a cluster: the repository, branch, and
-credential it syncs from, the last synced commit, any pending commit or
-sync error, and any open merge conflicts pausing the sync.
+credential it syncs from, the last synced commit, the commit the cluster is
+in step with and Git's head as last checked, any pending commit or sync
+error, any open merge conflicts pausing the sync, and the files Git and the
+platform are divided on (preserved paths), with when each was detected and
+whether it is decided.
 
 If no cluster name is provided, uses the currently selected cluster.
 
@@ -3988,8 +4172,9 @@ change applies at the next start.
 
 The instance type can also be changed on a running cluster that has three
 controllers: they are then resized one at a time, keeping the Kubernetes API
-up. With a single controller it still needs a stopped cluster, because
-resizing the only controller takes the API down while it reboots.
+up. With a single controller, resizing the only controller takes the API down
+for a few minutes while it reboots: where the platform supports that live
+resize it needs `--accept-api-downtime`, otherwise it needs a stopped cluster.
 
 Run "control-plane get" to see which of the two is available right now.
 
@@ -4048,6 +4233,14 @@ stopped cluster's offline resize drains nothing and ignores it, and so does a
 request the rolling resize refuses (fewer than three controllers) or has
 nothing to do for (the controllers already run that type).
 
+A running cluster with a single controller can be resized in place where the
+platform supports it, but the Kubernetes API is down for a few minutes while
+that server reboots on the new type. Workloads on the workers keep running;
+kubectl, deploys, the Ankra agent and controllers pause until it is back. That
+resize needs `--accept-api-downtime`: without it the command refuses before
+sending anything. Scale the control plane to three controllers first for a
+resize without downtime, or stop the cluster and resize it offline.
+
 List the instance types that do exist with:
 
 ```bash
@@ -4062,6 +4255,7 @@ ankra cluster hetzner control-plane set-instance-type <cluster_id|name> <instanc
 
 | Flag | Default | Description |
 |------|---------|-------------|
+| `--accept-api-downtime` | `false` | Accept that resizing the only controller of a running cluster takes the Kubernetes API down for a few minutes while it reboots on the new type. Required for that resize; has no effect on a stopped cluster or one with three controllers |
 | `--force-drain` | `false` | Bypass PodDisruptionBudgets for the rolling resize's drain of each control plane: pods whose disruption budget refuses eviction are evicted anyway. It only matters for a live rolling resize of a running cluster and has no effect on a stopped cluster's offline resize |
 | `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
 
@@ -4162,6 +4356,32 @@ ankra cluster hetzner nodes cloud-init-log <cluster_id|name> <node_id> [flags]
 | Flag | Default | Description |
 |------|---------|-------------|
 | `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+
+## ankra cluster hetzner nodes diagnose
+
+Dispatch the platform's read-only node diagnose job and wait for its report:
+over the bastion SSH lane it snapshots the node's OS-level state - the
+Kubernetes service unit and its journal, disk, memory, uptime, the kernel log
+and the firewall path to the API server - and names the symptoms it finds.
+Nothing on the node is changed. This is what to reach for when a node is
+NotReady or its kubelet stopped posting status, below what 'cluster get' can
+see. The same diagnosis the Ankra assistant runs as ssh_diagnose_node.
+
+The platform waits up to two minutes for the job; a slower run hands back the
+operation id to poll with 'cluster operations list', and repeated calls attach
+to the run already in flight. Find node ids with 'nodes list'. Needs the
+clusters.operate permission on the cluster.
+
+```bash
+ankra cluster hetzner nodes diagnose <cluster_id|name> <node_id> [flags]
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+| `--timeout` | `3m0s` | Maximum time to wait for the diagnosis report |
 
 ## ankra cluster hetzner nodes get
 
@@ -4274,12 +4494,12 @@ ankra cluster hetzner workers <cluster_id|name> [flags]
 
 ## ankra cluster info
 
-Show details of a specific cluster.
+Show details of a specific cluster, named by its name or its id.
 
-If no name is provided, shows details for the currently selected cluster.
+If no cluster is given, shows details for the currently selected cluster.
 
 ```bash
-ankra cluster info [name] [flags]
+ankra cluster info [name|id] [flags]
 ```
 
 **Flags**
@@ -5301,8 +5521,9 @@ change applies at the next start.
 
 The instance type can also be changed on a running cluster that has three
 controllers: they are then resized one at a time, keeping the Kubernetes API
-up. With a single controller it still needs a stopped cluster, because
-resizing the only controller takes the API down while it reboots.
+up. With a single controller, resizing the only controller takes the API down
+for a few minutes while it reboots: where the platform supports that live
+resize it needs `--accept-api-downtime`, otherwise it needs a stopped cluster.
 
 Run "control-plane get" to see which of the two is available right now.
 
@@ -5361,6 +5582,14 @@ stopped cluster's offline resize drains nothing and ignores it, and so does a
 request the rolling resize refuses (fewer than three controllers) or has
 nothing to do for (the controllers already run that type).
 
+A running cluster with a single controller can be resized in place where the
+platform supports it, but the Kubernetes API is down for a few minutes while
+that server reboots on the new type. Workloads on the workers keep running;
+kubectl, deploys, the Ankra agent and controllers pause until it is back. That
+resize needs `--accept-api-downtime`: without it the command refuses before
+sending anything. Scale the control plane to three controllers first for a
+resize without downtime, or stop the cluster and resize it offline.
+
 List the instance types that do exist with:
 
 ```bash
@@ -5375,6 +5604,7 @@ ankra cluster morpheus control-plane set-instance-type <cluster_id|name> <instan
 
 | Flag | Default | Description |
 |------|---------|-------------|
+| `--accept-api-downtime` | `false` | Accept that resizing the only controller of a running cluster takes the Kubernetes API down for a few minutes while it reboots on the new type. Required for that resize; has no effect on a stopped cluster or one with three controllers |
 | `--force-drain` | `false` | Bypass PodDisruptionBudgets for the rolling resize's drain of each control plane: pods whose disruption budget refuses eviction are evicted anyway. It only matters for a live rolling resize of a running cluster and has no effect on a stopped cluster's offline resize |
 | `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
 
@@ -5630,6 +5860,7 @@ ankra cluster node-group add <cluster_id|name> [flags]
 |------|---------|-------------|
 | `--availability-zone` |   | Pin every node of the group to one availability zone, on OVH 3-AZ regions (e.g. eu-west-par-b). See 'ankra cluster ovh regions `--with-zones`'. Pin the group when it runs zonal storage: an OVH volume cannot attach from another zone. Omitted on a zone-spread cluster, each node takes the zone with the fewest instances cluster-wide, so a one-node group lands wherever the cluster is thinnest, not where its name suggests; on a cluster with no zone pool OVH chooses |
 | `--count` | `1` | Number of nodes |
+| `--cpu-pool` |   | CPU pool of the cluster's zone every server the group creates is pinned to, scale-ups included (Ankra Cloud clusters only). Pick one with 'ankra cluster ankracloud cpu-pools `--cluster` &lt;cluster&gt;': a pool of x86-64 level 3 has AVX2, which images built with current Python, Rust or Go wheels may need (they crash with an illegal instruction, exit 132, on a lower level). Default: the Cloud places each server |
 | `--disk-gib` | `0` | Root disk size in GiB of every server the group creates, scale-ups included (Ankra Cloud clusters only; default: the plan's included disk). Ankra Cloud refuses a size below the plan's and the template's minimum |
 | `--disk-tier` |   | Storage tier of the root disk of every server the group creates, scale-ups included (Ankra Cloud clusters only): local-nvme (the node's own disks, the choice for CI nodes), standard, maxiops or hdd (the zone's Ankra Storage). Default: the zone's default tier |
 | `--instance-type` |   | Server type / flavor / plan for nodes (required) |
@@ -5868,6 +6099,79 @@ ankra cluster operations cancel-step <execution_id> <step_id> [flags]
 |------|---------|-------------|
 | `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
 
+## ankra cluster operations hold
+
+Set, read or lift a cluster's operations hold.
+
+While a hold is in force the platform admits no new write operation on the
+cluster: reconciliation, retries, node remediation and Kubernetes upgrades all
+stop, while reads keep running. It is the lever that keeps the platform from
+undoing a manual recovery, for example after a failed Kubernetes version hop.
+
+These are Ankra staff operations. The platform refuses API tokens for them, so
+they do not use your saved login: set ANKRA_STAFF_SESSION to the session of
+your admin-portal sign-in, and pass the cluster by id. Every change is audited
+with your name and the reason.
+
+## ankra cluster operations hold get
+
+Show the cluster's operations hold and any pending version record check
+
+```bash
+ankra cluster operations hold get <cluster_id> [flags]
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+
+## ankra cluster operations hold lift
+
+Lift the cluster's operations hold, whatever set it.
+
+When a Kubernetes version record repair was made under the hold, the platform
+refuses the lift until its reads have confirmed every node at the version the
+record pins ('hold get' shows the check). `--force` overrides that refusal and
+is recorded on the audit row; it asks for confirmation unless `--yes` is given.
+
+```bash
+ankra cluster operations hold lift <cluster_id> --reason <text> [flags]
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--force` | `false` | lift even though a version record repair is not confirmed yet |
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+| `--reason` |   | why the platform may act on the cluster again (audited) |
+| `-y`, `--yes` | `false` | skip the confirmation prompt of `--force` |
+
+## ankra cluster operations hold set
+
+Hold the cluster for `--for` from now (1m to 24h). Running it again extends
+or shortens the hold to the new duration; both are audited.
+
+Examples:
+
+```bash
+ankra cluster operations hold set 62f4559a-a44d-46d7-aab3-a57c9dd6b4c6 --for 4h --reason "k3s hop failed, manual rollback"
+```
+
+```bash
+ankra cluster operations hold set <cluster_id> --for <duration> --reason <text> [flags]
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--for` | `0s` | how long to hold the cluster from now (1m to 24h, e.g. 4h) |
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+| `--reason` |   | why the platform must stop acting on the cluster (audited) |
+
 ## ankra cluster operations list
 
 List executions for the active cluster, or show one by ID (no cluster needed)
@@ -6055,8 +6359,9 @@ change applies at the next start.
 
 The instance type can also be changed on a running cluster that has three
 controllers: they are then resized one at a time, keeping the Kubernetes API
-up. With a single controller it still needs a stopped cluster, because
-resizing the only controller takes the API down while it reboots.
+up. With a single controller, resizing the only controller takes the API down
+for a few minutes while it reboots: where the platform supports that live
+resize it needs `--accept-api-downtime`, otherwise it needs a stopped cluster.
 
 Run "control-plane get" to see which of the two is available right now.
 
@@ -6115,6 +6420,14 @@ stopped cluster's offline resize drains nothing and ignores it, and so does a
 request the rolling resize refuses (fewer than three controllers) or has
 nothing to do for (the controllers already run that type).
 
+A running cluster with a single controller can be resized in place where the
+platform supports it, but the Kubernetes API is down for a few minutes while
+that server reboots on the new type. Workloads on the workers keep running;
+kubectl, deploys, the Ankra agent and controllers pause until it is back. That
+resize needs `--accept-api-downtime`: without it the command refuses before
+sending anything. Scale the control plane to three controllers first for a
+resize without downtime, or stop the cluster and resize it offline.
+
 ```bash
 ankra cluster ovh control-plane set-instance-type <cluster_id|name> <instance_type> [flags]
 ```
@@ -6123,6 +6436,7 @@ ankra cluster ovh control-plane set-instance-type <cluster_id|name> <instance_ty
 
 | Flag | Default | Description |
 |------|---------|-------------|
+| `--accept-api-downtime` | `false` | Accept that resizing the only controller of a running cluster takes the Kubernetes API down for a few minutes while it reboots on the new type. Required for that resize; has no effect on a stopped cluster or one with three controllers |
 | `--force-drain` | `false` | Bypass PodDisruptionBudgets for the rolling resize's drain of each control plane: pods whose disruption budget refuses eviction are evicted anyway. It only matters for a live rolling resize of a running cluster and has no effect on a stopped cluster's offline resize |
 | `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
 
@@ -6211,6 +6525,32 @@ ankra cluster ovh nodes cloud-init-log <cluster_id|name> <node_id> [flags]
 | Flag | Default | Description |
 |------|---------|-------------|
 | `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+
+## ankra cluster ovh nodes diagnose
+
+Dispatch the platform's read-only node diagnose job and wait for its report:
+over the bastion SSH lane it snapshots the node's OS-level state - the
+Kubernetes service unit and its journal, disk, memory, uptime, the kernel log
+and the firewall path to the API server - and names the symptoms it finds.
+Nothing on the node is changed. This is what to reach for when a node is
+NotReady or its kubelet stopped posting status, below what 'cluster get' can
+see. The same diagnosis the Ankra assistant runs as ssh_diagnose_node.
+
+The platform waits up to two minutes for the job; a slower run hands back the
+operation id to poll with 'cluster operations list', and repeated calls attach
+to the run already in flight. Find node ids with 'nodes list'. Needs the
+clusters.operate permission on the cluster.
+
+```bash
+ankra cluster ovh nodes diagnose <cluster_id|name> <node_id> [flags]
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+| `--timeout` | `3m0s` | Maximum time to wait for the diagnosis report |
 
 ## ankra cluster ovh nodes get
 
@@ -6686,8 +7026,9 @@ change applies at the next start.
 
 The instance type can also be changed on a running cluster that has three
 controllers: they are then resized one at a time, keeping the Kubernetes API
-up. With a single controller it still needs a stopped cluster, because
-resizing the only controller takes the API down while it reboots.
+up. With a single controller, resizing the only controller takes the API down
+for a few minutes while it reboots: where the platform supports that live
+resize it needs `--accept-api-downtime`, otherwise it needs a stopped cluster.
 
 Run "control-plane get" to see which of the two is available right now.
 
@@ -6746,6 +7087,14 @@ stopped cluster's offline resize drains nothing and ignores it, and so does a
 request the rolling resize refuses (fewer than three controllers) or has
 nothing to do for (the controllers already run that type).
 
+A running cluster with a single controller can be resized in place where the
+platform supports it, but the Kubernetes API is down for a few minutes while
+that server reboots on the new type. Workloads on the workers keep running;
+kubectl, deploys, the Ankra agent and controllers pause until it is back. That
+resize needs `--accept-api-downtime`: without it the command refuses before
+sending anything. Scale the control plane to three controllers first for a
+resize without downtime, or stop the cluster and resize it offline.
+
 List the instance types that do exist with:
 
 ```bash
@@ -6760,6 +7109,7 @@ ankra cluster proxmox control-plane set-instance-type <cluster_id|name> <instanc
 
 | Flag | Default | Description |
 |------|---------|-------------|
+| `--accept-api-downtime` | `false` | Accept that resizing the only controller of a running cluster takes the Kubernetes API down for a few minutes while it reboots on the new type. Required for that resize; has no effect on a stopped cluster or one with three controllers |
 | `--force-drain` | `false` | Bypass PodDisruptionBudgets for the rolling resize's drain of each control plane: pods whose disruption budget refuses eviction are evicted anyway. It only matters for a live rolling resize of a running cluster and has no effect on a stopped cluster's offline resize |
 | `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
 
@@ -7114,8 +7464,9 @@ change applies at the next start.
 
 The instance type can also be changed on a running cluster that has three
 controllers: they are then resized one at a time, keeping the Kubernetes API
-up. With a single controller it still needs a stopped cluster, because
-resizing the only controller takes the API down while it reboots.
+up. With a single controller, resizing the only controller takes the API down
+for a few minutes while it reboots: where the platform supports that live
+resize it needs `--accept-api-downtime`, otherwise it needs a stopped cluster.
 
 Run "control-plane get" to see which of the two is available right now.
 
@@ -7174,6 +7525,14 @@ stopped cluster's offline resize drains nothing and ignores it, and so does a
 request the rolling resize refuses (fewer than three controllers) or has
 nothing to do for (the controllers already run that type).
 
+A running cluster with a single controller can be resized in place where the
+platform supports it, but the Kubernetes API is down for a few minutes while
+that server reboots on the new type. Workloads on the workers keep running;
+kubectl, deploys, the Ankra agent and controllers pause until it is back. That
+resize needs `--accept-api-downtime`: without it the command refuses before
+sending anything. Scale the control plane to three controllers first for a
+resize without downtime, or stop the cluster and resize it offline.
+
 List the instance types that do exist with:
 
 ```bash
@@ -7188,6 +7547,7 @@ ankra cluster scaleway control-plane set-instance-type <cluster_id|name> <instan
 
 | Flag | Default | Description |
 |------|---------|-------------|
+| `--accept-api-downtime` | `false` | Accept that resizing the only controller of a running cluster takes the Kubernetes API down for a few minutes while it reboots on the new type. Required for that resize; has no effect on a stopped cluster or one with three controllers |
 | `--force-drain` | `false` | Bypass PodDisruptionBudgets for the rolling resize's drain of each control plane: pods whose disruption budget refuses eviction are evicted anyway. It only matters for a live rolling resize of a running cluster and has no effect on a stopped cluster's offline resize |
 | `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
 
@@ -7370,6 +7730,32 @@ ankra cluster scaleway nodes cloud-init-log <cluster_id|name> <node_id> [flags]
 | Flag | Default | Description |
 |------|---------|-------------|
 | `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+
+## ankra cluster scaleway nodes diagnose
+
+Dispatch the platform's read-only node diagnose job and wait for its report:
+over the bastion SSH lane it snapshots the node's OS-level state - the
+Kubernetes service unit and its journal, disk, memory, uptime, the kernel log
+and the firewall path to the API server - and names the symptoms it finds.
+Nothing on the node is changed. This is what to reach for when a node is
+NotReady or its kubelet stopped posting status, below what 'cluster get' can
+see. The same diagnosis the Ankra assistant runs as ssh_diagnose_node.
+
+The platform waits up to two minutes for the job; a slower run hands back the
+operation id to poll with 'cluster operations list', and repeated calls attach
+to the run already in flight. Find node ids with 'nodes list'. Needs the
+clusters.operate permission on the cluster.
+
+```bash
+ankra cluster scaleway nodes diagnose <cluster_id|name> <node_id> [flags]
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+| `--timeout` | `3m0s` | Maximum time to wait for the diagnosis report |
 
 ## ankra cluster scaleway nodes get
 
@@ -8059,6 +8445,58 @@ ankra cluster stacks variables set <stack> <name> <value> [flags]
 | `--cluster` |   | Target cluster (name or ID); defaults to the active selection |
 | `--dry-run` | `false` | Print the proposed change without writing |
 
+## ankra cluster state-snapshots
+
+Ankra backs up the etcd state of every running cluster it provisions - every
+Secret, ConfigMap, custom resource and PersistentVolume binding - every six
+hours, encrypted, to your organisation's backup vault (or the Ankra-managed
+default vault). A start that finds the cluster's etcd lost restores the newest
+backup.
+
+**Examples**
+
+```bash
+ankra cluster state-snapshots retention
+ankra cluster state-snapshots retention --days 30 --cluster prod
+```
+
+## ankra cluster state-snapshots retention
+
+Show or set how many days of scheduled etcd backups Ankra keeps for the cluster.
+
+Ankra keeps the four newest backups, plus the newest backup of each UTC day for
+the retention window: 7 days unless you set another between 1 and 90. The
+newest backup from before the cluster's last start or recovery incident is kept
+whatever the window.
+
+Without `--days` this shows the window. With `--days` it sets it; the next
+retention pass applies it. A longer window keeps backups from then on and cannot
+bring back ones already deleted. A shorter window deletes the daily backups
+outside it from the vault, so it asks for confirmation first (`--yes` skips it).
+Setting the window needs permission to change cluster settings (clusters.write).
+
+-o json prints the platform's answer as it is.
+
+```bash
+ankra cluster state-snapshots retention [--days N] [flags]
+```
+
+**Examples**
+
+```bash
+ankra cluster state-snapshots retention
+ankra cluster state-snapshots retention --days 30
+ankra cluster state-snapshots retention --days 3 --yes --cluster dev -o json
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--days` | `0` | Set the retention window in days (1 to 90) |
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+| `-y`, `--yes` | `false` | Skip the confirmation a shorter window asks for |
+
 ## ankra cluster terminal
 
 Open an interactive shell in a container of the named pod, through the
@@ -8294,8 +8732,9 @@ change applies at the next start.
 
 The instance type can also be changed on a running cluster that has three
 controllers: they are then resized one at a time, keeping the Kubernetes API
-up. With a single controller it still needs a stopped cluster, because
-resizing the only controller takes the API down while it reboots.
+up. With a single controller, resizing the only controller takes the API down
+for a few minutes while it reboots: where the platform supports that live
+resize it needs `--accept-api-downtime`, otherwise it needs a stopped cluster.
 
 Run "control-plane get" to see which of the two is available right now.
 
@@ -8354,6 +8793,14 @@ stopped cluster's offline resize drains nothing and ignores it, and so does a
 request the rolling resize refuses (fewer than three controllers) or has
 nothing to do for (the controllers already run that type).
 
+A running cluster with a single controller can be resized in place where the
+platform supports it, but the Kubernetes API is down for a few minutes while
+that server reboots on the new type. Workloads on the workers keep running;
+kubectl, deploys, the Ankra agent and controllers pause until it is back. That
+resize needs `--accept-api-downtime`: without it the command refuses before
+sending anything. Scale the control plane to three controllers first for a
+resize without downtime, or stop the cluster and resize it offline.
+
 ```bash
 ankra cluster upcloud control-plane set-instance-type <cluster_id|name> <instance_type> [flags]
 ```
@@ -8362,6 +8809,7 @@ ankra cluster upcloud control-plane set-instance-type <cluster_id|name> <instanc
 
 | Flag | Default | Description |
 |------|---------|-------------|
+| `--accept-api-downtime` | `false` | Accept that resizing the only controller of a running cluster takes the Kubernetes API down for a few minutes while it reboots on the new type. Required for that resize; has no effect on a stopped cluster or one with three controllers |
 | `--force-drain` | `false` | Bypass PodDisruptionBudgets for the rolling resize's drain of each control plane: pods whose disruption budget refuses eviction are evicted anyway. It only matters for a live rolling resize of a running cluster and has no effect on a stopped cluster's offline resize |
 | `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
 
@@ -8449,6 +8897,32 @@ ankra cluster upcloud nodes cloud-init-log <cluster_id|name> <node_id> [flags]
 | Flag | Default | Description |
 |------|---------|-------------|
 | `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+
+## ankra cluster upcloud nodes diagnose
+
+Dispatch the platform's read-only node diagnose job and wait for its report:
+over the bastion SSH lane it snapshots the node's OS-level state - the
+Kubernetes service unit and its journal, disk, memory, uptime, the kernel log
+and the firewall path to the API server - and names the symptoms it finds.
+Nothing on the node is changed. This is what to reach for when a node is
+NotReady or its kubelet stopped posting status, below what 'cluster get' can
+see. The same diagnosis the Ankra assistant runs as ssh_diagnose_node.
+
+The platform waits up to two minutes for the job; a slower run hands back the
+operation id to poll with 'cluster operations list', and repeated calls attach
+to the run already in flight. Find node ids with 'nodes list'. Needs the
+clusters.operate permission on the cluster.
+
+```bash
+ankra cluster upcloud nodes diagnose <cluster_id|name> <node_id> [flags]
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+| `--timeout` | `3m0s` | Maximum time to wait for the diagnosis report |
 
 ## ankra cluster upcloud nodes get
 
@@ -8627,6 +9101,11 @@ snapshot is taken before the control plane upgrade. A drain blocked by a
 PodDisruptionBudget aborts the rollout; pass `--force` to proceed anyway.
 Downgrades and skipping minor versions are not supported.
 
+The upgrade preflight runs first and is printed before anything changes (run it
+alone with 'ankra cluster upgrade preflight'). A blocking check stops the upgrade
+with exit code 8 and nothing changed; `--force` goes past only the
+PodDisruptionBudget block, never the version, catalogue or restore-point checks.
+
 Examples:
 
 ```bash
@@ -8642,7 +9121,85 @@ ankra cluster upgrade <cluster_id|name> <target_version> [flags]
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--force` | `false` | proceed even when a node drain is blocked (bypasses PodDisruptionBudget failures) |
+| `--force` | `false` | proceed even when a node drain is blocked (bypasses PodDisruptionBudget failures and the preflight's PodDisruptionBudget block) |
+
+## ankra cluster upgrade preflight
+
+Run the read-only upgrade preflight for a hop to &lt;target_version&gt;.
+
+Each check answers pass, warn, block or skipped, with a sentence and the evidence:
+
+```text
+hop_plan                    versions per node, which nodes upgrade or are skipped; blocks a
+                            minor skip (and prints the one-minor hops to take), a downgrade
+                            or a version outside the catalogue
+operations                  running operations, reconciling nodes, an operations block
+pod_disruption_budgets      a budget that allows no disruption parks the drain on the node it
+                            names (the one block 'ankra cluster upgrade --force' goes past)
+cloudnative_pg              stopDelay longer than the 300 s drain timeout, single instances
+control_plane_memory        MemAvailable now and over 24 h, from the cluster's metrics source
+restore_points              newest cluster-state snapshot, backup vault, unprotected stacks
+control_plane_reachability  SSH failures to a control plane in the last 24 h
+k3s_address_pin             bind-address, advertise-address and node-ip on k3s control planes
+```
+
+A warning or a skipped check whose evidence could not be read was NOT checked; it did
+not pass. 'ankra cluster upgrade' runs the same preflight first.
+
+Exit codes: 0 when the verdict is ready (warnings included), 8 when a check blocks.
+
+Examples:
+
+```bash
+ankra cluster upgrade preflight my-cluster v1.35.9+k3s1
+ankra cluster upgrade preflight my-cluster v1.35.9 -o json
+```
+
+```bash
+ankra cluster upgrade preflight <cluster_id|name> <target_version> [flags]
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+
+## ankra cluster upgrade rollback-record
+
+Repair a cluster's Kubernetes version record after its nodes were rolled back
+by hand from a failed version hop.
+
+A failed hop leaves the platform's record pinning the new version, and the
+platform then re-runs the hop as soon as it may act again. This writes every
+control plane's record back to &lt;version&gt; and up, each worker to &lt;version&gt; (or
+to the newer version it runs), and the cluster's Kubernetes version to
+&lt;version&gt;. The platform refuses it unless an operations hold is in force with at
+least 10 minutes left, no write is running on the cluster, and its last read of
+every control plane shows exactly &lt;version&gt; (as the node reports it, e.g.
+v1.34.5+k3s1). Then wait for 'ankra cluster operations hold get' to show the
+record confirmed before lifting the hold.
+
+This is an Ankra staff operation: set ANKRA_STAFF_SESSION and pass the cluster
+by id. It asks for confirmation unless `--yes` is given.
+
+Examples:
+
+```bash
+ankra cluster upgrade rollback-record 62f4559a-a44d-46d7-aab3-a57c9dd6b4c6 v1.34.5+k3s1 --reason "cp-0 rolled back (tier 1)"
+```
+
+```bash
+ankra cluster upgrade rollback-record <cluster_id> <version> --reason <text> [flags]
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+| `--reason` |   | which rollback the record is brought in line with (audited) |
+| `-y`, `--yes` | `false` | skip the confirmation prompt |
 
 ## ankra cluster validate
 

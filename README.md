@@ -21,6 +21,7 @@ pnpm run check:nav          # every page reachable from docs.json, no dead nav e
 pnpm run check:frontmatter  # every page has title + description
 pnpm run check:snippets     # code blocks free of corruption patterns, YAML parses, mermaid arrows valid
 pnpm run check:api-paths    # every /api/v1 and /org path stated by hand exists on the cluster router (needs routes.json, see below)
+pnpm run check:cli-version  # latestStableCli in snippets/cli-version.jsx is not behind the newest stable ankra-cli release (GitHub API; GH_TOKEN="$(gh auth token)" lifts the rate limit)
 pnpm run check:links        # Mintlify broken-link checker
 ```
 
