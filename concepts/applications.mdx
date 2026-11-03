@@ -6,7 +6,7 @@ description: Point Ankra at an application's source repository and it generates 
 import { CliVersion } from "/snippets/cli-version.jsx";
 import { YouTube } from "/snippets/youtube.jsx";
 
-Applications take you from source code to a deployable workload. Connect an application's Git repository and Ankra analyzes it, generates the packaging it's missing, and opens a pull request in your repository. Once merged, CI builds and publishes a container image that you can deploy to a cluster.
+Applications take you from source code to a deployable workload. Connect an application's Git repository and Ankra analyzes it, generates the packaging it's missing, and opens a pull request in your repository, unless it finds nothing there it can build and keep running. Once merged, CI builds and publishes a container image that you can deploy to a cluster.
 
 <Note>
 Applications connect to **GitHub** repositories and use a [GitHub credential](/integrations/github). By default the generated CI/CD pipeline pushes the container image to your organisation's private Ankra registry; if you already run your own registry, [declare it](#using-your-own-registry) and Ankra publishes to and reads from it instead.
@@ -41,7 +41,7 @@ flowchart LR
     Ankra inspects the repository, detects the language and framework, and generates the artifacts it needs: a Dockerfile, Kubernetes manifests, and a CI/CD workflow.
   </Step>
   <Step title="Merge the pull request">
-    The pull request runs its own checks first: it builds the image, scans it and runs the security gate. When they pass, review and merge it. Merging activates the CI/CD pipeline in your repository. When they fail, Ankra fixes the pull request itself, and the [PR shepherd](#the-pr-shepherd) keeps it moving until you merge it - or merges it for you, if you opt in.
+    The pull request runs its own checks first: it builds the image, scans it and runs the security gate. It stays a draft, which GitHub will not merge, until they pass, and then Ankra marks it ready for review; if you run the [AI review](/platform/ai-code-review), it skips the draft until then unless **Review drafts** is on. Review and merge it. Merging activates the CI/CD pipeline in your repository. When they fail, Ankra fixes the pull request itself, and the [PR shepherd](#the-pr-shepherd) keeps it moving until you merge it - or merges it for you, if you opt in. Beside CI that Ankra adopted, with no CI at all, or on a private repository whose GitHub plan has no drafts, it opens ready for review.
   </Step>
   <Step title="Build and publish">
     CI builds and pushes the container image to the organisation's private Ankra registry. Ankra surfaces the image URL and scans the published image.
@@ -50,6 +50,15 @@ flowchart LR
     Deploy the application onto a cluster. Ankra verifies that the image was published and tracks the rollout.
   </Step>
 </Steps>
+
+<Note>
+**When setup stops before the pull request.** In two cases Ankra opens no setup pull request and deploys nothing. The setup ends as failed, and the application's error message says why:
+
+- **Nothing in the repository keeps running.** When the analysis finds only a program that runs once and exits, or nothing that runs at all, the message starts "Ankra did not set this repository up as an always-on application" and ends "Add a program that keeps running and listens on a port, then run setup again."
+- **Nothing can be built.** When there is no Dockerfile in the repository, on an open setup branch or among the files Ankra generated, the failed `setup_stopped` task says what Ankra found and what it could not write. Add a Dockerfile and run setup again.
+
+Both messages carry the same sentence: "No setup pull request was opened and nothing was deployed." A repository that commits its own manifests under `.ankra/manifests/`, or whose own CI already publishes an image, still gets its setup pull request, with no build for anything that has no Dockerfile. So does a monorepo in which at least one component can be built.
+</Note>
 
 ### When your repository already has CI
 
@@ -89,7 +98,17 @@ A failed build on the application's tracked branch dispatches the same agent. Wh
 | **Ask** (the default) | The agent investigates and proposes a fix, without committing |
 | **Agent** | The agent commits the fix and opens a pull request for you to review |
 
-A failed run on someone's own pull request is never committed to: the pull request gets the explanation and a **Fix with Ankra** link on the run page instead.
+### When a pull request fails its checks
+
+On Ankra Pipelines, a failed build, image gate or `run` step (your tests, for example) on any pull request from a branch of your repository, not only the setup pull request, is fixed on that pull request:
+
+- **The fix lands on the pull request's own branch.** An agent commits it to the head branch and watches the run that commit starts. It opens no second pull request and changes only what the failure needs. For an image gate the agent is handed each vulnerable package with the releases that fix it, and moves it to at least the highest.
+- **A conflict with the base branch is resolved the same way.** The status comment opens "This pull request conflicts with" and names the base. The agent merges the base into the head with a merge commit, resolving every file both sides changed, and the run of that merge commit is its check. Nothing is ever merged into your default branch.
+- **When the AI allowance is used up**, on Ankra's own models with no key of your own, the status comment says the fix is queued and starts by itself when the allowance resets on the 1st of the month, or as soon as an organisation owner adds the organisation's own model key under **Organisation settings**, **AI provider**; if billing has paused AI, it names that instead.
+- **Without AI, vulnerable Python packages are still upgraded.** When the image gate blocked the run and the fix has to wait, Ankra moves each package a lock file pins to a release that fixes it, checked against the packages' own requirements, commits that to the pull request on GitHub, and leaves the rest for the allowance.
+- **The same switches hold it:** automatic build fixing turned off for the application, Ankra's autonomous actions paused, or an environment of the application set to **You run it**.
+
+A pull request from a fork is never committed to: it gets the explanation and a **Fix with Ankra** link on the run page.
 
 ### The PR shepherd
 
@@ -101,6 +120,9 @@ What the shepherd does on its own:
 - **The pull request falls behind its base branch.** Ankra merges the base branch into its own branch with a merge commit - never a force-push or a rebase. It waits until the head has sat for about 6 hours, or does it straight away when merging is opted in (below).
 - **The pull request conflicts with its base branch.** Ankra resolves the conflict only when every file in the pull request is one Ankra owns: the Dockerfile, `.dockerignore`, the `.ankra/` directory and the generated build workflow. Your own files are kept exactly as the base branch has them, and a conflict that touches them is left for you.
 - **A check fails.** When the pull request only changes Ankra's own files, Ankra AI fixes it on the same branch, up to 3 times, then reports it for a person. A failure in a pull request that changes your files is reported, never "fixed".
+- **The proof of the head never gives an answer.** Where your organisation has a staging cluster, a proof still queued 20 minutes after Ankra queued it, or one that ended not proven, is a dead end: once nothing else is pending, the check reads **Needs a person**, names the proof and its reason, and Ankra does not merge. The shepherd keeps looking every 15 minutes, so a proof that passes later turns it **Ready to merge**.
+
+These are the shepherd's own actions. On Ankra Pipelines, a pull request from a branch of your repository is also fixed as [When a pull request fails its checks](#when-a-pull-request-fails-its-checks) describes, whichever files it changes.
 
 #### Merging
 
@@ -199,7 +221,7 @@ An application opens as a workspace: a context sidebar beside the main one, in t
 
 | Section | What it shows |
 | --- | --- |
-| **Overview** | Where the application is right now: the setup journey, the environments it is live in, and the latest run. |
+| **Overview** | Where the application is right now: the setup journey, the environments it is live in, and the latest run. **Add** beside the environments puts the application on another cluster; see [Add an environment on another cluster](/guides/application-environments#add-an-environment-on-another-cluster). |
 | **Pipelines** | Run history as one lane per run, with skipped and cancelled runs grouped on their own. Stages fold into phases decided by each stage's kind, so a long pipeline reads as a handful of things you can name; a kind the grouping does not know yet sits under *Other steps*. A run opens as its own sheet - logs, the failed step and its exit code, the artifact and the commit - with the suggested fix separate from the rerun. |
 | **Deployments** | One installation per row: the cluster and its environment label, the owning add-on or stack, the version it serves, health and the reported address. A version that differs between installations is shown as a difference, not called drift. A field the read does not carry reads *unknown*, never zero, and the installation sheet links to the owning add-on for namespace, pods, events and logs rather than pretending to show them. |
 | **Previews** | What the CLI and API call demos. One card per preview with its branch or commit, component, image, expiry, access (browser URL, in-cluster only, URL not live, or not reachable yet) and the staging cluster, plus the launch dialog and the environment template. See [Preview demos](#preview-demos). |
@@ -236,7 +258,7 @@ A repository that builds more than one deployable app is onboarded as a **monore
 
 Ankra decides the components from, in order: the `components` block of the repository's [`.ankra/ankra.yaml`](/reference/application-descriptor#components), when it declares one; the per-component workflows the repository already carries (so re-running analysis never renames a component and orphans the images it has published), the apps the analysis proposed, then the repository's structure - two or more Dockerfiles in subdirectories and no Dockerfile at the root, or a workspace marker (`nx.json`, `turbo.json`, `lerna.json`, `pnpm-workspace.yaml`, `go.work`) plus two or more subdirectories with their own dependency manifest. **Without a declaration, a Dockerfile at the repository root always means a single app**, whatever else the repository contains.
 
-Inference can add components to a monorepo but never removes them: a run that finds fewer components than the application records keeps the recorded ones. A repository whose layout inference misreads, such as an API built from `deploy/docker/Dockerfile` at the root beside a web app in `web/`, declares its components in [`.ankra/ankra.yaml`](/reference/application-descriptor#components), and the declaration is also how you remove one.
+The AI proposal and structural detection can add components to a monorepo but never leave it with fewer than it records: a run whose inference finds fewer keeps the recorded ones. Only a declaration, or two or more of Ankra's per-component build workflows for fewer components than the record, can shrink it, and a run that drops or renames a recorded component records the new set and reports the change as the failed task `record_components`. A repository whose layout inference misreads, such as an API built from `deploy/docker/Dockerfile` at the root beside a web app in `web/`, declares its components in [`.ankra/ankra.yaml`](/reference/application-descriptor#components), and the declaration is also how you remove one.
 
 Build state, published images, deploys, demos, and container scanning are all reported per component, so an application whose API component built and whose frontend did not says exactly that.
 
@@ -286,7 +308,7 @@ The same declaration at create time:
 | `api_url` | Optional. The registry's management API base; defaults to `https://<host>`, which is where a Harbor serves its own API. |
 | `pull_secret_name` | Optional. The `kubernetes.io/dockerconfigjson` Secret the generated manifests reference through `imagePullSecrets`. Defaults to `ankra-registry-pull`. |
 | `username_secret_name` / `password_secret_name` | Optional. The repository Actions secrets the build workflow logs in with. Default to `ANKRA_REGISTRY_USERNAME` / `ANKRA_REGISTRY_PASSWORD`. |
-| `admin_credential_name` | Optional. A registry credential with project administrator rights on the project (or a robot granted the robot-account permissions). Setting it hands robot management on your registry to Ankra: it mints, rotates and revokes a push robot for the application with it. See [Robot accounts](#robot-accounts). |
+| `admin_credential_name` | Optional. A registry credential with project administrator rights on the project (or a robot granted the robot-account permissions). Setting it hands robot management on your registry to Ankra: it mints and revokes a push robot for the application with it, and rotates it when the credential is a Harbor user. See [Robot accounts](#robot-accounts). |
 | `manage_actions_secrets` | Optional, default `false`. See below. |
 | `component_repositories` | Optional. The repository inside the project for a component, keyed by component name - `{"backend": "commerce-backend"}` publishes the backend at `<project>/commerce-backend` - for a registry whose layout follows neither Ankra's nesting nor the flat component name. Unnamed components keep the derived path. CLI: `--component-repository backend=commerce-backend` (repeatable); portal: one field per component under **Settings** → **Image registry**. |
 | `flat_repositories` | Optional, default `false`. Publish a monorepo's components straight under the project - `<project>/<component>` - instead of Ankra's `<project>/<app>/<component>`. Turn it on when the registry already holds the images that way, so publish readiness, the deploy gate and the generated workflows all address the repositories your pipeline already pushes to. Single-component applications are unaffected. |
@@ -307,7 +329,7 @@ On a monorepo, a component may declare its own `image_registry` to publish into 
 
 Publish readiness, the deploy gate, image tag listings, container scanning, and preview demos all resolve the declared registry, so an application whose images live outside Ankra reports what is actually published rather than staying blocked on an artifact that was never going to appear in Ankra's own project.
 
-Running Harbor yourself? [Harbor as your application registry](/guides/harbor-registry) covers the operator's side: which credential does what, why the project-administrator credential must be a Harbor user rather than a project robot, how to check the minted robot from Harbor's own API, and how the pull secret reaches every cluster and namespace the application deploys to.
+Running Harbor yourself? [Harbor as your application registry](/guides/harbor-registry) covers the operator's side: which credential does what, which Harbor releases let a robot administer robots and when the credential must be a Harbor user, how to check the minted robot from Harbor's own API, and how the pull secret reaches every cluster and namespace the application deploys to.
 
 ### Robot accounts
 
