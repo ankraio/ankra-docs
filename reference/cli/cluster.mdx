@@ -3782,8 +3782,10 @@ ankra cluster get storageclasses [name] [flags]
 
 ## ankra cluster gitops
 
-Commands for inspecting which GitOps repository a cluster syncs from, and for
-listing and resolving the merge conflicts that pause its sync.
+Commands for inspecting which GitOps repository a cluster syncs from, for
+listing and resolving the merge conflicts that pause its sync, and for listing
+and deciding its preserved paths: files edited in Git that Ankra keeps instead
+of overwriting.
 
 ## ankra cluster gitops conflicts
 
@@ -3876,6 +3878,150 @@ ankra cluster gitops conflicts resolve --all --keep git --yes -o json
 | `--keep` |   | Which side to keep: 'git' (the repository's version) or 'cluster' (the platform's version, pushed to the repository) |
 | `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
 | `-y`, `--yes` | `false` | Skip the confirmation prompt (required when stdin is not a terminal) |
+
+## ankra cluster gitops preserved
+
+A preserved path is a file in the cluster's GitOps repository that Ankra did not
+write, for example a cluster file someone edited by hand. Ankra keeps Git's
+version instead of overwriting it, so Ankra's own later changes to that file
+(a new add-on, a chart version it rolled) do not reach Git until a person
+decides which version wins. Nothing is paused: the rest of the cluster keeps
+syncing. These are not merge conflicts, so 'ankra cluster gitops conflicts'
+does not list or decide them.
+
+'list' shows the preserved paths and how many differences each has, 'show'
+prints where one file's two versions differ, key by key, and 'resolve' records
+a decision that the next sync runs:
+
+```text
+--keep git      Ankra imports Git's version of the file, and the cluster
+                changes to match it: what only Ankra's version declares is
+                removed from the cluster.
+--keep ankra    Ankra writes its own version of the file into Git, over the
+                edit made there. --keep cluster means the same.
+```
+
+## ankra cluster gitops preserved list
+
+List the files Git and Ankra are divided on: each file's path, when it was
+detected, whether a decision is recorded, whether its content is withheld (and
+why), and how many differences the platform found between Git's version and
+Ankra's.
+
+If no cluster name is provided, uses the `--cluster` flag or the currently
+selected cluster. -o json|yaml prints the platform's answer as it is, including
+each file's two versions where the platform lists them.
+
+```bash
+ankra cluster gitops preserved list [cluster_name] [flags]
+```
+
+**Examples**
+
+```bash
+ankra cluster gitops preserved list
+ankra cluster gitops preserved list prod
+ankra cluster gitops preserved list prod -o json
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+
+## ankra cluster gitops preserved resolve
+
+Record which version of a preserved file wins. The next sync runs the decision;
+resolve triggers that sync.
+
+`--keep` is required, because either version discards the other:
+
+```text
+--keep git      Ankra imports Git's version of the file, and the cluster
+                changes to match it. Stacks, add-ons and settings that only
+                Ankra's version declares are removed from the cluster. The
+                import runs once every preserved path on the cluster has a
+                decision.
+--keep ankra    Ankra writes its own version of the file into Git, over the
+                edit made there. --keep cluster means the same. Refused for a
+                file holding SOPS-encrypted content, which would put plaintext
+                in Git in place of ciphertext.
+```
+
+resolve reads the file's current state from the platform first, so the decision
+is recorded over exactly the two versions it shows you (the platform refuses it
+if either changed in between). It then lists what the choice discards, from the
+platform's key-by-key difference, and asks for confirmation. `--yes` skips the
+question; without a terminal to ask on (a script, CI) it is required.
+
+`--withdraw` removes a recorded decision so the file awaits one again. It changes
+nothing in Git or on the cluster, so it asks nothing; a decision the platform
+already started running is not recalled.
+
+Deciding needs permission to change the cluster's configuration
+(clusters.write). The cluster is the `--cluster` flag or the currently selected
+cluster.
+
+```bash
+ankra cluster gitops preserved resolve <path> [flags]
+```
+
+**Examples**
+
+```bash
+ankra cluster gitops preserved resolve clusters/prod/prod.yaml --keep ankra
+ankra cluster gitops preserved resolve clusters/prod/prod.yaml --keep git --cluster prod
+ankra cluster gitops preserved resolve clusters/prod/prod.yaml --keep ankra --yes -o json
+ankra cluster gitops preserved resolve clusters/prod/prod.yaml --withdraw
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--keep` |   | Which version to keep: 'git' (import Git's version; the cluster changes to match it) or 'ankra' (write Ankra's version into Git; 'cluster' means the same) |
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+| `--withdraw` | `false` | Withdraw the recorded decision, so the file awaits one again (changes nothing in Git or on the cluster) |
+| `-y`, `--yes` | `false` | Skip the confirmation prompt (required when stdin is not a terminal) |
+
+## ankra cluster gitops preserved show
+
+Show one preserved file: when it was detected, its decision, whether its content
+is withheld, and every difference the platform found between Git's version and
+Ankra's, key by key, read from Git's version to Ankra's:
+
+```text
+added      only Ankra's version has it
+removed    only Git's version has it
+changed    both have it, with different values
+reordered  both list the same members in another order
+```
+
+A value the platform does not show is printed as (masked): seeing values needs
+permission to reveal secrets on the cluster (kubernetes.secrets_reveal), and
+some files show no values to anyone. The platform lists at most 50 differences
+per file; the total is always given.
+
+The path is the full repository path, as 'ankra cluster gitops preserved list'
+prints it. The cluster is the `--cluster` flag or the currently selected cluster.
+
+```bash
+ankra cluster gitops preserved show <path> [flags]
+```
+
+**Examples**
+
+```bash
+ankra cluster gitops preserved show clusters/prod/prod.yaml
+ankra cluster gitops preserved show clusters/prod/prod.yaml --cluster prod -o json
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
 
 ## ankra cluster gitops status
 
