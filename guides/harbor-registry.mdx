@@ -167,7 +167,7 @@ ankra registry robots delete jenkins --yes
 | Field | Value |
 |---|---|
 | **Login** | `robot$org-<organisation-id>+user-<name>` |
-| **Project** | One project: your organisation's own, or an [extra project](#scoping-a-robot-to-one-project) you pick |
+| **Project** | Your organisation's own, an [extra project](#scoping-a-robot-to-one-project) you pick, or [several](#one-robot-for-several-projects) |
 | **Rights** | `push` = push and pull; `pull` = pull only; or your own list of permissions |
 | **Expiry** | Never, unless you set one when creating it |
 | **Credential** | `ankra-harbor-robot-<name>`, managed, revoked with the robot |
@@ -280,6 +280,48 @@ ankra registry robots delete collector-ci --yes
 | **Permissions** | The same scopes, permissions and expiry as on the Ankra registry. Creating one, and listing that registry's projects, also needs `credentials.reveal`, because Ankra acts as your admin credential. So does connecting the registry entry itself with a stored credential, which Ankra then sends to that registry's host |
 
 A robot of the same name that already exists on your registry is left alone, and the create is refused: pick another name or delete it in Harbor first. If the registry entry is deleted, or now points at another host, rotating the robot is refused and revoking it removes Ankra's copy of the login only; delete the robot in Harbor yourself if it still exists. A registry that refuses the admin credential is reported as such, so check the credential's rights on the project.
+
+### One robot for several projects
+
+A robot can reach up to 20 projects, each with its own access, so a consumer that installs a chart from one project and pulls its images from another needs one robot and one pull secret. Repeat `--registry-project`, or separate with commas. In the portal, tick several projects when you make the robot.
+
+<CliVersion since="0.63.0" command="registry robots create --registry-project a,b" note="Before v0.63.0 the flag takes one project." />
+
+```bash
+ankra registry robots create consumer --scope pull \
+  --registry smartoptics-harbor \
+  --admin-credential smartoptics-harbor-robot-admin \
+  --registry-project commerce-charts,commerce-images
+```
+
+On Harbor this is a system-level robot, so its login is `robot$org-<organisation-id>-user-<name>`. On a Harbor you run yourself, the admin credential must be allowed to make those: a Harbor system administrator, or a system-level robot with `robot` `create`, `read`, `list` and `delete` at system level that itself holds the same access on every project. If it may not, Ankra says so and makes nothing.
+
+### Changing which projects a robot reaches
+
+Give the full list of projects the robot should reach from now on. Projects it keeps keep the access they have; projects it gains get `--scope`, pull unless you say push. In the portal, use **Change projects…** in the robot's menu on the Registries page.
+
+<CliVersion since="0.64.0" command="registry robots update" />
+
+```bash
+ankra registry robots update consumer --registry-project commerce-charts,commerce-images,library
+```
+
+What happens depends on what Harbor allows:
+
+| Change | With a Harbor user, or on the Ankra registry | With a robot as the admin credential |
+|---|---|---|
+| Several projects to several | Same login, same secret | Replaced: same login, new secret |
+| One project to another, to several, or several to one | Replaced: new login, new secret | Replaced: new login, new secret |
+
+Harbor only lets a user change a robot in place: no robot can hold that right, and a robot cannot move between one project and several.
+
+**Replacing a robot stops whatever logs in with it.** So Ankra asks first. Without `--new-secret` the command changes nothing and says a new secret is needed, and the portal asks you to confirm. The new secret is shown once, and the robot keeps its name, description and expiry. Update everything that logs in with it straight away.
+
+Google Artifact Registry robots cannot have their repositories changed yet.
+
+**On the API:** `PUT /api/v1/org/registry-robots/{robot_name}/projects`, with `projects` and optional `allow_new_secret`. It needs `credentials.write`, plus `credentials.reveal` for a robot on a registry you run or for grants past the presets. Without `allow_new_secret`, a change that needs a new secret answers 409.
+
+**Over MCP and in Ankra AI:** `list_registry_robots` reads your robots, and `update_registry_robot_projects` changes one in place, after confirmation. It never replaces a robot, so a secret never reaches a model: where a replacement is needed, it changes nothing and gives you the command to run. With a robot as the admin credential, that is every change.
 
 ### Seeing every robot, including Ankra's
 
