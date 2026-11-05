@@ -3480,6 +3480,152 @@ ankra cluster exec cnpg-cluster-1 -n cnpg-database -c postgres --stdin -- psql -
 | `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
 | `--stdin` | `false` | Forward your stdin to the command; it sees end-of-file when your input ends |
 
+## ankra cluster gateway-api
+
+The Traefik that Ankra installs as a cluster's ingress can also serve the
+Kubernetes Gateway API, next to Ingress: a GatewayClass named traefik, a shared
+Gateway named traefik-gateway (HTTP on Traefik's web entry point, routes from
+every namespace), a certificate from cert-manager, and HTTPRoute hostnames
+published by external-dns. Every Ingress keeps working.
+
+At create time the option is '`--gateway-api`' on the create command. This
+command turns it on for a cluster that already exists, or shows where that
+stands. The platform answers one plan for both: whether the option is recorded,
+where the Gateway API CRDs come from and whether they are established, what the
+Traefik and cert-manager values still need, and who moves the enable on next.
+
+Run without a subcommand it shows the plan, like 'status'. There is no
+'disable': to stop the shared Gateway later, set gateway.enabled: false in
+Traefik's values; routes and CRDs stay.
+
+```bash
+ankra cluster gateway-api [flags]
+```
+
+**Examples**
+
+```bash
+ankra cluster gateway-api
+ankra cluster gateway-api status --cluster prod -o json
+ankra cluster gateway-api enable --cluster prod
+ankra cluster gateway-api enable --cluster prod --yes --wait
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+
+## ankra cluster gateway-api enable
+
+Turn the Gateway API on for a cluster Ankra built. The platform records the
+option on the cluster, installs the Gateway API CRDs through a gateway-api-crds
+addon in the networking stack (or uses the ones the cluster already carries),
+and, once it reads them as established, writes the Gateway API settings into
+the Traefik and cert-manager values through the ordinary stack write: one
+GitOps commit on a GitOps-backed cluster, then one Traefik rollout. Values you
+wrote yourself are never changed: a key that says the opposite of what the
+option needs is reported as a conflict and nothing is written until you decide.
+
+Because it changes what the cluster's ingress serves, enable prints the plan
+and asks for confirmation first. `--yes` skips the question; without a terminal
+to ask on (a script, CI) it is required.
+
+The enable is idempotent and resumable. Without `--wait` it records the option
+and returns at once, saying what is next; run it again later to write the
+values once the CRDs are established, or check with 'status'. With `--wait` it
+follows the phase, repeats the enable when the values are next, and returns
+once the Gateway API is enabled. A passing platform fault while it follows (a
+5xx, a dropped connection, one request timing out) is tried again on the next
+poll; five in a row end the follow. `--timeout` bounds `--wait` and is refused
+without it. The verdict is the same with or without `--wait`.
+
+Exit codes:
+
+```text
+0  the Gateway API is on, or (without --wait) the option is recorded and
+   the enable is moving: waiting for the CRDs, the values next, or
+   Traefik and cert-manager applying them
+1  the option is recorded but the platform needs a person: a conflict in
+   the values, a failed CRD install or apply, a networking stack with no
+   Ankra-installed Traefik and cert-manager to write into, or a values
+   write whose GitOps push failed (the values reached the platform, the
+   repository does not carry them yet). The reason goes to stderr. Also
+   a refusal of the enable --wait repeats (the option stays recorded),
+   any request that failed, five failed requests in a row during --wait
+   (the enable keeps going), and a platform without this route
+2  no terminal to confirm on and no --yes, --timeout without --wait, or a
+   cluster Ankra did not build
+3  the cluster is not in the selected organisation
+4  the confirmation was declined
+5  --wait ran out of --timeout; the enable keeps going, run it again to
+   keep following it
+6  the credentials are missing, expired or rejected: run 'ankra login'
+7  your role lacks clusters.write
+8  the platform cannot take the option and nothing was changed: the
+   cluster has no Ankra-managed ingress to serve it (the plan reads "not
+   available"), or the platform refused this run's first enable, for
+   example while the cluster's cloud provider stack is still being created
+```
+
+```bash
+ankra cluster gateway-api enable [flags]
+```
+
+**Examples**
+
+```bash
+ankra cluster gateway-api enable
+ankra cluster gateway-api enable --cluster prod --yes
+ankra cluster gateway-api enable --cluster prod --yes --wait --timeout 30m
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+| `--timeout` | `20m0s` | How long `--wait` follows the enable before giving up (exit 5); refused without `--wait` |
+| `--wait` | `false` | Follow the enable until the Gateway API is enabled, the platform needs a person, or `--timeout` runs out |
+| `-y`, `--yes` | `false` | Skip the confirmation prompt (required when stdin is not a terminal) |
+
+## ankra cluster gateway-api status
+
+Show the platform's plan for the Gateway API on the cluster: whether the
+option is recorded, where the Gateway API CRDs come from and whether the
+platform reads them as established, what the Traefik and cert-manager values
+still need (with any key that says the opposite of what the option needs), the
+last apply of each, and the note saying who moves the enable on next.
+
+Reading Gateway API objects on the cluster afterwards takes the singular kind:
+'ankra cluster get resources gatewayclass `--group` gateway.networking.k8s.io'.
+
+-o json prints the platform's answer as it is.
+
+Exit codes: 0 when the plan was read, whatever it says (including "not
+available"); 2 for a cluster Ankra did not build; 3 when the cluster is not in
+the selected organisation; 6 when the credentials are missing, expired or
+rejected; 7 when your role cannot read the cluster's settings; 1 for any other
+failure, including a platform without this route.
+
+```bash
+ankra cluster gateway-api status [flags]
+```
+
+**Examples**
+
+```bash
+ankra cluster gateway-api status
+ankra cluster gateway-api status --cluster prod -o json
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+
 ## ankra cluster get
 
 Get Kubernetes resources from the active cluster.
