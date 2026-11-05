@@ -1,0 +1,201 @@
+---
+title: "Gateway API"
+description: "Serve Kubernetes Gateway API resources from the networking stack's Traefik on a cluster Ankra builds, next to Ingress: what the option installs, the shared Gateway, HTTPRoutes with DNS records, and HTTPS through your own Gateway."
+---
+
+import { CliVersion } from "/snippets/cli-version.jsx";
+
+The networking stack on a cluster Ankra builds runs Traefik as its Ingress controller. With the Gateway API option, the same Traefik also serves the [Kubernetes Gateway API](https://gateway-api.sigs.k8s.io/): `Gateway` and `HTTPRoute` resources. Ingress keeps working as before and `traefik` stays the default IngressClass, so you can move one application at a time.
+
+The option is offered on every Ankra Managed provider: Hetzner, OVHcloud, UpCloud, DigitalOcean, Scaleway, AWS EC2, Ankra Cloud, Proxmox VE and HPE Morpheus. You choose it when you create the cluster.
+
+<Note>
+**The Gateway API needs the networking stack**, because the stack's Traefik is what serves it. The API refuses `gateway_api: true` together with `include_networking: false` with HTTP 400, and the CLI refuses `--gateway-api` together with `--include-networking=false` and exits with code 2.
+</Note>
+
+## Turn it on when you create the cluster
+
+<Tabs>
+  <Tab title="Dashboard">
+    In the create wizard of the new Ankra portal (`/next` on your portal's address), open **Advanced configuration**, keep **Install the networking stack** ticked, and tick **Add the Kubernetes Gateway API**. The checkbox is shown only while the networking stack is ticked. **Review** then lists **Gateway API** under **Included**.
+  </Tab>
+  <Tab title="CLI">
+    <CliVersion since="0.61.0" />
+
+    Add `--gateway-api` to the create command, for example on Hetzner:
+
+    ```bash
+    ankra cluster hetzner create \
+      --name my-cluster \
+      --credential-id <hetzner-credential-id> \
+      --ssh-key-credential-ids <key-id> \
+      --location fsn1 \
+      --control-plane-count 1 \
+      --worker-count 2 \
+      --gateway-api
+    ```
+
+    The flag is on `ankra cluster <provider> create` for `hetzner`, `ovh`, `upcloud`, `digitalocean`, `scaleway`, `aws`, `ankracloud`, `proxmox` and `morpheus`, and on the `preflight` commands of `scaleway`, `aws` and `ankracloud`. It is off by default.
+  </Tab>
+  <Tab title="API">
+    Add `gateway_api` to the create request, next to `include_networking`:
+
+    ```json
+    {
+      "include_networking": true,
+      "gateway_api": true
+    }
+    ```
+
+    Each provider's guide has the full request, for example [Hetzner](/guides/hetzner-clusters#create-the-cluster). `gateway_api` defaults to `false`.
+  </Tab>
+</Tabs>
+
+## What it installs
+
+The networking stack already runs Traefik, cert-manager and the `letsencrypt-prod` ClusterIssuer. The option adds one add-on and changes Traefik, cert-manager and external-dns:
+
+| Component | What the option adds |
+|---|---|
+| `gateway-api-crds` add-on | Chart `gateway-api-crds` 1.5.1 from `oci://ghcr.io/ankraio/ankra-charts`, which is the upstream Gateway API v1.5.1 standard channel: eight CRDs (`GatewayClass`, `Gateway`, `HTTPRoute`, `GRPCRoute`, `ReferenceGrant`, `BackendTLSPolicy`, `ListenerSet` and `TLSRoute`) and upstream's safe-upgrades ValidatingAdmissionPolicy. It installs before Traefik, cert-manager and external-dns, because all three read these kinds. |
+| Traefik | Its Gateway provider, the GatewayClass `traefik` (controller `traefik.io/gateway-controller`), and one shared Gateway, `traefik-gateway`, in the `traefik` namespace. |
+| cert-manager | Gateway API support (`config.enableGatewayAPI: true`), so a Gateway annotated with a ClusterIssuer gets its certificates. |
+| external-dns | HTTPRoutes as a source (`--source=gateway-httproute`), so an HTTPRoute hostname under the cluster's own Ankra domain gets its DNS record, like an Ingress hostname. external-dns is installed when the cluster has its public domain (`include_dns`, on by default). |
+
+<Warning>
+**Uninstalling the `gateway-api-crds` add-on keeps the CRDs.** Every object the chart installs carries `helm.sh/resource-policy: keep`, because deleting a CRD deletes every resource of that kind. Your Gateways and routes stay in place with the CRDs. Delete the CRDs by hand only if you mean to delete those too.
+</Warning>
+
+## The shared Gateway
+
+`traefik-gateway` has one listener:
+
+| Field | Value |
+|---|---|
+| Name | `web` |
+| Protocol | `HTTP` |
+| Port | `8000` |
+| Routes it admits | From every namespace |
+
+Port `8000` is the container port of Traefik's `web` entry point. Traefik binds a Gateway listener to the entry point with the same container port, so a listener port is an entry point port: `8000` for `web` and `8443` for `websecure`. Clients reach the listener the same way they reach your Ingress hosts over HTTP, on port 80 of Traefik's Service.
+
+The shared Gateway has no HTTPS listener, because HTTPS needs a certificate for each hostname. For HTTPS, create your own Gateway, as in [Serve HTTPS from your own Gateway](#serve-https-from-your-own-gateway).
+
+## Route HTTP traffic
+
+Attach an HTTPRoute to the shared Gateway's `web` listener. This one sends `app.<cluster-domain>` to the `my-app` Service on port 80:
+
+```yaml
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: my-app
+  namespace: my-app
+spec:
+  parentRefs:
+    - name: traefik-gateway
+      namespace: traefik
+      sectionName: web
+  hostnames:
+    - app.<cluster-domain>
+  rules:
+    - backendRefs:
+        - name: my-app
+          port: 80
+```
+
+Add it to a Stack as a [manifest](/concepts/stacks#manifests), next to the application it routes to. `ankra cluster domain <cluster>` prints the cluster's domain. external-dns publishes a hostname under that domain at the Gateway's addresses. A hostname on any other domain gets no record from Ankra, and that includes a zone you serve with your own DNS credential: create its record yourself.
+
+## Serve HTTPS from your own Gateway
+
+For HTTPS, create a Gateway of class `traefik` in your application's namespace, with a listener on Traefik's `websecure` entry point:
+
+- `port: 8443`, which Traefik's Service serves on port 443
+- `protocol: HTTPS` and a `hostname`
+- `tls.certificateRefs` naming the Secret the certificate goes into
+- the annotation `cert-manager.io/cluster-issuer: letsencrypt-prod` on the Gateway
+
+cert-manager's Gateway shim reads the annotation and creates a Certificate for the listener's hostname into that Secret. Attach the HTTPRoute to the listener by name with `sectionName`:
+
+```yaml
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: my-app
+  namespace: my-app
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+spec:
+  gatewayClassName: traefik
+  listeners:
+    - name: https
+      port: 8443
+      protocol: HTTPS
+      hostname: app.<cluster-domain>
+      tls:
+        mode: Terminate
+        certificateRefs:
+          - name: my-app-tls
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: my-app
+  namespace: my-app
+spec:
+  parentRefs:
+    - name: my-app
+      sectionName: https
+  hostnames:
+    - app.<cluster-domain>
+  rules:
+    - backendRefs:
+        - name: my-app
+          port: 80
+```
+
+Keep the HTTPRoute in the Gateway's namespace: a listener admits routes only from its own namespace unless it sets `allowedRoutes`.
+
+The `letsencrypt-prod` ClusterIssuer answers the HTTP-01 challenge from Let's Encrypt through the same Traefik, so the hostname has to resolve to the cluster before the certificate can be issued. For a hostname under the cluster's domain, external-dns publishes the record from the HTTPRoute.
+
+## Ankra Cloud clusters in ipv6_only mode
+
+On an Ankra Cloud cluster in the `ipv6_only` network mode, external-dns publishes HTTPRoute hostnames under the cluster's domain as proxied records by default, as it does for Ingress hostnames. Ankra Cloud's relay answers IPv4 clients, terminates TLS, and forwards plain HTTP to port 80 of the cluster's load balancer, which is Traefik's `web` entry point.
+
+A proxied HTTPRoute hostname therefore has to attach to a listener on the `web` entry point, such as the shared Gateway's `web` listener. A route attached only to an HTTPS listener of your own Gateway receives none of the relay's traffic. Give it a direct record instead with this annotation on the HTTPRoute:
+
+```yaml
+metadata:
+  annotations:
+    external-dns.alpha.kubernetes.io/webhook-ankra-cloud-proxied: "false"
+```
+
+A direct record is an IPv6 address only, so IPv4 clients cannot reach that hostname.
+
+## Verify
+
+Read the shared Gateway and your routes with the CLI:
+
+```bash
+ankra cluster get resources gateway --group gateway.networking.k8s.io -n traefik -o yaml
+ankra cluster get resources httproute --group gateway.networking.k8s.io -n my-app -o yaml
+```
+
+- The shared Gateway's status has the condition `Programmed` set to `True`, and its `addresses` are the load balancer's addresses.
+- Each HTTPRoute's status lists its parent Gateway with the condition `Accepted` set to `True`.
+
+## Troubleshooting
+
+| Issue | Solution |
+|-------|----------|
+| `--gateway-api requires the networking stack` from the CLI, or `gateway_api requires include_networking` from the API | Keep the networking stack on. On providers with `--external-cloud-provider`, turning that off turns networking off too |
+| An HTTPRoute hostname does not resolve | Check that the hostname is under the cluster's domain (`ankra cluster domain <cluster>`) and that the cluster has its public domain. Hostnames on other domains need a record you create |
+| An HTTPRoute is not accepted | Check `parentRefs`: the shared Gateway is `traefik-gateway` in namespace `traefik`, listener `web`. Your own Gateway admits routes from its own namespace only |
+| No Certificate for your own Gateway | The Gateway needs the `cert-manager.io/cluster-issuer` annotation, and the listener needs `protocol: HTTPS`, a `hostname` and `tls.certificateRefs` |
+| On an `ipv6_only` Ankra Cloud cluster, IPv4 clients get no answer for an HTTPS-only route | Attach the route to the shared Gateway's `web` listener, or set `external-dns.alpha.kubernetes.io/webhook-ankra-cloud-proxied: "false"` on it for a direct IPv6 record |
+
+## Related
+
+- [Cluster domains](/platform/organisation-settings#cluster-domains) - the cluster's own Ankra domain, and what external-dns manages.
+- [Serving a zone in your own DNS account](/concepts/applications#serving-a-zone-in-your-own-dns-account-from-every-cluster) - DNS for Ingress hosts on your own domains.
+- [Envoy Gateway and the Gateway API](/guides/registries#example-envoy-gateway-and-the-gateway-api) - install another Gateway API implementation from its Helm chart.
