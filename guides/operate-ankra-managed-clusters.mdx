@@ -15,7 +15,7 @@ Clusters whose control plane your cloud runs (EKS, GKE, AKS, DOKS, UKS, OVHcloud
 
 - The cluster shows **Online** and no operation is running on it. Day-2 changes are queued one at a time; follow them under **Operations** or with `ankra cluster operations list`.
 - In the dashboard, most controls live under **Nodes** in the cluster sidebar (tabs **Node groups**, **Control plane**, **Bastion & VMs**) and under **Settings → General**. [Nodes](/platform/cluster-nodes) describes every control on those tabs.
-- On the CLI, most commands find the provider from the cluster, so they are the same everywhere. The rest take the provider name: `hetzner`, `ovh`, `upcloud`, `digitalocean`, `scaleway`, `aws`, `proxmox` or `morpheus`. Ankra Cloud clusters are operated from the dashboard and the API; the released CLI has no Ankra Cloud commands yet.
+- On the CLI, most commands find the provider from the cluster, so they are the same everywhere. The rest take the provider name: `hetzner`, `ovh`, `upcloud`, `digitalocean`, `scaleway`, `aws`, `proxmox`, `morpheus` or `ankracloud`. The Ankra Cloud commands need CLI v0.21.0 or later; [`ankra cluster ankracloud`](/reference/cli/cluster#ankra-cluster-ankracloud) lists them.
 - Every command has an API equivalent under `/api/v1/clusters/{provider}/{cluster_id}/...` - see the API reference. Writes answer `202 Accepted` and run in the background; pass `--wait` on the CLI to block until one finishes.
 
 <CliVersion since="0.17.0" />
@@ -30,7 +30,7 @@ Clusters whose control plane your cloud runs (EKS, GKE, AKS, DOKS, UKS, OVHcloud
 | AWS EC2 | `aws` | CLI | Dashboard or API | CLI |
 | Proxmox VE | `proxmox` | CLI | Dashboard or API | CLI |
 | HPE Morpheus (Closed Beta) | `morpheus` | Not available | Dashboard or API | CLI |
-| Ankra Cloud (Closed Beta) | - | Dashboard or API | Dashboard or API | Dashboard or API |
+| Ankra Cloud (Closed Beta) | `ankracloud` | CLI | CLI | CLI |
 
 ---
 
@@ -72,7 +72,7 @@ Clusters also keep a single default worker pool that predates node groups. `ankr
 
 - **Growing the count is live.** Going from 1 to 3 controllers (3 to 5 on Proxmox VE) provisions the new controllers and joins them to the running cluster.
 - **Reducing the count is offline.** Stop the cluster (its state is kept and restored on start), apply the change, then start it.
-- **The instance type** changes live, one controller at a time, when the cluster has three or more controllers. A single controller is resized offline, because resizing it takes the Kubernetes API down while it reboots.
+- **The instance type** changes in one of three ways, described below. `control-plane get` and the **Control plane** tab say which one applies to your cluster right now.
 - A cluster spread across several zones or hosts keeps at least three controllers.
 
 ```bash
@@ -80,6 +80,57 @@ ankra cluster <provider> control-plane get <cluster>
 ankra cluster <provider> control-plane set-count <cluster> 3
 ankra cluster <provider> control-plane set-instance-type <cluster> <instance-type>
 ```
+
+### Change the control plane instance type
+
+How Ankra changes the instance type depends on how many controllers the cluster has and whether it is running:
+
+| Mode | When it applies | What happens |
+|---|---|---|
+| `rolling` | A running cluster with three or more controllers, on any provider | Ankra drains and resizes one controller at a time and waits for each to be healthy before the next. The Kubernetes API stays up. |
+| `live_with_api_downtime` | A running Hetzner cluster with one controller | Ankra resizes the only controller in place. The Kubernetes API is down for a few minutes while that server reboots on the new type. You have to accept the downtime first. |
+| `offline` | A stopped cluster, on any provider | On a paused Hetzner, UpCloud or DigitalOcean k3s cluster the change is refused. Otherwise Ankra saves the new type for the next start. A default stop on Hetzner, OVHcloud, UpCloud, DigitalOcean, Proxmox VE or HPE Morpheus deletes the servers, so the start creates every server again, the controllers on the new type. AWS EC2, Scaleway and Ankra Cloud keep the servers powered off: the start powers those same servers back on with the type they had, so the saved type is not applied to them (see Stop and start below). |
+
+A running cluster with one controller on any other provider cannot change its instance type live. Either grow it to three controllers first and then resize it with no downtime, or stop it and change the type offline.
+
+#### What the API downtime means
+
+While the only controller reboots, the Kubernetes API is not available:
+
+- Pods that are already running on the workers keep running.
+- `kubectl`, deployments, Stack and add-on changes, controllers and operators, and the Ankra agent pause until the API is back. Anything that needs the API, such as scaling a Deployment or rescheduling a pod, waits until then.
+- Before it changes the server, Ankra takes an etcd snapshot on the node and drains it. Hetzner changes the server type and keeps its disk and IP address, so the node comes back as the same machine with the same cluster state. Ankra then waits for the node to be Ready again. When the new type has a larger disk, the disk grows with it, and Hetzner cannot shrink it again, so the controller cannot move back to a type with a smaller disk.
+
+In a test on 2026-10-28, a Hetzner cluster resized from `cpx22` to `cpx32` finished the whole step in about two and a half minutes, and the workloads on the workers were not restarted. Plan for a few minutes of API downtime. To avoid any downtime, grow the cluster to three controllers first.
+
+Ankra does not start the resize while another change is running on the cluster, for example a [scheduled Cluster State Snapshot](/guides/kubernetes-upgrades#scheduled-cluster-state-snapshots). Start it again when that change has finished.
+
+#### Resize the only controller
+
+**In the dashboard:** open **Nodes → Control plane** and pick the new type. The tab says the Kubernetes API will be unavailable for a few minutes. **Resize with API downtime** in the review dialog accepts the downtime and starts the resize.
+
+**On the CLI:** `control-plane get` shows the change as `Change type: yes - live with a few minutes of API downtime (single controller)`. `set-instance-type` refuses the change unless you pass `--accept-api-downtime`:
+
+<CliVersion since="0.49.0" command="cluster hetzner control-plane set-instance-type --accept-api-downtime" />
+
+```bash
+ankra cluster hetzner control-plane get <cluster>
+ankra cluster hetzner control-plane set-instance-type <cluster> cpx32 --accept-api-downtime
+ankra cluster operations list <operation-id>    # show the resize operation the command printed
+```
+
+**From the AI or MCP:** the `change_control_plane` tool takes `accept_api_downtime`. The AI tells you about the downtime and sets it only after you have accepted it.
+
+**On the API:** send `accept_api_downtime: true` with the new type. Without it, the request is refused with `409 Conflict` and a message that describes the downtime.
+
+```bash
+curl -X PUT https://platform.ankra.app/api/v1/clusters/hetzner/<cluster-id>/control-plane/instance-type \
+  -H "Authorization: Bearer $ANKRA_API_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"instance_type": "cpx32", "accept_api_downtime": true}'
+```
+
+Sending the type the controller already has changes nothing and needs no acceptance.
 
 ---
 
@@ -111,7 +162,7 @@ The bastion is the machine Ankra and you reach the cluster through: every SSH ho
 ```bash
 ankra cluster <provider> bastion status <cluster>                     # last health verdict, without probing
 ankra cluster <provider> bastion diagnose <cluster>                   # probe it now, as an operation (not Scaleway)
-ankra cluster <provider> bastion resize <cluster> <instance-type>     # Hetzner, OVHcloud, UpCloud, DigitalOcean
+ankra cluster <provider> bastion resize <cluster> <instance-type>     # Hetzner, OVHcloud, UpCloud, DigitalOcean, Ankra Cloud
 ```
 
 A resize powers the bastion off, changes its type and powers it on again, so SSH access is interrupted briefly. Where the bastion is also the NAT for the nodes (AWS `bastion_nat` egress), node egress stops until it is back.
@@ -147,6 +198,8 @@ ankra cluster upgrade <cluster> v1.33.2+k3s1       # k3s
 - An etcd snapshot is taken before the control plane upgrade. With external etcd, the dedicated etcd members are upgraded first, one at a time, each saving a snapshot.
 - A drain blocked by a PodDisruptionBudget stops the rollout; `--force` proceeds anyway.
 - One minor version at a time (1.33 to 1.34, not 1.33 to 1.35), and no downgrades.
+
+Restore points, the pre-upgrade checklist and what to do when a hop stops are in [Upgrade Kubernetes on a Cluster](/guides/kubernetes-upgrades).
 
 ---
 
@@ -234,5 +287,6 @@ A few choices cannot be changed on a running cluster. They are made in the creat
 ## Next steps
 
 - [Nodes](/platform/cluster-nodes) - every control on the Nodes tabs, including standalone VMs.
+- [Gateway API](/guides/gateway-api) - serve Gateway and HTTPRoute resources from the networking stack's Traefik, chosen when you create the cluster.
 - [Cluster Autoscaling](/guides/cluster-autoscaling) - let pod demand size your node groups.
 - [Power Schedules](/platform/cluster-power-schedules) - stop and start on a timetable.
