@@ -6355,6 +6355,100 @@ ankra cluster node-group list <cluster_id|name> [flags]
 |------|---------|-------------|
 | `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
 
+## ankra cluster node-group remove-node
+
+Remove one named worker from its node group and delete its server. The
+group's node count drops by one, so nothing recreates the node.
+
+A scale-down picks the nodes it removes itself; remove-node is the way to
+retire a particular one, such as a node on a failing host. &lt;node&gt; is the
+node's server id (the ID column of 'ankra cluster &lt;provider&gt; nodes list',
+for example 'ankra cluster hetzner nodes list'), its server name, its
+Kubernetes node name (the server name, on every provider but AWS) or the
+providerID its Kubernetes node reports, in any letter case.
+
+Before asking, the command looks the reference up and shows the node's
+name, server id and providerID, or says that it could not tell which node
+the reference names. When it found the node, it sends that node's server
+id, so the node removed is the node you approved; otherwise it sends the
+reference as typed, and the platform resolves it itself. With `--yes` the
+node is not looked up and the reference is sent as typed. A node that is
+already cordoned is removed the same way, but a refused drain makes the
+node it keeps schedulable again: cordon it again if it must stay out of
+service.
+
+Each node removed is drained first, honouring its pods' PodDisruptionBudgets. A
+node whose drain is refused (a budget allows no eviction, or the node cannot be
+drained at all) is kept in service instead of removed, and a notice on the
+cluster says why. Give the blocking workloads eviction headroom (more replicas
+or a looser budget) and run the command again, or pass `--force-drain` to remove
+the node anyway without honouring its PodDisruptionBudget. `--force-drain`
+applies to this request only; use it only for a node you have decided to lose.
+
+The platform answers once it has marked the node for removal and started
+the operation that drains it and deletes its server; the drain and the
+delete run after that. The command prints the operation, and
+'ankra cluster operations list &lt;operation_id&gt; `--watch`' follows it until it
+ends. `--wait` waits for the platform's answer only, not for the drain or the
+delete. When the drain is refused, the operation fails and names what
+refused it, the node is kept and made schedulable again, and the group's
+count goes back up.
+
+When the platform names no operation, the removal is still recorded: the
+platform could not start the operation with the request, for example
+because another node operation is still running or the cluster's agent is
+offline, and its reconcile drains and deletes the node later.
+
+A stopped cluster's nodes are not removed: the command refuses the removal
+before it looks the node up, asks or sends anything, as the platform
+refuses it, and exits 1. Start the cluster first.
+
+Every refusal of the platform's exits 1 with its reason. Among them: a
+node that is not a worker, a node of another group, a node already marked
+for deletion or whose server is stopping, the last node of its group,
+which is not removed on its own (scale the node group to 0 or delete the
+node group instead), a removal that would take an autoscaling group below
+its min count (for both, only nodes that have joined the cluster count, so
+a node still being created does not keep the group), a reference several
+nodes answer to, even nodes already being removed (the reason lists each
+by its node id, which is the server id; the command's lookup lists them
+too and sends the reference as typed), and a change while an identical
+one is in progress. A reference the platform cannot resolve is refused
+the same way: a providerID it cannot see on the cluster's Kubernetes
+nodes, and on AWS a name that may be a Kubernetes node name it has not
+recorded yet. Name the node by its server name or its server id then;
+neither needs the Kubernetes nodes.
+
+A reference that names no node of the cluster exits 3 (the platform says
+it is not found in the node group); a node of another group is a refusal
+and exits 1. A group or node that is blank, has spaces around it, or is
+'.' or '..' (also percent-encoded), a '/' outside a providerID, a
+providerID with no id or with a '.' or '..' step, and an -o other than
+json or yaml exit 2 before anything is looked up or sent, and a node or
+group the platform cannot read (its 422) exits 2 too.
+
+Examples:
+
+```bash
+ankra cluster node-group remove-node <cluster_id> opensearch prod-opensearch-0
+ankra cluster node-group remove-node <cluster_id> opensearch prod-opensearch-0 --wait -o json
+ankra cluster node-group remove-node <cluster_id> workers hcloud://168428300 --force-drain --yes
+```
+
+```bash
+ankra cluster node-group remove-node <cluster_id|name> <group_name> <node> [flags]
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--force-drain` | `false` | Bypass PodDisruptionBudgets: the node is removed even if its pods' disruption budget refuses the drain, instead of being kept. Use it only for a node you have decided to lose |
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+| `--timeout` | `10m0s` | Maximum time to wait when `--wait` is set |
+| `--wait` | `false` | Wait until the platform has checked the removal, marked the node and started the operation that drains it and deletes its server (default: submit and return immediately). It does not wait for the drain or the delete: follow the operation the command prints for those |
+| `--yes` | `false` | Skip the confirmation prompt |
+
 ## ankra cluster node-group scale
 
 Scale a node group up or down to &lt;count&gt; nodes.
