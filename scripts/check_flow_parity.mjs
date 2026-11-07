@@ -37,6 +37,10 @@ export function parseMcpTools(text) {
   return new Set([...text.matchAll(/^\| `([a-z0-9_]+)` \|/gm)].map((match) => match[1]))
 }
 
+const escapeRegExp = (text) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+const documentsFlag = (section, flag) =>
+  section !== undefined && new RegExp(`(^|[^A-Za-z0-9-])${escapeRegExp(flag)}(?![A-Za-z0-9-])`).test(section)
+
 const cellProblems = (where, cell, surface) => {
   if (!cell || typeof cell !== 'object') return [`${where}: no ${surface} cell`]
   if ('gap' in cell) return cell.gap?.trim() ? [] : [`${where}: a gap needs its reason`]
@@ -58,7 +62,7 @@ export function findProblems(matrix, cliCommands, mcpTools) {
       }
       for (const [command, flags] of Object.entries(cli.flags ?? {})) {
         for (const flag of flags) {
-          if (!cliCommands.get(command)?.includes(flag)) problems.push(`${step} (CLI): "${command}" has no ${flag}`)
+          if (!documentsFlag(cliCommands.get(command), flag)) problems.push(`${step} (CLI): "${command}" has no ${flag}`)
         }
       }
     }
@@ -102,7 +106,7 @@ export function withTable(page, table) {
 /** The UI pages the matrix names that the frontend checkout does not have. */
 export function missingFrontendPages(matrix, frontendRoot) {
   return matrix.steps.flatMap(({ step, ui }) => {
-    if ('gap' in ui) return []
+    if (!ui || 'gap' in ui) return []
     const base = join(frontendRoot, 'src/pages', ui.page)
     return existsSync(`${base}.tsx`) || existsSync(join(base, 'index.tsx')) ? [] : [`${step} (UI): no page ${ui.page}`]
   })
@@ -115,7 +119,7 @@ export function missingCatalogTools(matrix, clusterRoot) {
     .map((file) => readFileSync(join(data, file), 'utf8'))
     .join('\n')
   return matrix.steps.flatMap(({ step, mcp }) =>
-    (mcp.tools ?? []).filter((tool) => !catalog.includes(`"name": "${tool}"`)).map((tool) => `${step} (MCP): no tool ${tool} in the catalog`),
+    (mcp?.tools ?? []).filter((tool) => !catalog.includes(`"name": "${tool}"`)).map((tool) => `${step} (MCP): no tool ${tool} in the catalog`),
   )
 }
 
