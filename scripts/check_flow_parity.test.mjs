@@ -35,6 +35,13 @@ test('a flag the command does not take fails', () => {
   assert.deepEqual(problems, ['Step (CLI): "ankra application deploy" has no --teleport'])
 })
 
+test('a flag that is only the prefix of a documented flag fails', () => {
+  const sections = new Map([...cli, ['ankra application ship', '## ankra application ship\n\n--set-up-database']])
+  const flags = { 'ankra application ship': ['--set'] }
+  const problems = findProblems(row({ cli: { commands: ['ankra application ship'], flags } }), sections, tools)
+  assert.deepEqual(problems, ['Step (CLI): "ankra application ship" has no --set'])
+})
+
 test('a tool the MCP reference does not list fails', () => {
   const problems = findProblems(row({ mcp: { tools: ['teleport_application'] } }), cli, tools)
   assert.deepEqual(problems, ['Step (MCP): "teleport_application" is not on platform/mcp-tools.mdx'])
