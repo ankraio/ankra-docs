@@ -2635,12 +2635,30 @@ have to filter by eye.
 Kinds outside the built-in set need `--group` (and sometimes `--api-version`),
 exactly like 'cluster get resources'.
 
+`--managed-fields` reads the object live from the cluster and adds who last
+wrote it: each field manager with its operation, subresource and time. It is
+how to see what resized a pod in place (subresource "resize"), scaled a
+workload or changed its spec. Kubernetes keeps one entry per manager and
+subresource, so this is the most recent write of each, not a full history. The
+cached copy other reads are served from does not keep them, and -o json|yaml
+then carry them under object.metadata.managedFields.
+
+`--kubelet-config`, on a node, adds the kubelet's live configuration as the
+kubelet reports it on /configz: the values in force once its flags and config
+file were merged (eviction thresholds, reserved resources, image garbage
+collection, max pods), which the Node object does not carry. A kubelet the
+read cannot reach is reported with the reason in place of the configuration,
+never as an empty one; -o json|yaml carry it as kubelet_config, or
+kubelet_config_error.
+
 Examples:
 
 ```bash
 ankra cluster describe pod web-7d9f-2xkvp -n default
 ankra cluster describe deployment web -n default
 ankra cluster describe node worker-1
+ankra cluster describe pod web-7d9f-2xkvp -n default --managed-fields
+ankra cluster describe node worker-1 --kubelet-config
 ankra cluster describe pvc data-web-0 -n default -o json
 ```
 
@@ -2655,6 +2673,8 @@ ankra cluster describe <kind> <name> [flags]
 | `--api-version` |   | API version for a kind outside the built-in set (e.g. v1, v1beta1) |
 | `--cluster-scoped` | `false` | Treat a kind outside the built-in set as cluster-scoped (e.g. ClusterIssuer, ClusterPolicy); no `--namespace` is needed |
 | `--group` |   | API group for a kind outside the built-in set (e.g. cert-manager.io) |
+| `--kubelet-config` | `false` | On a node: add the kubelet's live configuration as it reports it on /configz |
+| `--managed-fields` | `false` | Read the object live and show who last wrote it: each field manager with its operation, subresource and time |
 | `-n`, `--namespace` |   | Kubernetes namespace |
 | `-o`, `--output` | `table` | Output format: table, json, yaml |
 | `--resource` |   | Exact API resource plural when a custom kind has an irregular plural (e.g. backuprepositories) |
@@ -5730,6 +5750,11 @@ Run a range PromQL query against the cluster's Prometheus source.
 Provide either `--range` (a duration relative to now) or both `--start` and `--end`
 (Unix seconds). When `--step` is omitted a sensible step is chosen automatically.
 
+A series the platform returned fewer points of than the query produced is
+called out: the Points column reads "50 of 385", and a note on stderr says how
+far apart the returned points really are. Read such a series as a sketch, since
+a spike between two points is not in it.
+
 Examples:
 
 ```bash
@@ -6380,6 +6405,10 @@ ankra cluster node-group upgrade <cluster_id|name> <group_name> <instance_type> 
 
 Commands to list, inspect, retry, and cancel executions and their steps.
 
+Every command that takes an execution id also accepts its first 6 or more
+characters. A short id is looked up among the most recent executions of the
+active cluster, or of the organisation when no cluster is selected.
+
 ## ankra cluster operations cancel
 
 Cancel one or more running executions
@@ -6835,6 +6864,33 @@ ankra cluster ovh nodes cloud-init-log <cluster_id|name> <node_id> [flags]
 | Flag | Default | Description |
 |------|---------|-------------|
 | `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+
+## ankra cluster ovh nodes console-log
+
+Read the newest lines of the node's serial console from the cloud
+provider's API, as a tracked read-only operation. It goes through neither the
+node over SSH nor the in-cluster agent, so it answers for a node that hung: a
+kernel soft lockup, hung-task warnings, an out-of-memory kill or a root
+filesystem gone read-only is often the last thing the console printed.
+Nothing on the node, the instance or the cluster's credentials changes.
+
+The platform returns at most the newest 1000 lines (96 KiB); `--lines` shows
+fewer. The log goes to stdout and the heading and notes to stderr, so the
+output pipes cleanly into grep or a file. Repeated calls attach to a read in
+flight or a recent one. Find node ids with 'nodes list'. Needs the
+clusters.operate permission on the cluster.
+
+```bash
+ankra cluster ovh nodes console-log <cluster_id|name> <node_id> [flags]
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--lines` | `0` | Show only the newest N lines (0 shows every line the platform returned) |
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+| `--timeout` | `2m0s` | Maximum time to wait for the console read |
 
 ## ankra cluster ovh nodes diagnose
 
