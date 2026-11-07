@@ -97,7 +97,7 @@ Package `victoria-metrics` 1.0.0: VictoriaMetrics 1.153, as a single server.
 
 Package `gpu-chat` 1.0.0: capability `inference`, protocol `openai`. It gives the applications connected to it an OpenAI-compatible endpoint inside the cluster: a LiteLLM broker in front of vLLM, routed by llm-d, on a GPU node, plus a Secret with its credentials. It can also run the Open WebUI chat interface.
 
-The cluster needs a node with a free `nvidia.com/gpu`. Without one, setup is refused and says why.
+The cluster needs a Ready, schedulable node that advertises `nvidia.com/gpu`, which the NVIDIA device plugin publishes and Ankra does not install, with `gpu_count` GPUs on one node for each replica. Ankra counts the GPUs a node has, not the ones other pods hold, so a replica on a cluster whose GPUs are busy stays Pending and says why. Without such a node, setup is refused and says why.
 
 | Setting | Range | Default | What it changes |
 |---------|-------|---------|-----------------|
@@ -120,6 +120,7 @@ Ankra decides a service's [health](/concepts/managed-services#health) from these
 | SeaweedFS | Deployment `seaweedfs-all-in-one`, 1 available | `seaweedfs-all-in-one` | `seaweedfs-s3-secret` |
 | VictoriaLogs | StatefulSet `victoria-logs`, 1 ready | `victoria-logs` | `victoria-logs-credentials` |
 | VictoriaMetrics | StatefulSet `victoria-metrics`, 1 ready | `victoria-metrics` | `victoria-metrics-credentials` |
+| GPU chat | Every StatefulSet and Deployment in the namespace ready (the model servers, the router, LiteLLM and its database, and the embedding server and chat UI when chosen); a workload switched off is scaled to zero and set aside | `litellm` | `gpu-chat-credentials` |
 
 Every service is also checked for the stack that owns it: a member that failed to apply or is being removed, or a stack that is gone or being removed, reads `degraded`.
 
@@ -128,7 +129,7 @@ Every service is also checked for the stack that owns it: a member that failed t
 | About 1 minute | How often each service is observed |
 | 5 minutes | How long an observation stands before it reads `unknown` |
 | 15 minutes | How recent Ankra's view of a resource type on the cluster must be for a missing object to count as missing; older reads `unknown` |
-| 10 minutes (PostgreSQL, OpenSearch), 5 minutes (the others) | Grace window after a successful deployment, during which a failing check reads `progressing` |
+| 10 minutes (PostgreSQL, OpenSearch), 30.5 minutes (GPU chat, which downloads its model on first start), 5 minutes (the others) | Grace window after a successful deployment, during which a failing check reads `progressing` |
 | 30 minutes | How long after its last write a stack member's apply still counts as in progress |
 
 ## Readiness check
@@ -144,6 +145,7 @@ Every service has a [readiness](/concepts/managed-services#readiness) check: a s
 | SeaweedFS | `curlimages/curl:8.16.0` | `admin_access_key_id` and `admin_secret_access_key` of `seaweedfs-s3-secret` |
 | VictoriaLogs | `curlimages/curl:8.16.0` | `username` and `password` of `victoria-logs-credentials` |
 | VictoriaMetrics | `curlimages/curl:8.16.0` | `username` and `password` of `victoria-metrics-credentials` |
+| GPU chat | `curlimages/curl:8.16.0` | `api-key` and `model` of `gpu-chat-credentials` |
 
 Every check image, PostgreSQL's included, is pinned by digest as well as the tag shown, and the digest decides what the cluster pulls. What each check does is listed under [Readiness](/concepts/managed-services#readiness). The PostgreSQL check runs `psql -h postgresql-rw.<service>.svc.cluster.local -p 5432 -U app -d app -c "SELECT 1"`.
 
@@ -154,7 +156,7 @@ Every check image, PostgreSQL's included, is pinned by digest as well as the tag
 | Interval | About every 5 minutes, measured from the last attempt |
 | Result stands | 15 minutes |
 | Pod time limit | 60 seconds |
-| Grace window | While no check has passed yet: 10 minutes after a successful deployment for PostgreSQL and OpenSearch, 5 minutes for the other services |
+| Grace window | While no check has passed yet: 10 minutes after a successful deployment for PostgreSQL and OpenSearch, 30.5 minutes for GPU chat, 5 minutes for the other services |
 | Agent | The checks for services other than PostgreSQL need an agent recent enough to run them. Until it is, the service reads `unverified` and `readiness_check.reason` says to upgrade the agent. |
 
 At most one check pod runs on a cluster at a time.
