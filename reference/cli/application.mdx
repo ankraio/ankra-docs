@@ -131,6 +131,10 @@ With auto-deploy on, a build Ankra observes on the application's tracked branch
 is rolled out to its deployments unattended. With it off, a push still builds -
 it just waits for an explicit 'ankra application deploy'.
 
+This switch is application-wide. Which branches each environment follows, and
+whether pushes deploy to that environment, is 'ankra application environments
+set'.
+
 ## ankra application auto-deploy get
 
 Show whether auto-deploy is on, and the newest build seen on the tracked branch.
@@ -856,6 +860,11 @@ Deploy a packaged application to a target cluster.
 Use `--set` key=value (repeatable) to pass deploy inputs declared by the
 application's chart.
 
+Without `--set` image_tag=&lt;tag&gt; the platform deploys the newest build it
+recorded. When it has no tag recorded for that build, the command deploys the
+newest published build of the tracked branch instead (or the newest image in
+the application's registry) and says on stderr which tag it chose.
+
 `--environment` names the environment the deployment belongs to.
 `--follow-branches` gives that environment a branch rule from the start, so
 pushes to matching branches deploy to it: for example main for production and
@@ -1053,11 +1062,12 @@ ankra application environments my-app -o json
 Set the branches an environment follows, or whether pushes deploy to it.
 
 The environment is named by its name (case-insensitive) or its id, as listed by
-'ankra application environments'. `--branches` sets the rule, `--clear` (or
-`--branches ""`) removes it so the environment follows the tracked branch again,
-and `--enable` or `--disable` turns deploying on push on or off for the
-environment. Without `--enable` or `--disable` the environment keeps its current
-setting.
+'ankra application environments'. `--branches` (or `--follow`) sets the rule and
+turns deploying on push on for the environment, since a rule on an environment
+that does not deploy pushes would never deploy anything; add `--disable` to save
+the rule with pushes still off. `--clear` (or `--none`, or `--branches ""`) removes
+the rule so the environment follows the tracked branch again and keeps its
+switch as it is. `--enable` or `--disable` alone turns deploying on push on or off.
 
 Changing a rule never deploys by itself: the next push to a matching branch
 does.
@@ -1078,7 +1088,7 @@ ankra application environments set <application> <environment> [flags]
 ankra application environments set my-app production --branches main
 ankra application environments set my-app development --branches develop
 ankra application environments set my-app development --branches '**,!main'
-ankra application environments set my-app staging --branches 'release/*'
+ankra application environments set my-app staging --follow 'develop,release/*'
 ankra application environments set my-app staging --clear
 ankra application environments set my-app production --disable
 ```
@@ -1087,8 +1097,8 @@ ankra application environments set my-app production --disable
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--branches` |   | Comma-separated branch patterns, e.g. main or 'release/*' ("" removes the rule) |
-| `--clear` | `false` | Remove the branch rule so the environment follows the tracked branch |
+| `--branches` |   | Comma-separated branch patterns, e.g. main or 'release/*' ("" removes the rule); also `--follow` |
+| `--clear` | `false` | Remove the branch rule so the environment follows the tracked branch; also `--none` |
 | `--disable` | `false` | Stop deploying pushes to this environment |
 | `--enable` | `false` | Deploy pushes to this environment |
 | `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
@@ -1598,6 +1608,15 @@ still queued, it concluded skipped because its trigger filter excluded every
 stage before planning, or it was planned before authority was recorded.
 null is "not recorded", never "no authority".
 
+What 'unapproved' changes: the run takes the sections its definition declares
+beyond its trusted authority (secrets, credentials, permissions, services,
+network, runs_on, resources, timeout, cache, roles) from that trusted
+authority instead, and the Authority line lists them. A stage that needs one
+of them can fail, and Ankra will not merge the run's pull request when it is
+green (merge when green). It does not stop an application's image from being
+built and published: the registry login those steps use is the platform's
+own, not one the definition declares.
+
 ```bash
 ankra application pipeline get <application-id> [run] [flags]
 ```
@@ -1824,6 +1843,112 @@ ankra application platform <application-id> [flags]
 |------|---------|-------------|
 | `--cluster` |   | Target cluster name or ID (required) |
 | `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+
+## ankra application previews
+
+Show whether Ankra deploys each of this application's pull requests to its own
+temporary address and posts the link on the pull request.
+
+Previews follow the source-control connection's default until the repository
+has its own rule. 'previews enable' and 'previews disable' set that rule and
+change nothing else; 'previews follow' removes it again. Previews also need the
+organisation's staging cluster, which 'ankra org ai-environment set `--staging-cluster`' configures.
+
+```bash
+ankra application previews <application> [flags]
+```
+
+**Examples**
+
+```bash
+ankra application previews my-app
+ankra application previews enable my-app
+ankra application previews disable my-app
+ankra application previews follow my-app
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+
+## ankra application previews disable
+
+Stop previewing this repository's pull requests
+
+```bash
+ankra application previews disable <application> [flags]
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+
+## ankra application previews enable
+
+Preview every pull request of this repository
+
+```bash
+ankra application previews enable <application> [flags]
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+
+## ankra application previews follow
+
+Remove the repository's rule and follow the connection's default
+
+```bash
+ankra application previews follow <application> [flags]
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+
+## ankra application promote
+
+Move the build one environment runs onto the next, without building again.
+
+An environment is named by its id, its name, or its role when one environment
+has that role, as listed by 'ankra application environments'. The command shows
+what would change and asks before it deploys; `--dry-run` stops after showing it.
+The write carries the preview's fingerprint, so it is refused if either
+environment changed in between.
+
+Exit codes: 0 when promoted or the target already runs the build, 8 when
+something blocks the promotion (the blockers are printed), 4 when you decline.
+
+```bash
+ankra application promote <application> --from <environment> --to <environment> [flags]
+```
+
+**Examples**
+
+```bash
+ankra application promote my-app --from staging --to production
+ankra application promote my-app --from staging --to production --dry-run
+ankra application promote my-app --from staging --to production --yes -o json
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--dry-run` | `false` | Show what would change and deploy nothing |
+| `--from` |   | Environment whose build to promote (required) |
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+| `--to` |   | Environment to promote it to (required) |
+| `--yes` | `false` | Skip the confirmation prompt |
 
 ## ankra application protect
 
@@ -2510,9 +2635,13 @@ The build it waits for is the one that actually builds the application:
   That needs the applications.deploy permission. A push during the wait
   moves ship on to the new head commit. A run whose publish step is skipped
   stops ship and asks for a push. A run the pipeline skipped outright - no
-  trigger it declares accepts the push, typically because the setup pull
-  request that adds .ankra/pipeline.yaml is not merged yet - stops ship
-  with the pull request to merge, or the trigger the branch needs.
+  trigger it declares accepts the push - stops ship with the trigger the
+  branch needs. When that is because the setup pull request that adds
+  .ankra/pipeline.yaml is not merged yet, the normal state of a new
+  repository, ship follows the pull request's own run and stops with state
+  waiting_for_setup_pull_request and exit 9. A gate that blocks the run
+  stops it with state setup_pull_request_blocked, the findings and exit 8.
+  Merge the pull request and run ship again to continue.
 - The repository's own GitHub Actions workflow: its latest run on the
   tracked branch.
 - The workflow Ankra generated: its latest run on the tracked branch, once

@@ -1094,6 +1094,8 @@ ankra cluster ankracloud create [flags]
 | `--private-network-id` |   | Adopt an existing private network instead of creating one |
 | `--retention-policy` |   | Teardown policy for volumes: retain or delete (server default: retain) |
 | `--runtime-credential-id` |   | Ankra Cloud credential for the in-cluster CCM/CSI (defaults to the provisioning credential) |
+| `--sandbox-node-plan` |   | Server plan of the sandbox nodes (default: `--worker-plan`) |
+| `--sandbox-nodes` | `0` | Nodes in a separate node group running the gVisor sandbox runtime, beside the workers (kubeadm only). Ankra AI runs code on its own, to fix a build or regenerate a lockfile, only behind a sandbox, so set this on a cluster that will run CI: 1 is enough to start |
 | `--ssh-key-credential-id` |   | SSH key credential ID (required) |
 | `--template` |   | Server template (server default: debian-13; see 'ankracloud templates') |
 | `--worker-count` | `0` | Default-pool worker count (server default: 1) |
@@ -1319,6 +1321,8 @@ ankra cluster ankracloud preflight [flags]
 | `--private-network-id` |   | Adopt an existing private network instead of creating one |
 | `--retention-policy` |   | Teardown policy for volumes: retain or delete (server default: retain) |
 | `--runtime-credential-id` |   | Ankra Cloud credential for the in-cluster CCM/CSI (defaults to the provisioning credential) |
+| `--sandbox-node-plan` |   | Server plan of the sandbox nodes (default: `--worker-plan`) |
+| `--sandbox-nodes` | `0` | Nodes in a separate node group running the gVisor sandbox runtime, beside the workers (kubeadm only). Ankra AI runs code on its own, to fix a build or regenerate a lockfile, only behind a sandbox, so set this on a cluster that will run CI: 1 is enough to start |
 | `--ssh-key-credential-id` |   | SSH key credential ID (required) |
 | `--template` |   | Server template (server default: debian-13; see 'ankracloud templates') |
 | `--worker-count` | `0` | Default-pool worker count (server default: 1) |
@@ -1372,6 +1376,8 @@ ankra cluster ankracloud start <cluster_id|name> [flags]
 
 | Flag | Default | Description |
 |------|---------|-------------|
+| `--restore-over-kept-etcd` | `false` | With `--restore-snapshot-id`: confirm that the cluster's control-plane machines, and the etcd its stop kept on them, are lost, so the named snapshot may reset it (a provider that keeps its servers across a stop, such as Ankra Cloud, after a host failure). The install still refuses to restore over an etcd it finds alive. |
+| `--restore-snapshot-id` |   | State snapshot to restore on start, by id: for a cluster the start will not restore on its own (no snapshot was captured after its last start while older ones exist, for example a cluster whose control plane was lost); the refusal of a plain start names the newest. Implies `--restore-state=true`. |
 | `--restore-state` |   | Cluster state on start: omit to restore the newest state snapshot captured at stop when there is one; 'true' to require one (refused otherwise); 'false' to start a fresh cluster. |
 | `--scope` | `all` | Provisioning scope: 'all' or 'control_plane' |
 
@@ -2012,6 +2018,8 @@ ankra cluster aws start <cluster_id|name> [flags]
 | Flag | Default | Description |
 |------|---------|-------------|
 | `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+| `--restore-over-kept-etcd` | `false` | With `--restore-snapshot-id`: confirm that the cluster's control-plane machines, and the etcd its stop kept on them, are lost, so the named snapshot may reset it (a provider that keeps its servers across a stop, such as Ankra Cloud, after a host failure). The install still refuses to restore over an etcd it finds alive. |
+| `--restore-snapshot-id` |   | State snapshot to restore on start, by id: for a cluster the start will not restore on its own (no snapshot was captured after its last start while older ones exist, for example a cluster whose control plane was lost); the refusal of a plain start names the newest. Implies `--restore-state=true`. |
 | `--restore-state` |   | Cluster state on start: omit to restore the newest state snapshot captured at stop when there is one; 'true' to require one (refused otherwise); 'false' to start a fresh cluster. |
 | `--scope` | `all` | Provisioning scope: 'all' or 'control_plane' |
 
@@ -3079,6 +3087,8 @@ ankra cluster digitalocean start <cluster_id|name> [flags]
 
 | Flag | Default | Description |
 |------|---------|-------------|
+| `--restore-over-kept-etcd` | `false` | With `--restore-snapshot-id`: confirm that the cluster's control-plane machines, and the etcd its stop kept on them, are lost, so the named snapshot may reset it (a provider that keeps its servers across a stop, such as Ankra Cloud, after a host failure). The install still refuses to restore over an etcd it finds alive. |
+| `--restore-snapshot-id` |   | State snapshot to restore on start, by id: for a cluster the start will not restore on its own (no snapshot was captured after its last start while older ones exist, for example a cluster whose control plane was lost); the refusal of a plain start names the newest. Implies `--restore-state=true`. |
 | `--restore-state` |   | Cluster state on start: omit to restore the newest state snapshot captured at stop when there is one; 'true' to require one (refused otherwise); 'false' to start a fresh cluster. |
 | `--scope` | `all` | Provisioning scope: 'all' or 'control_plane' |
 
@@ -3544,9 +3554,11 @@ option on the cluster, installs the Gateway API CRDs through a gateway-api-crds
 addon in the networking stack (or uses the ones the cluster already carries),
 and, once it reads them as established, writes the Gateway API settings into
 the Traefik and cert-manager values through the ordinary stack write: one
-GitOps commit on a GitOps-backed cluster, then one Traefik rollout. Values you
-wrote yourself are never changed: a key that says the opposite of what the
-option needs is reported as a conflict and nothing is written until you decide.
+GitOps commit on a GitOps-backed cluster, then Traefik and the cert-manager
+controller each restart once to pick the settings up (a member whose values
+already carry them is left alone). Values you wrote yourself are never
+changed: a key that says the opposite of what the option needs is reported as
+a conflict and nothing is written until you decide.
 
 Because it changes what the cluster's ingress serves, enable prints the plan
 and asks for confirmation first. `--yes` skips the question; without a terminal
@@ -3556,25 +3568,32 @@ The enable is idempotent and resumable. Without `--wait` it records the option
 and returns at once, saying what is next; run it again later to write the
 values once the CRDs are established, or check with 'status'. With `--wait` it
 follows the phase, repeats the enable when the values are next, and returns
-once the Gateway API is enabled. A passing platform fault while it follows (a
-5xx, a dropped connection, one request timing out) is tried again on the next
-poll; five in a row end the follow. `--timeout` bounds `--wait` and is refused
-without it. The verdict is the same with or without `--wait`.
+once the Gateway API is enabled. When the platform holds the values back (a
+values hold: the cluster is offline, its GitOps sync is paused on open
+conflicts, or a Traefik or cert-manager values file was edited in git and is
+kept there until a person decides), nothing writes them until that is
+resolved, so `--wait` stops at once, names the hold and exits 1 instead of
+repeating the enable until `--timeout`. A passing platform fault while it
+follows (a 5xx, a dropped connection, one request timing out) is tried again
+on the next poll; five in a row end the follow. `--timeout` bounds `--wait` and is
+refused without it. The verdict is the same with or without `--wait`.
 
 Exit codes:
 
 ```text
 0  the Gateway API is on, or (without --wait) the option is recorded and
-   the enable is moving: waiting for the CRDs, the values next, or
-   Traefik and cert-manager applying them
+   the enable is moving: waiting for the CRDs, the values next and not
+   held back, or Traefik and cert-manager applying them
 1  the option is recorded but the platform needs a person: a conflict in
-   the values, a failed CRD install or apply, a networking stack with no
-   Ankra-installed Traefik and cert-manager to write into, or a values
-   write whose GitOps push failed (the values reached the platform, the
-   repository does not carry them yet). The reason goes to stderr. Also
-   a refusal of the enable --wait repeats (the option stays recorded),
-   any request that failed, five failed requests in a row during --wait
-   (the enable keeps going), and a platform without this route
+   the values, a values hold (the values are next but held back until a
+   person resolves what the hold names), a failed CRD install or apply, a
+   networking stack with no Ankra-installed Traefik and cert-manager to
+   write into, or a values write whose GitOps push failed (the values
+   reached the platform, the repository does not carry them yet). The
+   reason goes to stderr. Also a refusal of the enable --wait repeats
+   (the option stays recorded), any request that failed, five failed
+   requests in a row during --wait (the enable keeps going), and a
+   platform without this route
 2  no terminal to confirm on and no --yes, --timeout without --wait, or a
    cluster Ankra did not build
 3  the cluster is not in the selected organisation
@@ -3616,7 +3635,8 @@ Show the platform's plan for the Gateway API on the cluster: whether the
 option is recorded, where the Gateway API CRDs come from and whether the
 platform reads them as established, what the Traefik and cert-manager values
 still need (with any key that says the opposite of what the option needs), the
-last apply of each, and the note saying who moves the enable on next.
+last apply of each, any hold on the values write and what it names, and the
+note saying who moves the enable on next.
 
 Reading Gateway API objects on the cluster afterwards takes the singular kind:
 'ankra cluster get resources gatewayclass `--group` gateway.networking.k8s.io'.
@@ -3841,14 +3861,15 @@ ankra cluster get pods [name] [flags]
 
 Fetch any Kubernetes resource type. Use for kinds not covered by dedicated commands.
 
-Kinds outside the core API group need `--group` (and sometimes `--api-version`).
+Built-in kinds resolve their own API group and version, the same as 'cluster describe'.
+A custom resource needs `--group` (and `--api-version` if it is not v1).
 
 Example:
 
 ```bash
-ankra cluster resources PersistentVolumeClaim -n default
-ankra cluster resources NetworkPolicy --group networking.k8s.io --all-namespaces
-ankra cluster resources StorageClass --group storage.k8s.io
+ankra cluster get resources PersistentVolumeClaim -n default
+ankra cluster get resources RuntimeClass
+ankra cluster get resources Certificate --group cert-manager.io --all-namespaces
 ```
 
 ```bash
@@ -3860,8 +3881,8 @@ ankra cluster get resources <kind> [flags]
 | Flag | Default | Description |
 |------|---------|-------------|
 | `-A`, `--all-namespaces` | `false` | List across all namespaces |
-| `--api-version` | `v1` | API version (e.g. v1, v1beta1) |
-| `--group` |   | API group (e.g. apps, networking.k8s.io) |
+| `--api-version` |   | API version (e.g. v1, v1beta1); defaults to the kind's own, or v1 for a custom resource |
+| `--group` |   | API group (e.g. cert-manager.io); built-in kinds resolve their own |
 | `--name` |   | Filter by resource name |
 | `-n`, `--namespace` |   | Kubernetes namespace |
 | `-o`, `--output` | `table` | Output format: table, json, yaml |
@@ -4786,6 +4807,8 @@ ankra cluster hetzner start <cluster_id|name> [flags]
 | Flag | Default | Description |
 |------|---------|-------------|
 | `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+| `--restore-over-kept-etcd` | `false` | With `--restore-snapshot-id`: confirm that the cluster's control-plane machines, and the etcd its stop kept on them, are lost, so the named snapshot may reset it (a provider that keeps its servers across a stop, such as Ankra Cloud, after a host failure). The install still refuses to restore over an etcd it finds alive. |
+| `--restore-snapshot-id` |   | State snapshot to restore on start, by id: for a cluster the start will not restore on its own (no snapshot was captured after its last start while older ones exist, for example a cluster whose control plane was lost); the refusal of a plain start names the newest. Implies `--restore-state=true`. |
 | `--restore-state` |   | Cluster state on start: omit to restore the newest state snapshot captured at stop when there is one; 'true' to require one (refused otherwise); 'false' to start a fresh cluster. |
 | `--scope` | `all` | Provisioning scope: 'all' or 'control_plane' |
 
@@ -6096,6 +6119,8 @@ ankra cluster morpheus start <cluster_id|name> [flags]
 
 | Flag | Default | Description |
 |------|---------|-------------|
+| `--restore-over-kept-etcd` | `false` | With `--restore-snapshot-id`: confirm that the cluster's control-plane machines, and the etcd its stop kept on them, are lost, so the named snapshot may reset it (a provider that keeps its servers across a stop, such as Ankra Cloud, after a host failure). The install still refuses to restore over an etcd it finds alive. |
+| `--restore-snapshot-id` |   | State snapshot to restore on start, by id: for a cluster the start will not restore on its own (no snapshot was captured after its last start while older ones exist, for example a cluster whose control plane was lost); the refusal of a plain start names the newest. Implies `--restore-state=true`. |
 | `--restore-state` |   | Cluster state on start: omit to restore the newest state snapshot captured at stop when there is one; 'true' to require one (refused otherwise); 'false' to start a fresh cluster. |
 | `--scope` | `all` | Provisioning scope: 'all' or 'control_plane' |
 
@@ -6236,6 +6261,20 @@ Enable autoscaling with `--enabled` `--min` &lt;n&gt; `--max` &lt;n&gt;, or disa
 enabling requires the cluster's ankra-agent to be recent enough to serve
 the autoscaler, and installs the Cluster Autoscaler on first enable.
 
+Enabling with bounds the group is outside moves it inside them: a `--max`
+below the group's node count scales it down to `--max`, removing the least
+busy nodes first, each cordoned and drained once the pipeline steps running
+on it finish (up to 15 minutes per node), one node at a time; a `--min` above
+the node count scales it up to `--min`. The command says what will happen and
+names the operation doing it; `--wait` waits for that operation to finish.
+
+Examples:
+
+```bash
+ankra cluster node-group autoscaling set ankra-ci ci-large --enabled --min 1 --max 3
+ankra cluster node-group autoscaling set ankra-ci ci-large --enabled --min 1 --max 3 --wait --timeout 1h
+```
+
 ```bash
 ankra cluster node-group autoscaling set <cluster_id|name> <group_name> [flags]
 ```
@@ -6248,7 +6287,7 @@ ankra cluster node-group autoscaling set <cluster_id|name> <group_name> [flags]
 | `--max` | `5` | Maximum node count while autoscaling |
 | `--min` | `1` | Minimum node count while autoscaling (&gt;= 1) |
 | `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
-| `--timeout` | `10m0s` | Maximum time to wait when `--wait` is set |
+| `--timeout` | `1h0m0s` | Maximum time to wait when `--wait` is set |
 | `--wait` | `false` | Wait for the operation to finish and report success or failure (default: submit and return immediately) |
 
 ## ankra cluster node-group delete
@@ -6997,6 +7036,8 @@ ankra cluster ovh start <cluster_id|name> [flags]
 | Flag | Default | Description |
 |------|---------|-------------|
 | `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+| `--restore-over-kept-etcd` | `false` | With `--restore-snapshot-id`: confirm that the cluster's control-plane machines, and the etcd its stop kept on them, are lost, so the named snapshot may reset it (a provider that keeps its servers across a stop, such as Ankra Cloud, after a host failure). The install still refuses to restore over an etcd it finds alive. |
+| `--restore-snapshot-id` |   | State snapshot to restore on start, by id: for a cluster the start will not restore on its own (no snapshot was captured after its last start while older ones exist, for example a cluster whose control plane was lost); the refusal of a plain start names the newest. Implies `--restore-state=true`. |
 | `--restore-state` |   | Cluster state on start: omit to restore the newest state snapshot captured at stop when there is one; 'true' to require one (refused otherwise); 'false' to start a fresh cluster. |
 | `--scope` | `all` | Provisioning scope: 'all' or 'control_plane' |
 
@@ -7620,6 +7661,8 @@ ankra cluster proxmox start <cluster_id|name> [flags]
 
 | Flag | Default | Description |
 |------|---------|-------------|
+| `--restore-over-kept-etcd` | `false` | With `--restore-snapshot-id`: confirm that the cluster's control-plane machines, and the etcd its stop kept on them, are lost, so the named snapshot may reset it (a provider that keeps its servers across a stop, such as Ankra Cloud, after a host failure). The install still refuses to restore over an etcd it finds alive. |
+| `--restore-snapshot-id` |   | State snapshot to restore on start, by id: for a cluster the start will not restore on its own (no snapshot was captured after its last start while older ones exist, for example a cluster whose control plane was lost); the refusal of a plain start names the newest. Implies `--restore-state=true`. |
 | `--restore-state` |   | Cluster state on start: omit to restore the newest state snapshot captured at stop when there is one; 'true' to require one (refused otherwise); 'false' to start a fresh cluster. |
 | `--scope` | `all` | Provisioning scope: 'all' or 'control_plane' |
 
@@ -8229,6 +8272,8 @@ ankra cluster scaleway start <cluster_id|name> [flags]
 
 | Flag | Default | Description |
 |------|---------|-------------|
+| `--restore-over-kept-etcd` | `false` | With `--restore-snapshot-id`: confirm that the cluster's control-plane machines, and the etcd its stop kept on them, are lost, so the named snapshot may reset it (a provider that keeps its servers across a stop, such as Ankra Cloud, after a host failure). The install still refuses to restore over an etcd it finds alive. |
+| `--restore-snapshot-id` |   | State snapshot to restore on start, by id: for a cluster the start will not restore on its own (no snapshot was captured after its last start while older ones exist, for example a cluster whose control plane was lost); the refusal of a plain start names the newest. Implies `--restore-state=true`. |
 | `--restore-state` |   | Cluster state on start: omit to restore the newest state snapshot captured at stop when there is one; 'true' to require one (refused otherwise); 'false' to start a fresh cluster. |
 | `--scope` | `all` | Provisioning scope: 'all' or 'control_plane' |
 
@@ -8879,6 +8924,32 @@ ankra cluster state-snapshots retention
 ankra cluster state-snapshots retention --days 30 --cluster prod
 ```
 
+## ankra cluster state-snapshots latest
+
+Show the newest captured etcd state snapshot of the cluster that a start may
+restore: its id, what captured it (stop, power_schedule or scheduled), when, and
+the Kubernetes version it holds. Pass the id to the provider's start command
+with `--restore-snapshot-id` to restore it.
+
+-o json prints the platform's answer as it is.
+
+```bash
+ankra cluster state-snapshots latest [flags]
+```
+
+**Examples**
+
+```bash
+ankra cluster state-snapshots latest --cluster prod
+ankra cluster ankracloud start prod --restore-snapshot-id <id>
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+
 ## ankra cluster state-snapshots retention
 
 Show or set how many days of scheduled etcd backups Ankra keeps for the cluster.
@@ -9402,6 +9473,8 @@ ankra cluster upcloud start <cluster_id|name> [flags]
 
 | Flag | Default | Description |
 |------|---------|-------------|
+| `--restore-over-kept-etcd` | `false` | With `--restore-snapshot-id`: confirm that the cluster's control-plane machines, and the etcd its stop kept on them, are lost, so the named snapshot may reset it (a provider that keeps its servers across a stop, such as Ankra Cloud, after a host failure). The install still refuses to restore over an etcd it finds alive. |
+| `--restore-snapshot-id` |   | State snapshot to restore on start, by id: for a cluster the start will not restore on its own (no snapshot was captured after its last start while older ones exist, for example a cluster whose control plane was lost); the refusal of a plain start names the newest. Implies `--restore-state=true`. |
 | `--restore-state` |   | Cluster state on start: omit to restore the newest state snapshot captured at stop when there is one; 'true' to require one (refused otherwise); 'false' to start a fresh cluster. |
 | `--scope` | `all` | Provisioning scope: 'all' or 'control_plane' |
 
