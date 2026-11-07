@@ -25,6 +25,34 @@ The dashboard **Fleet Security** widget summarises actionable severe risk and li
 
 ---
 
+## Which project a read covers
+
+In an organisation with [projects](/concepts/projects), every Security Center read covers the project you act in: the findings, workloads, bills of materials and posture of that project's clusters. A finding, image or cluster of another project is left out of every list and is a `404` when named. In an organisation with projects off, a read covers the whole organisation, as before.
+
+An organisation-wide member can read past that project:
+
+- **In the new Ankra portal**, **Security** has a **This project** / **All projects** choice in the page header, beside **Security in Classic Ankra**. **All projects** reads every project and offers no changes: to act on a finding, open the project it belongs to.
+- **On the API**, the `GET` routes under `/api/v1/org/security/...`, and the per-cluster stack, pod, compliance, policy-violation, network-exposure and add-on security reads under `/api/v1/org/clusters/imported/{cluster_id}/...`, take `project_id`: `all` for the whole organisation, or a project's id for that project. The snapshot history and report schedule routes do not. Without it a read covers the project the request acts in. Any other value is refused with `422 project_id must be a UUID or all`. Writes ignore it and act in the project you act in.
+- **From the CLI**, `--all-projects` reads the whole organisation and the global `--project <name>` reads another project.
+
+A pinned token and a member limited to projects read their own project only, also while the organisation has projects off. `project_id=all` or another project's id is refused with `403 Pinned tokens cannot act outside their project` or `403 Members limited to projects cannot act outside their project`. The new portal does not offer **All projects** to a member limited to projects; an address that asks for it shows **Not available with your access** with **Show this project**.
+
+The compliance framework scores, the compliance report, and evidence destinations and deliveries are the organisation's, whichever project you act in. A pinned token and a member limited to projects are refused them with `403 Organisation compliance documents are not available to pinned tokens or members limited to projects`.
+
+Classic Ankra's Security pages read your [current project](/concepts/projects#your-current-project), which you switch in the new Ankra portal, and have no choice to widen them. Read the whole organisation in the new portal, with `--all-projects`, or with `project_id=all`.
+
+<CliVersion since="0.65.0" command="security --all-projects" />
+
+```bash
+ankra security overview --all-projects            # every project's totals and exploited-in-the-wild summary
+ankra security findings --project payments        # the findings of another project
+ankra security clusters --all-projects -o json    # every project's per-cluster posture, for reporting
+```
+
+Most `ankra security` reads take `--all-projects`; the [command reference](/reference/cli/security) shows it per command. `compliance`, `history` and `report-schedule` do not: `ankra security compliance` reads the project you act in, and the compliance frameworks, report and export are the organisation's. A refused `--all-projects` says that a pinned token or a member limited to projects reads only their own project.
+
+---
+
 ## Prerequisites
 
 Trivy Operator must be running in each cluster you want to assess. If it is not installed, the Security views explain the setup state and link to **Settings → Integrations → Trivy Operator**.
@@ -50,7 +78,7 @@ Trivy Operator must be running in each cluster you want to assess. If it is not 
 
 `ankra-security-baseline` is the public stack profile the platform installs on every cluster it provisions, unless the organisation opted out, and the one **Enable security baseline** installs on an imported cluster's Security page. Like every profile it is a catalogue entry you can open, copy and fork. From version 5 it carries:
 
-- **Trivy Operator** for image vulnerabilities, configuration audits and the CIS benchmark, sized for a small cluster by default.
+- **Trivy Operator** for image vulnerabilities, sized for a small cluster by default. Its workload configuration audit, RBAC assessment, CIS compliance report and CIS node assessment are off by default since version 7, because each of them loads the control plane. Turn them on per cluster with the profile inputs `trivy_config_audit_enabled`, `trivy_rbac_assessment_enabled`, `trivy_cluster_compliance_enabled` and `trivy_infra_assessment_enabled` to fill the CIS compliance view.
 - **Pod Security Standards, enforced by Kubernetes itself.** The profile ships an `ankra-pod-security` ConfigMap declaring the standard (`baseline` or `restricted`), the policy mode and the exempt namespaces. The Ankra agent labels every other namespace for [Pod Security Admission](https://kubernetes.io/docs/concepts/security/pod-security-admission/), the admission controller built into every API server: `pod-security.kubernetes.io/audit` and `/warn` at the standard in Audit mode, and `/enforce` as well once you switch the cluster to Enforce. Labels are only ever raised, so a namespace you hold at a stricter level keeps it, and the agent records what it set so switching back to Audit restores the previous state exactly.
 - **A guard for the enforce label.** A ValidatingAdmissionPolicy (Kubernetes 1.30 or newer) refuses lowering the enforce label of a managed namespace below the declared floor for anyone but the agent, so enforcement cannot be switched off with a namespace edit. It fails open: an admission it cannot evaluate is admitted.
 
@@ -60,7 +88,7 @@ No policy engine runs on the cluster. Earlier versions of the baseline carried K
 
 | Concern | Where it is computed |
 |---|---|
-| Image vulnerabilities, configuration audits, CIS benchmark | Trivy Operator, on the cluster; the platform reads its reports |
+| Image vulnerabilities, and the configuration audits and CIS benchmark on a cluster that turned them on | Trivy Operator, on the cluster; the platform reads its reports |
 | Pod Security Standards and configuration posture of every workload | The platform, from the inventory the agent streams; no report object is written on the cluster |
 | Pod-security enforcement | The API server's Pod Security Admission, from namespace labels the agent manages |
 | Enforce-label protection | A ValidatingAdmissionPolicy the API server evaluates in-process |
@@ -129,13 +157,13 @@ Where it appears:
 - **Clusters**, **Workloads**, and the add-on security panel - a known-exploited count beside the actionable and fixable counts, in red wherever it is above zero.
 - **Alerts** - two `security_findings` metrics: `kev` (actionable known-exploited findings on a cluster) and `new_kev_cves` (known-exploited CVEs new since the previous scan). The built-in new-severe-CVE notification also flags KEV listings of any severity.
 - **Scheduled reports** - a known-exploited banner, **KEV** markers and EPSS in the top-CVE table, and fix groups that clear a known-exploited CVE listed first.
-- **API and MCP** - `known_exploited`, `kev_date_added`, `kev_due_date`, `kev_ransomware_use`, `kev_vendor_project`, `kev_product`, `kev_vulnerability_name`, `kev_required_action`, `epss_score`, and `epss_percentile` on every finding and remediation candidate, a `known_exploited` filter on the findings and workloads lists, `known_exploited` counts on the overview, cluster, workload, and add-on reads, and `known_exploited_overdue` and `known_exploited_ransomware` finding counts on the overview. Pull them into your own reporting with a personal API token (`ankra tokens create`) against `GET /api/v1/org/security/overview`, `/findings`, `/findings/{finding_id}`, `/workloads`, and `/clusters` on `https://platform.ankra.app` - for example `GET /api/v1/org/security/findings?known_exploited=true&sort=exploitability&order=desc`. The AI security context carries the same fields.
-- **CLI** - `ankra security overview` (fleet totals, coverage, remediation candidates, and the exploited-in-the-wild summary first), `ankra security findings` (exploitability order by default, with `--known-exploited`, `--severity`, `--status`, `--fixable`, `--cluster`, `--addon`, `--namespace`, `--sort`), `ankra security finding <id>` (CISA's entry, deadline and required action above every occurrence) , `ankra security advisory <cve>` (the platform's own advisory for a CVE: the parsed NVD/OSV record, CISA's guidance, affected versions in words, and your organisation's exposure) and `ankra security clusters`; every one takes `-o json` for reporting.
+- **API and MCP** - `known_exploited`, `kev_date_added`, `kev_due_date`, `kev_ransomware_use`, `kev_vendor_project`, `kev_product`, `kev_vulnerability_name`, `kev_required_action`, `epss_score`, and `epss_percentile` on every finding and remediation candidate, a `known_exploited` filter on the findings and workloads lists, `known_exploited` counts on the overview, cluster, workload, and add-on reads, and `known_exploited_overdue` and `known_exploited_ransomware` finding counts on the overview. Pull them into your own reporting with a personal API token (`ankra tokens create`) against `GET /api/v1/org/security/overview`, `/findings`, `/findings/{finding_id}`, `/workloads`, and `/clusters` on `https://platform.ankra.app` - for example `GET /api/v1/org/security/findings?known_exploited=true&sort=exploitability&order=desc`. A pull without `project_id` reads the project the token acts in (see [your current project](/concepts/projects#your-current-project) for the order), so in an organisation with projects a report meant for the whole organisation adds `project_id=all`, which a pinned token or a member limited to projects is refused ([which project a read covers](#which-project-a-read-covers)). The AI security context carries the same fields.
+- **CLI** - `ankra security overview` (totals, coverage, remediation candidates, and the exploited-in-the-wild summary first), `ankra security findings` (exploitability order by default, with `--known-exploited`, `--severity`, `--status`, `--fixable`, `--cluster`, `--addon`, `--namespace`, `--sort`), `ankra security finding <id>` (CISA's entry, deadline and required action above every occurrence) , `ankra security advisory <cve>` (the platform's own advisory for a CVE: the parsed NVD/OSV record, CISA's guidance, affected versions in words, and your exposure) and `ankra security clusters`; every one takes `-o json` for reporting and, in an organisation with projects, reads the project you act in unless you add `--all-projects` ([which project a read covers](#which-project-a-read-covers)).
 
 <CliVersion since="0.14.0" command="security" />
 
 ```bash
-ankra security overview                      # fleet totals, coverage, and the exploited-in-the-wild summary
+ankra security overview                      # totals, coverage, and the exploited-in-the-wild summary
 ankra security findings --known-exploited    # only the findings CISA lists as exploited, deadline first
 ankra security finding <id>                  # CISA's entry, deadline and required action for one finding
 ankra security advisory <cve>                # the platform's advisory: parsed NVD/OSV record, CISA guidance, your exposure
@@ -152,7 +180,7 @@ Every finding links to an **Ankra advisory page** for its CVE at `/organisation/
 - **Exploitation** - CISA's KEV entry when the CVE is listed (catalog name, vendor and product, date added, the remediation deadline in explicit tense, ransomware use, and **CISA required action**), the FIRST EPSS probability, and CISA's SSVC decision (exploitation observed, automatable, technical impact) as NVD republishes it.
 - **Severity** - the lead CVSS score and vector spelled out component by component (attack vector, privileges required, user interaction, impact), with every published assessment - NVD's own and the CNA's - one click away.
 - **Affected versions** - the CNA's affected products and version ranges from NVD and the ecosystem package ranges from OSV, written as "2.34 before 2.39 (fixed in 2.39)" rather than as commit hashes.
-- **In your fleet** - the organisation's current findings for the CVE (one per package, with occurrences, clusters, workloads, and how many occurrences have a fix), each opening the finding sheet.
+- **In your fleet** - the current findings for the CVE (one per package, with occurrences, clusters, workloads, and how many occurrences have a fix), each opening the finding sheet.
 - **References** - the sources' links grouped by kind: patches and vendor advisories first, then exploits, trackers, and mailing lists.
 
 An advisory has three states and the page says which one it is in. A CVE the platform has not read yet shows **Fetching this advisory from NVD and OSV** and refreshes on its own - opening the page moves that CVE to the front of the platform's read queue, and most records arrive within a minute. A CVE neither source holds a record for (a reserved or very new id) says **No public advisory record for this CVE yet** and is re-checked every two weeks. Only a record both sources actually returned renders as the advisory, with a provenance footnote naming when NVD and OSV were last read and linking to their own pages.
@@ -277,9 +305,9 @@ Use it to find workloads nobody has scoped yet. Do not use it to decide a policy
 
 ### Compliance
 
-Fleet-wide benchmark scores for CIS Kubernetes, NSA/CISA hardening, and Pod Security Standards, alongside configuration-audit findings and report coverage. Filter for clusters that need attention, compare frameworks, and select a cluster to open its full Security workspace on the Compliance tab.
+Benchmark scores for CIS Kubernetes, NSA/CISA hardening, and Pod Security Standards, alongside configuration-audit findings and report coverage. Filter for clusters that need attention, compare frameworks, and select a cluster to open its full Security workspace on the Compliance tab.
 
-**From the CLI and MCP.** `ankra security compliance` is the fleet rollup, `ankra security compliance frameworks` lists GDPR, ISO 27001, SOC 2 and NIST CSF with each framework's switch and live score, `frameworks enable|disable <key>` flips one (`--yes` skips the prompt), `frameworks report <key> [--month 2026-08]` reads a report control by control, and `ankra security compliance export --format csv|json [--start-date --end-date] [--output-file]` downloads the [evidence report](/security/compliance-management#the-compliance-report). Per cluster, `ankra security benchmarks --cluster <cluster>` lists every failing control with its remediation and `benchmarks resources --cluster <cluster> --check <id> [--source config_audit]` the objects behind one control. From chat or the MCP server: `get_security_compliance_overview`, `list_security_compliance_frameworks`, `get_security_compliance_framework_report`, `set_security_compliance_framework` (confirmed, `security.manage`) and, per cluster, `get_compliance_reports`.
+**From the CLI and MCP.** `ankra security compliance` is the benchmark rollup (in an organisation with projects it covers the project you act in and takes no `--all-projects`; `GET /api/v1/org/security/compliance?project_id=all` reads the whole organisation's), `ankra security compliance frameworks` lists GDPR, ISO 27001, SOC 2 and NIST CSF with each framework's switch and live score, `frameworks enable|disable <key>` flips one (`--yes` skips the prompt), `frameworks report <key> [--month 2026-08]` reads a report control by control, and `ankra security compliance export --format csv|json [--start-date --end-date] [--output-file]` downloads the [evidence report](/security/compliance-management#the-compliance-report). Per cluster, `ankra security benchmarks --cluster <cluster>` lists every failing control with its remediation and `benchmarks resources --cluster <cluster> --check <id> [--source config_audit]` the objects behind one control. From chat or the MCP server: `get_security_compliance_overview`, `list_security_compliance_frameworks`, `get_security_compliance_framework_report`, `set_security_compliance_framework` (confirmed, `security.manage`) and, per cluster, `get_compliance_reports`.
 
 ---
 

@@ -36,22 +36,22 @@ Ankra publishes into the project the declaration's `oci://<host>/<project>` name
 </Step>
 
 <Step title="Mint the project-administrator credential">
-The account behind `admin_credential_name` is what Ankra checks and creates projects with, and mints robots with. A **system-level robot** is the tidiest; this is the minimal set that does everything Ankra asks of it, by level:
+The account behind `admin_credential_name` is what Ankra checks and creates projects with, and mints robots with. A **system-level robot** is the tidiest on **Harbor 2.14.1 or later**; this is the set Ankra calls Harbor with for the application's registry, by level (rotation is the exception, below):
 
 | Level | Resource | Actions | Used for |
 | --- | --- | --- | --- |
 | System (`/`) | `project` | `list`, `create` | Checking whether the declared project exists (the listing filtered by name) and creating it when it does not |
-| System (`/`) | `robot` | `create`, `read`, `list`, `delete` | Minting, probing and revoking the application's push robot |
-| Project (`*`) | `project` | `read` | Reading a project Ankra can already see |
-| Project (`*`) | `repository` | `push`, `pull`, `list`, `read` | Granting them to the push robot Ankra mints: Harbor lets a robot grant another robot only the rights it holds itself |
-| Project (`*`) | `artifact` | `create`, `read`, `list` | Likewise, for the robot's re-tag of the published digest |
-| Project (`*`) | `tag` | `create`, `list` | Likewise, for the `sha-<7>` tag and any `publish.tags` |
-| Project (`*`) | `robot` | `create`, `read`, `list`, `delete` | Robot accounts on the project |
+| System (`/`) | `robot` | `create`, `read`, `list`, `delete` | Robots you create yourself through the new portal or the API that span several projects, which are system-level robots; the application's push robot is a robot of the project and needs no system-level right |
+| Project (`*`) | `project` | `read` | Reading the declared project before Ankra mints, finds or revokes the push robot on it |
+| Project (`*`) | `repository` | `push`, `pull` | Granting them to the push robot Ankra mints: Harbor lets a robot grant another robot only the rights it holds itself |
+| Project (`*`) | `robot` | `create`, `read`, `list`, `delete` | Minting, finding and revoking the push robot, which is a robot of the project |
 
-The admin credential itself never pushes an image; the `repository`, `artifact` and `tag` rows exist because Harbor caps a robot a robot creates at its creator's own permissions, so the admin robot must hold everything it will grant the application's push robot. Harbor refuses `project:read` on a system robot (`bad request permission: project:read`), and project-level read on `*` covers only projects that exist. Ankra therefore checks a project it cannot read by listing projects by name, which system `project:list` covers; a name the listing lacks is created with `project:create`. Store the robot as a registry credential in Ankra.
+The admin credential itself never pushes an image; the `repository` row exists because Harbor caps a robot a robot creates at its creator's own permissions, and the push robot Ankra mints holds `repository` push and pull. If you also name this robot with `--admin-credential` for [robots you create yourself](#robots-on-a-harbor-you-run-yourself), it must hold at Project (`*`), or on that project for a project-scoped robot, every [permission](#exactly-the-permissions-a-job-needs) those robots are given as well. Harbor refuses `project:read` at the system level (`bad request permission: project:read`), and project-level read on `*` covers only projects that exist. Ankra therefore checks a project it cannot read by listing projects by name, which system `project:list` covers; a name the listing lacks is created with `project:create`. Store the robot as a registry credential in Ankra.
+
+Rotating needs `robot` update, which Harbor grants no robot: with a robot as the admin credential, `ankra application registry robot rotate` and the self-heal that re-adopts a robot are refused, and a Harbor user with Project Admin holds it. Until the credential is a user, revoke the robot and ensure it again, which mints a new secret.
 
 <Warning>
-A **project-scoped** robot cannot administer robots: Harbor's project-level robot permission set has no `robot` create/update/delete, so a declaration whose `admin_credential_name` points at an ordinary project robot fails to mint the application's robot - with a permission error from Harbor, not from Ankra. A Harbor **user** with Project Admin works for an existing project, and can create a missing one only when Harbor's *Project creation* setting is *Everyone*.
+Which robot can administer robots depends on the Harbor release. Harbor added `robot` permissions for robots in 2.12.0, so on an older Harbor the admin credential is a Harbor **user** with Project Admin. From 2.12.0 a **project-scoped** robot of the declared project can mint the application's robot when it holds the Project-level rows above on that project; one without `robot` create, list and delete is refused. A **system** robot is refused minting a project's robot on every 2.12 and 2.13 release and on 2.14.0 (Harbor answers `denied`, [goharbor/harbor#21406](https://github.com/goharbor/harbor/issues/21406)), and can from 2.14.1. Ankra reports each of these refusals as a credential that cannot manage robot accounts. A Harbor **user** with Project Admin works on every release for an existing project, and can create a missing one only when Harbor's *Project creation* setting is *Everyone*.
 </Warning>
 </Step>
 
@@ -111,7 +111,7 @@ ankra application registry robot ensure <application-id>
 # Show it: name, registry, created and last-rotated timestamps
 ankra application registry robot get <application-id>
 
-# Rotate after a leak - the old secret stops working the moment Harbor answers
+# Rotate after a leak - the old secret stops working the moment Harbor answers (refused when the admin credential is a robot, see the Step above)
 ankra application registry robot rotate <application-id>
 
 # Revoke: deletes the robot from Harbor and drops its credential
@@ -166,8 +166,8 @@ ankra registry robots delete jenkins --yes
 
 | Field | Value |
 |---|---|
-| **Login** | `robot$org-<organisation-id>+user-<name>` |
-| **Project** | One project: your organisation's own, or an [extra project](#scoping-a-robot-to-one-project) you pick |
+| **Login** | `robot$org-<organisation-id>+user-<name>` for one project, `robot$org-<organisation-id>-user-<name>` for several |
+| **Project** | Your organisation's own, an [extra project](#scoping-a-robot-to-one-project) you pick, or [several](#one-robot-for-several-projects) |
 | **Rights** | `push` = push and pull; `pull` = pull only; or your own list of permissions |
 | **Expiry** | Never, unless you set one when creating it |
 | **Credential** | `ankra-harbor-robot-<name>`, managed, revoked with the robot |
@@ -213,7 +213,7 @@ Because some of these permissions delete images, creating a robot with any permi
 
 Everything your organisation publishes lands in one registry project, so a robot bound to it can reach all of it. To give a login less, keep some images apart: create an extra project, push those images there, and bind the robot to that project. A robot reaches the one project it is bound to and nothing else on the registry.
 
-<CliVersion since="0.22.0" command="registry projects" />
+<CliVersion since="0.49.0" command="registry robots create --registry-project" note="From v0.22.0 to v0.48.x the flag is spelled --project." />
 
 ```bash
 # Your projects: your organisation's own is called default
@@ -223,7 +223,7 @@ ankra registry projects list
 ankra registry projects create staging
 
 # A robot that can push and pull there, and nowhere else
-ankra registry robots create staging-ci --project staging
+ankra registry robots create staging-ci --registry-project staging
 ```
 
 `ankra registry projects list` prints where to push for each project. An extra project named `staging` is `org-<organisation-id>-staging` on the registry, so its images are `<registry host>/org-<organisation-id>-staging/<repository>`.
@@ -244,7 +244,7 @@ Ankra's own lanes keep using your organisation's own project: applications build
 
 If your organisation runs its own Harbor and has connected it to Ankra as an OCI registry, the same commands create robots there too. Name the registry entry, a credential of yours that may manage robot accounts on it, and the **one project** of that registry the robot is bound to. Ankra mints, rotates and revokes the robot with that credential, and never uses its own registry administrator on a registry it does not run. On the **Registry robots** page, pick the registry under **Registry** in the create dialog: the projects it offers are the ones your Harbor holds.
 
-<CliVersion since="0.25.0" command="registry robots create --registry" />
+<CliVersion since="0.49.0" command="registry robots create --registry-project" note="From v0.25.0, when --registry arrived, to v0.48.x the project flag is spelled --project." />
 
 ```bash
 # The OCI registry entries your organisation has connected (a connected
@@ -260,11 +260,12 @@ ankra registry projects list \
 ankra registry robots create collector-ci \
   --registry smartoptics-harbor \
   --admin-credential smartoptics-harbor-robot-admin \
-  --project collectorcharts
+  --registry-project collectorcharts
 
-# Rotate, inspect and revoke it like any other robot. A robot's name is
-# unique across your organisation's registries, so the name alone says
-# which robot, and which registry, these act on.
+# Inspect and revoke it like any other robot, and rotate it when the admin
+# credential is a Harbor user (a robot admin cannot, see above). A robot's
+# name is unique across your organisation's registries, so the name alone
+# says which robot, and which registry, these act on.
 ankra registry robots rotate collector-ci
 ankra registry robots get collector-ci
 ankra registry robots delete collector-ci --yes
@@ -276,9 +277,51 @@ ankra registry robots delete collector-ci --yes
 | **Admin credential** | A registry credential you stored, with project administrator rights (robot accounts) on the project. A robot login Ankra manages cannot be used |
 | **Project** | Required: one project of that registry, by its name there (such as `collectorcharts`). The robot reaches that project and no other |
 | **Login** | `robot$<project>+user-<name>`, with your registry's robot prefix |
-| **Permissions** | The same scopes, permissions and expiry as on the Ankra registry. Creating one, and listing that registry's projects, also needs `credentials.reveal`, because Ankra acts as your admin credential |
+| **Permissions** | The same scopes, permissions and expiry as on the Ankra registry. Creating one, and listing that registry's projects, also needs `credentials.reveal`, because Ankra acts as your admin credential. So does connecting the registry entry itself with a stored credential, which Ankra then sends to that registry's host |
 
 A robot of the same name that already exists on your registry is left alone, and the create is refused: pick another name or delete it in Harbor first. If the registry entry is deleted, or now points at another host, rotating the robot is refused and revoking it removes Ankra's copy of the login only; delete the robot in Harbor yourself if it still exists. A registry that refuses the admin credential is reported as such, so check the credential's rights on the project.
+
+### One robot for several projects
+
+A robot can reach up to 20 projects, each with its own access, so a consumer that installs a chart from one project and pulls its images from another needs one robot and one pull secret. Repeat `--registry-project`, or separate with commas. In the new portal, tick several projects when you make the robot.
+
+<CliVersion since="0.63.0" command="registry robots create --registry-project a,b" note="Before v0.63.0 the flag takes one project." />
+
+```bash
+ankra registry robots create consumer --scope pull \
+  --registry smartoptics-harbor \
+  --admin-credential smartoptics-harbor-robot-admin \
+  --registry-project commerce-charts,commerce-images
+```
+
+On Harbor this is a system-level robot, so its login is `robot$org-<organisation-id>-user-<name>`. On a Harbor you run yourself, the admin credential must be allowed to make those: a Harbor system administrator, or a system-level robot with `robot` `create`, `read`, `list` and `delete` at system level that itself holds the same access on every project. If it may not, Ankra says so and makes nothing.
+
+### Changing which projects a robot reaches
+
+Give the full list of projects the robot should reach from now on. Projects it keeps keep the access they have; projects it gains get `--scope`, pull unless you say push. In the new portal, use **Change projects…** in the robot's menu on the Registries page.
+
+<CliVersion since="0.64.0" command="registry robots update" />
+
+```bash
+ankra registry robots update consumer --registry-project commerce-charts,commerce-images,library
+```
+
+What happens depends on what Harbor allows:
+
+| Change | With a Harbor user, or on the Ankra registry | With a robot as the admin credential |
+|---|---|---|
+| Several projects to several | Same login, same secret | Replaced: same login, new secret |
+| One project to another, to several, or several to one | Replaced: new login, new secret | Replaced: new login, new secret |
+
+Harbor only lets a user change a robot in place: no robot can hold that right, and a robot cannot move between one project and several.
+
+**Replacing a robot stops whatever logs in with it.** So Ankra asks first. Without `--new-secret` the command changes nothing and says a new secret is needed, and the new portal asks you to confirm. The new secret is shown once, and the robot keeps its name, description and expiry. Update everything that logs in with it straight away.
+
+Google Artifact Registry robots cannot have their repositories changed yet.
+
+**On the API:** `PUT /api/v1/org/registry-robots/{robot_name}/projects`, with `projects` and optional `allow_new_secret`. It needs `credentials.write`, plus `credentials.reveal` for a robot on a registry you run or for grants past the presets. Without `allow_new_secret`, a change that needs a new secret answers 409.
+
+**Over MCP and in Ankra AI:** `list_registry_robots` reads your robots, and `update_registry_robot_projects` changes one in place: in Ankra AI after you confirm, and over MCP on a token with mcp:write, where the token scope is the approval. It never replaces a robot, so a secret never reaches a model: where a replacement is needed, it changes nothing and gives you the command to run. With a robot as the admin credential, that is every change.
 
 ### Seeing every robot, including Ankra's
 
@@ -346,7 +389,7 @@ The Secret is built from the declaration's **read** credential, at the declared 
 
 | Symptom | Cause | Fix |
 | --- | --- | --- |
-| `robot ensure` fails with a Harbor permission error | `admin_credential_name` points at a project-scoped robot, which cannot administer robots | Use a Harbor user with Project Admin, or a system robot with robot permissions |
+| `robot ensure` fails with a Harbor permission error | `admin_credential_name` points at a robot Harbor does not let mint robots on that project: one without `robot` create, list and delete, a system robot before Harbor 2.14.1, or any robot before 2.12.0 | Use a Harbor user with Project Admin, or a robot with the permission set above on a Harbor release that allows it |
 | `registry set` is refused: `The project 'x' does not exist on 'host', and the registry credential ... may not create it` | The project is missing and the admin credential has no project-creation right | Create the project in Harbor and make the credential its Project Admin, or allow the credential to create projects (a user under *Project creation: Everyone*, or a system robot with `project` create) |
 | `registry set` is refused: `... may not read or list projects on 'host', so the project 'x' could not be checked` | The admin credential has neither project read on `x` nor system-level `project:list` | Grant the robot system `project` list (and create), as in the permission table above |
 | `registry set` is refused: `The project 'x' exists on 'host' but the registry credential ... cannot see it` | The project is private and the admin credential is not a member of it | Make the credential a Project Admin of that project |

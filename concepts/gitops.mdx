@@ -1,6 +1,6 @@
 ---
 title: GitOps
-description: Manage your clusters with GitOps using YAML files and include paths
+description: Manage your clusters with GitOps using one directory of YAML files per cluster in Git
 ---
 
 import { CliVersion } from "/snippets/cli-version.jsx";
@@ -32,19 +32,19 @@ my-repo/
 
 Edit these files and push; Ankra applies the change. [What Ankra Writes Back to Git](#what-ankra-writes-back-to-git) explains how it avoids overwriting your edits.
 
-**A layout you write by hand.** If you author the cluster definition yourself, for example to [import a cluster from YAML](/guides/import-cluster), you choose the layout and point at it with `include` paths:
+**Files you add by hand.** Ankra reads one directory per cluster, the directory shown above. The file in it named after the cluster, `my-cluster.yaml`, is the cluster file, and it is the only file Ankra reads as a cluster definition. Every other file in the directory is content: it takes effect when an entry in the cluster file names it with `from_file`. You can add your own files anywhere in the directory except under `argocd/`, in subdirectories too:
 
 ```
 my-repo/
-  manifests/
-    namespace.yaml
-    namespace.AGENTS.md
-    rbac.yaml
-  addons/
-    ingress.yaml
-    ingress.AGENTS.md
-    monitoring.yaml
-  import-cluster.yaml
+  clusters/
+    my-cluster-<short-id>/
+      my-cluster.yaml              # the cluster file
+      manifests/
+        logging-namespace.yaml
+        logging-namespace.AGENTS.md
+        logging-rbac.yaml
+      values/
+        fluent-bit.yaml
 ```
 
 The optional `AGENTS.md` sibling files hold per-manifest and per-add-on operational learnings for your team and Ankra's AI - see [Teach Your Agents with AGENTS.md](/platform/agents-md).
@@ -53,7 +53,7 @@ The optional `AGENTS.md` sibling files hold per-manifest and per-add-on operatio
 
 ## Cluster Definition Example
 
-Your `import-cluster.yaml` references files using `include` paths:
+The cluster file lists every manifest and add-on by `name` and points at its file with `from_file`. For the directory above, `my-cluster.yaml` reads:
 
 ```yaml
 apiVersion: v1
@@ -67,26 +67,41 @@ spec:
     branch: main
     repository: my-org/my-repo
   stacks:
-  - name: platform-stack
+  - name: logging
     manifests:
-    - include: manifests/
+    - name: logging-namespace
+      from_file: manifests/logging-namespace.yaml
+      agents_md_from_file: manifests/logging-namespace.AGENTS.md
+    - name: logging-rbac
+      from_file: manifests/logging-rbac.yaml
+      parents:
+      - name: logging-namespace
+        kind: manifest
     addons:
-    - include: addons/
+    - name: fluent-bit
+      chart_name: fluent-bit
+      chart_version: 0.49.1
+      registry_name: fluent
+      registry_url: https://fluent.github.io/helm-charts
+      namespace: logging
+      configuration:
+        from_file: values/fluent-bit.yaml
+      parents:
+      - name: logging-namespace
+        kind: manifest
 ```
 
-When Ankra syncs this file from the repository, it loads and applies all YAML files from the `manifests/` and `addons/` folders. Include paths are resolved only by that sync: `ankra cluster apply -f` refuses an `include` entry, so a file you apply from your machine lists its entries inline. You can also include individual files for more control:
+Each `from_file`, `agents_md_from_file` and `description_from_file` is a path relative to the cluster directory, and Ankra looks it up exactly as written among the files in that directory. There is no folder or wildcard form, a path that leaves the directory never matches, and Ankra never follows a symlink. When a manifest, an add-on's values, an application or a stack description names a file that is not there, the sync stops with an error ending `which is not in the repository snapshot` and applies nothing; a missing `AGENTS.md` file is skipped. An entry without a `name` stops the sync too: every manifest, add-on and application entry needs one.
 
-```yaml
-manifests:
-- include: manifests/namespace.yaml
-- include: manifests/rbac.yaml
-```
+One kind of file needs no entry. A file at `stacks/<stack>/manifests/<name>.yaml` (or `.yml`) that no entry already names, for a stack the cluster file declares, is added to that stack as a manifest called `<name>`, unless a stack already lists that name. If two declared stacks hold a file with the same unlisted name, the sync stops until you list it under the stack you mean.
+
+`ankra cluster apply -f` reads the same keys on your machine. It resolves each path against the directory the applied file is in and refuses a path that is absolute or contains `..`, so running it on the cluster file in its cluster directory resolves the same `from_file` paths a sync does; it does not add unlisted manifest files. [Files in the cluster directory](/reference/importcluster#files-in-the-cluster-directory) lists every key that names a file.
 
 ---
 
 ## Single-File Cluster Definition
 
-For small or self-contained setups you can skip include paths and define everything inline in one file. Manifest and values content is embedded as base64:
+A cluster file you apply with `ankra cluster apply -f` can instead carry everything inline, with manifest and values content embedded as base64. This form is for the CLI only: a sync from Git refuses a cluster file whose manifests carry `manifest_base64`, and reads a manifest's content only from its file:
 
 ```yaml
 apiVersion: v1
@@ -122,7 +137,7 @@ spec:
         kind: manifest
 ```
 
-Use `parents` to control deployment order - a resource only deploys after its parents succeed. Prefer include paths once a cluster definition grows beyond a couple of resources.
+Use `parents` to control deployment order: a resource deploys only after its parents succeed. When Ankra writes a cluster like this to Git, it moves each manifest's and add-on's content into a file in the cluster directory and names it with `from_file`, as in the [cluster definition example](#cluster-definition-example).
 
 Every field of this file - stacks, manifests, add-ons, applications, parents, and encrypted paths - is documented in the [ImportCluster YAML Schema](/reference/importcluster).
 
@@ -148,12 +163,12 @@ Credentials stay out of Git: a `username`, `password`, `token` or `auth_scheme` 
 
 1. You update or add YAML files in your Git repository
 2. Ankra detects the change and automatically syncs your cluster
-3. All included manifests and add-ons are applied in the order you specify
+3. Ankra reads the cluster file and the files it names with `from_file`, and applies the manifests and add-ons in the order you specify
 
 ```mermaid
 flowchart LR
     A[Git Push] --> B[Ankra Detects Change]
-    B --> C[Parse Include Paths]
+    B --> C[Read Cluster Directory]
     C --> D[Apply Manifests]
     D --> E[Deploy Add-ons]
     E --> F[Cluster Updated]
@@ -184,7 +199,7 @@ Three limits apply today:
 
 - **SOPS-encrypted files are not covered.** Their committed bytes are ciphertext that cannot be reproduced from the render, so Ankra keys them on the embedded content fingerprint instead, and re-encrypts the file whenever its stored values change. A hand edit to an encrypted file sealed under the cluster's `.sops.yaml` is imported like any other Git change and then re-sealed by Ankra's next write - the values survive, the ciphertext does not, so expect one re-seal commit after rotating a sealed Secret by hand (see [Rotating by API](/integrations/prometheus#rotating-by-api) and [SOPS](/guides/sops)).
 - **`.sops.yaml` in the cluster directory has its own rule.** Ankra rewrites the creation rules it generates there on every export, but it no longer replaces the file: rules you add by hand are kept, and kept above Ankra's own. See [Merging the SOPS configuration file](#merging-the-sops-configuration-file) below.
-- **Deciding a preserved file takes the API for now.** While a file is preserved, a change made to it in Ankra does not reach Git, and the cluster reads **Diverged** for as long as the two versions differ. The portal and the GitOps status name those files, but neither the portal, the CLI nor the MCP tools can show both versions or decide them yet. See [Diverged files](#diverged-files) below.
+- **The portal and the MCP tools cannot decide a preserved file yet.** While a file is preserved, a change made to it in Ankra does not reach Git, and the cluster reads **Diverged** for as long as the two versions differ. The portal and the GitOps status name those files but cannot show both versions or decide them; `ankra cluster gitops preserved` (CLI v0.59.0 or later) and the API do both. No MCP tool decides one. See [Diverged files](#diverged-files) below.
 
 ### Diverged files
 
@@ -194,7 +209,29 @@ A file you edited in Git stays yours: no later platform write replaces it. When 
 - **Only a difference in substance counts.** YAML and JSON are compared as decoded documents, so comments, key order and quoting alone never make a cluster diverged. Your file is still kept byte for byte.
 - **It clears when the two versions agree again** - you make the same change in Git, or Ankra's side changes back - or when a person decides it. It does not clear by waiting.
 
-To decide, list the preserved files with both versions, then record a decision for each one. Both calls take an [API token](/api-reference/introduction) (a token scoped to MCP is refused), and the decision needs `clusters.write` on the cluster:
+To decide, list the preserved files, read where one differs, then record which version wins:
+
+<CliVersion since="0.59.0" command="cluster gitops preserved" />
+
+```bash
+ankra cluster gitops preserved list prod
+ankra cluster gitops preserved show clusters/prod/prod.yaml --cluster prod
+ankra cluster gitops preserved resolve clusters/prod/prod.yaml --keep git --cluster prod
+```
+
+`list` prints each preserved file with when it was detected, its decision, whether its content is withheld and why, and how many differences the platform found. `show <path>` prints those differences key by key, read from Git's version to Ankra's: `added` (only Ankra's version has it), `removed` (only Git's has it), `changed` (both have it, with different values) or `reordered` (both list the same members in another order). It shows Git's and Ankra's value where the platform shows them and `(masked)` where it does not: seeing values needs `kubernetes.secrets_reveal` on the cluster, and some files show no values to anyone. The platform lists at most 50 differences per file and always gives the total. Name a file by its full repository path, as `list` prints it.
+
+`resolve <path>` records the decision, and the next sync runs it; `resolve` triggers that sync. `--keep` is required, because the decision names the version the next sync writes:
+
+| CLI | API `resolution` | What the next sync does |
+|-----|------------------|-------------------------|
+| `--keep git` | `git` | Imports Git's version into Ankra: wherever your file differs from Ankra's version, yours replaces it, and the cluster changes to match, except that a stack Ankra declares and your file leaves out stays (the rule below). It runs only once every preserved file on the cluster has a decision. The file stays yours, so a later change to it in Ankra is preserved again. |
+| `--keep ankra` (or `--keep cluster`) | `cluster` | Writes Ankra's version over your file in Git, without your comments or layout, and the file is Ankra's to write again. Refused for a SOPS-encrypted file, which would put plaintext over ciphertext. |
+| `--withdraw` | `none` | Withdraws a decision that has not run yet. Nothing changes in Git or on the cluster. |
+
+Before it asks, `resolve` prints the platform's key-by-key difference: each stack or add-on only one version declares on one line, and each value that changes. When keeping Git's version would drop `encrypted_paths` entries that Ankra's version declares, it warns that, if Git holds those values SOPS-encrypted, Ankra would stop decrypting them and deploy the ciphertext as the value. `--yes` skips the question, and without a terminal to ask on (a script, CI) it is required. `resolve` reads both digests from the listing itself, so you never type one and the decision covers exactly the two versions it showed you. Deciding needs `clusters.write` on the cluster. `-o json` prints the platform's answer.
+
+The same steps through the API take two calls with an [API token](/api-reference/introduction) (a token scoped to MCP is refused), and the decision needs `clusters.write` on the cluster:
 
 ```sh
 curl -H "Authorization: Bearer $ANKRA_TOKEN" \
@@ -203,19 +240,17 @@ curl -H "Authorization: Bearer $ANKRA_TOKEN" \
 
 Each entry carries the `path`, Git's version as `head_content` (read at `head_commit_sha`), Ankra's version as `render_content`, the digest of each as `head_content_hash` and `render_content_hash`, when the difference was first seen as `detected_at`, and any `resolution_choice` already made. A file that may hold a secret is listed with `content_redacted` and no content; its digests are still exact.
 
+Each entry also carries `structural_diff`, even when its content is withheld: the key path of every key or list member where the two versions differ, each marked `added`, `removed`, `changed` or `reordered` from Git's version to Ankra's. A value is shown only where Ankra's checks find nothing sensitive in it, and only to a caller holding `kubernetes.secrets_reveal` on the cluster; where a side holds a value that is not shown, the change reads `value_masked: true`, and a key name that may itself be a secret reads `<masked>`.
+
 ```sh
 curl -X POST -H "Authorization: Bearer $ANKRA_TOKEN" -H "Content-Type: application/json" \
   "https://platform.ankra.app/api/v1/org/clusters/<cluster-id>/gitops/preserved-paths/resolve" \
   -d '{"path": "<path>", "resolution": "git", "head_content_hash": "<head_content_hash>", "render_content_hash": "<render_content_hash>"}'
 ```
 
-| `resolution` | What the next sync does |
-|--------------|-------------------------|
-| `git` | Imports Git's version into Ankra: wherever your file differs from Ankra's version, yours replaces it. It runs only once every preserved file on the cluster has a decision. The file stays yours, so a later change to it in Ankra is preserved again. |
-| `cluster` | Writes Ankra's version over your file in Git, without your comments or layout, and the file is Ankra's to write again. Refused for a SOPS-encrypted file, which would put plaintext over ciphertext. |
-| `none` | Withdraws a decision that has not run yet. |
+`resolution` takes the values in the table above.
 
-A decision is pinned to the two digests it names. If either version has changed by the time you send it, the call answers `409` and you list again; if one changes before the sync runs it, the decision is cleared. A `git` import Ankra refuses - one that would lower a chart version, for example - records why in `import_refused_reason` and clears the decision, so you decide again. A `git` import never removes a stack: a stack Ankra declares and your file leaves out stays until you remove it through the platform.
+A decision is pinned to the two digests it names. If either version has changed by the time it arrives, it is refused with `409`: `resolve` says so and asks you to run the same command again, which reads the file again, and an API caller lists again. If one changes before the sync runs it, the decision is cleared. A different decision already recorded is refused too; withdraw it first. A `git` import Ankra refuses - one that would lower a chart version, for example - records why in `import_refused_reason` and clears the decision, so you decide again: `list` shows the file as `undecided (last keep-Git refused)` and `show` prints the reason. A `git` import never removes a stack: a stack Ankra declares and your file leaves out stays, and the file stays preserved, until you declare the stack in the file or remove it through the platform.
 
 ### Merging the SOPS configuration file
 
@@ -306,6 +341,20 @@ On every sync Ankra compares three things: the head of the branch, the state sto
 
 A conflict pins the cluster's sync. Nothing further is applied from Git and nothing further is pushed to it until every conflicting resource has a decision. For each one you choose **Git** (the committed version wins and the platform change is dropped) or **Cluster** (the platform version wins and is committed over the Git version). Resolve conflicts from the GitOps section of the cluster settings, one resource at a time or all at once, or with the `list_gitops_conflicts`, `get_gitops_conflict_diff` and `resolve_gitops_conflict` [MCP tools](/platform/mcp-tools). Sync resumes on its own once the last conflict is decided.
 
+From a terminal, list the open conflicts and record which side each one keeps:
+
+<CliVersion since="0.24.0" command="cluster gitops conflicts" />
+
+```bash
+ankra cluster gitops conflicts list prod
+ankra cluster gitops conflicts resolve stack:web/addon:nginx --keep git --cluster prod
+ankra cluster gitops conflicts resolve --all --keep cluster --cluster prod
+```
+
+`list` prints each conflict's resource key, and `resolve` takes that key, or `--all` for every open conflict. `--keep` is required, because either side discards the other: `git` is the same choice as **Git** above and `cluster` the same as **Cluster**. `resolve` shows what it is about to decide and asks first; `--yes` skips the question, and you need it where there is no terminal to ask on, such as CI.
+
+A script with an API token can call the same routes: `GET /api/v1/org/clusters/{cluster_id}/gitops/conflicts` lists the conflicts, and a `POST` to `/api/v1/org/clusters/{cluster_id}/gitops/conflicts/resolve` or to `.../gitops/conflicts/resolve-resource` decides all of them or one. Any member of the organisation can list conflicts; resolving one needs `clusters.write` on the cluster.
+
 There is no setting that makes one side win automatically. If Git should be the authority for a cluster, make changes to that cluster only through Git: with no platform-side edits there is nothing to conflict with. If a platform write finds a commit in Git that Ankra has not imported yet, the change is saved in the platform but its push to Git is held back, and the next sync merges the two sides or raises a conflict as above.
 
 ### Connecting a repository to a cluster that already has state
@@ -331,6 +380,15 @@ Navigate to your cluster → **Settings** → **GitOps** to see the current sync
 | **Syncing** | A sync is currently in progress |
 | **Error** | The last sync failed. Check error details below |
 | **Not Configured** | GitOps is not yet connected to a repository |
+
+### Applied Commit and Git Head
+
+`ankra cluster gitops status` and `GET /api/v1/clusters/{cluster_id}/gitops/status` report the last sync time and commit (`last_synced_at`, `last_commit_sha`) for the last full sync only. Beside them are two pointers:
+
+- **Applied Commit** (`applied_commit_sha`, `applied_commit_at`): the commit Ankra holds the cluster in step with, and since when.
+- **Git Head Checked** (`head_checked_sha`, `head_checked_at`): the head of the branch as Ankra last read it, and when.
+
+The applied commit moves on a sync or a push, and also without one: when Git's head moves but leaves the cluster's directory unchanged - a commit for another cluster in the same repository, for example - Ankra moves the applied commit to that head without running or recording a sync, so the last sync time can read days old on a current cluster. The same commit on both pointers means the cluster was in step with Git at that read; a different head is a commit Ankra has not applied yet.
 
 ### Sync Progress
 
@@ -420,7 +478,24 @@ Failed syncs show:
     
     **Solution**: Check for duplicate resource names or conflicting configurations.
   </Accordion>
+  <Accordion title="A Section That Is Not a List">
+    `spec.stacks`, or a stack's `manifests`, `addons` or `applications`, is present but is not a list: a lost `-` or an indentation slip turns a list into a mapping, and a key with nothing after it is null. Nothing is applied, because reading it as an empty list would remove everything it declared before; the error names the section, for example `stack "logging": addons must be a list, got a mapping`.
+    
+    **Solution**: Fix the YAML. To declare none, write an empty list, for example `addons: []`.
+  </Accordion>
 </AccordionGroup>
+
+### Large Removals Are Held
+
+A sync that would remove a large share of the cluster at once is held: nothing in the commit is applied, and the sync fails with an error that starts `GitOps sync held, nothing was applied: this commit would remove` and names what would go. A sync is held when it would:
+
+- Remove two or more stacks that have members, when they are half or more of the cluster's stacks with members, or more than three of them
+- Remove two or more add-ons, manifests or applications from the stacks it keeps, when they are half or more of those stacks' members, or more than five of them
+- Remove every member of a kept stack that has two or more
+
+A commit that removes only one stack, or only one member, always applies. Anything you are already removing through Ankra does not count.
+
+If the removal is intended, remove those stacks or members through Ankra: in the portal, or with `ankra cluster stacks delete` and `ankra cluster manifests delete`. The next sync then applies the rest of the same commit, without a new push; click **Sync Now** to run it straight away. If the removal is a mistake, such as a YAML slip or a merge conflict resolved the wrong way, restore them in the cluster file and push.
 
 ### Retrying Failed Syncs
 
@@ -429,26 +504,29 @@ Failed syncs show:
 3. Click **Sync Now** or wait for automatic detection
 4. Monitor the new sync in the history table
 
+A [held large removal](#large-removals-are-held) you meant to make needs no change in Git: remove those stacks or members through Ankra, and the next sync applies the same commit.
+
 ---
 
 ## Troubleshooting
 
 If Ankra isn't syncing as expected:
 
-<CliVersion since="0.10.0" />
+<CliVersion since="0.52.2" />
 
 | Issue | Solution |
 |-------|----------|
 | Sync not triggering | Check that Git credentials are valid and have repo access |
-| Files not found | Verify all `include` paths exist in the repository |
+| A sync fails with `which is not in the repository snapshot` | An entry's `from_file` or `description_from_file` names a path no file in the cluster directory has. Write it relative to the cluster directory, exactly as the file is named, and commit the file itself rather than a symlink. See [Cluster Definition Example](#cluster-definition-example) |
+| A sync fails with `GitOps sync held, nothing was applied` | The commit would remove a large share of the cluster in one sync. If you meant it, remove those stacks or members through Ankra and the next sync applies the rest of the commit; if not, restore them in the cluster file. See [Large Removals Are Held](#large-removals-are-held) |
 | Invalid configuration | Ensure YAML files are syntactically correct |
 | Wrong branch | Confirm the branch name in your cluster definition matches |
-| Unsure which repository a cluster deploys from | Run `ankra cluster gitops status --cluster <name>`. It reports the configured repository and branch, and `observed_source` - the repository the last successful sync actually read. If they disagree, `source_mismatch` is `true` |
+| Unsure which repository or commit a cluster deploys from | Run `ankra cluster gitops status --cluster <name>`. It prints the configured repository, branch and credential, and the **Applied Commit** and **Git Head Checked** with their times ([Applied Commit and Git Head](#applied-commit-and-git-head)). The repository the last successful sync actually read is `observed_source` in `GET /api/v1/clusters/{cluster_id}/gitops/status` and the `get_gitops_status` [MCP tool](/platform/mcp-tools); `source_mismatch` is `true` when it differs from the configured repository |
 | A `prometheus_metrics` or `log_source` block you deleted keeps coming back | Removing the block is not a disconnect - the platform re-renders it. Disconnect the source in the cluster's **Settings** → **Integrations** |
 | A field you added to a data source block fails the sync | Only the fields in the [ImportCluster schema](/reference/importcluster#observability-sources-in-git) are accepted; the error names the offending key. Credential fields (`username`, `password`, `token`, `auth_scheme`) are always refused - reference a credential by `credential_name` |
 | A value you set in Git is reverted by a platform write | Check that `.ankra-owned.json` exists in the cluster directory - without it the overwrite boundary is off ([What Ankra Writes Back to Git](#what-ankra-writes-back-to-git)). Restore it from history, and report the reverting commit: its author, `ankra-platform[bot]` or `Ankra Reconciler`, tells support which write path produced it |
 | A change made in the portal never reaches Git | The file is hand-maintained - its bytes in Git are not what Ankra last wrote, so Ankra preserves it and the cluster reads **Diverged**. Make the change in Git, or [decide the file](#diverged-files) |
-| A cluster reads **Diverged** and nobody changed anything in Ankra | Something changed Ankra's side of a file you edited in Git. [List the preserved files](#diverged-files): `render_content` is Ankra's version, and a `Sync cluster state from Ankra` or `ankra-platform[bot]` commit near `detected_at`, when that change wrote other files too, shows what else it changed. Decide the file, and report it to support if the same file comes back after a `git` import |
+| A cluster reads **Diverged** and nobody changed anything in Ankra | Something changed Ankra's side of a file you edited in Git. `ankra cluster gitops status` lists the preserved files, each with when it was detected and whether it has a decision. `ankra cluster gitops preserved show <path>` (CLI v0.59.0 or later) prints where Git's and Ankra's versions differ, key by key, even when the content is withheld, and a `Sync cluster state from Ankra` or `ankra-platform[bot]` commit near the time it was detected, when that change wrote other files too, shows what else it changed. Decide the file with `ankra cluster gitops preserved resolve <path>` and `--keep git` or `--keep ankra` (the API does the same, see [Diverged files](#diverged-files)), and report it to support if the same file comes back after a `git` import |
 
 <Tip>
 Use the Ankra WebUI to see sync status and any errors. The Operations page shows deployment history and helps identify issues.

@@ -1,19 +1,21 @@
 ---
 title: Private access for proxied domains
-description: Require Ankra organisation membership and optional roles for ankra.cc and custom domains proxied by Ankra Cloud.
+description: Require Ankra organisation membership, optional roles or access to one project for ankra.cc and custom domains proxied by Ankra Cloud.
 ---
+
+import { CliVersion } from "/snippets/cli-version.jsx";
 
 Ankra Cloud can protect services on generated `ankra.cc` hostnames **and custom domains** with the same organisation identity used in Ankra Platform. Set a domain's Cloud DNS zone to **organisation** access and the relay sends visitors through Platform sign-in, then checks their current organisation membership and allowed role before forwarding a request. Existing public zones stay public until you change their policy.
 
 This applies to hostnames served through the Ankra Cloud proxy. A DNS record that sends traffic directly to an origin does not pass through this gate. A private zone cannot use a direct HTTP route that bypasses the proxy.
 
-<Note>
-The `ankra org access-gateway` commands are merged into the CLI source but await the next tagged CLI release. Check `ankra org access-gateway --help` before following the commands below.
-</Note>
+To put sign-in in front of a service behind a tunnel, follow [Protect a tunnel with Ankra sign-in](/guides/protect-a-tunnel-with-ankra-sign-in) from start to finish.
 
 ## Choose who can enter
 
 First, link the Ankra Cloud account that owns the zone to its Ankra Platform organisation. Sign in to the [Ankra CLI](/integrations/ankra-cli), select that organisation, and list its Cloud DNS zones:
+
+<CliVersion since="0.44.0" />
 
 ```bash
 ankra org current
@@ -33,7 +35,32 @@ To limit access to particular organisation-wide roles, repeat `--role`:
 ankra org access-gateway set <zone-id> --mode organisation --role admin --role operator
 ```
 
-The built-in role names are `owner`, `admin`, `operator`, `member`, and `viewer`; you can also use a custom role's ID. A member must hold at least one allowed role. The policy applies to the zone's proxied hostnames and is inherited by its subzones. To make the zone public again, run `ankra org access-gateway set <zone-id> --mode public`.
+The built-in role names are `owner`, `admin`, `operator`, `member`, and `viewer`; you can also use a custom role's ID. A member must hold at least one allowed role, and only a role held across the organisation counts: a role in a cluster or a project does not. The policy applies to the zone's proxied hostnames and is inherited by its subzones. To make the zone public again, run `ankra org access-gateway set <zone-id> --mode public`.
+
+A zone that is private cannot hold direct `A`, `AAAA`, `CNAME`, `HTTPS` or `SVCB` records, or `NS` delegations you added yourself, in the zone or its subzones. Setting the policy is refused until they are removed or proxied. A subzone of a private zone cannot have a policy of its own: change it on the parent.
+
+## Limit a zone to one project
+
+<CliVersion since="0.64.0" command="org access-gateway set --access-project" />
+
+To admit only the members who can reach one [project](/concepts/projects), add `--access-project` with the project's slug, name or ID:
+
+```bash
+ankra org access-gateway set <zone-id> --mode organisation --access-project payments
+```
+
+| Who | Result |
+| --- | --- |
+| Organisation-wide member | Admitted: they reach every project |
+| Project-only member assigned to the project | Admitted |
+| Project-only member of another project | Refused |
+| Anyone, if the project has been deleted | Refused |
+
+- Leaving out `--access-project` keeps the zone's current limit, so running `set` again to change roles cannot widen access. `--access-project ""` removes the limit, and so does making the zone public. Naming a project with `--mode public` is refused.
+- `--access-project` is not the global `--project`. `--project` chooses where a command runs and has no effect on who is admitted.
+- With `--role` as well, a member must pass both checks. A project-only member holds no organisation-wide role, so they are refused while `--role` is set.
+- Changing the project ends existing sign-in sessions, and visitors sign in again.
+- The Ankra Cloud console shows the limit and keeps it when you save roles there, but it cannot set one.
 
 Reading zones and policies requires `members.read`; changing a policy requires `members.manage`. The organisation is taken from the authenticated CLI session, and the Cloud account and zone are checked server-side. You cannot select a different organisation by putting its ID in the policy.
 
@@ -41,7 +68,9 @@ Reading zones and policies requires `members.read`; changing a policy requires `
 
 Members sign in through Ankra Platform. An organisation can configure its own OpenID Connect provider under **Organisation → Settings → Single sign-on** and map provider groups to Ankra roles. The gateway then uses that Platform sign-in and checks current membership and roles; it does not maintain a separate Cloud user list. Follow [Single Sign-On](/guides/single-sign-on) for provider setup, plan requirements, and how to require SSO for the organisation.
 
-A browser visiting a private service is sent to sign-in when needed. Non-browser requests do not start the interactive flow; sign in through the service's browser page first. If membership or the required role is removed, subsequent checks deny access.
+A browser visiting a private service is sent to sign-in when needed. Non-browser requests do not start the interactive flow; sign in through the service's browser page first. If membership or the required role is removed, subsequent checks deny access. Membership is checked on each request, and a connection already open can continue for up to 15 minutes.
+
+A member whose invitation is still pending is refused until they accept it. Members can use any email domain. The gateway checks membership, not the address.
 
 ## Check readiness
 

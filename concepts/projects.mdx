@@ -5,7 +5,7 @@ description: A project is a room inside your organisation. Clusters, application
 
 A **project** is a room inside an [organisation](/concepts/organisations). The organisation keeps everything that is about people and money - members, roles, invitations, billing, single sign-on, the AI provider. A project owns a slice of the resource estate: its clusters, applications, environments, stack profiles, pipeline repositories, AI tickets, workspaces and automations, incidents, and the cost those produce.
 
-Projects are on for every organisation. Every organisation has a **Default** project, and every cluster, application, environment, stack profile, pipeline, AI ticket, workspace and automation you already had is in it. Nothing changes until someone creates a second project: the lists, links, tokens and scripts you use today keep working as they did.
+Projects are on for every organisation on the new portal. Every organisation has a **Default** project, and every cluster, application, environment, stack profile, pipeline, AI ticket, workspace and automation you already had is in it. Nothing changes until someone creates a second project: the lists, links, tokens and scripts you use today keep working as they did. In an organisation whose portal is not yet the new one (the new portal carries `/next` in its address), projects are off: its Default project stays out of sight and everything works as it did before projects.
 
 Projects exist for the organisation that holds several teams, products or stages that should not see or change each other's clusters, without splitting into several organisations and several invoices.
 
@@ -23,6 +23,12 @@ A project is not a cluster group. A [cluster group](/guides/roles-and-access#clu
 
 The third row holds the **shared kinds**. Each credential, registry, vault, bucket, variable, notification route or DNS zone is either **in one project**, where only that project sees and uses it, or **organisation-wide** (no project), where every project sees and uses it. The ones you had before projects were released are organisation-wide. When you create a new one you choose **This project** or **Whole organisation**, and a move can change it later.
 
+For a [notification route](/guides/notification-routing#routes-per-project), the choice decides what it hears, not only who sees it:
+
+- **A route in a project** delivers only that project's notifications. A notification belongs to the project of the thing it is about: the cluster, application, pipeline run, repository, ticket, automation, workspace, incident or environment.
+- **An organisation-wide route** delivers every project's notifications, plus the organisation's own, such as billing.
+- **A route created without a choice** is in the project the request that created it acted in: in the console before the form asked, the project its creator was in at the time; through the API without `project_id`, the token's pin, the project `X-Ankra-Project-Id` names, or otherwise the Default project (the oldest project they reach, for a project-only owner or member; see [Your current project](#your-current-project)). Such a route delivers only that project's notifications. If it should hear everything, move it to the whole organisation. A route from before projects were released, or created while the organisation has projects off, has no project and is organisation-wide.
+
 Reading an organisation-wide resource needs only the ordinary read permission. Changing, revealing or deleting one needs the matching permission held **on the organisation**: a role assigned in a project can create, change and delete that project's own credentials and variables, and can read the organisation-wide ones, but cannot change them. The refusal says so: `403 Organisation-wide resources require an organisation-level grant`.
 
 ## The Default project
@@ -36,13 +42,16 @@ A project has a name (up to 128 characters), a short name or slug (`a-z`, `0-9` 
 Every request acts in one project. It is resolved once, when the request is authenticated, in this order:
 
 1. **The token's pin.** A token minted in a project stays in it. See [Tokens and projects](#tokens-and-projects).
-2. **The `X-Ankra-Project-Id` header** on a bearer-token request, naming a project of the current organisation by id. An id that is not a project of this organisation is refused with `403 Project not found in this organisation` - a `403` rather than a `404`, so the answer is the same whether the id belongs to another organisation or to nothing - and a pinned token that names a different project is refused outright.
-3. **Your current project** in this organisation. Each organisation you belong to remembers its own current project, and switching it is server-side, like switching organisations: after a switch, every surface - console, API, CLI, MCP - reads and writes in the new project.
+2. **The `X-Ankra-Project-Id` header** on a bearer-token request, naming a project of the current organisation by id. An id that is not a project of this organisation is refused with `403 Project not found in this organisation` - a `403` rather than a `404`, so the answer is the same whether the id belongs to another organisation or to nothing - and a pinned token that names a different project is refused outright. A project you do not reach is refused the same way, and an MCP token that sends the header is refused.
+3. **For a console session, your current project** in this organisation. Each organisation you belong to remembers its own current project, and switching it is server-side, like switching organisations: every browser you are signed in on follows.
+4. **For a token, the Default project.** A token with no pin and no header never follows anyone's current project, so a switch in the console cannot move a CI job or a running session. A project-only member's token acts in the oldest project they reach.
+
+The CLI sends the project it saved with `ankra project switch` as that header, so it stays there until you switch again on that machine or run `ankra org switch`. See [Ankra CLI](/integrations/ankra-cli#projects).
 
 Switch with the project switcher beside the organisation switcher in the console, with `ankra project switch <name>`, or with `POST /api/v1/org/projects/switch`. `GET /api/v1/org/projects/current` tells you where you are, and `GET /api/v1/org/projects` lists the projects you can reach, each with `is_current` and `is_default`.
 
 <Tip>
-Older CLIs, Terraform and scripts that send no project header run in the current project of the token's owner, the same project that person sees in the console. There is no separate fallback for them: if they stop seeing a cluster, that person's current project is not the cluster's project, or an administrator has moved the cluster.
+Older CLIs, Terraform and scripts that send no project header run in the Default project, whatever the token's owner has selected in the console. If they cannot see a cluster, it is in another project: send `X-Ankra-Project-Id`, or use a token pinned to that project.
 </Tip>
 
 ## Roles at project scope
@@ -58,10 +67,10 @@ Creating, renaming, deleting and moving between projects needs `projects.manage`
 A member's organisation role is a floor that reaches every project: a `viewer` on the organisation sees every project, read-only, whatever else is assigned. To give someone one project and nothing else, invite them with the membership role **Project only**. It holds nothing organisation-wide:
 
 - The member reaches only the projects they are assigned a role in - `admin`, `operator`, `member` or `viewer` in that project - and sees nothing of the others.
-- They can never hold an organisation-level permission: members, billing, tokens, the audit log and organisation settings stay out of reach whatever role they are given in a project.
-- When they sign in they land in the first project they reach.
+- They can never hold an organisation-level permission: members, billing, other members' tokens, the audit log and organisation settings stay out of reach whatever role they are given in a project.
+- When they sign in they land in their current project if they still reach it, otherwise in the first project they reach, oldest first.
 
-Invitations and the **People** page offer **Project only** beside the organisation roles, and `ankra org invite <email> --role project --project <project> --project-role operator` invites one from the CLI (`--project-role` is `admin`, `operator`, `member` or `viewer`, `member` by default). Change a member to or from it on their row in People. A project-only member whose last project assignment is removed can sign in but reaches nothing until they are assigned again.
+Invitations and the **People** page offer **Project only** beside the organisation roles, and `ankra org invite <email> --role project --project <project> --project-role operator` invites one from the CLI (`--project-role` is `admin`, `operator`, `member` or `viewer`, `member` by default). Change a member to or from it on their row in People. A project-only member whose last project assignment is removed can still sign in, but every request, the console's own `/auth/whoami` included, answers `403 You are not assigned to any project in this organisation` until they are assigned again.
 
 <Warning>
 Ankra Cloud console access needs organisation-wide membership for now. A project-only member who opens the Ankra Cloud console is refused rather than shown the whole account. Everything in the Ankra platform itself works for them.
@@ -69,13 +78,13 @@ Ankra Cloud console access needs organisation-wide membership for now. A project
 
 ## Tokens and projects
 
-A token is **pinned** to a project when it is minted with one: an MCP token or a [service token](/guides/service-tokens) created in the console is pinned to the project chosen in the create dialog, which defaults to the project you are working in; `ankra tokens create --project <name>` pins from the CLI; and any token minted by a pinned token, or by a project-only member, is pinned to that project. A pinned token:
+A token is **pinned** to a project when it is minted with one: an MCP token or a [service token](/guides/service-tokens) created in the console is pinned to the project chosen in the create dialog, which defaults to the project you are working in; `ankra tokens create --project <name>` pins from the CLI; and any token minted by a pinned token is pinned to that project. A pinned token:
 
-- reads and writes in that project only, however the request is phrased - `project_id=all` on a cost route and `X-Ankra-Project-Id` naming another project are both refused;
+- reads and writes in that project only, however the request is phrased - `project_id=all` on a cost or Security Center route and `X-Ankra-Project-Id` naming another project are both refused;
 - cannot switch organisations either, as before;
 - stops authenticating, with `403 The project this token is pinned to no longer exists`, if its project is deleted. Mint a new one in the project that replaced it.
 
-Tokens minted before projects were released, and REST tokens minted without a project, are not pinned. A personal REST token follows its owner's current project and accepts `X-Ankra-Project-Id`; an unpinned service token acts in the project the header names and otherwise in the Default project. See [API tokens](/reference/tokens).
+Tokens minted before projects were released, and REST tokens minted without a project, are not pinned. A personal REST token and an unpinned service token both act in the project `X-Ankra-Project-Id` names and otherwise in the Default project; neither follows a switch in the console. An MCP token minted while the organisation has projects is pinned to the project it was created in. One minted before that is not pinned and never follows a switch: for an organisation-wide member it acts in the Default project whatever its owner switches to, and a project-only member's acts in the oldest project they reach. A project-only member's REST token minted without a project is not pinned either, and reaches only the projects they do. See [API tokens](/reference/tokens).
 
 ## Moving resources between projects
 
@@ -105,7 +114,7 @@ A project can be deleted only once nothing is in it: every cluster, application 
 
 ## Cost by project
 
-Cost is metered per project, so a report for a month in which a cluster moved shows its cost split between the two projects. The Cost pages filter by project, and the fleet view shows **By project**: each project's run rate and cluster count, with an **unattributed** bucket for spend no project can claim, such as waste found on a credential rather than a cluster. The projects reconcile to the fleet total only together with that bucket.
+Cost is metered per project, so a report for a month in which a cluster moved shows its cost split between the two projects. The Cost pages filter by project, and the fleet view shows **By project**: each project's run rate and cluster count, with an **unattributed** bucket for spend no project can claim, such as waste found on an organisation-wide credential rather than a cluster. The projects reconcile to the fleet total only together with that bucket.
 
 Every cost route and tool takes `project_id`: a project id for one project, `all` for the whole organisation, and nothing for your current project. Cost budgets take a `project` scope, and the cost autopilot takes per-project defaults between the organisation's policy and a cluster's own override. From the CLI, the global `--project` flag reads another project, `--all-projects` on the fleet cost commands reads the whole organisation, and `ankra org usage --group-by project` gives the showback. [Cloud Cost](/platform/cloud-cost#by-project) has the detail.
 
@@ -115,11 +124,13 @@ Billing is never split. The invoice stays one per organisation. The **By project
 
 - Bearer requests name a project for one call with `X-Ankra-Project-Id: <project-id>`, as described under [Your current project](#your-current-project).
 - Portal links Ankra hands you - in notifications, AI answers and MCP results - carry `?project=<project-id>` beside `?org=`, so a link to a cluster in another project opens in that project and offers to switch you to it. See [Portal URLs](/platform/portal-urls).
+- [Managed services](/concepts/managed-services#managed-services-and-projects) belong to their cluster's project, so listings and reads follow the project of the request.
+- The [Security Center](/guides/cluster-security#which-project-a-read-covers) reads the project of the request: findings, bills of materials and posture belong to a project through their cluster. Its reads take the same `project_id` as the cost routes, and `--all-projects` on most `ankra security` reads covers the whole organisation. The compliance framework scores, the compliance report and evidence deliveries stay the organisation's.
 - The [MCP server](/platform/mcp-server) and the AI Assistant act in the current project of the token or session. `list_projects` and `get_current_project` say where a session is, `move_cluster_to_project` and `move_application_to_project` are the moves, `get_organisation` reports the current project, and the cost tools take the same `project_id` as the routes. See [MCP Tools](/platform/mcp-tools#projects).
 
 ## Ankra Cloud
 
-For organisations that also use [Ankra Cloud](/guides/ankra-cloud-clusters), the platform is the source of truth for projects and the Cloud keeps a mirror: it learns the project list and each member's reach when they sign in, and between sign-ins the platform pushes every change. Servers the platform creates for a cluster carry the project in the `platform.ankra.io/project-id` label beside the cluster label. Projects are never created, renamed or deleted from the Cloud, and a project-only member is refused there for now.
+For organisations that also use [Ankra Cloud](/guides/ankra-cloud-clusters), the platform is the source of truth for projects, and Ankra Cloud does not scope its resources by project yet. Projects are never created, renamed or deleted from the Cloud, and a project-only member is refused in its console for now. A [private zone](/guides/private-proxied-domains#limit-a-zone-to-one-project) can name a project: the Cloud relay asks the platform who may enter, so a project-only member can open a service in that zone without Cloud console access. Servers the platform creates for a cluster carry the cluster's project in the `platform.ankra.io/project-id` label beside the cluster label.
 
 ## Related
 

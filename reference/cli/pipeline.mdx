@@ -463,18 +463,27 @@ Show a pipeline step's output.
 A step that has already concluded prints its complete log in one shot -
 `--follow` does nothing extra for it, since there is nothing left to produce.
 Its archived log is read when the run has one; archiving needs a ready backup
-vault, and when there is none the command replays the step's output from the
-platform's retained log stream instead and stops when that runs out. A log
-still being archived - asked for the moment its step ended - is waited for,
-for up to a minute, before the command falls back to that replay; it exits 5
-only when neither copy can be read.
+vault, and when there is none, or archiving the log failed, the command
+replays the step's output from the platform's retained log stream instead and
+stops when that runs out. A log still being archived - asked for the moment
+its step ended - is waited for, for up to a minute, before the command falls
+back to that replay; it exits 5 only when neither copy can be read. A replay
+the stream breaks off part way exits 1, since its output is incomplete.
 
 A step that is still running is followed over the live log stream: without
 `--follow`, the command tails the step until it concludes and then stops; with
-`--follow` it keeps reconnecting through a dropped stream instead of giving up.
-A live connection starts from the moment it connects unless you pass
-`--replay`, which asks the platform for the output the step already produced
-first.
+`--follow` it keeps reconnecting through a dropped stream instead of giving up,
+resuming after the last line it printed and waiting longer after each failed
+connection. A live connection starts from the moment it connects unless you
+pass `--replay`, which asks the platform for the output the step already
+produced first.
+
+A dropped stream never exits 0 with part of the output missing. One that
+drops while the step is still running exits 1 without `--follow`, and with
+`--follow` after 10 connections in a row fail, both saying the output is
+incomplete and how to reopen it. One that drops as the step concludes is
+finished from the platform's retained log stream, after the last line
+printed, so no section is lost.
 
 A step that has not started yet has no log stream. With `--follow` the command
 waits for it - saying what it is blocked on - and attaches as soon as the
@@ -1186,6 +1195,11 @@ requests by itself; 'shadow' only records which ones it would add, and 'list'
 shows its latest decisions. A pull request based on another pull request's
 branch rides on that pull request's entry, shown as "(on #N)".
 
+'`--auto-admit-criterion`' says what auto-admit waits for: green, the default,
+waits for a pull request's own run to pass, and ready adds it when it is marked
+ready, before that run has passed. 'ankra pipeline train enable `--help`' has the
+details and the protected paths that keep the green rule at ready.
+
 The train merges under the Ankra GitHub App's identity, so adding or removing
 a pull request needs pipelines.operate and, on top of it, one of: you are an
 organisation administrator, you opened the pull request, or you have write
@@ -1240,10 +1254,60 @@ ankra pipeline train disable [flags]
 
 ## ankra pipeline train enable
 
-Switch the merge train on
+Switch the merge train on and set how it runs. A flag you leave out keeps its
+current value.
+
+`--auto-admit` off|shadow|on decides whether the train adds pull requests by
+itself. shadow only records which ones it would add.
+
+`--auto-admit-criterion` green|ready_shadow|ready says what auto-admit waits for
+once it is on. Every other auto-admit rule applies under all three: a draft, an
+ankra:hold label or a blocked review keeps a pull request out.
+
+```text
+green         A pull request enters once its own run has passed. Every
+              repository's default.
+ready_shadow  Still enters at green, and records which pull requests ready
+              would have added while their own run was going, as
+              ready_shadow_admit in 'ankra pipeline train list'. Use it to
+              read what ready would do first.
+ready         A pull request enters when it is marked ready, before its own
+              run has passed, unless a step of that run already failed or
+              GitHub says it does not merge cleanly. If its own run fails
+              before its car has passed, it leaves the train. A pull request
+              that changes a protected path, or whose list of changes could
+              not be read in full, keeps the green rule and waits for its own
+              run to pass.
+```
+
+At ready the car's run is the only run that has to pass before the merge, so
+use it only once this repository's cars run everything its pull request runs
+do. Going back to green leaves the entries already in the train where they are.
+
+`--auto-admit-protected-paths` &lt;glob,...&gt; sets the paths that keep the green rule
+at ready: at most 50 GitHub-style patterns of at most 256 characters, where the
+last matching pattern wins and a leading ! excludes.
+`--auto-admit-protected-paths-default` restores the default list, alembic/**,
+deploy/charts/*/values.yaml and deploy/charts/*/values.schema.json.
+`--auto-admit-protected-paths-none` protects nothing, so migrations and deploy
+values enter at ready too. An empty `--auto-admit-protected-paths` is refused.
+
+A service account token may set green or ready_shadow. It may not set ready or
+change the protected paths: those need a human member, and the platform refuses
+the token with its reason.
 
 ```bash
 ankra pipeline train enable [flags]
+```
+
+**Examples**
+
+```bash
+ankra pipeline train enable --max-cars 4
+ankra pipeline train enable --auto-admit on --auto-admit-criterion ready_shadow
+ankra pipeline train enable --auto-admit-criterion ready
+ankra pipeline train enable --auto-admit-protected-paths 'alembic/**,deploy/**'
+ankra pipeline train enable --auto-admit-protected-paths-default
 ```
 
 **Flags**
@@ -1251,7 +1315,11 @@ ankra pipeline train enable [flags]
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--application` |   | Application name or id whose pipeline to act on |
-| `--auto-admit` |   | Whether the train puts green pull requests in by itself: off, shadow (only records what it would admit) or on; omitted keeps the current mode |
+| `--auto-admit` |   | Whether the train puts pull requests in by itself: off, shadow (only records what it would admit) or on; omitted keeps the current mode |
+| `--auto-admit-criterion` |   | What auto-admit waits for: green (its own run passed), ready_shadow (green, and records what ready would add) or ready (marked ready, before its own run passed); omitted keeps the current one |
+| `--auto-admit-protected-paths` | `[]` | Glob patterns, comma-separated, that keep the green rule at ready; omitted keeps the current list |
+| `--auto-admit-protected-paths-default` | `false` | Restore the default protected paths |
+| `--auto-admit-protected-paths-none` | `false` | Protect no path, so migrations and deploy values enter at ready too |
 | `--max-cars` | `1` | How many pull requests are tested at once (1-8), each stacked on the ones ahead of it |
 | `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
 | `--repository` |   | Pipeline repository id to act on (mutually exclusive with `--application`) |

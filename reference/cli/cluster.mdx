@@ -499,15 +499,26 @@ builder - pulled on every node pipeline steps can land on, so a node that
 just joined pulls them as it joins rather than while a step waits: off (the
 default) or on.
 
+The step workspaces setting decides whether a pipeline that declares
+workspace.mode: per_step gets a workspace for each step, so its steps can run
+on different nodes, rather than one volume that keeps the whole run on one
+node: off (the default), shadow (recorded, nothing changes) or on.
+
+The Ankra Workspace class is the storage class the cluster's Ankra Workspaces
+cut their volume from, when they cannot share the one pipeline steps use. Left
+empty, they inherit it.
+
 ## ankra cluster agent ci get
 
 Show the stored worker count, storage class and placement, the agent version
 that has to honour them, whether that agent currently advertises it can run
 pipeline steps, and how the last write was applied. The placement block names
 the node group, node selector, tolerations and mode, and how many Ready nodes
-it admits right now. The run reservation and image pre-pull modes are shown
-with whether the agent advertises each; a platform that predates a setting
-shows neither of its lines.
+it admits right now. The run reservation, image pre-pull and step workspaces
+modes are shown with whether the agent advertises each; a platform that
+predates a setting shows neither of its lines. The Ankra Workspace class is
+the storage class the cluster's Ankra Workspaces use, and says when they
+inherit it; a platform that predates it shows no such line.
 
 An agent that has not yet re-rendered its release reports pipeline steps as
 not advertised even with a non-zero worker count stored: the capability is
@@ -539,6 +550,21 @@ class its step workspaces are carved from, and where its pipeline pods run.
 its agent and everything else it does. `--storage-class` is only sent when you
 pass it, so setting the worker count alone keeps the storage class already
 stored; pass an empty value to fall back to the cluster's default class.
+
+`--storage-class` reaches two things at different times. Pipeline steps take it
+at the agent's next re-render. Ankra Workspaces on the cluster that have no
+workspace class of their own read it at their next use, so changing it replaces
+each of them then, and whatever runs in one stops. An Ankra Workspace stays off
+the nodes pipeline steps run on, so a class only those nodes can use would leave
+it Pending for good.
+
+`--ankra-workspace-storage-class` gives the cluster's Ankra Workspaces a class of
+their own, so that cannot happen. To move pipeline steps to such a class with
+no workspace replaced, first pass the class the workspaces use now, which
+changes nothing for them, and then change `--storage-class`. Naming a different
+class replaces each workspace at its next use. It reaches no pipeline step and
+restarts no agent. Pass an empty value to inherit `--storage-class` again; a
+workspace is replaced then if that is a different class.
 
 `--workers` is the agent's CI slots: how many pipeline steps it watches at
 once. A slot is not a node; the nodes steps run on come from the cluster's
@@ -591,6 +617,19 @@ next step dispatched. Each node keeps about 0.9 GB of images it would
 otherwise pull on demand. It needs an agent that advertises image pre-pull;
 off (the default) removes it with the next step dispatched.
 
+`--step-workspaces` off|shadow|on decides whether a pipeline that declares
+workspace.mode: per_step gets a workspace for each step, so its steps can run
+on different nodes, rather than one volume that keeps the whole run on one
+node. off (every cluster's default) runs every pipeline on the shared volume,
+whatever it declares. shadow still does, and records the mode each per_step
+run would have taken under on: use it to check a cluster first. on gives each
+step its own workspace; it needs an agent that advertises step workspaces and
+a ready backup vault to hand files between steps through, and a run without
+either stays on the shared volume. A pipeline that does not declare per_step
+never changes. A run takes its mode at its first step, with no agent restart,
+and keeps it, so off is the way back for new runs and a run already started
+finishes in the mode it has.
+
 `--build-apparmor-profile` &lt;name&gt; runs the rootless image builder under a
 Localhost AppArmor profile installed on the cluster's nodes under that name.
 On nodes whose container runtime confines the builder with its default
@@ -614,11 +653,13 @@ ankra cluster agent ci set [flags]
 ankra cluster agent ci set
 ankra cluster agent ci set --workers 50 --storage-class proxmox-csi
 ankra cluster agent ci set --workers 0 --cluster edge-01
+ankra cluster agent ci set --ankra-workspace-storage-class ankra-ci-disposable --cluster ci-01
 ankra cluster agent ci set --node-group pipelines
 ankra cluster agent ci set --node-selector pool=ci --toleration dedicated=ci:NoSchedule --placement preferred
 ankra cluster agent ci set --clear-placement
 ankra cluster agent ci set --run-reservation shadow --cluster ci-01
 ankra cluster agent ci set --image-prepull on --cluster ci-01
+ankra cluster agent ci set --step-workspaces shadow --cluster ci-01
 ankra cluster agent ci set --build-apparmor-profile ankra-rootless-buildkit --cluster ci-01
 ```
 
@@ -626,6 +667,7 @@ ankra cluster agent ci set --build-apparmor-profile ankra-rootless-buildkit --cl
 
 | Flag | Default | Description |
 |------|---------|-------------|
+| `--ankra-workspace-storage-class` |   | Storage class for the cluster's Ankra Workspaces, apart from pipeline steps; a different class replaces each workspace on next use; pass empty to inherit `--storage-class` (omit the flag to keep the stored value) |
 | `--build-apparmor-profile` |   | Node-installed AppArmor profile the rootless image builder runs under (Localhost); pass empty to use the runtime's default (omit the flag to keep the stored value) |
 | `--clear-placement` | `false` | Remove the cluster's CI placement |
 | `--image-prepull` |   | Image pre-pull: off (default) pulls the platform's step images on demand, on keeps them pulled on every node pipeline steps can land on |
@@ -634,7 +676,8 @@ ankra cluster agent ci set --build-apparmor-profile ankra-rootless-buildkit --cl
 | `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
 | `--placement` |   | Placement mode: required (default) keeps pipeline pods on the selected nodes, preferred favours them |
 | `--run-reservation` |   | Run reservation: off (default) reserves nothing, shadow sizes and records each run's reservation without holding it, on holds a run's room on its node between its steps |
-| `--storage-class` |   | Storage class for pipeline step workspaces; pass empty to use the cluster default (omit the flag to keep the stored value) |
+| `--step-workspaces` |   | Step workspaces: off (default) runs every pipeline on one shared volume, shadow records the mode each per_step run would take without changing it, on gives each step of a per_step pipeline its own workspace |
+| `--storage-class` |   | Storage class for pipeline step workspaces: pipeline steps take it at the next agent re-render, and Ankra Workspaces on the cluster that have no workspace class of their own are replaced on next use; pass empty to use the cluster default (omit the flag to keep the stored value) |
 | `--toleration` | `[]` | Taint every pipeline pod tolerates, as key[=value]:Effect with Effect NoSchedule, PreferNoSchedule or NoExecute (repeatable) |
 | `--workers` | `0` | CI slots: pipeline steps the agent watches at once, not nodes (nodes come from the node group autoscaler); up to 128 on agents that support live resize, 32 otherwise; 0 disables the scheduler; omitted with no other flag on a cluster with pipeline steps off, 50 |
 
@@ -1037,6 +1080,7 @@ ankra cluster ankracloud create [flags]
 | `--etcd-node-count` | `0` | External etcd node count, 3 or 5 (server default: 3) |
 | `--etcd-plan` |   | External etcd server plan (required with `--etcd-topology` external) |
 | `--etcd-topology` |   | etcd topology: stacked or external (server default: stacked) |
+| `--gateway-api` | `false` | Also serve the Kubernetes Gateway API from the networking stack's Traefik, next to Ingress: installs the Gateway API CRDs, a GatewayClass named traefik and a shared Gateway named traefik-gateway (HTTP on Traefik's web entry point, routes from every namespace), and external-dns publishes HTTPRoute hostnames. Requires the networking stack (default off) |
 | `--gitops-branch` |   | GitOps branch (server default: master) |
 | `--gitops-credential-name` |   | GitOps credential name (optional) |
 | `--gitops-repository` |   | GitOps repository URL (optional) |
@@ -1134,6 +1178,32 @@ ankra cluster ankracloud nodes cloud-init-log <cluster_id|name> <node_id> [flags
 | Flag | Default | Description |
 |------|---------|-------------|
 | `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+
+## ankra cluster ankracloud nodes diagnose
+
+Dispatch the platform's read-only node diagnose job and wait for its report:
+over the bastion SSH lane it snapshots the node's OS-level state - the
+Kubernetes service unit and its journal, disk, memory, uptime, the kernel log
+and the firewall path to the API server - and names the symptoms it finds.
+Nothing on the node is changed. This is what to reach for when a node is
+NotReady or its kubelet stopped posting status, below what 'cluster get' can
+see. The same diagnosis the Ankra assistant runs as ssh_diagnose_node.
+
+The platform waits up to two minutes for the job; a slower run hands back the
+operation id to poll with 'cluster operations list', and repeated calls attach
+to the run already in flight. Find node ids with 'nodes list'. Needs the
+clusters.operate permission on the cluster.
+
+```bash
+ankra cluster ankracloud nodes diagnose <cluster_id|name> <node_id> [flags]
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+| `--timeout` | `3m0s` | Maximum time to wait for the diagnosis report |
 
 ## ankra cluster ankracloud nodes get
 
@@ -1235,6 +1305,7 @@ ankra cluster ankracloud preflight [flags]
 | `--etcd-node-count` | `0` | External etcd node count, 3 or 5 (server default: 3) |
 | `--etcd-plan` |   | External etcd server plan (required with `--etcd-topology` external) |
 | `--etcd-topology` |   | etcd topology: stacked or external (server default: stacked) |
+| `--gateway-api` | `false` | Also serve the Kubernetes Gateway API from the networking stack's Traefik, next to Ingress: installs the Gateway API CRDs, a GatewayClass named traefik and a shared Gateway named traefik-gateway (HTTP on Traefik's web entry point, routes from every namespace), and external-dns publishes HTTPRoute hostnames. Requires the networking stack (default off) |
 | `--gitops-branch` |   | GitOps branch (server default: master) |
 | `--gitops-credential-name` |   | GitOps credential name (optional) |
 | `--gitops-repository` |   | GitOps repository URL (optional) |
@@ -1645,6 +1716,7 @@ ankra cluster aws create [flags]
 | `--etcd-node-count` | `0` | External etcd node count, 3 or 5 (server default: 3) |
 | `--etcd-topology` |   | etcd topology: stacked or external (server default: stacked) |
 | `--etcd-type` |   | External etcd instance type (server default: t3.medium) |
+| `--gateway-api` | `false` | Also serve the Kubernetes Gateway API from the networking stack's Traefik, next to Ingress: installs the Gateway API CRDs, a GatewayClass named traefik and a shared Gateway named traefik-gateway (HTTP on Traefik's web entry point, routes from every namespace), and external-dns publishes HTTPRoute hostnames. Requires the networking stack (default off) |
 | `--gitops-branch` |   | GitOps branch (server default: master) |
 | `--gitops-credential-name` |   | GitOps GitHub credential name; when set with `--gitops-repository`, the generated stack is committed to Git |
 | `--gitops-repository` |   | GitOps repository (owner/repo) the generated stack is committed to |
@@ -1765,6 +1837,32 @@ ankra cluster aws nodes cloud-init-log <cluster_id|name> <node_id> [flags]
 |------|---------|-------------|
 | `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
 
+## ankra cluster aws nodes diagnose
+
+Dispatch the platform's read-only node diagnose job and wait for its report:
+over the bastion SSH lane it snapshots the node's OS-level state - the
+Kubernetes service unit and its journal, disk, memory, uptime, the kernel log
+and the firewall path to the API server - and names the symptoms it finds.
+Nothing on the node is changed. This is what to reach for when a node is
+NotReady or its kubelet stopped posting status, below what 'cluster get' can
+see. The same diagnosis the Ankra assistant runs as ssh_diagnose_node.
+
+The platform waits up to two minutes for the job; a slower run hands back the
+operation id to poll with 'cluster operations list', and repeated calls attach
+to the run already in flight. Find node ids with 'nodes list'. Needs the
+clusters.operate permission on the cluster.
+
+```bash
+ankra cluster aws nodes diagnose <cluster_id|name> <node_id> [flags]
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+| `--timeout` | `3m0s` | Maximum time to wait for the diagnosis report |
+
 ## ankra cluster aws nodes get
 
 Show full spec and metadata for a single node
@@ -1848,6 +1946,7 @@ ankra cluster aws preflight [flags]
 | `--etcd-node-count` | `0` | External etcd node count, 3 or 5 (server default: 3) |
 | `--etcd-topology` |   | etcd topology: stacked or external (server default: stacked) |
 | `--etcd-type` |   | External etcd instance type (server default: t3.medium) |
+| `--gateway-api` | `false` | Also serve the Kubernetes Gateway API from the networking stack's Traefik, next to Ingress: installs the Gateway API CRDs, a GatewayClass named traefik and a shared Gateway named traefik-gateway (HTTP on Traefik's web entry point, routes from every namespace), and external-dns publishes HTTPRoute hostnames. Requires the networking stack (default off) |
 | `--gitops-branch` |   | GitOps branch (server default: master) |
 | `--gitops-credential-name` |   | GitOps GitHub credential name; when set with `--gitops-repository`, the generated stack is committed to Git |
 | `--gitops-repository` |   | GitOps repository (owner/repo) the generated stack is committed to |
@@ -2536,12 +2635,30 @@ have to filter by eye.
 Kinds outside the built-in set need `--group` (and sometimes `--api-version`),
 exactly like 'cluster get resources'.
 
+`--managed-fields` reads the object live from the cluster and adds who last
+wrote it: each field manager with its operation, subresource and time. It is
+how to see what resized a pod in place (subresource "resize"), scaled a
+workload or changed its spec. Kubernetes keeps one entry per manager and
+subresource, so this is the most recent write of each, not a full history. The
+cached copy other reads are served from does not keep them, and -o json|yaml
+then carry them under object.metadata.managedFields.
+
+`--kubelet-config`, on a node, adds the kubelet's live configuration as the
+kubelet reports it on /configz: the values in force once its flags and config
+file were merged (eviction thresholds, reserved resources, image garbage
+collection, max pods), which the Node object does not carry. A kubelet the
+read cannot reach is reported with the reason in place of the configuration,
+never as an empty one; -o json|yaml carry it as kubelet_config, or
+kubelet_config_error.
+
 Examples:
 
 ```bash
 ankra cluster describe pod web-7d9f-2xkvp -n default
 ankra cluster describe deployment web -n default
 ankra cluster describe node worker-1
+ankra cluster describe pod web-7d9f-2xkvp -n default --managed-fields
+ankra cluster describe node worker-1 --kubelet-config
 ankra cluster describe pvc data-web-0 -n default -o json
 ```
 
@@ -2556,6 +2673,8 @@ ankra cluster describe <kind> <name> [flags]
 | `--api-version` |   | API version for a kind outside the built-in set (e.g. v1, v1beta1) |
 | `--cluster-scoped` | `false` | Treat a kind outside the built-in set as cluster-scoped (e.g. ClusterIssuer, ClusterPolicy); no `--namespace` is needed |
 | `--group` |   | API group for a kind outside the built-in set (e.g. cert-manager.io) |
+| `--kubelet-config` | `false` | On a node: add the kubelet's live configuration as it reports it on /configz |
+| `--managed-fields` | `false` | Read the object live and show who last wrote it: each field manager with its operation, subresource and time |
 | `-n`, `--namespace` |   | Kubernetes namespace |
 | `-o`, `--output` | `table` | Output format: table, json, yaml |
 | `--resource` |   | Exact API resource plural when a custom kind has an irregular plural (e.g. backuprepositories) |
@@ -2787,6 +2906,7 @@ ankra cluster digitalocean create [flags]
 | `--etcd-size` |   | Droplet size for dedicated etcd nodes when `--etcd-topology=external` (server default: s-2vcpu-4gb) |
 | `--etcd-topology` | `stacked` | etcd topology for kubeadm clusters: stacked (on control plane) or external (dedicated VMs) |
 | `--external-cloud-provider` | `true` | Install the DigitalOcean CCM and CSI (cloud-provider=external) for LoadBalancers and persistent volumes (default on; pass `--external-cloud-provider=false` to skip, which also disables `--include-networking`) |
+| `--gateway-api` | `false` | Also serve the Kubernetes Gateway API from the networking stack's Traefik, next to Ingress: installs the Gateway API CRDs, a GatewayClass named traefik and a shared Gateway named traefik-gateway (HTTP on Traefik's web entry point, routes from every namespace), and external-dns publishes HTTPRoute hostnames. Requires the networking stack (default off) |
 | `--gitops-branch` | `master` | GitOps branch to commit to |
 | `--gitops-credential-name` |   | GitOps GitHub credential name; when set with `--gitops-repository`, the generated digitalocean-cloud-provider stack is committed to Git (optional) |
 | `--gitops-repository` |   | GitOps repository (e.g. org/repo) to commit the generated stack to (optional) |
@@ -2844,6 +2964,32 @@ ankra cluster digitalocean nodes cloud-init-log <cluster_id|name> <node_id> [fla
 | Flag | Default | Description |
 |------|---------|-------------|
 | `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+
+## ankra cluster digitalocean nodes diagnose
+
+Dispatch the platform's read-only node diagnose job and wait for its report:
+over the bastion SSH lane it snapshots the node's OS-level state - the
+Kubernetes service unit and its journal, disk, memory, uptime, the kernel log
+and the firewall path to the API server - and names the symptoms it finds.
+Nothing on the node is changed. This is what to reach for when a node is
+NotReady or its kubelet stopped posting status, below what 'cluster get' can
+see. The same diagnosis the Ankra assistant runs as ssh_diagnose_node.
+
+The platform waits up to two minutes for the job; a slower run hands back the
+operation id to poll with 'cluster operations list', and repeated calls attach
+to the run already in flight. Find node ids with 'nodes list'. Needs the
+clusters.operate permission on the cluster.
+
+```bash
+ankra cluster digitalocean nodes diagnose <cluster_id|name> <node_id> [flags]
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+| `--timeout` | `3m0s` | Maximum time to wait for the diagnosis report |
 
 ## ankra cluster digitalocean nodes get
 
@@ -3023,8 +3169,16 @@ ankra cluster domain [cluster] [flags]
 
 Stage all changes in an ImportCluster YAML as drafts on the cluster
 without deploying anything. The local checks run first (the same ones as
-'ankra cluster apply `--dry-run`'), then each stack in the file is saved as a
-resource draft you can review, edit, and deploy from the Ankra stack builder.
+'ankra cluster apply `--dry-run`'), then the stacks in the file are saved as
+resource drafts you can review, edit, and deploy from the Ankra stack builder.
+
+The file lands whole or not at all: if the platform refuses any stack, it says
+everything it found and nothing is staged, so you fix the file and run the same
+command again. A stack that already has a draft is refused. `--replace` discards
+that draft and stages the file's version instead, including any edits made to
+the draft since it was staged, so it asks first; without a terminal to ask on,
+it needs `--yes`. A draft a data run is still waiting on, or one that is not yours
+to discard, is refused either way.
 
 If the cluster does not exist yet it is imported first without its stacks,
 since drafts can only be attached to an existing cluster; every stack in the
@@ -3042,6 +3196,8 @@ ankra cluster draft [flags]
 |------|---------|-------------|
 | `-f`, `--file` |   | Path to the ImportCluster YAML file to stage as drafts |
 | `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+| `--replace` | `false` | Discard the existing draft of each stack in the file, including edits made to it, and stage the file's version |
+| `-y`, `--yes` | `false` | Skip the `--replace` confirmation prompt |
 
 ## ankra cluster drain
 
@@ -3343,6 +3499,152 @@ ankra cluster exec cnpg-cluster-1 -n cnpg-database -c postgres --stdin -- psql -
 | `-n`, `--namespace` |   | Namespace of the pod (required) |
 | `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
 | `--stdin` | `false` | Forward your stdin to the command; it sees end-of-file when your input ends |
+
+## ankra cluster gateway-api
+
+The Traefik that Ankra installs as a cluster's ingress can also serve the
+Kubernetes Gateway API, next to Ingress: a GatewayClass named traefik, a shared
+Gateway named traefik-gateway (HTTP on Traefik's web entry point, routes from
+every namespace), a certificate from cert-manager, and HTTPRoute hostnames
+published by external-dns. Every Ingress keeps working.
+
+At create time the option is '`--gateway-api`' on the create command. This
+command turns it on for a cluster that already exists, or shows where that
+stands. The platform answers one plan for both: whether the option is recorded,
+where the Gateway API CRDs come from and whether they are established, what the
+Traefik and cert-manager values still need, and who moves the enable on next.
+
+Run without a subcommand it shows the plan, like 'status'. There is no
+'disable': to stop the shared Gateway later, set gateway.enabled: false in
+Traefik's values; routes and CRDs stay.
+
+```bash
+ankra cluster gateway-api [flags]
+```
+
+**Examples**
+
+```bash
+ankra cluster gateway-api
+ankra cluster gateway-api status --cluster prod -o json
+ankra cluster gateway-api enable --cluster prod
+ankra cluster gateway-api enable --cluster prod --yes --wait
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+
+## ankra cluster gateway-api enable
+
+Turn the Gateway API on for a cluster Ankra built. The platform records the
+option on the cluster, installs the Gateway API CRDs through a gateway-api-crds
+addon in the networking stack (or uses the ones the cluster already carries),
+and, once it reads them as established, writes the Gateway API settings into
+the Traefik and cert-manager values through the ordinary stack write: one
+GitOps commit on a GitOps-backed cluster, then one Traefik rollout. Values you
+wrote yourself are never changed: a key that says the opposite of what the
+option needs is reported as a conflict and nothing is written until you decide.
+
+Because it changes what the cluster's ingress serves, enable prints the plan
+and asks for confirmation first. `--yes` skips the question; without a terminal
+to ask on (a script, CI) it is required.
+
+The enable is idempotent and resumable. Without `--wait` it records the option
+and returns at once, saying what is next; run it again later to write the
+values once the CRDs are established, or check with 'status'. With `--wait` it
+follows the phase, repeats the enable when the values are next, and returns
+once the Gateway API is enabled. A passing platform fault while it follows (a
+5xx, a dropped connection, one request timing out) is tried again on the next
+poll; five in a row end the follow. `--timeout` bounds `--wait` and is refused
+without it. The verdict is the same with or without `--wait`.
+
+Exit codes:
+
+```text
+0  the Gateway API is on, or (without --wait) the option is recorded and
+   the enable is moving: waiting for the CRDs, the values next, or
+   Traefik and cert-manager applying them
+1  the option is recorded but the platform needs a person: a conflict in
+   the values, a failed CRD install or apply, a networking stack with no
+   Ankra-installed Traefik and cert-manager to write into, or a values
+   write whose GitOps push failed (the values reached the platform, the
+   repository does not carry them yet). The reason goes to stderr. Also
+   a refusal of the enable --wait repeats (the option stays recorded),
+   any request that failed, five failed requests in a row during --wait
+   (the enable keeps going), and a platform without this route
+2  no terminal to confirm on and no --yes, --timeout without --wait, or a
+   cluster Ankra did not build
+3  the cluster is not in the selected organisation
+4  the confirmation was declined
+5  --wait ran out of --timeout; the enable keeps going, run it again to
+   keep following it
+6  the credentials are missing, expired or rejected: run 'ankra login'
+7  your role lacks clusters.write
+8  the platform cannot take the option and nothing was changed: the
+   cluster has no Ankra-managed ingress to serve it (the plan reads "not
+   available"), or the platform refused this run's first enable, for
+   example while the cluster's cloud provider stack is still being created
+```
+
+```bash
+ankra cluster gateway-api enable [flags]
+```
+
+**Examples**
+
+```bash
+ankra cluster gateway-api enable
+ankra cluster gateway-api enable --cluster prod --yes
+ankra cluster gateway-api enable --cluster prod --yes --wait --timeout 30m
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+| `--timeout` | `20m0s` | How long `--wait` follows the enable before giving up (exit 5); refused without `--wait` |
+| `--wait` | `false` | Follow the enable until the Gateway API is enabled, the platform needs a person, or `--timeout` runs out |
+| `-y`, `--yes` | `false` | Skip the confirmation prompt (required when stdin is not a terminal) |
+
+## ankra cluster gateway-api status
+
+Show the platform's plan for the Gateway API on the cluster: whether the
+option is recorded, where the Gateway API CRDs come from and whether the
+platform reads them as established, what the Traefik and cert-manager values
+still need (with any key that says the opposite of what the option needs), the
+last apply of each, and the note saying who moves the enable on next.
+
+Reading Gateway API objects on the cluster afterwards takes the singular kind:
+'ankra cluster get resources gatewayclass `--group` gateway.networking.k8s.io'.
+
+-o json prints the platform's answer as it is.
+
+Exit codes: 0 when the plan was read, whatever it says (including "not
+available"); 2 for a cluster Ankra did not build; 3 when the cluster is not in
+the selected organisation; 6 when the credentials are missing, expired or
+rejected; 7 when your role cannot read the cluster's settings; 1 for any other
+failure, including a platform without this route.
+
+```bash
+ankra cluster gateway-api status [flags]
+```
+
+**Examples**
+
+```bash
+ankra cluster gateway-api status
+ankra cluster gateway-api status --cluster prod -o json
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
 
 ## ankra cluster get
 
@@ -3661,8 +3963,10 @@ ankra cluster get storageclasses [name] [flags]
 
 ## ankra cluster gitops
 
-Commands for inspecting which GitOps repository a cluster syncs from, and for
-listing and resolving the merge conflicts that pause its sync.
+Commands for inspecting which GitOps repository a cluster syncs from, for
+listing and resolving the merge conflicts that pause its sync, and for listing
+and deciding its preserved paths: files edited in Git that Ankra keeps instead
+of overwriting.
 
 ## ankra cluster gitops conflicts
 
@@ -3756,11 +4060,158 @@ ankra cluster gitops conflicts resolve --all --keep git --yes -o json
 | `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
 | `-y`, `--yes` | `false` | Skip the confirmation prompt (required when stdin is not a terminal) |
 
+## ankra cluster gitops preserved
+
+A preserved path is a file in the cluster's GitOps repository that Ankra did not
+write, for example a cluster file someone edited by hand. Ankra keeps Git's
+version instead of overwriting it, so Ankra's own later changes to that file
+(a new add-on, a chart version it rolled) do not reach Git until a person
+decides which version wins. Nothing is paused: the rest of the cluster keeps
+syncing. These are not merge conflicts, so 'ankra cluster gitops conflicts'
+does not list or decide them.
+
+'list' shows the preserved paths and how many differences each has, 'show'
+prints where one file's two versions differ, key by key, and 'resolve' records
+a decision that the next sync runs:
+
+```text
+--keep git      Ankra imports Git's version of the file, and the cluster
+                changes to match it: what only Ankra's version declares is
+                removed from the cluster.
+--keep ankra    Ankra writes its own version of the file into Git, over the
+                edit made there. --keep cluster means the same.
+```
+
+## ankra cluster gitops preserved list
+
+List the files Git and Ankra are divided on: each file's path, when it was
+detected, whether a decision is recorded, whether its content is withheld (and
+why), and how many differences the platform found between Git's version and
+Ankra's.
+
+If no cluster name is provided, uses the `--cluster` flag or the currently
+selected cluster. -o json|yaml prints the platform's answer as it is, including
+each file's two versions where the platform lists them.
+
+```bash
+ankra cluster gitops preserved list [cluster_name] [flags]
+```
+
+**Examples**
+
+```bash
+ankra cluster gitops preserved list
+ankra cluster gitops preserved list prod
+ankra cluster gitops preserved list prod -o json
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+
+## ankra cluster gitops preserved resolve
+
+Record which version of a preserved file wins. The next sync runs the decision;
+resolve triggers that sync.
+
+`--keep` is required, because either version discards the other:
+
+```text
+--keep git      Ankra imports Git's version of the file, and the cluster
+                changes to match it. Stacks, add-ons and settings that only
+                Ankra's version declares are removed from the cluster. The
+                import runs once every preserved path on the cluster has a
+                decision.
+--keep ankra    Ankra writes its own version of the file into Git, over the
+                edit made there. --keep cluster means the same. Refused for a
+                file holding SOPS-encrypted content, which would put plaintext
+                in Git in place of ciphertext.
+```
+
+resolve reads the file's current state from the platform first, so the decision
+is recorded over exactly the two versions it shows you (the platform refuses it
+if either changed in between). It then lists what the choice discards, from the
+platform's key-by-key difference, and asks for confirmation. `--yes` skips the
+question; without a terminal to ask on (a script, CI) it is required.
+
+`--withdraw` removes a recorded decision so the file awaits one again. It changes
+nothing in Git or on the cluster, so it asks nothing; a decision the platform
+already started running is not recalled.
+
+Deciding needs permission to change the cluster's configuration
+(clusters.write). The cluster is the `--cluster` flag or the currently selected
+cluster.
+
+```bash
+ankra cluster gitops preserved resolve <path> [flags]
+```
+
+**Examples**
+
+```bash
+ankra cluster gitops preserved resolve clusters/prod/prod.yaml --keep ankra
+ankra cluster gitops preserved resolve clusters/prod/prod.yaml --keep git --cluster prod
+ankra cluster gitops preserved resolve clusters/prod/prod.yaml --keep ankra --yes -o json
+ankra cluster gitops preserved resolve clusters/prod/prod.yaml --withdraw
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--keep` |   | Which version to keep: 'git' (import Git's version; the cluster changes to match it) or 'ankra' (write Ankra's version into Git; 'cluster' means the same) |
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+| `--withdraw` | `false` | Withdraw the recorded decision, so the file awaits one again (changes nothing in Git or on the cluster) |
+| `-y`, `--yes` | `false` | Skip the confirmation prompt (required when stdin is not a terminal) |
+
+## ankra cluster gitops preserved show
+
+Show one preserved file: when it was detected, its decision, whether its content
+is withheld, and every difference the platform found between Git's version and
+Ankra's, key by key, read from Git's version to Ankra's:
+
+```text
+added      only Ankra's version has it
+removed    only Git's version has it
+changed    both have it, with different values
+reordered  both list the same members in another order
+```
+
+A value the platform does not show is printed as (masked): seeing values needs
+permission to reveal secrets on the cluster (kubernetes.secrets_reveal), and
+some files show no values to anyone. The platform lists at most 50 differences
+per file; the total is always given.
+
+The path is the full repository path, as 'ankra cluster gitops preserved list'
+prints it. The cluster is the `--cluster` flag or the currently selected cluster.
+
+```bash
+ankra cluster gitops preserved show <path> [flags]
+```
+
+**Examples**
+
+```bash
+ankra cluster gitops preserved show clusters/prod/prod.yaml
+ankra cluster gitops preserved show clusters/prod/prod.yaml --cluster prod -o json
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+
 ## ankra cluster gitops status
 
 Show the GitOps sync status of a cluster: the repository, branch, and
-credential it syncs from, the last synced commit, any pending commit or
-sync error, and any open merge conflicts pausing the sync.
+credential it syncs from, the last synced commit, the commit the cluster is
+in step with and Git's head as last checked, any pending commit or sync
+error, any open merge conflicts pausing the sync, and the files Git and the
+platform are divided on (preserved paths), with when each was detected and
+whether it is decided.
 
 If no cluster name is provided, uses the currently selected cluster.
 
@@ -4159,6 +4610,7 @@ ankra cluster hetzner create [flags]
 | `--etcd-server-type` |   | Server type for dedicated etcd nodes when `--etcd-topology=external` (server default: the cheapest x86 type the location can provision with at least 4 vCPU and 8 GB) |
 | `--etcd-topology` | `stacked` | etcd topology for kubeadm clusters: stacked (on control planes) or external (dedicated VMs) |
 | `--external-cloud-provider` | `true` | Install the Hetzner CCM and CSI (cloud-provider=external) for LoadBalancers and persistent volumes (default on; pass `--external-cloud-provider=false` to skip, which also disables `--include-networking`) |
+| `--gateway-api` | `false` | Also serve the Kubernetes Gateway API from the networking stack's Traefik, next to Ingress: installs the Gateway API CRDs, a GatewayClass named traefik and a shared Gateway named traefik-gateway (HTTP on Traefik's web entry point, routes from every namespace), and external-dns publishes HTTPRoute hostnames. Requires the networking stack (default off) |
 | `--gitops-branch` | `master` | GitOps branch to commit to |
 | `--gitops-credential-name` |   | GitOps GitHub credential name; when set with `--gitops-repository`, the generated hcloud stack is committed to Git (optional) |
 | `--gitops-repository` |   | GitOps repository (e.g. org/repo) to commit the generated stack to (optional) |
@@ -4232,6 +4684,32 @@ ankra cluster hetzner nodes cloud-init-log <cluster_id|name> <node_id> [flags]
 | Flag | Default | Description |
 |------|---------|-------------|
 | `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+
+## ankra cluster hetzner nodes diagnose
+
+Dispatch the platform's read-only node diagnose job and wait for its report:
+over the bastion SSH lane it snapshots the node's OS-level state - the
+Kubernetes service unit and its journal, disk, memory, uptime, the kernel log
+and the firewall path to the API server - and names the symptoms it finds.
+Nothing on the node is changed. This is what to reach for when a node is
+NotReady or its kubelet stopped posting status, below what 'cluster get' can
+see. The same diagnosis the Ankra assistant runs as ssh_diagnose_node.
+
+The platform waits up to two minutes for the job; a slower run hands back the
+operation id to poll with 'cluster operations list', and repeated calls attach
+to the run already in flight. Find node ids with 'nodes list'. Needs the
+clusters.operate permission on the cluster.
+
+```bash
+ankra cluster hetzner nodes diagnose <cluster_id|name> <node_id> [flags]
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+| `--timeout` | `3m0s` | Maximum time to wait for the diagnosis report |
 
 ## ankra cluster hetzner nodes get
 
@@ -4344,12 +4822,12 @@ ankra cluster hetzner workers <cluster_id|name> [flags]
 
 ## ankra cluster info
 
-Show details of a specific cluster.
+Show details of a specific cluster, named by its name or its id.
 
-If no name is provided, shows details for the currently selected cluster.
+If no cluster is given, shows details for the currently selected cluster.
 
 ```bash
-ankra cluster info [name] [flags]
+ankra cluster info [name|id] [flags]
 ```
 
 **Flags**
@@ -5272,6 +5750,11 @@ Run a range PromQL query against the cluster's Prometheus source.
 Provide either `--range` (a duration relative to now) or both `--start` and `--end`
 (Unix seconds). When `--step` is omitted a sensible step is chosen automatically.
 
+A series the platform returned fewer points of than the query produced is
+called out: the Points column reads "50 of 385", and a note on stderr says how
+far apart the returned points really are. Read such a series as a sketch, since
+a spike between two points is not in it.
+
 Examples:
 
 ```bash
@@ -5483,6 +5966,7 @@ ankra cluster morpheus create [flags]
 | `--etcd-node-count` | `3` | Number of dedicated etcd nodes when `--etcd-topology=external` (3 or 5) |
 | `--etcd-plan-id` | `0` | Service plan ID for dedicated etcd nodes when `--etcd-topology=external` (optional) |
 | `--etcd-topology` | `stacked` | etcd topology for kubeadm clusters: stacked (on control plane) or external (dedicated instances) |
+| `--gateway-api` | `false` | Also serve the Kubernetes Gateway API from the networking stack's Traefik, next to Ingress: installs the Gateway API CRDs, a GatewayClass named traefik and a shared Gateway named traefik-gateway (HTTP on Traefik's web entry point, routes from every namespace), and external-dns publishes HTTPRoute hostnames. Requires the networking stack (default off) |
 | `--group-id` | `0` | Morpheus group ID (required; see `ankra cluster morpheus groups`) |
 | `--include-dns` | `true` | Give the cluster its own subdomain under ankra.cc and install external-dns, so an ingress hostname under that subdomain gets its DNS record and TLS certificate with no manual setup. Scope: external-dns only manages the generated subdomain - ingress hosts on your own domains are ignored, and their DNS records stay yours to create (default on; pass `--include-dns=false` to skip) |
 | `--include-networking` | `true` | Install Traefik + cert-manager as Ankra-managed stacks for ingress (exposed via the built-in k3s service load balancer; default on) |
@@ -5921,6 +6405,10 @@ ankra cluster node-group upgrade <cluster_id|name> <group_name> <instance_type> 
 
 Commands to list, inspect, retry, and cancel executions and their steps.
 
+Every command that takes an execution id also accepts its first 6 or more
+characters. A short id is looked up among the most recent executions of the
+active cluster, or of the organisation when no cluster is selected.
+
 ## ankra cluster operations cancel
 
 Cancel one or more running executions
@@ -6316,6 +6804,7 @@ ankra cluster ovh create [flags]
 | `--etcd-node-count` | `3` | Number of dedicated etcd nodes when `--etcd-topology=external` (3 or 5) |
 | `--etcd-topology` | `stacked` | etcd topology for kubeadm clusters: stacked (on control planes) or external (dedicated VMs) |
 | `--external-cloud-provider` | `true` | Install the OpenStack CCM and Cinder CSI (cloud-provider=external) for LoadBalancers and persistent volumes (default on; pass `--external-cloud-provider=false` to skip, which also disables `--include-networking`) |
+| `--gateway-api` | `false` | Also serve the Kubernetes Gateway API from the networking stack's Traefik, next to Ingress: installs the Gateway API CRDs, a GatewayClass named traefik and a shared Gateway named traefik-gateway (HTTP on Traefik's web entry point, routes from every namespace), and external-dns publishes HTTPRoute hostnames. Requires the networking stack (default off) |
 | `--gateway-flavor-id` |   | Gateway instance flavor (server default: c3-4) |
 | `--gitops-branch` | `master` | GitOps branch to commit to |
 | `--gitops-credential-name` |   | GitOps GitHub credential name; when set with `--gitops-repository`, the generated ovh-cloud stack is committed to Git (optional) |
@@ -6375,6 +6864,59 @@ ankra cluster ovh nodes cloud-init-log <cluster_id|name> <node_id> [flags]
 | Flag | Default | Description |
 |------|---------|-------------|
 | `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+
+## ankra cluster ovh nodes console-log
+
+Read the newest lines of the node's serial console from the cloud
+provider's API, as a tracked read-only operation. It goes through neither the
+node over SSH nor the in-cluster agent, so it answers for a node that hung: a
+kernel soft lockup, hung-task warnings, an out-of-memory kill or a root
+filesystem gone read-only is often the last thing the console printed.
+Nothing on the node, the instance or the cluster's credentials changes.
+
+The platform returns at most the newest 1000 lines (96 KiB); `--lines` shows
+fewer. The log goes to stdout and the heading and notes to stderr, so the
+output pipes cleanly into grep or a file. Repeated calls attach to a read in
+flight or a recent one. Find node ids with 'nodes list'. Needs the
+clusters.operate permission on the cluster.
+
+```bash
+ankra cluster ovh nodes console-log <cluster_id|name> <node_id> [flags]
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--lines` | `0` | Show only the newest N lines (0 shows every line the platform returned) |
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+| `--timeout` | `2m0s` | Maximum time to wait for the console read |
+
+## ankra cluster ovh nodes diagnose
+
+Dispatch the platform's read-only node diagnose job and wait for its report:
+over the bastion SSH lane it snapshots the node's OS-level state - the
+Kubernetes service unit and its journal, disk, memory, uptime, the kernel log
+and the firewall path to the API server - and names the symptoms it finds.
+Nothing on the node is changed. This is what to reach for when a node is
+NotReady or its kubelet stopped posting status, below what 'cluster get' can
+see. The same diagnosis the Ankra assistant runs as ssh_diagnose_node.
+
+The platform waits up to two minutes for the job; a slower run hands back the
+operation id to poll with 'cluster operations list', and repeated calls attach
+to the run already in flight. Find node ids with 'nodes list'. Needs the
+clusters.operate permission on the cluster.
+
+```bash
+ankra cluster ovh nodes diagnose <cluster_id|name> <node_id> [flags]
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+| `--timeout` | `3m0s` | Maximum time to wait for the diagnosis report |
 
 ## ankra cluster ovh nodes get
 
@@ -6962,6 +7504,7 @@ ankra cluster proxmox create [flags]
 | `--etcd-instance-type` |   | Instance-size preset for dedicated etcd nodes when `--etcd-topology=external` (server default: px-medium) |
 | `--etcd-node-count` | `3` | Number of dedicated etcd nodes when `--etcd-topology=external` (3 or 5) |
 | `--etcd-topology` | `stacked` | etcd topology for kubeadm clusters: stacked (on control plane) or external (dedicated VMs) |
+| `--gateway-api` | `false` | Also serve the Kubernetes Gateway API from the networking stack's Traefik, next to Ingress: installs the Gateway API CRDs, a GatewayClass named traefik and a shared Gateway named traefik-gateway (HTTP on Traefik's web entry point, routes from every namespace), and external-dns publishes HTTPRoute hostnames. Requires the networking stack (default off) |
 | `--include-dns` | `true` | Give the cluster its own subdomain under ankra.cc and install external-dns, so an ingress hostname under that subdomain gets its DNS record and TLS certificate with no manual setup. Scope: external-dns only manages the generated subdomain - ingress hosts on your own domains are ignored, and their DNS records stay yours to create (default on; pass `--include-dns=false` to skip) |
 | `--include-networking` | `true` | Install Traefik + cert-manager as Ankra-managed stacks for ingress (exposed via the built-in k3s service load balancer; default on) |
 | `--kubernetes-version` |   | Kubernetes version (optional; see `ankra cluster kubeadm-versions` or `ankra cluster k3s-versions`) |
@@ -7412,6 +7955,7 @@ ankra cluster scaleway create [flags]
 | `--etcd-topology` |   | etcd topology: stacked or external (server default: stacked) |
 | `--etcd-type` |   | External etcd commercial type (server default: DEV1-M) |
 | `--gateway-allowed-ips` | `[]` | CIDRs allowed to reach the gateway bastion |
+| `--gateway-api` | `false` | Also serve the Kubernetes Gateway API from the networking stack's Traefik, next to Ingress: installs the Gateway API CRDs, a GatewayClass named traefik and a shared Gateway named traefik-gateway (HTTP on Traefik's web entry point, routes from every namespace), and external-dns publishes HTTPRoute hostnames. Requires the networking stack (default off) |
 | `--gateway-type` |   | Public Gateway type (server default: VPC-GW-S) |
 | `--include-dns` | `true` | Provision the DNS zone |
 | `--include-networking` | `true` | Provision the networking stack |
@@ -7555,6 +8099,32 @@ ankra cluster scaleway nodes cloud-init-log <cluster_id|name> <node_id> [flags]
 |------|---------|-------------|
 | `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
 
+## ankra cluster scaleway nodes diagnose
+
+Dispatch the platform's read-only node diagnose job and wait for its report:
+over the bastion SSH lane it snapshots the node's OS-level state - the
+Kubernetes service unit and its journal, disk, memory, uptime, the kernel log
+and the firewall path to the API server - and names the symptoms it finds.
+Nothing on the node is changed. This is what to reach for when a node is
+NotReady or its kubelet stopped posting status, below what 'cluster get' can
+see. The same diagnosis the Ankra assistant runs as ssh_diagnose_node.
+
+The platform waits up to two minutes for the job; a slower run hands back the
+operation id to poll with 'cluster operations list', and repeated calls attach
+to the run already in flight. Find node ids with 'nodes list'. Needs the
+clusters.operate permission on the cluster.
+
+```bash
+ankra cluster scaleway nodes diagnose <cluster_id|name> <node_id> [flags]
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+| `--timeout` | `3m0s` | Maximum time to wait for the diagnosis report |
+
 ## ankra cluster scaleway nodes get
 
 Show full spec and metadata for a single node
@@ -7630,6 +8200,7 @@ ankra cluster scaleway preflight [flags]
 | `--etcd-topology` |   | etcd topology: stacked or external (server default: stacked) |
 | `--etcd-type` |   | External etcd commercial type (server default: DEV1-M) |
 | `--gateway-allowed-ips` | `[]` | CIDRs allowed to reach the gateway bastion |
+| `--gateway-api` | `false` | Also serve the Kubernetes Gateway API from the networking stack's Traefik, next to Ingress: installs the Gateway API CRDs, a GatewayClass named traefik and a shared Gateway named traefik-gateway (HTTP on Traefik's web entry point, routes from every namespace), and external-dns publishes HTTPRoute hostnames. Requires the networking stack (default off) |
 | `--gateway-type` |   | Public Gateway type (server default: VPC-GW-S) |
 | `--include-dns` | `true` | Provision the DNS zone |
 | `--include-networking` | `true` | Provision the networking stack |
@@ -7899,7 +8470,7 @@ ankra cluster stacks delete <name> [flags]
 
 Deploy the pending draft of a stack on the active cluster: a stack that exists only as a draft (what a clone or a stack-profile instantiation leaves behind), or the draft of edits 'ankra cluster draft -f' or the stack builder left on a stack that is already deployed.
 
-The draft's contents are deployed exactly as they are stored. Review them first with 'ankra cluster stacks list &lt;stack name&gt;', and edit them in the stack builder if the clone warned that something has to change before it can come up.
+The draft's contents are deployed exactly as they are stored. Review them first with 'ankra cluster stacks show-draft &lt;stack name&gt;', and edit them in the stack builder if the clone warned that something has to change before it can come up.
 
 For a stack that is already deployed only the members the draft changes are written; members it does not mention keep running untouched.
 
@@ -7981,6 +8552,33 @@ ankra cluster stacks protect <stack> [flags]
 | `--timeout` | `2h0m0s` | Maximum time to wait when `--wait` is set |
 | `--vault` |   | Backup vault the restore points are written to (name or id, required) |
 | `--wait` | `false` | Wait for the operation to finish and report success or failure (default: submit and return immediately) |
+
+## ankra cluster stacks redeploy
+
+Re-run the deployment jobs of the members a redeploy of this stack picks on the active cluster. The result lists the operations it started and every member it skipped, with the reason.
+
+`--force` is for a manifest whose apply failed with an error reading conflict with "&lt;manager&gt;". The manifests this redeploy re-runs apply with server-side apply force-conflicts, for this redeploy only, and nothing is stored on the stack. The result names the manifests it forced; members it does not re-run and add-ons are not forced, and an application member's apply forces conflicts either way. It overwrites the conflicting fields on the live objects with the stack's values, and that cannot be undone. before-first-apply is Kubernetes' name for fields written before Ankra's first server-side apply, not another controller, though the value may still be one a person set. `--force` needs clusters.write on the cluster on top of stacks.deploy, and asks for confirmation first: `--yes` answers it, and without a terminal `--yes` is required.
+
+```bash
+ankra cluster stacks redeploy <stack name> [flags]
+```
+
+**Examples**
+
+```bash
+ankra cluster stacks redeploy web
+ankra cluster stacks redeploy web --force
+ankra cluster stacks redeploy web --force --yes
+ankra cluster stacks redeploy web -o json
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--force` | `false` | apply the manifests this redeploy re-runs with server-side apply force-conflicts, overwriting the conflicting live fields (needs clusters.write) |
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+| `--yes` | `false` | Skip the `--force` confirmation prompt |
 
 ## ankra cluster stacks rename
 
@@ -8145,6 +8743,29 @@ ankra cluster stacks restore-points restore <stack> <restore-point-id> [flags]
 | `--timeout` | `2h0m0s` | Maximum time to wait when `--wait` is set |
 | `--wait` | `false` | Wait for the operation to finish and report success or failure (default: submit and return immediately) |
 | `--yes` | `false` | Skip the typed stack-name confirmation |
+
+## ankra cluster stacks show-draft
+
+Print the pending draft of a stack on the active cluster: every member, what it waits for, and the content it would deploy, decoded. Nothing is deployed or changed.
+
+Encrypted values are shown as they are stored, and variables are shown unresolved, because both are filled in when the draft deploys.
+
+```bash
+ankra cluster stacks show-draft <stack name> [flags]
+```
+
+**Examples**
+
+```bash
+ankra cluster stacks show-draft shop --cluster staging
+ankra cluster stacks show-draft shop --cluster staging -o json
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
 
 ## ankra cluster stacks unprotect
 
@@ -8636,6 +9257,7 @@ ankra cluster upcloud create [flags]
 | `--etcd-plan` |   | Plan for dedicated etcd nodes when `--etcd-topology=external` (server default: PREMIUM-2xCPU-4GB) |
 | `--etcd-topology` | `stacked` | etcd topology for kubeadm clusters: stacked (on control planes) or external (dedicated VMs) |
 | `--external-cloud-provider` | `true` | Install the UpCloud CCM and CSI (cloud-provider=external) for LoadBalancers and persistent volumes (default on; pass `--external-cloud-provider=false` to skip, which also disables `--include-networking`) |
+| `--gateway-api` | `false` | Also serve the Kubernetes Gateway API from the networking stack's Traefik, next to Ingress: installs the Gateway API CRDs, a GatewayClass named traefik and a shared Gateway named traefik-gateway (HTTP on Traefik's web entry point, routes from every namespace), and external-dns publishes HTTPRoute hostnames. Requires the networking stack (default off) |
 | `--gitops-branch` | `master` | GitOps branch to commit to |
 | `--gitops-credential-name` |   | GitOps GitHub credential name; when set with `--gitops-repository`, the generated upcloud-cloud-provider stack is committed to Git (optional) |
 | `--gitops-repository` |   | GitOps repository (e.g. org/repo) to commit the generated stack to (optional) |
@@ -8695,6 +9317,32 @@ ankra cluster upcloud nodes cloud-init-log <cluster_id|name> <node_id> [flags]
 | Flag | Default | Description |
 |------|---------|-------------|
 | `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+
+## ankra cluster upcloud nodes diagnose
+
+Dispatch the platform's read-only node diagnose job and wait for its report:
+over the bastion SSH lane it snapshots the node's OS-level state - the
+Kubernetes service unit and its journal, disk, memory, uptime, the kernel log
+and the firewall path to the API server - and names the symptoms it finds.
+Nothing on the node is changed. This is what to reach for when a node is
+NotReady or its kubelet stopped posting status, below what 'cluster get' can
+see. The same diagnosis the Ankra assistant runs as ssh_diagnose_node.
+
+The platform waits up to two minutes for the job; a slower run hands back the
+operation id to poll with 'cluster operations list', and repeated calls attach
+to the run already in flight. Find node ids with 'nodes list'. Needs the
+clusters.operate permission on the cluster.
+
+```bash
+ankra cluster upcloud nodes diagnose <cluster_id|name> <node_id> [flags]
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+| `--timeout` | `3m0s` | Maximum time to wait for the diagnosis report |
 
 ## ankra cluster upcloud nodes get
 
@@ -8829,9 +9477,12 @@ testing is graded as development and local as disposable. `--criticality`
 overrides it. An environment of your own leaves the reporting level as it is
 unless `--criticality` is given.
 
-The environment is not part of an ImportCluster file: 'ankra cluster apply'
-never changes it on an existing cluster, so a value set here stays until it
-is changed here or in the portal.
+An ImportCluster file can declare the environment too, as metadata.environment:
+'ankra cluster apply' creates a new cluster with it, and fills it in on an
+existing cluster only where nobody chose the label yet. A value set here is
+never reverted by a file, so it stays until it is changed here or in the
+portal. Who chose a label is recorded from the credential: your own token
+records you, a service account records automation.
 
 The cluster is given by name or id; without one, the selected cluster is
 updated.

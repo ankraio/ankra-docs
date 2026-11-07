@@ -1,0 +1,159 @@
+---
+title: Protect a tunnel with Ankra sign-in
+description: Publish a service through an Ankra Cloud tunnel so that only your organisation's members can open it, or only the members of one project, with no OAuth proxy to run.
+---
+
+import { CliVersion } from "/snippets/cli-version.jsx";
+
+A tunnel gives a service with only outbound connectivity a public HTTPS hostname. A private zone puts Ankra sign-in in front of that hostname. You run no OAuth proxy and write no login code. Visitors sign in with Ankra, on any email domain, and the relay checks their membership before it forwards a request.
+
+This guide goes from nothing to a protected service: create the zone, set the policy, create the tunnel, run its connector and invite a member.
+
+## Who gets in
+
+| Who | Zone set to `organisation` | Zone also limited to a project |
+| --- | --- | --- |
+| Organisation-wide member | Admitted | Admitted: they reach every project |
+| Project-only member assigned to the project | Admitted | Admitted |
+| Project-only member of another project | Admitted | Refused |
+| Member whose invitation is still pending | Refused | Refused |
+| Anyone else | Refused | Refused |
+
+The policy belongs to a zone and covers its subzones. Removing someone from the organisation or the project removes their access.
+
+## Before you start
+
+- You are an owner or admin of the organisation. Changing a policy needs `members.manage`.
+- You have the [Ankra CLI](/integrations/ankra-cli), signed in to that organisation. `ankra org current` shows which one.
+- You have a host or cluster that can reach your service and open outbound connections, to run the connector.
+
+The CLI does not create tunnels or zones yet, so those steps use the [Ankra Cloud console](https://cloud.ankra.app) or its API. For the API, create a token under **Settings** → **API tokens** in the console and export it as `ANKRA_CLOUD_TOKEN`.
+
+## Set it up
+
+<Steps>
+  <Step title="Open the organisation's Cloud account">
+    Sign in to the [Ankra Cloud console](https://cloud.ankra.app) with your Ankra account, open **Switch account** and choose your organisation. If it has no Cloud account yet, opening it creates one.
+
+    Stay in this account for the next steps. A tunnel from any other account cannot be served from the organisation's private zone.
+  </Step>
+  <Step title="Choose a zone">
+    List the zones of that account:
+
+    <CliVersion since="0.49.0" />
+
+    ```bash
+    ankra org access-gateway zones
+    ```
+
+    Use a zone that holds only what these members should reach, because the policy covers everything below it. A private zone also cannot hold direct web records, so a new subzone is usually the simplest choice:
+
+    ```bash
+    curl -X POST "https://cloud.ankra.app/v1/dns/zones/<parent-zone-id>/subzones" \
+      -H "Authorization: Bearer $ANKRA_CLOUD_TOKEN" \
+      -H "Content-Type: application/json" \
+      -d '{"label": "internal"}'
+    ```
+
+    The answer carries the new zone's `id`. In the console, the same action is under **DNS** → your zone → **Subzones**.
+
+    To use a domain you own, choose **Add zone** under **DNS**, publish the TXT record it shows, verify it, then delegate the domain to the zone's nameservers.
+  </Step>
+  <Step title="Set the policy">
+    Do this before you create the tunnel, so the hostname is protected from its first request:
+
+    ```bash
+    ankra org access-gateway set <zone-id> --mode organisation
+    ```
+
+    To admit only the members who can reach one project, name it with `--access-project`:
+
+    ```bash
+    ankra project list
+    ankra org access-gateway set <zone-id> --mode organisation --access-project payments
+    ```
+
+    <CliVersion since="0.64.0" command="org access-gateway set --access-project" />
+
+    Confirm what the zone now says:
+
+    ```bash
+    ankra org access-gateway get <zone-id>
+    ```
+  </Step>
+  <Step title="Create the tunnel">
+    In the console, open **Networking** → **Tunnels** → **Create tunnel**, or use the API. The hostname must be in the zone from the previous step, and the origin is the URL the connector uses to reach your service:
+
+    ```bash
+    curl -X POST "https://cloud.ankra.app/v1/tunnels" \
+      -H "Authorization: Bearer $ANKRA_CLOUD_TOKEN" \
+      -H "Content-Type: application/json" \
+      -d '{
+        "name": "internal-app",
+        "hostnames": [
+          { "hostname": "app.internal.example.com", "origin_url": "http://web.default.svc.cluster.local:8080" }
+        ]
+      }'
+    ```
+
+    The answer carries the connector token. It is shown once, so store it as a secret straight away.
+  </Step>
+  <Step title="Run the connector">
+    The tunnel's page in the console shows the relay address and the connector image. Run the connector anywhere that reaches the origin:
+
+    ```bash
+    docker run -d --name ankra-tunnel --restart unless-stopped \
+      -e ANKRA_TUNNEL_RELAY=<relay-address> \
+      -e ANKRA_TUNNEL_TOKEN=<token> \
+      <connector-image>
+    ```
+
+    For a Kubernetes Deployment, follow [Running the connector](https://cloud.ankra.app/docs/concepts/tunnels#running-the-connector). The tunnel reads `connected` once the relay holds a connector.
+  </Step>
+  <Step title="Invite a member">
+    Invite someone to the whole organisation:
+
+    ```bash
+    ankra org invite alice@example.com
+    ```
+
+    Or to one project and nothing else:
+
+    ```bash
+    ankra org invite contractor@example.com --role project --project payments --project-role viewer
+    ```
+
+    Here `--project` names the project they join. They reach the service once they accept the invitation. A project-only member needs no access to the Ankra Cloud console.
+  </Step>
+</Steps>
+
+## Verify it
+
+1. Open the hostname in a private browser window. You are sent to Ankra sign-in.
+2. Sign in as a member. The service opens.
+3. Sign in as someone who is not admitted. The relay refuses the request and your service never sees it.
+
+To see who reaches a limited zone, run `ankra project members payments`.
+
+## Good to know
+
+- **Your service does not learn who is calling.** The relay passes it no identity and removes its own session cookies. If the service needs to know the user, it needs its own sign-in as well.
+- **Sign-in starts in a browser.** A request that is not a browser page load gets a `401` until the visitor has signed in through the service's page.
+- **Access ends quickly, not instantly.** Membership is checked on each request, and a connection already open can continue for up to 15 minutes.
+- **Your organisation's single sign-on applies.** Members sign in the way the organisation requires. See [Single Sign-On](/guides/single-sign-on).
+- **Separate audiences need sibling zones.** A subzone cannot have its own policy under a private parent, so give each audience its own zone side by side.
+- **Protect your origin too.** The policy covers only requests through the relay. Anything that can reach your service directly bypasses it.
+
+The options for roles and project limits are in [Private access for proxied domains](/guides/private-proxied-domains), and tunnel limits are in [Tunnels](https://cloud.ankra.app/docs/concepts/tunnels#limits).
+
+## Troubleshooting
+
+| What you see | Why | What to do |
+| --- | --- | --- |
+| `set` says the account must be linked | The zone's account belongs to no organisation | Open the organisation's account as in the first step, and create the zone there |
+| `set` says records must go through the proxy | The zone or a subzone holds a direct `A`, `AAAA`, `CNAME`, `HTTPS` or `SVCB` record, or an `NS` delegation you added | Remove or proxy them, or use a new subzone |
+| `set` says to change access on the parent | A parent zone is private and controls this zone | Change the policy on the parent, or use a zone outside it |
+| `set` says the project is not found, or not in this organisation | `--access-project` named a project that does not exist here or has been deleted | Run `ankra project list` and use one of those |
+| Connector logs `unknown tunnel token`, or browsers get a TLS error | The tunnel is in another account, or the token is wrong | Create the tunnel in the organisation's account, or [rotate the token](https://cloud.ankra.app/docs/concepts/tunnels#rotating-the-token) |
+| A member is refused | Their invitation is pending, they are not assigned to the project, or `--role` is set and they hold no organisation-wide role | Check with `ankra org members` and `ankra project members <project>` |
+| Everyone is refused on a limited zone | The named project has been deleted | Set another project, or remove the limit with `--access-project ""` |
