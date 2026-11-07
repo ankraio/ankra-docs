@@ -24,7 +24,7 @@ Reference material for [DigitalOcean clusters](/guides/digitalocean-clusters).
 | `node_groups` | | Array of node group definitions; `node_groups` wins when `worker_count` is also given |
 | `distribution` | `kubeadm` | Kubernetes distribution (`kubeadm` or `k3s`) |
 | `kubernetes_version` | *latest stable* | Kubernetes version (optional) |
-| `k3s_disabled_components` | | k3s only. Packaged components the k3s install leaves out (`k3s --disable`), on top of what the provider's k3s shape already disables: any of `coredns`, `servicelb`, `traefik`, `local-storage`, `metrics-server`, `runtimes`, for example `["traefik"]` on a cluster that brings its own ingress. A list on a `kubeadm` cluster, an entry outside those six or an entry listed twice is refused with a `400` naming it |
+| `k3s_disabled_components` | | k3s only. Packaged components the k3s install leaves out (`k3s --disable`), on top of what the provider's k3s shape already disables: any of `coredns`, `servicelb`, `traefik`, `local-storage`, `metrics-server`, `runtimes`, for example `["traefik"]` on a cluster that brings its own ingress. A list on a `kubeadm` cluster is refused with a `400` (`k3s_disabled_components is only supported for the k3s distribution.`); an entry outside those six or an entry listed twice is a `422` validation error pointing at the entry |
 | `cni` | `cilium` (kubeadm), `flannel` (k3s) | CNI plugin. Follows the distribution when omitted; kubeadm clusters always use `cilium` |
 | `cni_features` | *all off* | CNI feature toggles, fixed at creation. See [Choices fixed at create time](/guides/operate-ankra-managed-clusters#choices-fixed-at-create-time) |
 | `etcd_topology` | `stacked` | kubeadm only. `stacked` or `external` (dedicated etcd droplets) |
@@ -81,6 +81,23 @@ Available regions and sizes depend on your account. Use `ankra cluster digitaloc
 | `/api/v1/clusters/digitalocean/{id}/bastion/instance-type` | PUT | Resize the bastion instance type |
 
 See [Restart a node](/guides/operate-ankra-managed-clusters#restart-a-node) and [Bastion](/guides/operate-ankra-managed-clusters#bastion) for usage.
+
+## Disabled k3s Components API
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/v1/clusters/digitalocean/{id}/k3s-disabled-components` | GET | The stored `k3s_disabled_components` (empty when nothing is stored), the k8s node `resource_ids` carrying it, `control_plane_count` and `applies` |
+| `/api/v1/clusters/digitalocean/{id}/k3s-disabled-components` | PUT | Replace the stored list on a running k3s cluster, for example `{"k3s_disabled_components": ["traefik"]}` |
+
+The `k3s_disabled_components` list set at create can grow on a running k3s cluster. The body is the complete list and has to contain every entry already stored; an unknown or repeated entry is a `422` validation error pointing at the entry. `applies` answers: "The platform's maintenance read lane compares each control plane's k3s server config against this list within about five minutes and flags the ones missing an entry; the reconcile lane then patches the config and restarts k3s on one control plane at a time, in the cluster's k8s update chain. Control planes already carrying every entry are not touched. The list only grows: re-enabling a bundled component is not supported yet, so a change that removes a stored entry is refused, and so is any change while a node update, version upgrade or node restart is still in progress on the cluster." The refusals answer `409` with the detail shown:
+
+| Request | Detail |
+|---------|--------|
+| The cluster runs kubeadm (the read is refused too) | `k3s_disabled_components is only supported for the k3s distribution.` |
+| The cluster has no Kubernetes node resources (the read is refused too) | `No Kubernetes node resources found for this cluster` |
+| The list drops a stored entry, here `traefik` | `k3s_disabled_components: re-enabling a bundled component is not supported yet, so a stored entry cannot be removed: traefik. Send the stored list plus any additions.` |
+| The list adds `coredns` | `k3s_disabled_components: coredns cannot be disabled on a running cluster. It is load-bearing for in-cluster DNS, and k3s removes it on the first control plane that restarts with the entry.` |
+| A node update, version upgrade or node restart is in progress | `k3s_disabled_components cannot be changed while a Kubernetes node update, version upgrade or node restart is in progress on this cluster. Retry once it has finished.` |
 
 ---
 
