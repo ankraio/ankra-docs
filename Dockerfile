@@ -34,7 +34,7 @@ FROM deps AS export
 COPY . .
 
 # Exercise the actual dependency-free runtime before publishing its export.
-RUN node --test scripts/serve.test.mjs
+RUN node --test scripts/serve.test.mjs scripts/check_flow_parity.test.mjs
 
 # The export also carries non-page repository files and Mintlify's own
 # local-viewer launchers. Only web assets are kept: an allowlist of extensions
