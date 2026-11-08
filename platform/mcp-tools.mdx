@@ -114,6 +114,15 @@ Creating a credential is deliberately **not** available over MCP or chat. Creati
 | `update_stack_profile` | `mcp:write` | Yes | Update a stack profile's metadata |
 | `delete_stack_profile` | `mcp:write` | Yes | Delete a stack profile and all its versions |
 | `instantiate_stack_profile` | `mcp:write` | Yes | Instantiate a stack profile onto the cluster |
+| `list_stack_profile_deployments` | `mcp:read` | No | Where a stack profile runs: every cluster and stack deployed from it, the version each runs, and whether it is behind the current version or on a deprecated one |
+| `diff_stack_profile_versions` | `mcp:read` | No | Compare two published versions of a stack profile: the add-ons, manifests and parameters one adds, removes or changes against the other |
+| `list_stack_profile_shares` | `mcp:read` | No | The organisations a stack profile is shared with, with each share's id for `unshare_stack_profile` |
+| `adopt_stack_profile` | `mcp:write` | No | Record a stack a cluster already runs as a deployment of a stack profile without changing the cluster; `only_on_cluster` lists the members a rollout of the version would remove |
+| `rollout_stack_profile_version` | `mcp:write` | No | Update the stacks deployed from a profile to a published version in place, keeping each one's non-secret inputs. A member the version drops is removed only if the profile put it there or `confirmed_member_removals` names it, else that target is refused unchanged; try `dry_run` first, and a failure stops the rest unless `continue_on_error` |
+| `deprecate_stack_profile_version` | `mcp:write` | No | Mark a published version of a profile your organisation owns as unfit to deploy: new deployments of it are refused and its deployments are flagged. The current version cannot be deprecated; `reason` is `incompatibility`, `critical_bug` or `cve` |
+| `undeprecate_stack_profile_version` | `mcp:write` | No | Lift a version's deprecation so it can be deployed again |
+| `share_stack_profile` | `mcp:write` | No | Share a stack profile your organisation owns with another organisation, which can then list and deploy it |
+| `unshare_stack_profile` | `mcp:write` | No | Stop sharing a stack profile with an organisation; stacks it already deployed keep running |
 | `validate_cluster_manifest` | `mcp:read` | No | Validate an ImportCluster YAML the way `ankra cluster validate` and the API do, without changing anything |
 | `apply_cluster_manifest` | `mcp:write` | Yes | Apply an ImportCluster YAML declaratively: the cluster's definition is replaced by the manifest (stacks.write) |
 | `stage_cluster_manifest_drafts` | `mcp:write` | Yes | Stage every stack in an ImportCluster YAML as a draft for a person to promote |
@@ -458,7 +467,7 @@ Create and operate provider-managed control planes - EKS (AWS), AKS (Azure), GKE
 
 ## CI/CD & Deploy Analysis
 
-Over MCP `watch_pipeline_run` waits for the run and returns it; in the Ankra chat it registers a watch instead, and the conversation is woken with the outcome.
+Over MCP `watch_pipeline_run` waits for the run and returns it; in the Ankra chat it registers a watch instead, and the conversation is woken with the outcome. Every pipeline tool that acts on one connected repository names it with exactly one of `repository_id`, `application_id`, or `owner` and `repo`; `connect_pipeline_repository` takes `owner` and `repo`.
 
 | Tool | Scope | Cluster-scoped | Description |
 | --- | --- | --- | --- |
@@ -472,6 +481,20 @@ Over MCP `watch_pipeline_run` waits for the run and returns it; in the Ankra cha
 | `cicd_validate_pipeline_yaml` | `mcp:read` | No | Validate an Ankra pipeline definition (`.ankra/pipeline.yaml`) before proposing or committing it |
 | `get_pipeline_step_logs` | `mcp:read` | No | Read an Ankra Pipelines run and one step's archived log tail, to explain why a step failed |
 | `watch_pipeline_run` | `mcp:read` | No | Block up to 45 seconds for an Ankra Pipelines run (by `head_sha` or `run_id`) to conclude, then return the settled run with each step's outcome and the first failing step, or `timed_out: true` with the last observed state; nothing notifies the client later, so call again with the `run_id` |
+| `list_pipeline_repositories` | `mcp:read` | No | The repositories connected to Ankra Pipelines in the organisation and project, newest first, with the linked application, CI cluster override, merge train settings and what the trigger last decided for each |
+| `get_pipeline_repository` | `mcp:read` | No | One connected repository: its default branch, linked application, CI cluster override, merge train settings, Workspaces-only mode and the trigger's last decision (why a push did or did not start a run) |
+| `connect_pipeline_repository` | `mcp:write` | No | Connect a repository to Ankra Pipelines so pushes, pull requests, tags, schedules and the merge train start runs from its committed `.ankra/pipeline.yaml`; `workspaces_only` connects it for Ankra Workspaces alone, with no runs |
+| `disconnect_pipeline_repository` | `mcp:write` | No | Stop every trigger starting runs for a repository; its run history is kept and connecting it again revives it. Refused while a run is queued or running |
+| `run_pipeline` | `mcp:write` | No | Start a manual run of a connected repository's committed pipeline at a branch, tag or commit; it always runs the definition of record, and a dispatch identical to a queued one joins it (`already_queued`) |
+| `rerun_pipeline_run` | `mcp:write` | No | Re-run a pipeline run at the same commit: `failed_only` re-runs only the stages that failed, `full_run` runs every stage regardless of path filters; a run dispatched with its own spec also needs `pipelines.manage` |
+| `cancel_pipeline_run` | `mcp:write` | No | Cancel a run that has not concluded; a started run with finally stages runs them first, so cancel again with `force` to stop those too |
+| `get_merge_train` | `mcp:read` | No | A repository's merge train: whether it is on, `max_cars`, auto-admit, the queued pull requests with the run testing each, and the ones that recently left it with the reason |
+| `add_to_merge_train` | `mcp:write` | No | Put a pull request in its repository's merge train, which tests it on top of the ones ahead and merges it when green. Open to an organisation admin, the author or anyone with push access; refused to a service account and to an AI lane acting on its own |
+| `remove_from_merge_train` | `mcp:write` | No | Take a pull request out of the merge train by `entry_id` or `pull_request_number`; an entry being merged, or one that already left, is refused |
+| `list_pipeline_schedules` | `mcp:read` | No | A connected repository's cron schedules with timezone, ref, dispatch inputs, whether each is enabled, when it fires next and what it last did |
+| `create_pipeline_schedule` | `mcp:write` | No | Create a five-field cron schedule (UTC unless `timezone`) that starts a repository's pipeline at a ref with its manual inputs; refused for a repository connected for Workspaces only |
+| `update_pipeline_schedule` | `mcp:write` | No | Change a pipeline schedule: only what you name changes, `inputs` replaces the whole input set, and `enabled` false pauses it |
+| `delete_pipeline_schedule` | `mcp:write` | No | Delete a pipeline schedule; runs it already started are kept. To pause one instead, use `update_pipeline_schedule` |
 
 ## Tickets & Collaboration
 
@@ -512,15 +535,22 @@ The support desk - the same tickets `ankra support` and the portal's Support pag
 
 ## Organisation & AI Posture
 
-The organisation a token is bound to, who has access, what is parked awaiting a human decision, and how the organisation's AI is configured. Membership, role, provider-key and endpoint writes stay in the portal and CLI.
+The organisation a token is bound to, who has access, what is parked awaiting a human decision, and how the organisation's AI is configured. Writes that carry a provider key stay in the portal and CLI: setting the organisation's provider keys, adding an AI endpoint, and changing an endpoint's address or key.
 
 | Tool | Scope | Cluster-scoped | Description |
 | --- | --- | --- | --- |
 | `get_organisation` | `mcp:read` | No | The bound organisation: id, name, slug, member counts, organisation-wide settings and the current project |
 | `list_organisation_members` | `mcp:read` | No | Who has access: members, pending invites and Ankra's service principals, with roles |
 | `list_organisation_roles` | `mcp:read` | No | Built-in and custom roles with the permissions each grants |
+| `invite_organisation_member` | `mcp:write` | No | Invite a person by email with an organisation role, or limit them to one project with `project_id` and `project_role_slug`; refused for a role carrying a permission you do not hold, a person already invited or a member, and on a single-user plan (members.invite) |
+| `update_organisation_member_role` | `mcp:write` | No | Change a member's organisation role, or limit them to one project, which retires their organisation-wide assignments; refused for your own role, a member stronger than you, a role carrying a permission you do not hold, and the last owner (members.manage) |
+| `remove_organisation_member` | `mcp:write` | No | Remove a member from the organisation: their role, role assignments and cluster access here stop applying at once, and coming back needs a new invitation. Refused for a member stronger than you and for the last owner (members.manage) |
 | `get_cluster_access_policy` | `mcp:read` | No | The organisation cluster access policy: the role a cluster's creator receives, the highest role a grant may carry, the longest a grant above view may last and the role from which grants need a reason, plus any pending proposal with its `apply_url` (kube_access.manage, kube_access.policy or kube_access.elevate) |
 | `propose_cluster_access_policy` | `mcp:write` | No | Record a proposed change to the cluster access policy and return its `apply_url`: no token changes the policy, an organisation owner or admin applies it signed in to the Ankra web app. A proposal expires after 7 days (kube_access.manage) |
+| `list_cluster_access_grants` | `mcp:read` | No | Who holds Kubernetes access to one cluster through the Ankra cluster gateway: each grant's member, role, scope, expiry (null is standing), reason, source and whether it is over the access policy (kube_access.manage) |
+| `grant_cluster_access` | `mcp:write` | No | Give a member time-boxed Kubernetes access to one cluster through the cluster gateway, within the access policy's bounds. The grant must expire (`expires_in` or `expires_at`): a standing grant is made in the portal or with the CLI (kube_access.manage) |
+| `revoke_cluster_access` | `mcp:write` | No | Revoke one Kubernetes access grant on a cluster; a grant an organisation role carries is removed by changing the member's role instead (kube_access.manage) |
+| `elevate_cluster_access` | `mcp:write` | No | Break-glass access for yourself alone: time-boxed Kubernetes access to one cluster, always held to the access policy's self-elevation bounds on lifetime, reason and role (kube_access.elevate) |
 | `list_organisation_custom_dns_zones` | `mcp:read` | No | The DNS zones the organisation's clusters serve with their own credentials |
 | `list_limit_requests` | `mcp:read` | No | The latest limit-increase request per kind (billing.read) |
 | `list_pending_actions` | `mcp:read` | No | AI actions parked for a human decision, with risk, cluster, expiry and the bill of materials |
@@ -534,6 +564,16 @@ The organisation a token is bound to, who has access, what is parked awaiting a 
 | `delete_personal_ai_key` | `mcp:write` | No | Remove one of the caller's own AI keys |
 | `set_personal_ai_keys_allowed` | `mcp:write` | No | Turn members' own AI keys on or off for the organisation (organisation admins only) |
 | `list_ai_models` | `mcp:read` | No | The model catalog the chat picker offers, with tool, thinking and image support |
+| `create_ai_model` | `mcp:write` | No | Add a model to the catalog the chat picker and the AI lanes choose from, optionally served by one of the organisation's own endpoints through `endpoint_id` (ai.manage) |
+| `update_ai_model` | `mcp:write` | No | Change a catalog model: only the fields passed change, and disabling a model a lane selected returns that lane to its default (ai.manage) |
+| `delete_ai_model` | `mcp:write` | No | Remove a model from the organisation's catalog; a lane that selected it falls back to its default (ai.manage) |
+| `list_ai_endpoints` | `mcp:read` | No | The organisation's OpenAI-compatible AI endpoints with name, provider, base URL and a masked key preview; a key is never returned (ai.manage) |
+| `rename_ai_endpoint` | `mcp:write` | No | Rename one of the organisation's AI endpoints; its address and stored key stay as they are (ai.manage) |
+| `delete_ai_endpoint` | `mcp:write` | No | Delete an AI endpoint and its stored key, with the catalog models it served; a lane that selected one falls back to its default. The key is gone for good: using the endpoint again means adding it again (ai.manage) |
+| `set_ai_lane_model` | `mcp:write` | No | Choose the model one AI lane runs on, a catalog key or an exact OpenRouter model id; it changes which provider every member's work on that lane goes to and who pays for it (ai.manage) |
+| `clear_ai_lane_model` | `mcp:write` | No | Return one AI lane to its default model (ai.manage) |
+| `get_ai_spend_cap` | `mcp:read` | No | The organisation's AI spend cap: its own daily chat cap in US dollars, the plan default, the cap in force and today's spend, and the daily token soft and hard caps for unattended runs with today's tokens (billing.read) |
+| `set_ai_spend_cap` | `mcp:write` | No | Change the AI spend cap: only the fields passed change, and null clears one. Past the token soft cap unattended runs drop to the quick tier for the rest of the UTC day, past the hard cap new ones are refused (billing.manage) |
 | `pause_ai_autonomy` | `mcp:write` | No | Pause autonomous AI actions organisation-wide (ai.manage); chat and diagnosis keep working |
 | `resume_ai_autonomy` | `mcp:write` | No | Restore exactly what the pause turned off (ai.manage) |
 | `get_remediation_policy` | `mcp:read` | No | The organisation's AI auto-remediation policy, including autonomy level, tier overrides and the cluster allow list |
@@ -544,19 +584,29 @@ The organisation a token is bound to, who has access, what is parked awaiting a 
 | `set_registry_retention` | `mcp:write` | No | Change which images the organisation's registry keeps, organisation-wide or per repository |
 | `run_registry_retention` | `mcp:write` | No | Run the organisation's registry retention now instead of at its daily time |
 | `set_registry_storage_addon` | `mcp:write` | No | Buy or return paid registry storage blocks, billed monthly |
+| `list_registry_projects` | `mcp:read` | No | The organisation's projects on the Ankra registry, its own and any extra ones, with each one's registry path, repository count and how many robots reach it, and how many extra projects it may hold (credentials.read) |
+| `create_registry_project` | `mcp:write` | No | Create an extra private project on the organisation's Ankra registry, under the same scan, retention and storage policy as its own; a name is 2 to 30 lower-case letters, digits and single hyphens (credentials.write) |
+| `delete_registry_project` | `mcp:write` | No | Delete an extra registry project; one that still holds repositories or that robots still reach is refused, and the organisation's own project cannot be deleted (credentials.delete) |
 | `list_registry_robots` | `mcp:read` | No | The organisation's registry robots, the logins that are not people, on the Ankra registry and on registries the organisation runs, with every project each one reaches; secrets are never listed (credentials.read) |
+| `create_registry_robot` | `mcp:write` | No | Create a registry robot with pull or push access to one or more registry projects. Its login is stored as a platform-managed registry credential and the answer names that credential, never the secret (credentials.write, plus credentials.reveal on a registry the organisation runs) |
 | `update_registry_robot_projects` | `mcp:write` | No | Change which projects a registry robot reaches, in place where the registry allows it; otherwise it changes nothing and gives the command a person runs to replace it. Google Artifact Registry robots are refused (credentials.write, plus credentials.reveal for a robot on a registry the organisation runs or with grants past the presets) |
+| `rotate_registry_robot_secret` | `mcp:write` | No | Give a registry robot a new secret, kept in the managed credential that holds its login and never shown; anything outside Ankra that logs in with the old one stops working. Robots Ankra manages are refused (credentials.write) |
+| `delete_registry_robot` | `mcp:write` | No | Delete a registry robot and the credential holding its login; whatever logs in with it stops working. Robots Ankra manages are refused (credentials.delete) |
 
 ## Projects
 
-Every tool acts in one [project](/concepts/projects): an MCP token minted while the organisation has projects is pinned to the project it was created in, and a chat session follows the member's current project. An MCP token minted before that is not pinned (`get_current_project` answers `pinned: false`) and never follows a switch: for an organisation-wide member it acts in the Default project whatever its owner switches to, and a project-only member's acts in the oldest project they reach. `get_organisation` reports that project, list results carry each resource's `project_id`, and the cost tools below take `project_id` (a project id, `all` for the whole organisation, or nothing for the current project; a pinned token refuses `all` and other projects).
+Every tool acts in one [project](/concepts/projects): an MCP token minted while the organisation has projects is pinned to the project it was created in, and a chat session follows the member's current project. An MCP token minted before that is not pinned (`get_current_project` answers `pinned: false`) and never follows a switch: for an organisation-wide member it acts in the Default project whatever its owner switches to, and a project-only member's acts in the oldest project they reach. `get_organisation` reports that project, list results carry each resource's `project_id`, and the cost tools below take `project_id` (a project id, `all` for the whole organisation, or nothing for the current project; a pinned token refuses `all` and other projects). The tools in this section are offered only while the organisation has projects on.
 
 | Tool | Scope | Cluster-scoped | Description |
 | --- | --- | --- | --- |
 | `list_projects` | `mcp:read` | No | The organisation's projects with id, name, slug, whether each is the reserved default and which is current |
 | `get_current_project` | `mcp:read` | No | The project this token or session acts in, and whether the token is pinned to it |
+| `list_project_members` | `mcp:read` | No | Who reaches one project and how, through their organisation role or an assignment scoped to the project, plus the project-only invitations naming it that are pending or expired |
 | `move_cluster_to_project` | `mcp:write` | No | Move a cluster into another project of the organisation (`projects.manage`); its DNS zones, incidents, AI tickets and pinned notification routes follow |
 | `move_application_to_project` | `mcp:write` | No | Move an application into another project of the organisation (`projects.manage`); its connected pipeline repositories follow |
+| `create_project` | `mcp:write` | No | Create an empty project in the organisation (`projects.manage`); its slug is permanent: lowercase kebab-case, at most 63 characters, not a UUID, and `default` is reserved |
+| `rename_project` | `mcp:write` | No | Rename a project and optionally change its description (`projects.manage`); the slug never changes |
+| `delete_project` | `mcp:write` | No | Delete an empty project other than the default one (`projects.manage`): its scoped role assignments are retired, members whose current project it was move to the default project, and tokens pinned to it stop authenticating. It cannot be undone |
 
 ## Memory & Miscellaneous
 
@@ -616,6 +666,13 @@ Cloud cost estimates, budgets and the cost autopilot, plus the organisation's us
 | `delete_cost_budget` | `mcp:write` | No | Delete one of the organisation's cost budgets (organisation admins only) |
 | `get_cost_autopilot` | `mcp:read` | No | The organisation's cost autopilot policy, which decides how much Ankra may do about cost unasked |
 | `update_cost_autopilot` | `mcp:write` | No | Change the cost autopilot policy, one project's defaults, or one cluster's tier |
+| `list_cost_decisions` | `mcp:read` | No | The cost decisions Ankra's cost surfaces filed (right-sizes, off-hours schedules, released volumes to clean up) within your reach, newest first, each with its status, plan, `plan_hash`, expected saving and whether you may decide and run it |
+| `get_cost_decision` | `mcp:read` | No | One cost decision with its plan and `plan_hash`, evidence, status, the receipt of a run and the measured saving; a security decision is refused here |
+| `approve_cost_decision` | `mcp:write` | No | Approve the plan you read: `plan_hash` must match, so a plan that changed since is refused. Nothing runs yet: `execute_cost_decision` runs it, or the cost autopilot does once its `run_after` passes |
+| `set_aside_cost_decision` | `mcp:write` | No | Set a cost decision aside with your reason, withdrawing an approval before anything ran; approving it again re-opens it |
+| `hold_cost_decision` | `mcp:write` | No | Hold an approved cost decision before it ran; the cost autopilot does not run it until someone releases it |
+| `release_cost_decision` | `mcp:write` | No | Release a held cost decision back to approved; an approval older than the approval window is refused and taken back to proposed |
+| `execute_cost_decision` | `mcp:write` | No | Run an approved cost decision now, on the cluster or cloud account: a right-size, a schedule or deleting released volumes. A delete with no snapshot needs `consent`; the answer carries the `operation_id` while it runs and the receipt once settled |
 | `get_usage` | `mcp:read` | No | The organisation's usage of Ankra per meter and period, such as worker vCPU-hours, hosted logs and AI tokens |
 | `get_billing_standing` | `mcp:read` | No | The organisation's billing standing as the platform's gates read it: which limit applies (an overdue invoice, the credit limit, an exhausted prepaid wallet or the free tier's capacity), whether it is enforced, the remedy and the actions it pauses (billing.read) |
 | `get_wallet_balance` | `mcp:read` | No | The organisation's prepaid credit wallet: its net position in EUR, its state, the credit lots in the order they are spent with their expiry, and whether top-ups are open; no wallet is the free tier, not an empty one (billing.read) |
