@@ -84,11 +84,19 @@ ankra cluster node-group autoscaling get <cluster_id> <group_name>
 ankra cluster node-group autoscaling set <cluster_id> <group_name> \
   --enabled --min 1 --max 5
 
+# Enable with bounds and wait for the operation that moves the group inside them
+ankra cluster node-group autoscaling set <cluster_id> <group_name> \
+  --enabled --min 1 --max 3 --wait
+
 # Disable (the group keeps its current node count)
 ankra cluster node-group autoscaling set <cluster_id> <group_name> --enabled=false
 ```
 
 The cloud provider is detected automatically from the cluster.
+
+<CliVersion since="0.71.0" command="cluster node-group autoscaling set --wait" note="Earlier releases set the same bounds but print neither the outcome nor the operation, and their wait does not follow it." />
+
+The command prints what the new bounds do to the group's node count and, once an operation has started for it, that operation's id, which you can follow with `ankra cluster operations list <operation_id>`. With `--wait` it follows that operation until it ends, and fails with the operation's status and recorded error if it does not succeed. `--timeout` defaults to one hour for this command, because nodes leave one at a time.
 
 ### Via the API
 
@@ -100,6 +108,15 @@ GET /api/v1/clusters/{provider}/{cluster_id}/node-groups/{group_name}/autoscalin
 PUT /api/v1/clusters/{provider}/{cluster_id}/node-groups/{group_name}/autoscaling
 { "enabled": true, "min_count": 1, "max_count": 5 }
 ```
+
+### When the group is outside the new bounds
+
+The platform moves a group that is outside the bounds you set to the nearest count inside them:
+
+- **More nodes than Max.** The group scales down to **Max**. The least busy nodes go first, and each one is cordoned, waits up to 15 minutes for the pipeline steps running on it, and is then drained behind its PodDisruptionBudgets, one node at a time.
+- **Fewer nodes than Min.** The group scales up to **Min**, the way a manual scale-up adds nodes.
+
+A group already inside the bounds keeps its node count, and so does a group you turn autoscaling off for. The move runs as an operation on the cluster: when another operation is already working on the cluster it starts once that one finishes, and on a stopped cluster the group starts with the new count.
 
 ---
 
