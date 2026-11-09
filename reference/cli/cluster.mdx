@@ -13,7 +13,7 @@ Commands for managing and operating on clusters.
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--cluster` |   | Target cluster name or ID for this command, overriding `ankra cluster select` |
+| `--cluster` |   | Cluster (`name\|id`) the command acts on, the same as its cluster argument where it takes one; overrides 'ankra cluster select' |
 
 ## ankra cluster access
 
@@ -820,6 +820,107 @@ ankra cluster agent upgrade --version 2.1.1247 --allow-downgrade
 | `--allow-downgrade` | `false` | Allow `--version` to be older than the release the agent runs (needs `--version`) |
 | `--version` |   | Exact agent release to install (default: the newer of the running release and the latest stable one) |
 
+## ankra cluster alertmanager
+
+Work with the Alertmanager running in the active cluster (the one
+kube-prometheus-stack or the Alertmanager chart installs), through the
+cluster's Ankra agent.
+
+## ankra cluster alertmanager silences
+
+List, create and expire silences on the active cluster's Alertmanager.
+
+Listing needs clusters.read on the cluster; creating and expiring need
+alerts.write there. The Alertmanager is discovered by its labels; when the
+cluster runs several, or a non-standard install, pass `--namespace` (and
+`--service`, `--port`).
+
+```bash
+ankra cluster alertmanager silences list
+ankra cluster alertmanager silences create --matcher alertname=KubeVersionMismatch --duration 2w --comment "pending upgrade"
+ankra cluster alertmanager silences expire <silence-id> --yes
+```
+
+## ankra cluster alertmanager silences create
+
+Create a silence on the active cluster's Alertmanager. An alert is
+silenced while every `--matcher` matches it: name=value is an exact match,
+name=~regex a regular expression, and at least one must be exact so a
+silence cannot mute everything. `--duration` takes a number and a unit (s, m,
+h, d, w) from 5m to 30d, 2h by default. `--comment` says why; operators see it
+in Alertmanager. The silence starts at once and is attributed to you.
+
+```bash
+ankra cluster alertmanager silences create --matcher alertname=KubeVersionMismatch \
+  --matcher cluster=ankra-production --duration 2w --comment "pending component version alignment"
+ankra cluster alertmanager silences create --matcher alertname=PodCrashLooping --matcher 'pod=~web-.*' \
+  --duration 30m --comment "rolling deploy"
+```
+
+```bash
+ankra cluster alertmanager silences create --matcher <name=value> --comment <why> [flags]
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--comment` |   | Why the alerts are silenced (required) |
+| `--duration` |   | How long the silence lasts, e.g. 30m, 2h, 2w (5m to 30d; default 2h) |
+| `--matcher` | `[]` | Label matcher as name=value or name=~regex (repeatable, at least one) |
+| `--namespace` |   | Namespace of the Alertmanager Service (narrows discovery; required with `--service`) |
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+| `--port` | `0` | Port Alertmanager listens on (default 9093) |
+| `--service` |   | Name of the Alertmanager Service, for installs discovery does not find |
+
+## ankra cluster alertmanager silences expire
+
+Expire one silence on the active cluster's Alertmanager; the alerts it
+muted notify again. 'list' shows the ids. The command asks first (`--yes`
+skips, declining exits 4); a silence Alertmanager does not have exits 3.
+
+```bash
+ankra cluster alertmanager silences expire 35833f27-aaed-47c3-956e-9b071140f062 --yes
+```
+
+```bash
+ankra cluster alertmanager silences expire <silence-id> [flags]
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--namespace` |   | Namespace of the Alertmanager Service (narrows discovery; required with `--service`) |
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+| `--port` | `0` | Port Alertmanager listens on (default 9093) |
+| `--service` |   | Name of the Alertmanager Service, for installs discovery does not find |
+| `-y`, `--yes` | `false` | Skip the confirmation prompt |
+
+## ankra cluster alertmanager silences list
+
+List the silences on the active cluster's Alertmanager, newest ending
+first. `--state` picks active (the default), pending, expired or all.
+
+```bash
+ankra cluster alertmanager silences list
+ankra cluster alertmanager silences list --state all -o json
+```
+
+```bash
+ankra cluster alertmanager silences list [flags]
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--namespace` |   | Namespace of the Alertmanager Service (narrows discovery; required with `--service`) |
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+| `--port` | `0` | Port Alertmanager listens on (default 9093) |
+| `--service` |   | Name of the Alertmanager Service, for installs discovery does not find |
+| `--state` | `active` | Silences to list: active, pending, expired or all |
+
 ## ankra cluster ankracloud
 
 Manage kubeadm or k3s clusters Ankra builds on Ankra Cloud servers.
@@ -1026,14 +1127,21 @@ ankra cluster ankracloud cpu-pools [flags]
 
 Create an Ankra-managed kubeadm (default) or k3s cluster on Ankra Cloud
 servers. Ankra builds the private network (unless `--private-network-id` adopts
-one), a NAT router for the nodes' IPv4 egress, the per-server firewalls, a
-bastion with a public IPv4 address, and the control plane and worker servers.
-The kube-apiserver stays private and is reached through the bastion.
+one), the per-server firewalls, a bastion, and the control plane and worker
+servers. The kube-apiserver stays private and is reached through the bastion.
 
-That is the ipv4_nat network mode, the server default. A zone with no public
-IPv4 left takes `--network-mode` ipv6_only instead: no NAT router, the bastion
-is reached over IPv6 through the Cloud's port forward, and the nodes reach
-IPv4 through the zone's NAT64. The preflight names the mode a zone needs.
+The network mode is ipv6_only unless `--network-mode` says otherwise (the
+server default): no NAT router, the bastion holds only a public IPv6 address
+and is reached through the Cloud's port forward, and the nodes reach IPv4
+through the zone's NAT64. `--network-mode` ipv4_nat adds a NAT router for the
+nodes' IPv4 egress and gives the bastion a public IPv4 address; public IPv4
+is a paid add-on under a per-account quota. The preflight says whether a zone
+can serve the mode you chose.
+
+`--credential-id` may be left out where the platform provides a built-in Ankra
+Cloud credential, which it then uses; a platform without one refuses the
+create. Without `--ssh-key-credential-id` the cluster uses an SSH key Ankra
+generates for it; add your own later with 'ankra cluster ssh-keys set'.
 
 Servers are sized by plan: list them with 'ankra cluster ankracloud plans'.
 Each server's root disk is its plan's included disk unless a --*-disk-gib
@@ -1070,7 +1178,7 @@ ankra cluster ankracloud create [flags]
 | `--control-plane-disk-gib` | `0` | Control plane root disk size in GiB (default: the plan's included disk) |
 | `--control-plane-disk-tier` |   | Control plane root disk storage tier: local-nvme (the node's own disks), standard, maxiops or hdd (the zone's Ankra Storage). Default: the zone's default tier |
 | `--control-plane-plan` |   | Control plane server plan (required) |
-| `--credential-id` |   | Ankra Cloud credential ID (required) |
+| `--credential-id` |   | Ankra Cloud credential ID (optional where the platform provides a built-in Ankra Cloud credential, which it then uses) |
 | `--criticality` |   | Reporting level: production, staging, development or disposable (server default: the environment's own level) |
 | `--description` |   | Cluster description |
 | `--distribution` | `kubeadm` | Kubernetes distribution: kubeadm or k3s |
@@ -1089,14 +1197,14 @@ ankra cluster ankracloud create [flags]
 | `--kubernetes-version` |   | Pin a Kubernetes version (default: latest supported) |
 | `--name` |   | Cluster name (required) |
 | `--network-ip-range` |   | RFC 1918 CIDR (/16 to /29) for the created private network (server default: a /24 derived from the cluster) |
-| `--network-mode` |   | Network mode: ipv4_nat (NAT router and a public-IPv4 bastion) or ipv6_only (for a zone without public IPv4: no router, bastion reached over IPv6 and the Cloud's port forward, IPv4 egress through NAT64). Server default: ipv4_nat |
+| `--network-mode` |   | Network mode: ipv6_only (the server default: no NAT router, the bastion reached over IPv6 and the Cloud's port forward, IPv4 egress through the zone's NAT64) or ipv4_nat (a NAT router and a bastion with a public IPv4 address; public IPv4 is a paid add-on) |
 | `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
 | `--private-network-id` |   | Adopt an existing private network instead of creating one |
 | `--retention-policy` |   | Teardown policy for volumes: retain or delete (server default: retain) |
 | `--runtime-credential-id` |   | Ankra Cloud credential for the in-cluster CCM/CSI (defaults to the provisioning credential) |
 | `--sandbox-node-plan` |   | Server plan of the sandbox nodes (default: `--worker-plan`) |
 | `--sandbox-nodes` | `0` | Nodes in a separate node group running the gVisor sandbox runtime, beside the workers (kubeadm only). Ankra AI runs code on its own, to fix a build or regenerate a lockfile, only behind a sandbox, so set this on a cluster that will run CI: 1 is enough to start |
-| `--ssh-key-credential-id` |   | SSH key credential ID (required) |
+| `--ssh-key-credential-id` |   | SSH key credential ID (default: an SSH key Ankra generates for the cluster) |
 | `--template` |   | Server template (server default: debian-13; see 'ankracloud templates') |
 | `--worker-count` | `0` | Default-pool worker count (server default: 1) |
 | `--worker-disk-gib` | `0` | Worker root disk size in GiB (default: the plan's included disk). Ankra Cloud refuses a size below the plan's and the template's minimum |
@@ -1122,8 +1230,62 @@ ankra cluster ankracloud deprovision <cluster_id|name> [flags]
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--accept-volume-data-loss` | `false` | Accept that deprovisioning deletes the cluster's persistent volumes (the cloud volumes its CSI driver provisioned) and the data on them, forced or not. Required when the cluster has such volumes, or Ankra cannot list them, and you are not answering the prompt on a terminal; `--yes` does not imply it. A cluster whose retention_policy is retain (AWS, Scaleway, Ankra Cloud) keeps its volumes and needs no acknowledgement |
+| `--force` | `false` | Force teardown: skip the in-cluster agent's uninstall of the stack resources and tolerate infrastructure that can no longer be reached. It never decides the persistent volumes: a cluster whose retention_policy is retain keeps them, and a delete cluster's are deleted only with `--accept-volume-data-loss` or a yes at the prompt |
 | `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
 | `--yes` | `false` | Skip the confirmation prompt |
+
+## ankra cluster ankracloud etcd
+
+Read the cluster's etcd membership from one control-plane node, and remove
+the stale member a dead control-plane node left behind so its replacement can
+join. Both run over the platform's bastion SSH lane as tracked operations and
+need clusters.operate on the cluster. Find node ids with 'nodes list'.
+
+## ankra cluster ankracloud etcd members
+
+Run 'etcdctl member list' and the endpoint health check on the control-plane
+node named and report every member (hex and decimal id), its health, any
+alarms and the quorum summary with its failure tolerance. Nothing changes.
+Run it on a healthy control-plane node when another one is dead.
+
+```bash
+ankra cluster ankracloud etcd members <cluster_id|name> <node_id> [flags]
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+| `--timeout` | `4m0s` | Maximum time to wait for the job's report |
+
+## ankra cluster ankracloud etcd remove
+
+Remove one etcd member, named by the hex or decimal id 'etcd members'
+reported, executing on the healthy control-plane node named. The platform
+re-reads live membership first and refuses a healthy member, a member whose
+health it cannot read, the node's own member, an ambiguous id, and any
+removal that would break quorum.
+
+This is destructive and cannot be undone: the command asks first (`--yes`
+skips, declining exits 4).
+
+```bash
+ankra cluster hetzner etcd members prod <healthy-node-id>
+ankra cluster hetzner etcd remove prod <healthy-node-id> 8e9e05c52164694d
+```
+
+```bash
+ankra cluster ankracloud etcd remove <cluster_id|name> <node_id> <member_id> [flags]
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+| `--timeout` | `4m0s` | Maximum time to wait for the job's report |
+| `-y`, `--yes` | `false` | Skip the confirmation prompt |
 
 ## ankra cluster ankracloud k8s-version
 
@@ -1253,6 +1415,160 @@ ankra cluster ankracloud nodes restart <cluster_id|name> <node_id> [flags]
 |------|---------|-------------|
 | `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
 
+## ankra cluster ankracloud os-patches
+
+Unattended upgrades hold back the packages whose maintainer scripts restart
+networking in place; the rolling OS patch lane installs them instead, one
+host at a time, drained and returned to service before the next.
+
+```text
+status       the policy, the newest run host by host, the last dry run
+plan         the dry run: what each host would install
+run          start the rolling patch (asks first)
+policy set   change the maintenance window and the opt-in
+node-policy  write or remove the node OS update hold by hand
+```
+
+## ankra cluster ankracloud os-patches node-policy
+
+Write the node OS update hold - the apt policy that keeps unattended
+upgrades away from the packages that restart networking - on the nodes named
+with `--node`, on every node with `--all-nodes`, and on the bastion with
+`--include-bastion`. The rolling OS patch lane writes and lifts it on its own;
+this is the by-hand route. Writing it is refused unless the cluster's OS
+patch policy is enabled; `--revert` removes it and is always allowed.
+
+The command asks first (`--yes` skips, declining exits 4). Needs
+clusters.operate.
+
+```bash
+ankra cluster ankracloud os-patches node-policy <cluster_id|name> [flags]
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--all-nodes` | `false` | Apply the policy to every node |
+| `--include-bastion` | `false` | Apply the policy to the bastion too |
+| `--node` | `[]` | Node id to apply the policy to (repeatable) |
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+| `--revert` | `false` | Remove the hold instead of writing it |
+| `--timeout` | `4m0s` | Maximum time to wait for the per-host report |
+| `-y`, `--yes` | `false` | Skip the confirmation prompt |
+
+## ankra cluster ankracloud os-patches plan
+
+Run the dry run on every host and report what each would install, which
+held-back security updates are pending, whether a reboot would follow, and
+the order 'run' would take. The platform waits about 40 seconds; a slower
+plan hands back its operation id, and 'status' shows it once it finishes.
+Needs clusters.operate.
+
+```bash
+ankra cluster ankracloud os-patches plan <cluster_id|name> [flags]
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+| `--timeout` | `4m0s` | Maximum time to wait for the plan |
+
+## ankra cluster ankracloud os-patches policy
+
+Show or change the cluster's OS patch policy
+
+## ankra cluster ankracloud os-patches policy get
+
+Show the OS patch policy and its maintenance window
+
+```bash
+ankra cluster ankracloud os-patches policy get <cluster_id|name> [flags]
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+
+## ankra cluster ankracloud os-patches policy set
+
+Change the cluster's OS patch policy. Only the flags passed are changed.
+Turning the policy off also removes the node OS update hold from every host,
+and is refused while a run or a node OS policy operation is in flight.
+Needs clusters.write.
+
+```bash
+ankra cluster hetzner os-patches policy set prod --enable --window-days sat,sun --window-start-hour 2 --window-duration-hours 4
+ankra cluster hetzner os-patches policy set prod --disable
+```
+
+```bash
+ankra cluster ankracloud os-patches policy set <cluster_id|name> [flags]
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--cadence-days` | `0` | Days between scheduled runs |
+| `--disable` | `false` | Turn the rolling OS patch policy off |
+| `--enable` | `false` | Turn the rolling OS patch policy on |
+| `--exclude-stateful-nodes` | `false` | Leave nodes running stateful workloads out |
+| `--include-stateful-nodes` | `false` | Patch nodes running stateful workloads |
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+| `--security-lag-days` | `0` | Days a held security update may wait before the cluster is reported lagging |
+| `--timeout` | `4m0s` | Maximum time to wait for the change |
+| `--window-days` | `[]` | Days the maintenance window opens (mon,tue,...) |
+| `--window-duration-hours` | `0` | How many hours the window stays open |
+| `--window-start-hour` | `0` | Hour of the day (UTC, 0-23) the window opens |
+
+## ankra cluster ankracloud os-patches run
+
+Start the rolling patch: each host is drained, patched, rebooted when the
+packages ask for it, and returned to service before the next. Workloads move
+between nodes while it runs, so the command asks first (`--yes` skips,
+declining exits 4).
+
+Outside the policy's maintenance window the platform refuses unless
+`--outside-window` is passed. Stateful nodes follow the policy unless
+`--include-stateful-nodes` or `--exclude-stateful-nodes` says otherwise; the
+bastion is patched last unless `--exclude-bastion`. Follow the run with
+'status' or 'ankra cluster operations list'. Needs clusters.operate.
+
+```bash
+ankra cluster ankracloud os-patches run <cluster_id|name> [flags]
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--exclude-bastion` | `false` | Leave the bastion out of this run |
+| `--exclude-stateful-nodes` | `false` | Leave nodes running stateful workloads out, whatever the policy says |
+| `--include-stateful-nodes` | `false` | Patch nodes running stateful workloads, whatever the policy says |
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+| `--outside-window` | `false` | Start now even though the maintenance window is closed |
+| `--timeout` | `4m0s` | Maximum time to wait for the run to start |
+| `-y`, `--yes` | `false` | Skip the confirmation prompt |
+
+## ankra cluster ankracloud os-patches status
+
+Show the OS patch policy, the newest run and the security-lag verdict
+
+```bash
+ankra cluster ankracloud os-patches status <cluster_id|name> [flags]
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+
 ## ankra cluster ankracloud plans
 
 List the server plans (sizes) the create and node-group flags take.
@@ -1297,7 +1613,7 @@ ankra cluster ankracloud preflight [flags]
 | `--control-plane-disk-gib` | `0` | Control plane root disk size in GiB (default: the plan's included disk) |
 | `--control-plane-disk-tier` |   | Control plane root disk storage tier: local-nvme (the node's own disks), standard, maxiops or hdd (the zone's Ankra Storage). Default: the zone's default tier |
 | `--control-plane-plan` |   | Control plane server plan (required) |
-| `--credential-id` |   | Ankra Cloud credential ID (required) |
+| `--credential-id` |   | Ankra Cloud credential ID (optional where the platform provides a built-in Ankra Cloud credential, which it then uses) |
 | `--criticality` |   | Reporting level: production, staging, development or disposable (server default: the environment's own level) |
 | `--description` |   | Cluster description |
 | `--distribution` | `kubeadm` | Kubernetes distribution: kubeadm or k3s |
@@ -1316,14 +1632,14 @@ ankra cluster ankracloud preflight [flags]
 | `--kubernetes-version` |   | Pin a Kubernetes version (default: latest supported) |
 | `--name` |   | Cluster name (required) |
 | `--network-ip-range` |   | RFC 1918 CIDR (/16 to /29) for the created private network (server default: a /24 derived from the cluster) |
-| `--network-mode` |   | Network mode: ipv4_nat (NAT router and a public-IPv4 bastion) or ipv6_only (for a zone without public IPv4: no router, bastion reached over IPv6 and the Cloud's port forward, IPv4 egress through NAT64). Server default: ipv4_nat |
+| `--network-mode` |   | Network mode: ipv6_only (the server default: no NAT router, the bastion reached over IPv6 and the Cloud's port forward, IPv4 egress through the zone's NAT64) or ipv4_nat (a NAT router and a bastion with a public IPv4 address; public IPv4 is a paid add-on) |
 | `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
 | `--private-network-id` |   | Adopt an existing private network instead of creating one |
 | `--retention-policy` |   | Teardown policy for volumes: retain or delete (server default: retain) |
 | `--runtime-credential-id` |   | Ankra Cloud credential for the in-cluster CCM/CSI (defaults to the provisioning credential) |
 | `--sandbox-node-plan` |   | Server plan of the sandbox nodes (default: `--worker-plan`) |
 | `--sandbox-nodes` | `0` | Nodes in a separate node group running the gVisor sandbox runtime, beside the workers (kubeadm only). Ankra AI runs code on its own, to fix a build or regenerate a lockfile, only behind a sandbox, so set this on a cluster that will run CI: 1 is enough to start |
-| `--ssh-key-credential-id` |   | SSH key credential ID (required) |
+| `--ssh-key-credential-id` |   | SSH key credential ID (default: an SSH key Ankra generates for the cluster) |
 | `--template` |   | Server template (server default: debian-13; see 'ankracloud templates') |
 | `--worker-count` | `0` | Default-pool worker count (server default: 1) |
 | `--worker-disk-gib` | `0` | Worker root disk size in GiB (default: the plan's included disk). Ankra Cloud refuses a size below the plan's and the template's minimum |
@@ -1463,6 +1779,38 @@ ankra cluster apply [flags]
 | `--timeout` | `10m0s` | Maximum time to wait when `--wait` is set |
 | `--wait` | `false` | Wait for the configuration write to be applied and report its result. Add-on deploys are dispatched afterwards and are NOT covered by this flag - watch them with 'ankra cluster operations list' |
 
+## ankra cluster audit-logs
+
+Show the newest audit log entries for one cluster: the organisation's trail
+narrowed to the cluster, the same rows as the cluster's Audit tab. Without a
+cluster argument it uses the selected cluster. Without `--since` or `--until` it
+reads the last 7 days. To download a cluster's trail, use
+ankra org audit-logs export `--cluster` &lt;cluster&gt;.
+
+```bash
+ankra cluster audit-logs prod --since 24h --actor-type agent
+```
+
+```bash
+ankra cluster audit-logs [cluster] [flags]
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--action` |   | only this action type |
+| `--actor-type` |   | only this kind of actor: agent, human, service_account or system |
+| `--agent-task` |   | only the runs of this agent id |
+| `--limit` | `50` | show at most this many of the newest entries (0 shows all) |
+| `--outcome` |   | only succeeded or failed actions |
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+| `--resource-type` |   | only this resource type |
+| `--search` |   | free-text search over the entries |
+| `--since` |   | start of the window: a span back from now (24h, 7d, 2w), a date, an RFC 3339 time, or all |
+| `--until` |   | end of the window, in the same forms as `--since` |
+| `--user` |   | only actions by this user id |
+
 ## ankra cluster aws
 
 Manage the lifecycle of self-managed Kubernetes clusters Ankra builds on EC2.
@@ -1505,7 +1853,7 @@ ankra cluster aws availability-zones [flags]
 
 ## ankra cluster aws bastion
 
-Inspect and diagnose the cluster's single bastion/gateway node.
+Inspect, diagnose, and resize the cluster's single bastion/gateway node.
 Find its node ID with 'nodes list'.
 
 ## ankra cluster aws bastion diagnose
@@ -1526,6 +1874,30 @@ ankra cluster aws bastion diagnose <cluster_id|name> [flags]
 |------|---------|-------------|
 | `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
 | `--timeout` | `3m0s` | Maximum time to wait for the diagnosis report |
+
+## ankra cluster aws bastion resize
+
+Resize the bastion/gateway node. The provider's bastion/gateway update job
+powers it off, resizes it, and powers it back on, causing brief SSH/NAT
+downtime for the cluster.
+
+`--wait` covers the platform write only; the cloud resize runs as the operation
+reported on success. Follow it with 'ankra cluster operations list &lt;operation_id&gt;'.
+
+On AWS &lt;instance_type&gt; is an EC2 instance type such as t3.medium; list them
+with 'ankra cluster aws instance-types'.
+
+```bash
+ankra cluster aws bastion resize <cluster_id|name> <instance_type> [flags]
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+| `--timeout` | `10m0s` | Maximum time to wait when `--wait` is set |
+| `--wait` | `false` | Wait for the operation to finish and report success or failure (default: submit and return immediately) |
 
 ## ankra cluster aws bastion status
 
@@ -1769,6 +2141,59 @@ ankra cluster aws deprovision <cluster_id|name> [flags]
 | `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
 | `--yes` | `false` | Skip the confirmation prompt |
 
+## ankra cluster aws etcd
+
+Read the cluster's etcd membership from one control-plane node, and remove
+the stale member a dead control-plane node left behind so its replacement can
+join. Both run over the platform's bastion SSH lane as tracked operations and
+need clusters.operate on the cluster. Find node ids with 'nodes list'.
+
+## ankra cluster aws etcd members
+
+Run 'etcdctl member list' and the endpoint health check on the control-plane
+node named and report every member (hex and decimal id), its health, any
+alarms and the quorum summary with its failure tolerance. Nothing changes.
+Run it on a healthy control-plane node when another one is dead.
+
+```bash
+ankra cluster aws etcd members <cluster_id|name> <node_id> [flags]
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+| `--timeout` | `4m0s` | Maximum time to wait for the job's report |
+
+## ankra cluster aws etcd remove
+
+Remove one etcd member, named by the hex or decimal id 'etcd members'
+reported, executing on the healthy control-plane node named. The platform
+re-reads live membership first and refuses a healthy member, a member whose
+health it cannot read, the node's own member, an ambiguous id, and any
+removal that would break quorum.
+
+This is destructive and cannot be undone: the command asks first (`--yes`
+skips, declining exits 4).
+
+```bash
+ankra cluster hetzner etcd members prod <healthy-node-id>
+ankra cluster hetzner etcd remove prod <healthy-node-id> 8e9e05c52164694d
+```
+
+```bash
+ankra cluster aws etcd remove <cluster_id|name> <node_id> <member_id> [flags]
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+| `--timeout` | `4m0s` | Maximum time to wait for the job's report |
+| `-y`, `--yes` | `false` | Skip the confirmation prompt |
+
 ## ankra cluster aws images
 
 List the Ubuntu series and CPU architectures a create may ask for with
@@ -1907,6 +2332,160 @@ bastion/gateway.
 
 ```bash
 ankra cluster aws nodes restart <cluster_id|name> <node_id> [flags]
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+
+## ankra cluster aws os-patches
+
+Unattended upgrades hold back the packages whose maintainer scripts restart
+networking in place; the rolling OS patch lane installs them instead, one
+host at a time, drained and returned to service before the next.
+
+```text
+status       the policy, the newest run host by host, the last dry run
+plan         the dry run: what each host would install
+run          start the rolling patch (asks first)
+policy set   change the maintenance window and the opt-in
+node-policy  write or remove the node OS update hold by hand
+```
+
+## ankra cluster aws os-patches node-policy
+
+Write the node OS update hold - the apt policy that keeps unattended
+upgrades away from the packages that restart networking - on the nodes named
+with `--node`, on every node with `--all-nodes`, and on the bastion with
+`--include-bastion`. The rolling OS patch lane writes and lifts it on its own;
+this is the by-hand route. Writing it is refused unless the cluster's OS
+patch policy is enabled; `--revert` removes it and is always allowed.
+
+The command asks first (`--yes` skips, declining exits 4). Needs
+clusters.operate.
+
+```bash
+ankra cluster aws os-patches node-policy <cluster_id|name> [flags]
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--all-nodes` | `false` | Apply the policy to every node |
+| `--include-bastion` | `false` | Apply the policy to the bastion too |
+| `--node` | `[]` | Node id to apply the policy to (repeatable) |
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+| `--revert` | `false` | Remove the hold instead of writing it |
+| `--timeout` | `4m0s` | Maximum time to wait for the per-host report |
+| `-y`, `--yes` | `false` | Skip the confirmation prompt |
+
+## ankra cluster aws os-patches plan
+
+Run the dry run on every host and report what each would install, which
+held-back security updates are pending, whether a reboot would follow, and
+the order 'run' would take. The platform waits about 40 seconds; a slower
+plan hands back its operation id, and 'status' shows it once it finishes.
+Needs clusters.operate.
+
+```bash
+ankra cluster aws os-patches plan <cluster_id|name> [flags]
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+| `--timeout` | `4m0s` | Maximum time to wait for the plan |
+
+## ankra cluster aws os-patches policy
+
+Show or change the cluster's OS patch policy
+
+## ankra cluster aws os-patches policy get
+
+Show the OS patch policy and its maintenance window
+
+```bash
+ankra cluster aws os-patches policy get <cluster_id|name> [flags]
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+
+## ankra cluster aws os-patches policy set
+
+Change the cluster's OS patch policy. Only the flags passed are changed.
+Turning the policy off also removes the node OS update hold from every host,
+and is refused while a run or a node OS policy operation is in flight.
+Needs clusters.write.
+
+```bash
+ankra cluster hetzner os-patches policy set prod --enable --window-days sat,sun --window-start-hour 2 --window-duration-hours 4
+ankra cluster hetzner os-patches policy set prod --disable
+```
+
+```bash
+ankra cluster aws os-patches policy set <cluster_id|name> [flags]
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--cadence-days` | `0` | Days between scheduled runs |
+| `--disable` | `false` | Turn the rolling OS patch policy off |
+| `--enable` | `false` | Turn the rolling OS patch policy on |
+| `--exclude-stateful-nodes` | `false` | Leave nodes running stateful workloads out |
+| `--include-stateful-nodes` | `false` | Patch nodes running stateful workloads |
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+| `--security-lag-days` | `0` | Days a held security update may wait before the cluster is reported lagging |
+| `--timeout` | `4m0s` | Maximum time to wait for the change |
+| `--window-days` | `[]` | Days the maintenance window opens (mon,tue,...) |
+| `--window-duration-hours` | `0` | How many hours the window stays open |
+| `--window-start-hour` | `0` | Hour of the day (UTC, 0-23) the window opens |
+
+## ankra cluster aws os-patches run
+
+Start the rolling patch: each host is drained, patched, rebooted when the
+packages ask for it, and returned to service before the next. Workloads move
+between nodes while it runs, so the command asks first (`--yes` skips,
+declining exits 4).
+
+Outside the policy's maintenance window the platform refuses unless
+`--outside-window` is passed. Stateful nodes follow the policy unless
+`--include-stateful-nodes` or `--exclude-stateful-nodes` says otherwise; the
+bastion is patched last unless `--exclude-bastion`. Follow the run with
+'status' or 'ankra cluster operations list'. Needs clusters.operate.
+
+```bash
+ankra cluster aws os-patches run <cluster_id|name> [flags]
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--exclude-bastion` | `false` | Leave the bastion out of this run |
+| `--exclude-stateful-nodes` | `false` | Leave nodes running stateful workloads out, whatever the policy says |
+| `--include-stateful-nodes` | `false` | Patch nodes running stateful workloads, whatever the policy says |
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+| `--outside-window` | `false` | Start now even though the maintenance window is closed |
+| `--timeout` | `4m0s` | Maximum time to wait for the run to start |
+| `-y`, `--yes` | `false` | Skip the confirmation prompt |
+
+## ankra cluster aws os-patches status
+
+Show the OS patch policy, the newest run and the security-lag verdict
+
+```bash
+ankra cluster aws os-patches status <cluster_id|name> [flags]
 ```
 
 **Flags**
@@ -2611,14 +3190,16 @@ This is a teardown, not a power-off:
   whose retention_policy is retain (aws, scaleway, ankracloud) keeps its volumes, which
   keep billing in your cloud account.
 
-To power a cluster off and back on while keeping its state, use the provider's
-stop/start commands (for example "ankra hetzner cluster stop" and
-"ankra hetzner cluster start") or "ankra cluster power-schedules" instead.
+To power a cluster off and back on while keeping its state, use its provider's
+stop and start commands (for example "ankra cluster hetzner stop" and
+"ankra cluster hetzner start") or "ankra cluster power-schedules" instead.
 
-If no cluster name is provided, uses the currently selected cluster.
+Name the cluster as the argument or with `--cluster`. Deprovision never falls
+back to the cluster selected with 'ankra cluster select': that selection is
+shared by every shell and agent session on the machine.
 
 ```bash
-ankra cluster deprovision [cluster_name] [flags]
+ankra cluster deprovision <cluster_name> [flags]
 ```
 
 **Flags**
@@ -2626,7 +3207,7 @@ ankra cluster deprovision [cluster_name] [flags]
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--accept-volume-data-loss` | `false` | Accept that deprovisioning deletes the cluster's persistent volumes (the cloud volumes its CSI driver provisioned) and the data on them, forced or not. Required when the cluster has such volumes, or Ankra cannot list them, and you are not answering the prompt on a terminal; `--yes` does not imply it. A cluster whose retention_policy is retain (AWS, Scaleway, Ankra Cloud) keeps its volumes and needs no acknowledgement |
-| `--force` | `false` | Force deprovision even if cluster is in an unexpected state; on UpCloud, Hetzner, OVH, DigitalOcean and AWS also deletes leftover load balancers (the persistent volumes are deleted forced or not, and only with `--accept-volume-data-loss` or a yes at the prompt); on Proxmox finishes the teardown when the host or jumphost is unreachable, leaving the VMs behind |
+| `--force` | `false` | Force the teardown of a cloud cluster of any kind: skip the in-cluster agent's uninstall of the stack resources and tolerate infrastructure that can no longer be reached. On UpCloud, Hetzner, OVH, DigitalOcean and AWS it also deletes leftover load balancers; on Proxmox it finishes the teardown when the host or jumphost is unreachable, leaving the VMs behind. It never decides the persistent volumes: they are deleted only with `--accept-volume-data-loss` or a yes at the prompt, and a cluster whose retention_policy is retain keeps them. No effect on an imported cluster |
 | `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
 | `--yes` | `false` | Skip the confirmation prompt (not the persistent volume acknowledgement) |
 
@@ -2929,6 +3510,59 @@ ankra cluster digitalocean create [flags]
 | `--worker-count` | `1` | Number of worker nodes |
 | `--worker-size` |   | Worker droplet size (server default: s-2vcpu-4gb) |
 
+## ankra cluster digitalocean etcd
+
+Read the cluster's etcd membership from one control-plane node, and remove
+the stale member a dead control-plane node left behind so its replacement can
+join. Both run over the platform's bastion SSH lane as tracked operations and
+need clusters.operate on the cluster. Find node ids with 'nodes list'.
+
+## ankra cluster digitalocean etcd members
+
+Run 'etcdctl member list' and the endpoint health check on the control-plane
+node named and report every member (hex and decimal id), its health, any
+alarms and the quorum summary with its failure tolerance. Nothing changes.
+Run it on a healthy control-plane node when another one is dead.
+
+```bash
+ankra cluster digitalocean etcd members <cluster_id|name> <node_id> [flags]
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+| `--timeout` | `4m0s` | Maximum time to wait for the job's report |
+
+## ankra cluster digitalocean etcd remove
+
+Remove one etcd member, named by the hex or decimal id 'etcd members'
+reported, executing on the healthy control-plane node named. The platform
+re-reads live membership first and refuses a healthy member, a member whose
+health it cannot read, the node's own member, an ambiguous id, and any
+removal that would break quorum.
+
+This is destructive and cannot be undone: the command asks first (`--yes`
+skips, declining exits 4).
+
+```bash
+ankra cluster hetzner etcd members prod <healthy-node-id>
+ankra cluster hetzner etcd remove prod <healthy-node-id> 8e9e05c52164694d
+```
+
+```bash
+ankra cluster digitalocean etcd remove <cluster_id|name> <node_id> <member_id> [flags]
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+| `--timeout` | `4m0s` | Maximum time to wait for the job's report |
+| `-y`, `--yes` | `false` | Skip the confirmation prompt |
+
 ## ankra cluster digitalocean k8s-version
 
 Get current Kubernetes version for an DigitalOcean cluster
@@ -3045,6 +3679,160 @@ ankra cluster digitalocean nodes restart <cluster_id|name> <node_id> [flags]
 |------|---------|-------------|
 | `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
 
+## ankra cluster digitalocean os-patches
+
+Unattended upgrades hold back the packages whose maintainer scripts restart
+networking in place; the rolling OS patch lane installs them instead, one
+host at a time, drained and returned to service before the next.
+
+```text
+status       the policy, the newest run host by host, the last dry run
+plan         the dry run: what each host would install
+run          start the rolling patch (asks first)
+policy set   change the maintenance window and the opt-in
+node-policy  write or remove the node OS update hold by hand
+```
+
+## ankra cluster digitalocean os-patches node-policy
+
+Write the node OS update hold - the apt policy that keeps unattended
+upgrades away from the packages that restart networking - on the nodes named
+with `--node`, on every node with `--all-nodes`, and on the bastion with
+`--include-bastion`. The rolling OS patch lane writes and lifts it on its own;
+this is the by-hand route. Writing it is refused unless the cluster's OS
+patch policy is enabled; `--revert` removes it and is always allowed.
+
+The command asks first (`--yes` skips, declining exits 4). Needs
+clusters.operate.
+
+```bash
+ankra cluster digitalocean os-patches node-policy <cluster_id|name> [flags]
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--all-nodes` | `false` | Apply the policy to every node |
+| `--include-bastion` | `false` | Apply the policy to the bastion too |
+| `--node` | `[]` | Node id to apply the policy to (repeatable) |
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+| `--revert` | `false` | Remove the hold instead of writing it |
+| `--timeout` | `4m0s` | Maximum time to wait for the per-host report |
+| `-y`, `--yes` | `false` | Skip the confirmation prompt |
+
+## ankra cluster digitalocean os-patches plan
+
+Run the dry run on every host and report what each would install, which
+held-back security updates are pending, whether a reboot would follow, and
+the order 'run' would take. The platform waits about 40 seconds; a slower
+plan hands back its operation id, and 'status' shows it once it finishes.
+Needs clusters.operate.
+
+```bash
+ankra cluster digitalocean os-patches plan <cluster_id|name> [flags]
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+| `--timeout` | `4m0s` | Maximum time to wait for the plan |
+
+## ankra cluster digitalocean os-patches policy
+
+Show or change the cluster's OS patch policy
+
+## ankra cluster digitalocean os-patches policy get
+
+Show the OS patch policy and its maintenance window
+
+```bash
+ankra cluster digitalocean os-patches policy get <cluster_id|name> [flags]
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+
+## ankra cluster digitalocean os-patches policy set
+
+Change the cluster's OS patch policy. Only the flags passed are changed.
+Turning the policy off also removes the node OS update hold from every host,
+and is refused while a run or a node OS policy operation is in flight.
+Needs clusters.write.
+
+```bash
+ankra cluster hetzner os-patches policy set prod --enable --window-days sat,sun --window-start-hour 2 --window-duration-hours 4
+ankra cluster hetzner os-patches policy set prod --disable
+```
+
+```bash
+ankra cluster digitalocean os-patches policy set <cluster_id|name> [flags]
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--cadence-days` | `0` | Days between scheduled runs |
+| `--disable` | `false` | Turn the rolling OS patch policy off |
+| `--enable` | `false` | Turn the rolling OS patch policy on |
+| `--exclude-stateful-nodes` | `false` | Leave nodes running stateful workloads out |
+| `--include-stateful-nodes` | `false` | Patch nodes running stateful workloads |
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+| `--security-lag-days` | `0` | Days a held security update may wait before the cluster is reported lagging |
+| `--timeout` | `4m0s` | Maximum time to wait for the change |
+| `--window-days` | `[]` | Days the maintenance window opens (mon,tue,...) |
+| `--window-duration-hours` | `0` | How many hours the window stays open |
+| `--window-start-hour` | `0` | Hour of the day (UTC, 0-23) the window opens |
+
+## ankra cluster digitalocean os-patches run
+
+Start the rolling patch: each host is drained, patched, rebooted when the
+packages ask for it, and returned to service before the next. Workloads move
+between nodes while it runs, so the command asks first (`--yes` skips,
+declining exits 4).
+
+Outside the policy's maintenance window the platform refuses unless
+`--outside-window` is passed. Stateful nodes follow the policy unless
+`--include-stateful-nodes` or `--exclude-stateful-nodes` says otherwise; the
+bastion is patched last unless `--exclude-bastion`. Follow the run with
+'status' or 'ankra cluster operations list'. Needs clusters.operate.
+
+```bash
+ankra cluster digitalocean os-patches run <cluster_id|name> [flags]
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--exclude-bastion` | `false` | Leave the bastion out of this run |
+| `--exclude-stateful-nodes` | `false` | Leave nodes running stateful workloads out, whatever the policy says |
+| `--include-stateful-nodes` | `false` | Patch nodes running stateful workloads, whatever the policy says |
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+| `--outside-window` | `false` | Start now even though the maintenance window is closed |
+| `--timeout` | `4m0s` | Maximum time to wait for the run to start |
+| `-y`, `--yes` | `false` | Skip the confirmation prompt |
+
+## ankra cluster digitalocean os-patches status
+
+Show the OS patch policy, the newest run and the security-lag verdict
+
+```bash
+ankra cluster digitalocean os-patches status <cluster_id|name> [flags]
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+
 ## ankra cluster digitalocean regions
 
 List the DigitalOcean regions the supplied credential can deploy in.
@@ -3141,7 +3929,9 @@ in its own DNS account) gets its own domain as the cluster domain this way.
 
 The plain command is a read: it never creates a zone. A cluster that has no
 domain reports state "none", and 'ankra org dns zones' lists every cluster in
-the organisation that does have one.
+the organisation that does have one. The read falls back to the cluster
+selected with 'ankra cluster select'; `--enable` and `--remove` never do, and
+need the cluster named as the argument or with `--cluster`.
 
 `--enable` queues the zone for a cluster that has none. It is idempotent: a
 cluster that already has a zone reports its existing domain unchanged. A fresh
@@ -3568,7 +4358,11 @@ The enable is idempotent and resumable. Without `--wait` it records the option
 and returns at once, saying what is next; run it again later to write the
 values once the CRDs are established, or check with 'status'. With `--wait` it
 follows the phase, repeats the enable when the values are next, and returns
-once the Gateway API is enabled. When the platform holds the values back (a
+once the Gateway API is enabled. Enabled means the cluster itself reports the
+Gateway as served: the platform reads GatewayClass 'traefik' as Accepted and
+Gateway 'traefik-gateway' as Programmed from the cluster's synced state. Until
+it does, the phase stays applying, and `--wait` prints the platform's note on
+what it is waiting for each time that note changes. When the platform holds the values back (a
 values hold: the cluster is offline, its GitOps sync is paused on open
 conflicts, or a Traefik or cert-manager values file was edited in git and is
 kept there until a person decides), nothing writes them until that is
@@ -3583,7 +4377,8 @@ Exit codes:
 ```text
 0  the Gateway API is on, or (without --wait) the option is recorded and
    the enable is moving: waiting for the CRDs, the values next and not
-   held back, or Traefik and cert-manager applying them
+   held back, or the values written and the Gateway not yet reported as
+   served
 1  the option is recorded but the platform needs a person: a conflict in
    the values, a values hold (the values are next but held back until a
    person resolves what the hold names), a failed CRD install or apply, a
@@ -4642,11 +5437,64 @@ ankra cluster hetzner create [flags]
 | `--name` |   | Cluster name (required) |
 | `--network-ip-range` | `10.0.0.0/16` | Network IP range |
 | `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
-| `--ssh-key-credential-id` |   | SSH key credential ID (single key, use `--ssh-key-credential-ids` for multiple) |
-| `--ssh-key-credential-ids` | `[]` | SSH key credential IDs (comma-separated or repeated) |
+| `--ssh-key-credential-id` |   | SSH key credential ID; installed together with any `--ssh-key-credential-ids` |
+| `--ssh-key-credential-ids` | `[]` | SSH key credential IDs (comma-separated or repeated); `--ssh-key-credential-id` adds one more |
 | `--subnet-range` | `10.0.1.0/24` | Subnet range |
 | `--worker-count` | `1` | Number of worker nodes |
 | `--worker-server-type` |   | Worker server type (server default: the cheapest x86 type the location can provision with at least 2 vCPU and 4 GB) |
+
+## ankra cluster hetzner etcd
+
+Read the cluster's etcd membership from one control-plane node, and remove
+the stale member a dead control-plane node left behind so its replacement can
+join. Both run over the platform's bastion SSH lane as tracked operations and
+need clusters.operate on the cluster. Find node ids with 'nodes list'.
+
+## ankra cluster hetzner etcd members
+
+Run 'etcdctl member list' and the endpoint health check on the control-plane
+node named and report every member (hex and decimal id), its health, any
+alarms and the quorum summary with its failure tolerance. Nothing changes.
+Run it on a healthy control-plane node when another one is dead.
+
+```bash
+ankra cluster hetzner etcd members <cluster_id|name> <node_id> [flags]
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+| `--timeout` | `4m0s` | Maximum time to wait for the job's report |
+
+## ankra cluster hetzner etcd remove
+
+Remove one etcd member, named by the hex or decimal id 'etcd members'
+reported, executing on the healthy control-plane node named. The platform
+re-reads live membership first and refuses a healthy member, a member whose
+health it cannot read, the node's own member, an ambiguous id, and any
+removal that would break quorum.
+
+This is destructive and cannot be undone: the command asks first (`--yes`
+skips, declining exits 4).
+
+```bash
+ankra cluster hetzner etcd members prod <healthy-node-id>
+ankra cluster hetzner etcd remove prod <healthy-node-id> 8e9e05c52164694d
+```
+
+```bash
+ankra cluster hetzner etcd remove <cluster_id|name> <node_id> <member_id> [flags]
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+| `--timeout` | `4m0s` | Maximum time to wait for the job's report |
+| `-y`, `--yes` | `false` | Skip the confirmation prompt |
 
 ## ankra cluster hetzner k8s-version
 
@@ -4770,6 +5618,160 @@ bastion/gateway.
 
 ```bash
 ankra cluster hetzner nodes restart <cluster_id|name> <node_id> [flags]
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+
+## ankra cluster hetzner os-patches
+
+Unattended upgrades hold back the packages whose maintainer scripts restart
+networking in place; the rolling OS patch lane installs them instead, one
+host at a time, drained and returned to service before the next.
+
+```text
+status       the policy, the newest run host by host, the last dry run
+plan         the dry run: what each host would install
+run          start the rolling patch (asks first)
+policy set   change the maintenance window and the opt-in
+node-policy  write or remove the node OS update hold by hand
+```
+
+## ankra cluster hetzner os-patches node-policy
+
+Write the node OS update hold - the apt policy that keeps unattended
+upgrades away from the packages that restart networking - on the nodes named
+with `--node`, on every node with `--all-nodes`, and on the bastion with
+`--include-bastion`. The rolling OS patch lane writes and lifts it on its own;
+this is the by-hand route. Writing it is refused unless the cluster's OS
+patch policy is enabled; `--revert` removes it and is always allowed.
+
+The command asks first (`--yes` skips, declining exits 4). Needs
+clusters.operate.
+
+```bash
+ankra cluster hetzner os-patches node-policy <cluster_id|name> [flags]
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--all-nodes` | `false` | Apply the policy to every node |
+| `--include-bastion` | `false` | Apply the policy to the bastion too |
+| `--node` | `[]` | Node id to apply the policy to (repeatable) |
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+| `--revert` | `false` | Remove the hold instead of writing it |
+| `--timeout` | `4m0s` | Maximum time to wait for the per-host report |
+| `-y`, `--yes` | `false` | Skip the confirmation prompt |
+
+## ankra cluster hetzner os-patches plan
+
+Run the dry run on every host and report what each would install, which
+held-back security updates are pending, whether a reboot would follow, and
+the order 'run' would take. The platform waits about 40 seconds; a slower
+plan hands back its operation id, and 'status' shows it once it finishes.
+Needs clusters.operate.
+
+```bash
+ankra cluster hetzner os-patches plan <cluster_id|name> [flags]
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+| `--timeout` | `4m0s` | Maximum time to wait for the plan |
+
+## ankra cluster hetzner os-patches policy
+
+Show or change the cluster's OS patch policy
+
+## ankra cluster hetzner os-patches policy get
+
+Show the OS patch policy and its maintenance window
+
+```bash
+ankra cluster hetzner os-patches policy get <cluster_id|name> [flags]
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+
+## ankra cluster hetzner os-patches policy set
+
+Change the cluster's OS patch policy. Only the flags passed are changed.
+Turning the policy off also removes the node OS update hold from every host,
+and is refused while a run or a node OS policy operation is in flight.
+Needs clusters.write.
+
+```bash
+ankra cluster hetzner os-patches policy set prod --enable --window-days sat,sun --window-start-hour 2 --window-duration-hours 4
+ankra cluster hetzner os-patches policy set prod --disable
+```
+
+```bash
+ankra cluster hetzner os-patches policy set <cluster_id|name> [flags]
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--cadence-days` | `0` | Days between scheduled runs |
+| `--disable` | `false` | Turn the rolling OS patch policy off |
+| `--enable` | `false` | Turn the rolling OS patch policy on |
+| `--exclude-stateful-nodes` | `false` | Leave nodes running stateful workloads out |
+| `--include-stateful-nodes` | `false` | Patch nodes running stateful workloads |
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+| `--security-lag-days` | `0` | Days a held security update may wait before the cluster is reported lagging |
+| `--timeout` | `4m0s` | Maximum time to wait for the change |
+| `--window-days` | `[]` | Days the maintenance window opens (mon,tue,...) |
+| `--window-duration-hours` | `0` | How many hours the window stays open |
+| `--window-start-hour` | `0` | Hour of the day (UTC, 0-23) the window opens |
+
+## ankra cluster hetzner os-patches run
+
+Start the rolling patch: each host is drained, patched, rebooted when the
+packages ask for it, and returned to service before the next. Workloads move
+between nodes while it runs, so the command asks first (`--yes` skips,
+declining exits 4).
+
+Outside the policy's maintenance window the platform refuses unless
+`--outside-window` is passed. Stateful nodes follow the policy unless
+`--include-stateful-nodes` or `--exclude-stateful-nodes` says otherwise; the
+bastion is patched last unless `--exclude-bastion`. Follow the run with
+'status' or 'ankra cluster operations list'. Needs clusters.operate.
+
+```bash
+ankra cluster hetzner os-patches run <cluster_id|name> [flags]
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--exclude-bastion` | `false` | Leave the bastion out of this run |
+| `--exclude-stateful-nodes` | `false` | Leave nodes running stateful workloads out, whatever the policy says |
+| `--include-stateful-nodes` | `false` | Patch nodes running stateful workloads, whatever the policy says |
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+| `--outside-window` | `false` | Start now even though the maintenance window is closed |
+| `--timeout` | `4m0s` | Maximum time to wait for the run to start |
+| `-y`, `--yes` | `false` | Skip the confirmation prompt |
+
+## ankra cluster hetzner os-patches status
+
+Show the OS patch policy, the newest run and the security-lag verdict
+
+```bash
+ankra cluster hetzner os-patches status <cluster_id|name> [flags]
 ```
 
 **Flags**
@@ -5807,7 +6809,7 @@ Commands to create, stop, start, and inspect HPE Morpheus clusters.
 
 ## ankra cluster morpheus bastion
 
-Inspect and diagnose the cluster's single bastion/gateway node.
+Inspect, diagnose, and resize the cluster's single bastion/gateway node.
 Find its node ID with 'nodes list'.
 
 ## ankra cluster morpheus bastion diagnose
@@ -5828,6 +6830,30 @@ ankra cluster morpheus bastion diagnose <cluster_id|name> [flags]
 |------|---------|-------------|
 | `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
 | `--timeout` | `3m0s` | Maximum time to wait for the diagnosis report |
+
+## ankra cluster morpheus bastion resize
+
+Resize the bastion/gateway node. The provider's bastion/gateway update job
+powers it off, resizes it, and powers it back on, causing brief SSH/NAT
+downtime for the cluster.
+
+`--wait` covers the platform write only; the cloud resize runs as the operation
+reported on success. Follow it with 'ankra cluster operations list &lt;operation_id&gt;'.
+
+On HPE Morpheus &lt;instance_type&gt; is the numeric ID of a service plan; list them
+with 'ankra cluster morpheus plans'.
+
+```bash
+ankra cluster morpheus bastion resize <cluster_id|name> <instance_type> [flags]
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+| `--timeout` | `10m0s` | Maximum time to wait when `--wait` is set |
+| `--wait` | `false` | Wait for the operation to finish and report success or failure (default: submit and return immediately) |
 
 ## ankra cluster morpheus bastion status
 
@@ -6093,6 +7119,48 @@ ankra cluster morpheus nodes list <cluster_id|name> [flags]
 |------|---------|-------------|
 | `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
 
+## ankra cluster morpheus os-patches
+
+Unattended upgrades hold back the packages whose maintainer scripts restart
+networking in place; the rolling OS patch lane installs them instead, one
+host at a time, drained and returned to service before the next.
+
+```text
+status       the policy, the newest run host by host, the last dry run
+plan         the dry run: what each host would install
+run          start the rolling patch (asks first)
+policy set   change the maintenance window and the opt-in
+node-policy  write or remove the node OS update hold by hand
+```
+
+## ankra cluster morpheus os-patches node-policy
+
+Write the node OS update hold - the apt policy that keeps unattended
+upgrades away from the packages that restart networking - on the nodes named
+with `--node`, on every node with `--all-nodes`, and on the bastion with
+`--include-bastion`. The rolling OS patch lane writes and lifts it on its own;
+this is the by-hand route. Writing it is refused unless the cluster's OS
+patch policy is enabled; `--revert` removes it and is always allowed.
+
+The command asks first (`--yes` skips, declining exits 4). Needs
+clusters.operate.
+
+```bash
+ankra cluster morpheus os-patches node-policy <cluster_id|name> [flags]
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--all-nodes` | `false` | Apply the policy to every node |
+| `--include-bastion` | `false` | Apply the policy to the bastion too |
+| `--node` | `[]` | Node id to apply the policy to (repeatable) |
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+| `--revert` | `false` | Remove the hold instead of writing it |
+| `--timeout` | `4m0s` | Maximum time to wait for the per-host report |
+| `-y`, `--yes` | `false` | Skip the confirmation prompt |
+
 ## ankra cluster morpheus plans
 
 List HPE Morpheus service plans available to a credential
@@ -6176,17 +7244,19 @@ and sandbox clusters, and when the destination already has a cluster with the
 same name.
 
 The destination is resolved among your organisations by id, slug or name.
-If no cluster name is provided, the currently selected cluster is moved.
+Name the cluster as the argument or with `--cluster`. A move never falls back
+to the cluster selected with 'ankra cluster select': that selection is shared
+by every shell and agent session on the machine.
 
 ```bash
-ankra cluster move [cluster_name] [flags]
+ankra cluster move <cluster_name> [flags]
 ```
 
 **Examples**
 
 ```bash
 ankra cluster move edge-01 --organisation acme-prod
-ankra cluster move --organisation 6f1c... --yes
+ankra cluster move --cluster edge-01 --organisation 6f1c... --yes
 ankra cluster move edge-01 --organisation "Acme Prod" -o json
 ```
 
@@ -6229,7 +7299,7 @@ ankra cluster node-group add <cluster_id|name> [flags]
 | `--taints` |   | Comma-separated key=value:Effect taints every node of the group registers with (value optional, effect defaults to NoSchedule); a tainted group runs only pods that tolerate them, such as pipeline pods placed with 'ankra cluster agent ci set `--node-group`' |
 | `--timeout` | `10m0s` | Maximum time to wait when `--wait` is set |
 | `--user-data-file` |   | Path to a cloud-init user-data file for the group (OVH clusters only). Applied verbatim at first boot by every instance the group ever creates, replacements included; Ankra sends no cloud-init of its own, so the document is not merged with anything. Max 65535 bytes. Use for provision-time disk layouts, e.g. carving a partition for LUKS before growpart runs |
-| `--wait` | `false` | Wait for the operation to finish and report success or failure (default: submit and return immediately) |
+| `--wait` | `false` | Wait until the platform has recorded the change or refused it. It does not wait for the change to reach the nodes (nodes created, resized, drained or removed, labels and taints applied) or for nodes to become Ready: the platform does that afterwards in an operation, which 'ankra cluster operations list `--cluster` &lt;cluster&gt;' shows (default: submit and return immediately) |
 | `--zone` |   | Pin every node of the group to one zone of an UpCloud multi-zone cluster's pool (e.g. se-sto1). Pin the group when it runs zonal storage: an UpCloud volume cannot attach from another zone. Omitted spreads the group across the pool; refused on a single-zone cluster |
 
 ## ankra cluster node-group autoscaling
@@ -6257,9 +7327,36 @@ ankra cluster node-group autoscaling get <cluster_id|name> <group_name> [flags]
 ## ankra cluster node-group autoscaling set
 
 Enable autoscaling with `--enabled` `--min` &lt;n&gt; `--max` &lt;n&gt;, or disable it with
-`--enabled=false`. min must be at least 1 (scale-to-zero is not supported);
-enabling requires the cluster's ankra-agent to be recent enough to serve
-the autoscaler, and installs the Cluster Autoscaler on first enable.
+`--enabled=false`.
+
+A `--min` or `--max` you leave out is read from the group first. The platform
+saves both bounds on every write, so this is what keeps `--enabled=false` on
+its own, or a change to one bound, from resetting the other:
+
+- A disable keeps the bounds exactly as the group reads, so `--enabled=false`
+
+on its own changes nothing but the switch. Given only `--min` on a group
+with no bounds recorded, it sends max 5 rather than the 100 the group
+reads as, so a later `--enabled` never keeps a max of 100 nobody typed.
+
+- An enable keeps the bound recorded for the group, or takes min 1 and
+
+max 5 when the group has none recorded. A disabled group that recorded
+exactly min 1 and max 100 reads the same as one with none, and gets the
+same.
+
+An enable without `--max` changes nothing and exits 8 when the group has more
+nodes than the max it would keep or take, since enabling would scale it
+down; it names the `--max` that keeps the group's size. The command also
+changes nothing when the group's current bounds or node count cannot be
+read. On a stopped cluster the platform does not answer the bounds read, so
+pass both `--min` and `--max` there.
+
+`--min` 0 (scale-to-zero) is accepted where the platform can size a node from
+the group's instance type and the cluster's ankra-agent serves the node
+template; the platform names what is missing otherwise. Enabling requires
+the cluster's ankra-agent to be recent enough to serve the autoscaler, and
+installs the Cluster Autoscaler on first enable.
 
 Enabling with bounds the group is outside moves it inside them: a `--max`
 below the group's node count scales it down to `--max`, removing the least
@@ -6284,8 +7381,8 @@ ankra cluster node-group autoscaling set <cluster_id|name> <group_name> [flags]
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--enabled` | `true` | Enable (true) or disable (false) autoscaling |
-| `--max` | `5` | Maximum node count while autoscaling |
-| `--min` | `1` | Minimum node count while autoscaling (&gt;= 1) |
+| `--max` | `0` | Maximum node count while autoscaling (at most 100). Left out, the group keeps its current max, or 5 when it has none recorded and this is an enable or a disable given `--min`; an enable that would then scale the group down is refused (exit 8) |
+| `--min` | `0` | Minimum node count while autoscaling (0 allows scale-to-zero). Left out, the group keeps its current min, or 1 when an enable finds none recorded |
 | `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
 | `--timeout` | `1h0m0s` | Maximum time to wait when `--wait` is set |
 | `--wait` | `false` | Wait for the operation to finish and report success or failure (default: submit and return immediately) |
@@ -6320,7 +7417,7 @@ ankra cluster node-group delete <cluster_id|name> <group_name> [flags]
 | `--force-drain` | `false` | Bypass PodDisruptionBudgets: each node of the group is removed even if its pods' disruption budget refuses the drain, instead of being kept. Use it only for nodes you have decided to lose |
 | `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
 | `--timeout` | `10m0s` | Maximum time to wait when `--wait` is set |
-| `--wait` | `false` | Wait for the operation to finish and report success or failure (default: submit and return immediately) |
+| `--wait` | `false` | Wait until the platform has recorded the change or refused it. It does not wait for the change to reach the nodes (nodes created, resized, drained or removed, labels and taints applied) or for nodes to become Ready: the platform does that afterwards in an operation, which 'ankra cluster operations list `--cluster` &lt;cluster&gt;' shows (default: submit and return immediately) |
 | `--yes` | `false` | Skip the confirmation prompt |
 
 ## ankra cluster node-group labels
@@ -6339,14 +7436,15 @@ ankra cluster node-group labels <cluster_id|name> <group_name> [flags]
 | `--labels` |   | Comma-separated key=value pairs to set on the group |
 | `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
 | `--timeout` | `10m0s` | Maximum time to wait when `--wait` is set |
-| `--wait` | `false` | Wait for the operation to finish and report success or failure (default: submit and return immediately) |
+| `--wait` | `false` | Wait until the platform has recorded the change or refused it. It does not wait for the change to reach the nodes (nodes created, resized, drained or removed, labels and taints applied) or for nodes to become Ready: the platform does that afterwards in an operation, which 'ankra cluster operations list `--cluster` &lt;cluster&gt;' shows (default: submit and return immediately) |
 
 ## ankra cluster node-group list
 
-List node groups
+List the node groups of a cloud cluster. The cluster is the argument, else
+`--cluster`, else the cluster selected with 'ankra cluster select'.
 
 ```bash
-ankra cluster node-group list <cluster_id|name> [flags]
+ankra cluster node-group list [cluster_id|name] [flags]
 ```
 
 **Flags**
@@ -6479,7 +7577,7 @@ ankra cluster node-group scale <cluster_id|name> <group_name> <count> [flags]
 | `--force-drain` | `false` | Bypass PodDisruptionBudgets for the nodes a scale-down removes: a node is removed even if its pods' disruption budget refuses the drain, instead of being kept. Use it only for a node you have decided to lose. Has no effect on a scale-up |
 | `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
 | `--timeout` | `10m0s` | Maximum time to wait when `--wait` is set |
-| `--wait` | `false` | Wait for the operation to finish and report success or failure (default: submit and return immediately) |
+| `--wait` | `false` | Wait until the platform has recorded the change or refused it. It does not wait for the change to reach the nodes (nodes created, resized, drained or removed, labels and taints applied) or for nodes to become Ready: the platform does that afterwards in an operation, which 'ankra cluster operations list `--cluster` &lt;cluster&gt;' shows (default: submit and return immediately) |
 
 ## ankra cluster node-group taints
 
@@ -6497,7 +7595,7 @@ ankra cluster node-group taints <cluster_id|name> <group_name> [flags]
 | `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
 | `--taints` |   | Comma-separated key=value:Effect taints to set on the group |
 | `--timeout` | `10m0s` | Maximum time to wait when `--wait` is set |
-| `--wait` | `false` | Wait for the operation to finish and report success or failure (default: submit and return immediately) |
+| `--wait` | `false` | Wait until the platform has recorded the change or refused it. It does not wait for the change to reach the nodes (nodes created, resized, drained or removed, labels and taints applied) or for nodes to become Ready: the platform does that afterwards in an operation, which 'ankra cluster operations list `--cluster` &lt;cluster&gt;' shows (default: submit and return immediately) |
 
 ## ankra cluster node-group upgrade
 
@@ -6532,7 +7630,7 @@ ankra cluster node-group upgrade <cluster_id|name> <group_name> <instance_type> 
 | `--force-drain` | `false` | Bypass PodDisruptionBudgets when draining each node before its resize: a node is power-cycled even if its pods' disruption budget refuses the drain, so those pods lose the availability their budget protects. Use it only when you accept that disruption |
 | `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
 | `--timeout` | `10m0s` | Maximum time to wait when `--wait` is set |
-| `--wait` | `false` | Wait for the operation to finish and report success or failure (default: submit and return immediately) |
+| `--wait` | `false` | Wait until the platform has recorded the change or refused it. It does not wait for the change to reach the nodes (nodes created, resized, drained or removed, labels and taints applied) or for nodes to become Ready: the platform does that afterwards in an operation, which 'ankra cluster operations list `--cluster` &lt;cluster&gt;' shows (default: submit and return immediately) |
 
 ## ankra cluster operations
 
@@ -6954,6 +8052,59 @@ ankra cluster ovh create [flags]
 | `--worker-count` | `1` | Number of worker nodes |
 | `--worker-flavor-id` |   | Worker instance flavor (server default: b3-16) |
 
+## ankra cluster ovh etcd
+
+Read the cluster's etcd membership from one control-plane node, and remove
+the stale member a dead control-plane node left behind so its replacement can
+join. Both run over the platform's bastion SSH lane as tracked operations and
+need clusters.operate on the cluster. Find node ids with 'nodes list'.
+
+## ankra cluster ovh etcd members
+
+Run 'etcdctl member list' and the endpoint health check on the control-plane
+node named and report every member (hex and decimal id), its health, any
+alarms and the quorum summary with its failure tolerance. Nothing changes.
+Run it on a healthy control-plane node when another one is dead.
+
+```bash
+ankra cluster ovh etcd members <cluster_id|name> <node_id> [flags]
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+| `--timeout` | `4m0s` | Maximum time to wait for the job's report |
+
+## ankra cluster ovh etcd remove
+
+Remove one etcd member, named by the hex or decimal id 'etcd members'
+reported, executing on the healthy control-plane node named. The platform
+re-reads live membership first and refuses a healthy member, a member whose
+health it cannot read, the node's own member, an ambiguous id, and any
+removal that would break quorum.
+
+This is destructive and cannot be undone: the command asks first (`--yes`
+skips, declining exits 4).
+
+```bash
+ankra cluster hetzner etcd members prod <healthy-node-id>
+ankra cluster hetzner etcd remove prod <healthy-node-id> 8e9e05c52164694d
+```
+
+```bash
+ankra cluster ovh etcd remove <cluster_id|name> <node_id> <member_id> [flags]
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+| `--timeout` | `4m0s` | Maximum time to wait for the job's report |
+| `-y`, `--yes` | `false` | Skip the confirmation prompt |
+
 ## ankra cluster ovh k8s-version
 
 Get current Kubernetes version for an OVH cluster
@@ -7097,6 +8248,160 @@ ankra cluster ovh nodes restart <cluster_id|name> <node_id> [flags]
 |------|---------|-------------|
 | `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
 
+## ankra cluster ovh os-patches
+
+Unattended upgrades hold back the packages whose maintainer scripts restart
+networking in place; the rolling OS patch lane installs them instead, one
+host at a time, drained and returned to service before the next.
+
+```text
+status       the policy, the newest run host by host, the last dry run
+plan         the dry run: what each host would install
+run          start the rolling patch (asks first)
+policy set   change the maintenance window and the opt-in
+node-policy  write or remove the node OS update hold by hand
+```
+
+## ankra cluster ovh os-patches node-policy
+
+Write the node OS update hold - the apt policy that keeps unattended
+upgrades away from the packages that restart networking - on the nodes named
+with `--node`, on every node with `--all-nodes`, and on the bastion with
+`--include-bastion`. The rolling OS patch lane writes and lifts it on its own;
+this is the by-hand route. Writing it is refused unless the cluster's OS
+patch policy is enabled; `--revert` removes it and is always allowed.
+
+The command asks first (`--yes` skips, declining exits 4). Needs
+clusters.operate.
+
+```bash
+ankra cluster ovh os-patches node-policy <cluster_id|name> [flags]
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--all-nodes` | `false` | Apply the policy to every node |
+| `--include-bastion` | `false` | Apply the policy to the bastion too |
+| `--node` | `[]` | Node id to apply the policy to (repeatable) |
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+| `--revert` | `false` | Remove the hold instead of writing it |
+| `--timeout` | `4m0s` | Maximum time to wait for the per-host report |
+| `-y`, `--yes` | `false` | Skip the confirmation prompt |
+
+## ankra cluster ovh os-patches plan
+
+Run the dry run on every host and report what each would install, which
+held-back security updates are pending, whether a reboot would follow, and
+the order 'run' would take. The platform waits about 40 seconds; a slower
+plan hands back its operation id, and 'status' shows it once it finishes.
+Needs clusters.operate.
+
+```bash
+ankra cluster ovh os-patches plan <cluster_id|name> [flags]
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+| `--timeout` | `4m0s` | Maximum time to wait for the plan |
+
+## ankra cluster ovh os-patches policy
+
+Show or change the cluster's OS patch policy
+
+## ankra cluster ovh os-patches policy get
+
+Show the OS patch policy and its maintenance window
+
+```bash
+ankra cluster ovh os-patches policy get <cluster_id|name> [flags]
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+
+## ankra cluster ovh os-patches policy set
+
+Change the cluster's OS patch policy. Only the flags passed are changed.
+Turning the policy off also removes the node OS update hold from every host,
+and is refused while a run or a node OS policy operation is in flight.
+Needs clusters.write.
+
+```bash
+ankra cluster hetzner os-patches policy set prod --enable --window-days sat,sun --window-start-hour 2 --window-duration-hours 4
+ankra cluster hetzner os-patches policy set prod --disable
+```
+
+```bash
+ankra cluster ovh os-patches policy set <cluster_id|name> [flags]
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--cadence-days` | `0` | Days between scheduled runs |
+| `--disable` | `false` | Turn the rolling OS patch policy off |
+| `--enable` | `false` | Turn the rolling OS patch policy on |
+| `--exclude-stateful-nodes` | `false` | Leave nodes running stateful workloads out |
+| `--include-stateful-nodes` | `false` | Patch nodes running stateful workloads |
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+| `--security-lag-days` | `0` | Days a held security update may wait before the cluster is reported lagging |
+| `--timeout` | `4m0s` | Maximum time to wait for the change |
+| `--window-days` | `[]` | Days the maintenance window opens (mon,tue,...) |
+| `--window-duration-hours` | `0` | How many hours the window stays open |
+| `--window-start-hour` | `0` | Hour of the day (UTC, 0-23) the window opens |
+
+## ankra cluster ovh os-patches run
+
+Start the rolling patch: each host is drained, patched, rebooted when the
+packages ask for it, and returned to service before the next. Workloads move
+between nodes while it runs, so the command asks first (`--yes` skips,
+declining exits 4).
+
+Outside the policy's maintenance window the platform refuses unless
+`--outside-window` is passed. Stateful nodes follow the policy unless
+`--include-stateful-nodes` or `--exclude-stateful-nodes` says otherwise; the
+bastion is patched last unless `--exclude-bastion`. Follow the run with
+'status' or 'ankra cluster operations list'. Needs clusters.operate.
+
+```bash
+ankra cluster ovh os-patches run <cluster_id|name> [flags]
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--exclude-bastion` | `false` | Leave the bastion out of this run |
+| `--exclude-stateful-nodes` | `false` | Leave nodes running stateful workloads out, whatever the policy says |
+| `--include-stateful-nodes` | `false` | Patch nodes running stateful workloads, whatever the policy says |
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+| `--outside-window` | `false` | Start now even though the maintenance window is closed |
+| `--timeout` | `4m0s` | Maximum time to wait for the run to start |
+| `-y`, `--yes` | `false` | Skip the confirmation prompt |
+
+## ankra cluster ovh os-patches status
+
+Show the OS patch policy, the newest run and the security-lag verdict
+
+```bash
+ankra cluster ovh os-patches status <cluster_id|name> [flags]
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+
 ## ankra cluster ovh regions
 
 List the OVH Cloud regions the supplied credential's project can deploy in. Only these regions are valid for cluster creation.
@@ -7224,6 +8529,39 @@ ankra cluster patch <kind> <name> [name...] [flags]
 | `--patch-file` |   | Read the patch document from a JSON or YAML file instead of `--patch` |
 | `--resource` |   | Exact API resource plural when a custom kind has an irregular plural (e.g. backuprepositories) |
 | `--type` | `strategic` | Patch type: strategic (default), merge (RFC 7386) or json (RFC 6902) |
+| `-y`, `--yes` | `false` | Skip the confirmation prompt |
+
+## ankra cluster persistent-volumes
+
+Delete PersistentVolumes on the active cluster through its Ankra agent.
+List them with 'ankra cluster get persistentvolumes'. Needs kubernetes.write
+on the cluster.
+
+## ankra cluster persistent-volumes delete
+
+Delete one or more PersistentVolumes. Each volume's phase is read first: a
+Bound volume still backs a claim, and deleting it takes the claim's data
+away from the workload using it, so the command refuses it (exit 8, nothing
+deleted) unless `--force`. Released, Available and Failed volumes are deleted;
+their storage is then released according to the reclaim policy.
+
+The command asks first (`--yes` skips, declining exits 4); each volume reports
+its own outcome, and one that did not exist exits 3.
+
+```bash
+ankra cluster persistent-volumes delete pvc-1f2e3d4c --yes
+```
+
+```bash
+ankra cluster persistent-volumes delete <name> [name...] [flags]
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--dry-run` | `false` | Report what would be deleted without deleting anything |
+| `--force` | `false` | Delete a volume even while a claim still holds it (Bound) |
 | `-y`, `--yes` | `false` | Skip the confirmation prompt |
 
 ## ankra cluster playground
@@ -7434,14 +8772,17 @@ resources from the cluster's stored stack definition. Verify anything you patche
 in place afterwards - see "ankra cluster addons list &lt;addon&gt;" and
 "ankra cluster manifests list".
 
-This is not a power-on. To resume a cluster you powered off, use the provider's
-start command (for example "ankra hetzner cluster start") or
+This is not a power-on. To resume a cluster you powered off, use its provider's
+start command (for example "ankra cluster hetzner start") or
 "ankra cluster power-schedules".
 
-If no cluster name is provided, uses the currently selected cluster.
+Name the cluster as the argument or with `--cluster`. Provisioning builds
+infrastructure that bills, so it never falls back to the cluster selected with
+'ankra cluster select': that selection is shared by every shell and agent
+session on the machine.
 
 ```bash
-ankra cluster provision [cluster_name] [flags]
+ankra cluster provision <cluster_name> [flags]
 ```
 
 **Flags**
@@ -7456,7 +8797,7 @@ Commands to create, stop, start, and inspect Proxmox VE clusters.
 
 ## ankra cluster proxmox bastion
 
-Inspect and diagnose the cluster's single bastion/gateway node.
+Inspect, diagnose, and resize the cluster's single bastion/gateway node.
 Find its node ID with 'nodes list'.
 
 ## ankra cluster proxmox bastion diagnose
@@ -7477,6 +8818,30 @@ ankra cluster proxmox bastion diagnose <cluster_id|name> [flags]
 |------|---------|-------------|
 | `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
 | `--timeout` | `3m0s` | Maximum time to wait for the diagnosis report |
+
+## ankra cluster proxmox bastion resize
+
+Resize the bastion/gateway node. The provider's bastion/gateway update job
+powers it off, resizes it, and powers it back on, causing brief SSH/NAT
+downtime for the cluster.
+
+`--wait` covers the platform write only; the cloud resize runs as the operation
+reported on success. Follow it with 'ankra cluster operations list &lt;operation_id&gt;'.
+
+On Proxmox VE &lt;instance_type&gt; is an instance-size preset such as px-medium;
+list them with 'ankra cluster proxmox sizes'.
+
+```bash
+ankra cluster proxmox bastion resize <cluster_id|name> <instance_type> [flags]
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+| `--timeout` | `10m0s` | Maximum time to wait when `--wait` is set |
+| `--wait` | `false` | Wait for the operation to finish and report success or failure (default: submit and return immediately) |
 
 ## ankra cluster proxmox bastion status
 
@@ -7735,6 +9100,48 @@ ankra cluster proxmox nodes restart <cluster_id|name> <node_id> [flags]
 |------|---------|-------------|
 | `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
 
+## ankra cluster proxmox os-patches
+
+Unattended upgrades hold back the packages whose maintainer scripts restart
+networking in place; the rolling OS patch lane installs them instead, one
+host at a time, drained and returned to service before the next.
+
+```text
+status       the policy, the newest run host by host, the last dry run
+plan         the dry run: what each host would install
+run          start the rolling patch (asks first)
+policy set   change the maintenance window and the opt-in
+node-policy  write or remove the node OS update hold by hand
+```
+
+## ankra cluster proxmox os-patches node-policy
+
+Write the node OS update hold - the apt policy that keeps unattended
+upgrades away from the packages that restart networking - on the nodes named
+with `--node`, on every node with `--all-nodes`, and on the bastion with
+`--include-bastion`. The rolling OS patch lane writes and lifts it on its own;
+this is the by-hand route. Writing it is refused unless the cluster's OS
+patch policy is enabled; `--revert` removes it and is always allowed.
+
+The command asks first (`--yes` skips, declining exits 4). Needs
+clusters.operate.
+
+```bash
+ankra cluster proxmox os-patches node-policy <cluster_id|name> [flags]
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--all-nodes` | `false` | Apply the policy to every node |
+| `--include-bastion` | `false` | Apply the policy to the bastion too |
+| `--node` | `[]` | Node id to apply the policy to (repeatable) |
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+| `--revert` | `false` | Remove the hold instead of writing it |
+| `--timeout` | `4m0s` | Maximum time to wait for the per-host report |
+| `-y`, `--yes` | `false` | Skip the confirmation prompt |
+
 ## ankra cluster proxmox sizes
 
 List the instance-size presets (px-small, px-medium, ...) accepted by the Proxmox VE instance-type flags.
@@ -7931,8 +9338,33 @@ Manage the lifecycle of Scaleway clusters.
 
 ## ankra cluster scaleway bastion
 
-Inspect the cluster's single bastion/gateway node.
+Inspect and resize the cluster's single bastion/gateway node.
 Find its node ID with 'nodes list'.
+
+## ankra cluster scaleway bastion resize
+
+Resize the bastion/gateway node. The provider's bastion/gateway update job
+powers it off, resizes it, and powers it back on, causing brief SSH/NAT
+downtime for the cluster.
+
+`--wait` covers the platform write only; the cloud resize runs as the operation
+reported on success. Follow it with 'ankra cluster operations list &lt;operation_id&gt;'.
+
+On Scaleway the bastion is the cluster's managed Public Gateway, so
+&lt;instance_type&gt; is a gateway type such as VPC-GW-M; list them with
+'ankra cluster scaleway gateway-types'.
+
+```bash
+ankra cluster scaleway bastion resize <cluster_id|name> <instance_type> [flags]
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+| `--timeout` | `10m0s` | Maximum time to wait when `--wait` is set |
+| `--wait` | `false` | Wait for the operation to finish and report success or failure (default: submit and return immediately) |
 
 ## ankra cluster scaleway bastion status
 
@@ -8057,7 +9489,7 @@ ankra cluster scaleway control-plane set-instance-type <cluster_id|name> <instan
 
 ## ankra cluster scaleway create
 
-Create an Ankra-managed K3s or kubeadm cluster on Scaleway Instances.
+Create an Ankra-managed kubeadm (default) or k3s cluster on Scaleway Instances.
 
 Ankra owns the server graph, security group, Public Gateway v2, generated SSH
 key and (unless `--private-network-id` adopts an existing one) the Private
@@ -8086,7 +9518,7 @@ ankra cluster scaleway create [flags]
 | `--credential-id` |   | Scaleway provisioning credential ID (required) |
 | `--criticality` |   | Reporting level: production, staging, development or disposable (server default: the environment's own level) |
 | `--description` |   | Cluster description |
-| `--distribution` |   | Kubernetes distribution: k3s or kubeadm (server default: k3s). kubeadm on Scaleway is Cilium-only |
+| `--distribution` |   | Kubernetes distribution: kubeadm or k3s (server default: kubeadm). kubeadm on Scaleway is Cilium-only |
 | `--environment` |   | Environment: production, staging, development, testing, local, or a name of your own (server default: development) |
 | `--etcd-node-count` | `0` | External etcd node count, 3 or 5 (server default: 3) |
 | `--etcd-topology` |   | etcd topology: stacked or external (server default: stacked) |
@@ -8127,8 +9559,62 @@ ankra cluster scaleway deprovision <cluster_id|name> [flags]
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--accept-volume-data-loss` | `false` | Accept that deprovisioning deletes the cluster's persistent volumes (the cloud volumes its CSI driver provisioned) and the data on them, forced or not. Required when the cluster has such volumes, or Ankra cannot list them, and you are not answering the prompt on a terminal; `--yes` does not imply it. A cluster whose retention_policy is retain (AWS, Scaleway, Ankra Cloud) keeps its volumes and needs no acknowledgement |
+| `--force` | `false` | Force teardown: skip the in-cluster agent's uninstall of the stack resources and tolerate infrastructure that can no longer be reached. It never decides the persistent volumes: a cluster whose retention_policy is retain keeps them, and a delete cluster's are deleted only with `--accept-volume-data-loss` or a yes at the prompt |
 | `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
 | `--yes` | `false` | Skip the confirmation prompt |
+
+## ankra cluster scaleway etcd
+
+Read the cluster's etcd membership from one control-plane node, and remove
+the stale member a dead control-plane node left behind so its replacement can
+join. Both run over the platform's bastion SSH lane as tracked operations and
+need clusters.operate on the cluster. Find node ids with 'nodes list'.
+
+## ankra cluster scaleway etcd members
+
+Run 'etcdctl member list' and the endpoint health check on the control-plane
+node named and report every member (hex and decimal id), its health, any
+alarms and the quorum summary with its failure tolerance. Nothing changes.
+Run it on a healthy control-plane node when another one is dead.
+
+```bash
+ankra cluster scaleway etcd members <cluster_id|name> <node_id> [flags]
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+| `--timeout` | `4m0s` | Maximum time to wait for the job's report |
+
+## ankra cluster scaleway etcd remove
+
+Remove one etcd member, named by the hex or decimal id 'etcd members'
+reported, executing on the healthy control-plane node named. The platform
+re-reads live membership first and refuses a healthy member, a member whose
+health it cannot read, the node's own member, an ambiguous id, and any
+removal that would break quorum.
+
+This is destructive and cannot be undone: the command asks first (`--yes`
+skips, declining exits 4).
+
+```bash
+ankra cluster hetzner etcd members prod <healthy-node-id>
+ankra cluster hetzner etcd remove prod <healthy-node-id> 8e9e05c52164694d
+```
+
+```bash
+ankra cluster scaleway etcd remove <cluster_id|name> <node_id> <member_id> [flags]
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+| `--timeout` | `4m0s` | Maximum time to wait for the job's report |
+| `-y`, `--yes` | `false` | Skip the confirmation prompt |
 
 ## ankra cluster scaleway gateway-types
 
@@ -8308,6 +9794,132 @@ ankra cluster scaleway nodes restart <cluster_id|name> <node_id> [flags]
 |------|---------|-------------|
 | `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
 
+## ankra cluster scaleway os-patches
+
+Unattended upgrades hold back the packages whose maintainer scripts restart
+networking in place; the rolling OS patch lane installs them instead, one
+host at a time, drained and returned to service before the next.
+
+```text
+status       the policy, the newest run host by host, the last dry run
+plan         the dry run: what each host would install
+run          start the rolling patch (asks first)
+policy set   change the maintenance window and the opt-in
+node-policy  write or remove the node OS update hold by hand
+```
+
+## ankra cluster scaleway os-patches plan
+
+Run the dry run on every host and report what each would install, which
+held-back security updates are pending, whether a reboot would follow, and
+the order 'run' would take. The platform waits about 40 seconds; a slower
+plan hands back its operation id, and 'status' shows it once it finishes.
+Needs clusters.operate.
+
+```bash
+ankra cluster scaleway os-patches plan <cluster_id|name> [flags]
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+| `--timeout` | `4m0s` | Maximum time to wait for the plan |
+
+## ankra cluster scaleway os-patches policy
+
+Show or change the cluster's OS patch policy
+
+## ankra cluster scaleway os-patches policy get
+
+Show the OS patch policy and its maintenance window
+
+```bash
+ankra cluster scaleway os-patches policy get <cluster_id|name> [flags]
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+
+## ankra cluster scaleway os-patches policy set
+
+Change the cluster's OS patch policy. Only the flags passed are changed.
+Turning the policy off also removes the node OS update hold from every host,
+and is refused while a run or a node OS policy operation is in flight.
+Needs clusters.write.
+
+```bash
+ankra cluster hetzner os-patches policy set prod --enable --window-days sat,sun --window-start-hour 2 --window-duration-hours 4
+ankra cluster hetzner os-patches policy set prod --disable
+```
+
+```bash
+ankra cluster scaleway os-patches policy set <cluster_id|name> [flags]
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--cadence-days` | `0` | Days between scheduled runs |
+| `--disable` | `false` | Turn the rolling OS patch policy off |
+| `--enable` | `false` | Turn the rolling OS patch policy on |
+| `--exclude-stateful-nodes` | `false` | Leave nodes running stateful workloads out |
+| `--include-stateful-nodes` | `false` | Patch nodes running stateful workloads |
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+| `--security-lag-days` | `0` | Days a held security update may wait before the cluster is reported lagging |
+| `--timeout` | `4m0s` | Maximum time to wait for the change |
+| `--window-days` | `[]` | Days the maintenance window opens (mon,tue,...) |
+| `--window-duration-hours` | `0` | How many hours the window stays open |
+| `--window-start-hour` | `0` | Hour of the day (UTC, 0-23) the window opens |
+
+## ankra cluster scaleway os-patches run
+
+Start the rolling patch: each host is drained, patched, rebooted when the
+packages ask for it, and returned to service before the next. Workloads move
+between nodes while it runs, so the command asks first (`--yes` skips,
+declining exits 4).
+
+Outside the policy's maintenance window the platform refuses unless
+`--outside-window` is passed. Stateful nodes follow the policy unless
+`--include-stateful-nodes` or `--exclude-stateful-nodes` says otherwise; the
+bastion is patched last unless `--exclude-bastion`. Follow the run with
+'status' or 'ankra cluster operations list'. Needs clusters.operate.
+
+```bash
+ankra cluster scaleway os-patches run <cluster_id|name> [flags]
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--exclude-bastion` | `false` | Leave the bastion out of this run |
+| `--exclude-stateful-nodes` | `false` | Leave nodes running stateful workloads out, whatever the policy says |
+| `--include-stateful-nodes` | `false` | Patch nodes running stateful workloads, whatever the policy says |
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+| `--outside-window` | `false` | Start now even though the maintenance window is closed |
+| `--timeout` | `4m0s` | Maximum time to wait for the run to start |
+| `-y`, `--yes` | `false` | Skip the confirmation prompt |
+
+## ankra cluster scaleway os-patches status
+
+Show the OS patch policy, the newest run and the security-lag verdict
+
+```bash
+ankra cluster scaleway os-patches status <cluster_id|name> [flags]
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+
 ## ankra cluster scaleway preflight
 
 Run the Scaleway create preflight: region/zone reachability, CIDR overlap,
@@ -8331,7 +9943,7 @@ ankra cluster scaleway preflight [flags]
 | `--credential-id` |   | Scaleway provisioning credential ID (required) |
 | `--criticality` |   | Reporting level: production, staging, development or disposable (server default: the environment's own level) |
 | `--description` |   | Cluster description |
-| `--distribution` |   | Kubernetes distribution: k3s or kubeadm (server default: k3s). kubeadm on Scaleway is Cilium-only |
+| `--distribution` |   | Kubernetes distribution: kubeadm or k3s (server default: kubeadm). kubeadm on Scaleway is Cilium-only |
 | `--environment` |   | Environment: production, staging, development, testing, local, or a name of your own (server default: development) |
 | `--etcd-node-count` | `0` | External etcd node count, 3 or 5 (server default: 3) |
 | `--etcd-topology` |   | etcd topology: stacked or external (server default: stacked) |
@@ -8487,7 +10099,7 @@ ankra cluster ssh-keys set <cluster_id|name> [flags]
 
 ## ankra cluster stacks
 
-Commands to list, create, delete, rename, and view history of stacks.
+Commands to list, create, delete, rename, redeploy, uninstall and install stacks, and view their history.
 
 ## ankra cluster stacks clone
 
@@ -8629,6 +10241,31 @@ Show history of changes for a stack
 
 ```bash
 ankra cluster stacks history <name> [flags]
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+
+## ankra cluster stacks install
+
+Install a stack that was uninstalled: deploy its add-ons, manifests and applications to the cluster again, in dependency order, with the definitions the stack holds now, including members added or edited while it was uninstalled. A member that was already off the cluster when the stack was uninstalled, such as an add-on uninstalled on its own, stays off it.
+
+Name the cluster with `--cluster`. This command never uses the cluster 'ankra cluster select' saved, which every shell and agent session on this machine shares: a stack uninstalled on one cluster because it now runs on another must not come back on the wrong one.
+
+The platform refuses an install, and changes nothing, for a stack that is not uninstalled, one whose uninstall is still taking members off the cluster, one with an open draft or being deleted, and while the cluster is offline. The command then prints the platform's reason and exits 8. It needs the stacks.deploy permission on the cluster (exit 7 without it), and a stack the cluster does not have exits 3.
+
+```bash
+ankra cluster stacks install <stack name> [flags]
+```
+
+**Examples**
+
+```bash
+ankra cluster stacks install web --cluster prod
+ankra cluster stacks install web --cluster prod -o json
 ```
 
 **Flags**
@@ -8906,6 +10543,37 @@ ankra cluster stacks show-draft shop --cluster staging -o json
 |------|---------|-------------|
 | `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
 
+## ankra cluster stacks uninstall
+
+Uninstall a stack: take every add-on, manifest and application in it off the cluster. The stack itself is not deleted. It stays declared in Ankra and in your GitOps repository, nothing is committed to Git, and 'ankra cluster stacks install &lt;stack&gt; `--cluster` &lt;cluster&gt;' deploys it again.
+
+Members come off in reverse dependency order. Data is treated exactly as a delete treats it: whatever a chart or operator removes together with its workload is removed too, and installing the stack again does not bring that back. Back the stack up first: 'ankra cluster stacks data list &lt;stack&gt;' lists what it stores, and 'ankra cluster stacks restore-points create &lt;stack&gt;' takes a restore point.
+
+While the stack is uninstalled its members stay off the cluster through cluster starts and Git syncs, and edits to them are stored and deployed when the stack is installed again.
+
+Name the cluster with `--cluster`. This command never uses the cluster 'ankra cluster select' saved, which every shell and agent session on this machine shares. It says what it will do and asks first: `--yes` answers, and without a terminal `--yes` is required.
+
+The platform refuses an uninstall, and changes nothing, while the cluster is offline, while a member's deployment is still running or has failed, while the stack has an open draft or is being deleted, and for a stack a managed service owns. The command then prints the platform's reason and exits 8. It needs the stacks.delete permission on the cluster (exit 7 without it), and a stack the cluster does not have exits 3.
+
+```bash
+ankra cluster stacks uninstall <stack name> [flags]
+```
+
+**Examples**
+
+```bash
+ankra cluster stacks uninstall web --cluster prod
+ankra cluster stacks uninstall web --cluster prod --yes
+ankra cluster stacks uninstall web --cluster prod --yes -o json
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+| `--yes` | `false` | Skip the confirmation prompt |
+
 ## ankra cluster stacks unprotect
 
 Turn off protection for a stack.
@@ -9080,6 +10748,60 @@ ankra cluster state-snapshots retention --days 3 --yes --cluster dev -o json
 | `--days` | `0` | Set the retention window in days (1 to 90) |
 | `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
 | `-y`, `--yes` | `false` | Skip the confirmation a shorter window asks for |
+
+## ankra cluster storage-classes
+
+Create or delete StorageClasses on the active cluster through its Ankra
+agent. List them with 'ankra cluster get storageclasses'. Both need
+kubernetes.write on the cluster.
+
+## ankra cluster storage-classes create
+
+Create a StorageClass from flags. `--provisioner` names the CSI driver that
+cuts the volumes (driver.longhorn.io, csi.hetzner.cloud, ebs.csi.aws.com,
+...); `--parameter` passes the driver's own settings and repeats.
+
+```bash
+ankra cluster storage-classes create fast --provisioner csi.hetzner.cloud --reclaim-policy Retain
+ankra cluster storage-classes create replicated --provisioner driver.longhorn.io \
+  --parameter numberOfReplicas=3 --allow-volume-expansion --volume-binding-mode WaitForFirstConsumer
+```
+
+```bash
+ankra cluster storage-classes create <name> --provisioner <provisioner> [flags]
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--allow-volume-expansion` | `false` | Let claims of this class grow |
+| `--default` | `false` | Mark this class the cluster's default |
+| `--dry-run` | `false` | Report what would be created without creating anything |
+| `--mount-option` | `[]` | Mount option for the volumes (repeatable) |
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+| `--parameter` | `[]` | Driver parameter as key=value (repeatable) |
+| `--provisioner` |   | CSI driver that provisions the volumes (required) |
+| `--reclaim-policy` |   | Delete or Retain (the cluster's default is Delete) |
+| `--volume-binding-mode` |   | Immediate or WaitForFirstConsumer |
+
+## ankra cluster storage-classes delete
+
+Delete one or more StorageClasses. Volumes already provisioned from a class
+keep running; new claims naming it stay Pending until a class of that name
+exists again. The command asks first (`--yes` skips, declining exits 4); each
+class reports its own outcome, and one that did not exist exits 3.
+
+```bash
+ankra cluster storage-classes delete <name> [name...] [flags]
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--dry-run` | `false` | Report what would be deleted without deleting anything |
+| `-y`, `--yes` | `false` | Skip the confirmation prompt |
 
 ## ankra cluster terminal
 
@@ -9439,6 +11161,59 @@ ankra cluster upcloud create [flags]
 | `--zone` |   | UpCloud zone (required); the primary zone of a multi-zone cluster (bastion, first control plane, default network) |
 | `--zones` | `[]` | Zone pool for a multi-zone cluster (e.g. fi-hel1,fi-hel2,se-sto1). Must include `--zone`. Needs at least 3 zones and `--control-plane-count=3` so the control plane survives the loss of any one zone; each extra zone gets its own private network and NAT gateway, and the nodes are joined by a platform-managed WireGuard mesh. kubeadm only. Omitted keeps the cluster in `--zone` |
 
+## ankra cluster upcloud etcd
+
+Read the cluster's etcd membership from one control-plane node, and remove
+the stale member a dead control-plane node left behind so its replacement can
+join. Both run over the platform's bastion SSH lane as tracked operations and
+need clusters.operate on the cluster. Find node ids with 'nodes list'.
+
+## ankra cluster upcloud etcd members
+
+Run 'etcdctl member list' and the endpoint health check on the control-plane
+node named and report every member (hex and decimal id), its health, any
+alarms and the quorum summary with its failure tolerance. Nothing changes.
+Run it on a healthy control-plane node when another one is dead.
+
+```bash
+ankra cluster upcloud etcd members <cluster_id|name> <node_id> [flags]
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+| `--timeout` | `4m0s` | Maximum time to wait for the job's report |
+
+## ankra cluster upcloud etcd remove
+
+Remove one etcd member, named by the hex or decimal id 'etcd members'
+reported, executing on the healthy control-plane node named. The platform
+re-reads live membership first and refuses a healthy member, a member whose
+health it cannot read, the node's own member, an ambiguous id, and any
+removal that would break quorum.
+
+This is destructive and cannot be undone: the command asks first (`--yes`
+skips, declining exits 4).
+
+```bash
+ankra cluster hetzner etcd members prod <healthy-node-id>
+ankra cluster hetzner etcd remove prod <healthy-node-id> 8e9e05c52164694d
+```
+
+```bash
+ankra cluster upcloud etcd remove <cluster_id|name> <node_id> <member_id> [flags]
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+| `--timeout` | `4m0s` | Maximum time to wait for the job's report |
+| `-y`, `--yes` | `false` | Skip the confirmation prompt |
+
 ## ankra cluster upcloud k8s-version
 
 Get current Kubernetes version for an UpCloud cluster
@@ -9555,6 +11330,160 @@ ankra cluster upcloud nodes restart <cluster_id|name> <node_id> [flags]
 |------|---------|-------------|
 | `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
 
+## ankra cluster upcloud os-patches
+
+Unattended upgrades hold back the packages whose maintainer scripts restart
+networking in place; the rolling OS patch lane installs them instead, one
+host at a time, drained and returned to service before the next.
+
+```text
+status       the policy, the newest run host by host, the last dry run
+plan         the dry run: what each host would install
+run          start the rolling patch (asks first)
+policy set   change the maintenance window and the opt-in
+node-policy  write or remove the node OS update hold by hand
+```
+
+## ankra cluster upcloud os-patches node-policy
+
+Write the node OS update hold - the apt policy that keeps unattended
+upgrades away from the packages that restart networking - on the nodes named
+with `--node`, on every node with `--all-nodes`, and on the bastion with
+`--include-bastion`. The rolling OS patch lane writes and lifts it on its own;
+this is the by-hand route. Writing it is refused unless the cluster's OS
+patch policy is enabled; `--revert` removes it and is always allowed.
+
+The command asks first (`--yes` skips, declining exits 4). Needs
+clusters.operate.
+
+```bash
+ankra cluster upcloud os-patches node-policy <cluster_id|name> [flags]
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--all-nodes` | `false` | Apply the policy to every node |
+| `--include-bastion` | `false` | Apply the policy to the bastion too |
+| `--node` | `[]` | Node id to apply the policy to (repeatable) |
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+| `--revert` | `false` | Remove the hold instead of writing it |
+| `--timeout` | `4m0s` | Maximum time to wait for the per-host report |
+| `-y`, `--yes` | `false` | Skip the confirmation prompt |
+
+## ankra cluster upcloud os-patches plan
+
+Run the dry run on every host and report what each would install, which
+held-back security updates are pending, whether a reboot would follow, and
+the order 'run' would take. The platform waits about 40 seconds; a slower
+plan hands back its operation id, and 'status' shows it once it finishes.
+Needs clusters.operate.
+
+```bash
+ankra cluster upcloud os-patches plan <cluster_id|name> [flags]
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+| `--timeout` | `4m0s` | Maximum time to wait for the plan |
+
+## ankra cluster upcloud os-patches policy
+
+Show or change the cluster's OS patch policy
+
+## ankra cluster upcloud os-patches policy get
+
+Show the OS patch policy and its maintenance window
+
+```bash
+ankra cluster upcloud os-patches policy get <cluster_id|name> [flags]
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+
+## ankra cluster upcloud os-patches policy set
+
+Change the cluster's OS patch policy. Only the flags passed are changed.
+Turning the policy off also removes the node OS update hold from every host,
+and is refused while a run or a node OS policy operation is in flight.
+Needs clusters.write.
+
+```bash
+ankra cluster hetzner os-patches policy set prod --enable --window-days sat,sun --window-start-hour 2 --window-duration-hours 4
+ankra cluster hetzner os-patches policy set prod --disable
+```
+
+```bash
+ankra cluster upcloud os-patches policy set <cluster_id|name> [flags]
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--cadence-days` | `0` | Days between scheduled runs |
+| `--disable` | `false` | Turn the rolling OS patch policy off |
+| `--enable` | `false` | Turn the rolling OS patch policy on |
+| `--exclude-stateful-nodes` | `false` | Leave nodes running stateful workloads out |
+| `--include-stateful-nodes` | `false` | Patch nodes running stateful workloads |
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+| `--security-lag-days` | `0` | Days a held security update may wait before the cluster is reported lagging |
+| `--timeout` | `4m0s` | Maximum time to wait for the change |
+| `--window-days` | `[]` | Days the maintenance window opens (mon,tue,...) |
+| `--window-duration-hours` | `0` | How many hours the window stays open |
+| `--window-start-hour` | `0` | Hour of the day (UTC, 0-23) the window opens |
+
+## ankra cluster upcloud os-patches run
+
+Start the rolling patch: each host is drained, patched, rebooted when the
+packages ask for it, and returned to service before the next. Workloads move
+between nodes while it runs, so the command asks first (`--yes` skips,
+declining exits 4).
+
+Outside the policy's maintenance window the platform refuses unless
+`--outside-window` is passed. Stateful nodes follow the policy unless
+`--include-stateful-nodes` or `--exclude-stateful-nodes` says otherwise; the
+bastion is patched last unless `--exclude-bastion`. Follow the run with
+'status' or 'ankra cluster operations list'. Needs clusters.operate.
+
+```bash
+ankra cluster upcloud os-patches run <cluster_id|name> [flags]
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--exclude-bastion` | `false` | Leave the bastion out of this run |
+| `--exclude-stateful-nodes` | `false` | Leave nodes running stateful workloads out, whatever the policy says |
+| `--include-stateful-nodes` | `false` | Patch nodes running stateful workloads, whatever the policy says |
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+| `--outside-window` | `false` | Start now even though the maintenance window is closed |
+| `--timeout` | `4m0s` | Maximum time to wait for the run to start |
+| `-y`, `--yes` | `false` | Skip the confirmation prompt |
+
+## ankra cluster upcloud os-patches status
+
+Show the OS patch policy, the newest run and the security-lag verdict
+
+```bash
+ankra cluster upcloud os-patches status <cluster_id|name> [flags]
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+
 ## ankra cluster upcloud start
 
 Start (re-provision) a stopped UpCloud cluster. Use `--scope` control_plane to bring up only the control plane.
@@ -9651,18 +11580,23 @@ never reverted by a file, so it stays until it is changed here or in the
 portal. Who chose a label is recorded from the credential: your own token
 records you, a service account records automation.
 
-The cluster is given by name or id; without one, the selected cluster is
-updated.
+The cluster is given by name or id, as the argument or with `--cluster`. An
+update never falls back to the cluster selected with 'ankra cluster select':
+that selection is shared by every shell and agent session on the machine,
+and the environment decides dynamic cluster groups and the access they
+grant, alert silencing ('local') and whether Ankra AI may remediate the
+cluster on its own (never on production), so a relabel aimed at the wrong
+cluster could switch that on for a production cluster.
 
 ```bash
-ankra cluster update [cluster] [flags]
+ankra cluster update <cluster> [flags]
 ```
 
 **Examples**
 
 ```bash
 ankra cluster update so-infrastructure --environment development
-ankra cluster update --environment eu-qa --criticality staging
+ankra cluster update --cluster eu-qa-01 --environment eu-qa --criticality staging
 ankra cluster update 3d0e2935-963b-4c7b-a494-b7266776ec68 --environment production -o json
 ```
 
