@@ -42,10 +42,13 @@ A node group is a set of workers with one instance type, a count, and optional l
 
 **On the CLI:**
 
+<CliVersion since="0.72.0" command="cluster node-group remove-node" />
+
 ```bash
 ankra cluster node-group list <cluster>
 ankra cluster node-group add <cluster> --name workers-large --instance-type <instance-type> --count 2
 ankra cluster node-group scale <cluster> workers-large 4
+ankra cluster node-group remove-node <cluster> workers-large <node>
 ankra cluster node-group upgrade <cluster> workers-large <larger-instance-type>
 ankra cluster node-group labels <cluster> workers-large --labels env=production,tier=backend
 ankra cluster node-group taints <cluster> workers-large --taints dedicated=ml:NoSchedule
@@ -54,7 +57,7 @@ ankra cluster node-group delete <cluster> workers-large
 
 - **Instance type changes go one way.** A group moves to an equal or larger type only; to get smaller nodes, add a new group with the smaller type and delete the old one. How the change is applied depends on the provider - most power each node off, resize it and power it on again, while AWS replaces each node - so check the provider guide before you resize a group that runs stateful workloads.
 - **Labels and taints** apply to every node in the group. `--clear` removes them all; a taint without an effect gets `NoSchedule`.
-- **Removing nodes drains them first.** A scale-down, a group delete and a replacement drain each node, honouring PodDisruptionBudgets.
+- **Removing nodes drains them first.** A scale-down, a group delete and a replacement drain each node, honouring PodDisruptionBudgets. A scale-down picks the nodes it removes itself; `remove-node` retires one chosen worker instead, named by its server id, server name, Kubernetes node name or providerID, and prints the operation that drains it and deletes its server. A node whose drain is refused is kept in service, and `--force-drain` removes it anyway. The last node of a group is not removed that way (scale the group to 0 or delete it), and a stopped cluster's nodes are not removed.
 - **Deleting a group removes all its servers.** Workloads on them are evicted.
 - **Zones.** On OVHcloud 3-AZ regions (`--availability-zone`), UpCloud zone pools (`--zone`) and multi-zone AWS clusters, a group can be pinned to one zone - do that for groups that run zonal storage.
 - **Autoscaling and first-boot scripts.** Set a group's autoscaling range with `ankra cluster node-group autoscaling set` - see [Cluster Autoscaling](/guides/cluster-autoscaling). OVHcloud groups can carry a cloud-init document - see [Node Group Cloud-init User Data](/guides/node-group-user-data).
@@ -227,7 +230,12 @@ ankra cluster <provider> stop <cluster> --force                    # cancel in-f
 ankra cluster <provider> start <cluster>                           # the whole cluster
 ankra cluster <provider> start <cluster> --scope control_plane     # only the control plane, to inspect or repair it
 ankra cluster <provider> start <cluster> --restore-state=false     # start fresh instead of restoring the snapshot
+ankra cluster <provider> start <cluster> --restore-snapshot-id <id>  # restore the snapshot you name
 ```
+
+<CliVersion since="0.71.0" command="cluster <provider> start --restore-snapshot-id" />
+
+A start restores the newest snapshot captured after the cluster's last start by itself. When there is none but older snapshots exist, the start is refused and the refusal names the newest; `ankra cluster state-snapshots latest` shows it, and `--restore-snapshot-id <id>` restores it. On AWS EC2, Scaleway and Ankra Cloud, whose stop keeps the servers, a start restores nothing by itself; when the control-plane machines are lost, add `--restore-over-kept-etcd` to the named restore. [Restore a named snapshot](/guides/kubernetes-upgrades#restore-a-named-snapshot) has the detail.
 
 - A stop never deletes the volumes your workloads provisioned through the CSI driver, forced or not; they keep billing while the cluster is stopped. `--force` also deletes the cluster's load balancers, and never captures a snapshot.
 - Stop and start run in the background. A start is refused with `409` while a stop or terminate is still running.
