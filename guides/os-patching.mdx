@@ -1,0 +1,138 @@
+---
+title: OS Security Patching
+description: Patch the operating system of an Ankra-managed cluster's nodes one host at a time - read the patch status, dry-run the pending updates, run a rolling patch, and set the maintenance window and policy, from the CLI, Ankra's AI, MCP or the REST API.
+---
+
+import { CliVersion } from "/snippets/cli-version.jsx";
+
+Ankra-managed nodes install operating system security updates through unattended upgrades. A few packages - systemd, udev, netplan, the container runtime and the packet filter - restart networking when they upgrade, and installing them on every node at once takes the cluster's agents offline. **Rolling OS patching** installs updates one host at a time instead, each drained and returned to service before the next.
+
+Once you enable a cluster's patch policy, those network-restarting packages are held back from unattended upgrades on the hosts the lane patches, and their security fixes reach the cluster only through rolling runs. A manual run on a cluster whose policy is off leaves the unattended-upgrade settings as it finds them.
+
+This guide covers reading where a cluster stands, a dry run, a rolling run, and the per-cluster policy that lets Ankra run it on its own inside a maintenance window.
+
+## Before you start
+
+- **A cluster Ankra built** on Ankra Cloud, AWS, DigitalOcean, Hetzner, OVHcloud, Scaleway or UpCloud. An imported cluster is refused.
+- **Permissions on the cluster.** Reading the status needs `clusters.read`. A dry run and a run need `clusters.operate`: the dry run opens an SSH session to every host, and the run drains, patches and can reboot them. Changing the policy needs `clusters.write`.
+- **The CLI or an [API token](/reference/tokens).** The examples use a Hetzner cluster; replace `hetzner` in the command or the path with the cluster's provider: `ankracloud`, `aws`, `digitalocean`, `hetzner`, `ovh`, `scaleway` or `upcloud`. The curl examples read the token from `ANKRA_API_TOKEN`.
+
+## 1. Read the status
+
+<CliVersion since="0.73.0" />
+
+<CodeGroup>
+```bash CLI
+ankra cluster hetzner os-patches status <cluster>
+```
+
+```bash cURL
+curl -fsS -H "Authorization: Bearer $ANKRA_API_TOKEN" \
+  "https://platform.ankra.app/api/v1/clusters/hetzner/<cluster-id>/os-patches"
+```
+</CodeGroup>
+
+The answer carries the cluster's policy, with when the window next opens and whether it is open now, the newest run host by host, the last dry run, and the **security lag** verdict: whether held-back security updates have been pending longer than the policy's `security_lag_days`. A cluster nobody configured reads the default policy, marked as not stored.
+
+Over MCP and in chat the same read is `get_os_patch_status`.
+
+## 2. Dry-run the pending updates
+
+<CodeGroup>
+```bash CLI
+ankra cluster hetzner os-patches plan <cluster>
+```
+
+```bash cURL
+curl -fsS -X POST -H "Authorization: Bearer $ANKRA_API_TOKEN" \
+  "https://platform.ankra.app/api/v1/clusters/hetzner/<cluster-id>/os-patches/plan"
+```
+</CodeGroup>
+
+The dry run connects to every host and changes nothing. For each host it reports the security and held-back updates pending, whether a reboot is required, how old the package lists are, and whether the host carries stateful workloads. It also gives the order a run would take and the hosts it would skip, with why. When the hosts do not all answer within the call, it returns the operation id, and the status read shows the result once it is in.
+
+The tool is `plan_os_patches`.
+
+## 3. Run a rolling patch
+
+<CodeGroup>
+```bash CLI
+ankra cluster hetzner os-patches run <cluster>
+```
+
+```bash cURL
+curl -fsS -X POST -H "Authorization: Bearer $ANKRA_API_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{}' \
+  "https://platform.ankra.app/api/v1/clusters/hetzner/<cluster-id>/os-patches/run"
+```
+</CodeGroup>
+
+The run takes the control planes first, then the workers node group by node group, then the bastion. On each node it refreshes the package lists and leaves the node untouched when nothing is pending. Otherwise it drains the node, honouring PodDisruptionBudgets and never forcing the drain, upgrades the packages without removing any, reboots only when the node needs it, and waits for the node and its workloads to be back before the next one. A failed step stops the run, so a host that does not come back is never followed by another going down. On providers where the bastion is the nodes' NAT gateway, its reboot cuts the nodes' internet access while it lasts; the plan and the run say so.
+
+The answer names the operation to follow, the order and the skipped hosts. Follow it with `ankra cluster operations list` and the cluster's **Operations** page.
+
+The CLI asks before it starts (`--yes` skips the question). The body is optional, and every field defers to the cluster's policy:
+
+| Field | CLI flag | Meaning |
+|---|---|---|
+| `outside_window` | `--outside-window` | `true` starts the run now although the maintenance window is closed. Without it, a run outside the window is refused. |
+| `include_stateful_nodes` | `--include-stateful-nodes`, `--exclude-stateful-nodes` | `true` also drains nodes that carry single-replica stateful workloads and database node pools. They are skipped by default, because draining a single-replica database is an outage. |
+| `include_bastion` | `--exclude-bastion` | `false` leaves the bastion out. By default it is patched last. |
+
+A node that is not up, and a cluster's only control plane, are never patched by a run: they are skipped and reported. Sending the same request twice cannot start two runs. While one is in flight, a second is refused with `409`, naming the operation already running.
+
+The tool is `run_os_patches`, and Ankra's AI asks you to confirm it before it runs.
+
+## 4. Set the policy
+
+A cluster's policy decides whether Ankra starts runs on its own, when, how often and what it may drain. Change only the fields you send; an omitted or `null` field keeps its stored value.
+
+<CodeGroup>
+```bash CLI
+ankra cluster hetzner os-patches policy set <cluster> --enable --window-days tue,wed \
+  --window-start-hour 3 --window-duration-hours 3 --cadence-days 7
+ankra cluster hetzner os-patches policy get <cluster>
+```
+
+```bash cURL
+curl -fsS -X PATCH -H "Authorization: Bearer $ANKRA_API_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"enabled": true, "window_days": ["tue", "wed"], "window_start_hour_utc": 3, "window_duration_hours": 3, "cadence_days": 7}' \
+  "https://platform.ankra.app/api/v1/clusters/hetzner/<cluster-id>/os-patches/policy"
+```
+</CodeGroup>
+
+On the CLI, `--disable` turns the policy off, `--security-lag-days` sets the lag threshold, and `--include-stateful-nodes` or `--exclude-stateful-nodes` set what runs may drain.
+
+| Field | Default | Bounds |
+|---|---|---|
+| `enabled` | `false` | Lets Ankra start a run on its own inside the window, at most once per `cadence_days` |
+| `window_days` | `mon`, `tue`, `wed`, `thu` | At least one of `mon` to `sun`; full English day names are accepted |
+| `window_start_hour_utc` | `2` | 0 to 23, in UTC |
+| `window_duration_hours` | `4` | 1 to 12. A window that runs past midnight belongs to the day it opened on |
+| `cadence_days` | `7` | 1 to 90 |
+| `include_stateful_nodes` | `false` | Whether runs drain nodes with single-replica stateful workloads |
+| `security_lag_days` | `14` | 1 to 90. How long held-back security updates may stay pending before the cluster reports a security lag |
+
+A cluster nobody configured is not patched automatically, because patching drains and can reboot every node. Until the status shows a run Ankra started on its own, start runs by hand as in step 3. The default window has no Friday or weekend starts, so a run that goes wrong meets a working day. A person can always run a patch by hand.
+
+A value of the wrong type is refused with `422`, and a value out of bounds with `409`, naming the field. The tool is `set_os_patch_policy`, also confirmed before it applies.
+
+## Troubleshooting
+
+| Response | Cause and fix |
+|---|---|
+| `409` naming the window | The maintenance window is closed. Wait for it, or send `"outside_window": true`. |
+| `409` naming a running operation | A run is already in flight. Follow that operation instead of starting another. |
+| `409` on an imported cluster, or one of another provider than the path names | Rolling OS patching is for clusters Ankra built on the providers above. Use the cluster's own provider in the path. |
+| `404` | The cluster is not in the token's organisation. |
+| `403` naming a permission | The token's role lacks `clusters.operate` or `clusters.write` on that cluster. |
+| A host is listed as skipped | It carries stateful workloads (send `include_stateful_nodes`), it is not up, or it is the cluster's only control plane. |
+| The run failed on a drain | A PodDisruptionBudget refused the eviction. The node is uncordoned and the run stops; fix the budget or the workload's replicas and run again. |
+
+## Related
+
+- [Operate Ankra-managed clusters](/guides/operate-ankra-managed-clusters) - node groups, restarts, the bastion and upgrades.
+- [Change Management](/security/change-management) - operating system patching inside the patch window.
+- [MCP Tools](/platform/mcp-tools)

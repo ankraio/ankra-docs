@@ -1,0 +1,102 @@
+---
+title: Object Storage Buckets
+description: Have Ankra create an S3-compatible bucket on your Hetzner, Scaleway, DigitalOcean or UpCloud credential with ankra bucket, follow it to ready, and delete it with or without its data.
+---
+
+import { CliVersion } from "/snippets/cli-version.jsx";
+
+`ankra bucket` creates an object storage bucket in your own cloud account, on one of the organisation's provider credentials. Ankra creates the bucket, verifies it and keeps its access keys in its secret store. The keys are never printed, and no read returns them.
+
+A bucket here is storage on its own. When the bucket is for cluster backups, create a [backup vault](/guides/backups#let-ankra-create-the-bucket) instead: a vault is a bucket with restore points and protection schedules on top.
+
+## Before you start
+
+- **A credential Ankra can create buckets with**: Hetzner, Scaleway, DigitalOcean or UpCloud. Other credential kinds cannot provision a bucket yet.
+- **`credentials.write`** to create a bucket, and **`credentials.delete`** to delete one. Listing and reading need only `credentials.read`.
+- **For Hetzner, an Object Storage key pair.** Hetzner's Cloud API cannot mint Object Storage keys, so neither can Ankra. Create the pair in the Hetzner Cloud Console under **Object Storage** → **Manage credentials**.
+
+| Credential | What Ankra does | Default region |
+|---|---|---|
+| UpCloud | Creates a Managed Object Storage service, a user and an access key, then the bucket | `europe-1` |
+| DigitalOcean | Mints a Spaces access key with the API token and creates the Space | `fra1` |
+| Scaleway | Uses the credential's own key pair and creates the bucket in its project | `fr-par` |
+| Hetzner | Creates the bucket with the Object Storage key pair you supply | `fsn1` |
+
+## 1. Create the bucket
+
+<CliVersion since="0.17.0" />
+
+```bash
+ankra bucket create registry-storage --credential upcloud-main --region europe-1 --wait
+```
+
+Every flag has a default. The credential defaults to the only one Ankra can create buckets with, the region to that provider's usual one, and the provider-side bucket name to a unique name derived from the bucket's name. Pass `--bucket` to choose the provider-side name yourself:
+
+```bash
+ankra bucket create custody --credential upcloud-main --region europe-1 --bucket acme-custody
+```
+
+For a Hetzner credential, pass the access key id and you are prompted for the secret key, hidden, so it stays out of your shell history:
+
+```bash
+ankra bucket create media --credential hetzner-main --region fsn1 --access-key-id <access-key-id>
+```
+
+Once the key pair is stored on the Hetzner credential, later buckets on it need nothing more. `--secret-access-key` exists for automation; a value passed that way is recorded wherever the command line is.
+
+Ankra refuses a provider-side name that already exists, whether it is your own bucket or one another bucket in Ankra uses. It only ever holds a bucket it created.
+
+## 2. Follow it to ready
+
+Without `--wait` the command returns as soon as the platform accepts the request. The bucket shows `provisioning` until Ankra has created and verified it, then `ready`, or `error` with an excerpt of what the provider refused:
+
+```bash
+ankra bucket list
+ankra bucket get registry-storage
+ankra bucket get registry-storage -o json
+```
+
+`get` shows the provider, region, provider-side bucket name, endpoint, whether it is path-style, and its status. With `--wait`, the command blocks until the bucket is ready or fails, for up to `--timeout` (25 minutes by default).
+
+## 3. Share it, or keep it to one project
+
+A bucket is a shared kind: it is either in one [project](/concepts/projects) or organisation-wide. Move it with:
+
+```bash
+ankra project move --kind object_storage_bucket --id <bucket-id> --to payments
+```
+
+## 4. Delete it
+
+There are two different deletes, and the default keeps your data.
+
+```bash
+ankra bucket delete registry-storage
+ankra bucket delete registry-storage --destroy-provider-resources
+```
+
+- **Without a flag**, Ankra forgets the bucket and drops the access keys it held. The bucket and every object in it stay in your cloud account.
+- **With `--destroy-provider-resources`**, Ankra also empties and deletes the bucket and removes what it created for it, such as the UpCloud object storage service or the DigitalOcean Spaces key. Everything in the bucket is gone for good. Ankra only empties a bucket it recorded creating; any other bucket it keeps and says so.
+
+A bucket that is still being created is always torn down, because the half-finished run may already have made something billable.
+
+## Terraform and Ankra's AI
+
+`ankra_object_storage_bucket` manages a bucket from Terraform, and `ankra_object_storage_buckets` lists them. The plan refuses a change that would replace a bucket while `destroy_provider_resources = true`, because the replacement would delete its data. See [Terraform](/integrations/terraform).
+
+Ankra's AI and the MCP server use `list_object_storage_buckets`, `get_object_storage_bucket`, `create_object_storage_bucket` and `delete_object_storage_bucket`, with the same permissions.
+
+## Troubleshooting
+
+| Symptom | Cause and fix |
+|---|---|
+| The bucket stays in `error` | `ankra bucket get <name>` shows what the provider answered: a region your account cannot use, a bucket name someone else holds, or a token without the right scope. Fix it, delete the bucket and create it again. |
+| `create` asks which credential to use | The organisation has several credentials that can create buckets. Pass `--credential <name>`. |
+| A Hetzner bucket fails on its keys | The key pair is missing or wrong. Pass `--access-key-id` again and enter the secret key at the prompt. |
+| A deleted bucket still costs money | A plain delete leaves the bucket and its objects at the provider, and Ankra no longer holds it. Delete it in your cloud account. Next time, use `--destroy-provider-resources` when the data should go too. |
+
+## Related
+
+- [Backups](/guides/backups) - buckets with restore points and schedules.
+- [`ankra bucket` reference](/reference/cli/bucket)
+- [Credentials](/platform/credentials)
