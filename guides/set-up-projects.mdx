@@ -1,0 +1,132 @@
+---
+title: Set Up Projects
+description: Split one organisation into projects - create a project, move clusters and shared resources into it, give people access to that project only, and pin CI and MCP tokens to it.
+---
+
+import { CliVersion } from "/snippets/cli-version.jsx";
+
+Use this guide when several teams, products or stages share one organisation and should not see or change each other's clusters. You end with a project that holds its own clusters, applications and cost, members who reach only that project, and tokens that cannot act outside it.
+
+How projects work, what lives at which level, and how a request picks its project are explained in [Projects](/concepts/projects). This page is the task.
+
+## Before you start
+
+- **Projects are on for your organisation.** They are on for every organisation on the new portal (its address carries `/next`). While they are off, every `ankra project` command exits 3 and says so.
+- **You hold `projects.manage`.** Owners and admins hold it at organisation scope. Listing projects needs only `projects.read`, which every built-in role holds.
+- **Ankra CLI** logged in to the organisation (`ankra org current`).
+
+Nothing changes until you create a second project: everything you already have is in the **Default** project, and the lists, links, tokens and scripts you use today keep working.
+
+## 1. Create the project
+
+<CliVersion since="0.49.0" />
+
+```bash
+ankra project create "Payments" --slug payments --description "Payments clusters and services"
+ankra project list
+```
+
+The slug is the short name links, kubeconfig entries and CLI selections use. It never changes after the project exists, so pick it deliberately. Without `--slug` it is derived from the name.
+
+In the console, the same is under **Settings** → **People and access** → **Projects**.
+
+## 2. Move resources into it
+
+A cluster, application, environment, stack profile, pipeline repository, AI automation or AI workspace belongs to exactly one project. Move each one with `ankra project move`:
+
+```bash
+ankra project move --kind cluster --id payments-prod --to payments
+ankra project move --kind application --id checkout-api --to payments
+```
+
+A cluster carries its DNS zones, incidents, AI tickets and the notification routes pinned to it. An application carries its connected pipeline repositories. A cluster with operations still running is refused with `operations_in_flight`: wait for them to finish and move it again.
+
+The **shared kinds** - credentials, registries, backup vaults, object storage buckets, organisation variables, notification routes and DNS zones - are either in one project or organisation-wide. Keep a credential every team uses organisation-wide, and move the ones that only this team should use:
+
+```bash
+ankra project move --kind credential --id <credential-id> --to payments
+ankra project move --kind credential --id <credential-id> --to org-wide
+```
+
+Cost already metered stays with the project the cluster was in at the time. Only hours from the move onwards count against the new project.
+
+## 3. Give people access to the project
+
+There are two ways in, depending on whether the person should see the rest of the organisation.
+
+**A member who should see only this project** is invited with the membership role **Project only**. They reach the projects they hold a role in and nothing else of the organisation:
+
+```bash
+ankra org invite contractor@example.com --role project --project payments --project-role operator
+```
+
+`--project-role` is `admin`, `operator`, `member` or `viewer` (`member` by default).
+
+**An existing member who needs more in this project** keeps their organisation role and gets a second role at project scope:
+
+```bash
+ankra org assign dev@example.com --role admin --scope project --scope-id payments
+```
+
+A project assignment never confers permissions about the organisation as a whole: members, billing, tokens, the audit log, projects and organisation settings are dropped from it whatever the role. The full list is in [Roles at project scope](/concepts/projects#roles-at-project-scope).
+
+Check who reaches the project, and how:
+
+```bash
+ankra project members payments
+```
+
+## 4. Pin tokens to the project
+
+A token minted in a project stays there: it reads and writes only in that project, and a request that names another project is refused. Pin every CI job and agent to the project it works in.
+
+```bash
+ankra --project payments tokens create payments-ci --service --role member --label github-actions
+ankra --project payments tokens create payments-agent --scopes mcp:read
+```
+
+A token with MCP scopes is always pinned, to the project you pass or the project you are acting in. A REST token created without `--project` is not pinned. In the console, the service token and MCP token dialogs pin the token to the project you choose. See [Service Tokens](/guides/service-tokens).
+
+From Terraform, `ankra_project` creates the project and a `project_id` on `ankra_service_token` pins a token to it. See [Projects and GitHub OIDC trust](/integrations/terraform#projects-and-github-oidc-trust).
+
+## 5. Work in the project
+
+The CLI acts in one project per command. Switch for the session, or name a project for one command:
+
+```bash
+ankra project switch payments
+ankra project current
+ankra --project default cluster list
+```
+
+`ankra project switch` saves the choice on this machine and moves your current project in the console too. A pinned token cannot switch, and `ANKRA_PROJECT` does the same as `--project` for scripts.
+
+Give the project its own budget once its clusters are in it:
+
+```bash
+ankra cost budgets set --scope project --scope-id payments --name "Payments" --amount 4000 --currency eur
+```
+
+See [Cost budgets and the autopilot](/guides/cost-budgets-and-autopilot).
+
+## Verify
+
+- `ankra project members payments` lists the people you expected, each with how they reach the project.
+- `ankra --project payments cluster list` lists the clusters you moved, and `ankra --project default cluster list` no longer does.
+- Signed in as a project-only member, the project switcher offers only **Payments**.
+
+## Troubleshooting
+
+| Symptom | Cause and fix |
+|---|---|
+| A script or older CLI cannot see a cluster you moved | It sends no project and runs in the Default project. Pass `--project`, set `ANKRA_PROJECT`, or use a token pinned to the project. |
+| `403 Organisation-wide resources require an organisation-level grant` | A role assigned in a project cannot change organisation-wide credentials or variables. Move the resource into the project, or have an organisation admin change it. |
+| A move is refused with `follows_cluster` | The DNS zone is bound to a cluster and follows that cluster's project. Move the cluster instead. |
+| `403 The project this token is pinned to no longer exists` | The project was deleted. Mint a new token in the project that replaced it. |
+| `ankra project delete` is refused | The project still holds resources; the refusal lists them per kind. Move them out, or make the shared ones organisation-wide, then delete. The Default project cannot be deleted. |
+
+## Related
+
+- [Projects](/concepts/projects) - the model behind this guide.
+- [Roles & Access](/guides/roles-and-access) - scopes and what each role holds.
+- [`ankra project` reference](/reference/cli/project)

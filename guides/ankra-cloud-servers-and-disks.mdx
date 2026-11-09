@@ -1,0 +1,132 @@
+---
+title: Ankra Cloud Servers, Disks and Quota
+description: Size an Ankra Cloud cluster before you build it - pick server plans, zones, CPU pools and templates, size and tier each role's root disk, check the account quota and preflight the whole request.
+tag: "Closed Beta"
+---
+
+import { CliVersion } from "/snippets/cli-version.jsx";
+
+<Warning>
+**Closed beta.** Ankra Cloud clusters are part of [Ankra Cloud as a cluster provider](/guides/ankra-cloud-clusters), which is in closed beta and enabled per organisation on request. [Contact support](/platform/support) to have it turned on for your organisation.
+</Warning>
+
+Use this guide to choose the servers and disks of an [Ankra Cloud cluster](/guides/ankra-cloud-clusters) and to make sure the account has room for them, before anything is built. The same choices apply when you add a node group later.
+
+## Before you start
+
+- **An Ankra Cloud credential** and an **SSH key credential**. Find their ids with `ankra credentials ankracloud list` and `ankra credentials ssh-key list`.
+- **Ankra CLI** logged in to the organisation.
+
+## 1. Pick the zone
+
+<CliVersion since="0.46.0" />
+
+```bash
+ankra cluster ankracloud zones --credential-id <credential-id>
+```
+
+A zone that is only a network location runs no servers, and a zone with no public IPv4 left needs `--network-mode ipv6_only`. The preflight below names the mode a zone needs.
+
+## 2. Pick server plans
+
+A plan is a server size. Every role takes one: the bastion, the control planes, the workers, and the etcd nodes when etcd runs outside the control plane.
+
+```bash
+ankra cluster ankracloud plans --credential-id <credential-id>
+ankra cluster ankracloud templates --credential-id <credential-id>
+```
+
+The template is the operating system the servers boot, `debian-13` unless you pass `--template`. For an existing cluster, `--cluster <name>` lists the plans under that cluster's own credential, for node groups and control-plane or bastion resizes.
+
+### Pin workloads that need AVX2 to a CPU pool
+
+<CliVersion since="0.49.0" command="cluster ankracloud cpu-pools, node-group add --cpu-pool" />
+
+A zone's compute nodes are grouped into CPU pools by exact CPU, and a server's guest sees its host's CPU. Images built for x86-64-v3 (many Python, Rust and ML wheels) need AVX2 and crash with an illegal instruction, exit 132, on a lower level.
+
+```bash
+ankra cluster ankracloud cpu-pools --credential-id <credential-id> --zone <zone>
+ankra cluster node-group add <cluster> --name ml --instance-type <plan> --cpu-pool <pool>
+```
+
+A pool with x86-64 level 3 or more has AVX2. Every server the group creates, scale-ups included, is pinned to the pool.
+
+## 3. Size and tier the root disks
+
+Each server's root disk is its plan's included disk on the zone's default storage tier unless you choose otherwise, per role:
+
+| Role | Size flag | Tier flag |
+|---|---|---|
+| Bastion | `--bastion-disk-gib` | `--bastion-disk-tier` |
+| Control planes | `--control-plane-disk-gib` | `--control-plane-disk-tier` |
+| External etcd nodes | `--etcd-disk-gib` | `--etcd-disk-tier` |
+| Workers | `--worker-disk-gib` | `--worker-disk-tier` |
+
+Sizes are in GiB, from the plan's and template's minimum up to 4096. The tiers are:
+
+- `local-nvme` - the compute node's own disks: fastest, a single copy, pinned to one server.
+- `standard`, `maxiops` and `hdd` - the zone's replicated Ankra Storage tiers.
+
+CI workers belong on small `local-nvme` disks when their data lives on persistent volumes:
+
+```bash
+ankra cluster ankracloud create --name ci --credential-id <credential-id> \
+  --ssh-key-credential-id <ssh-key-credential-id> --zone <zone> \
+  --bastion-plan <plan> --control-plane-plan <plan> \
+  --worker-plan <plan> --worker-disk-gib 40 --worker-disk-tier local-nvme
+```
+
+A node group takes the same choice with `--disk-gib` and `--disk-tier` on `ankra cluster node-group add`, for every server it creates. Persistent volumes are separate: they take their tier from their StorageClass. See [Cloud controller and storage](/guides/ankra-cloud-clusters#cloud-controller-and-storage).
+
+## 4. Check the quota
+
+The Ankra Cloud account behind a cluster has limits on servers, cores, memory, storage, floating IPs, private networks and routers. For an existing cluster, see what is used and what is left:
+
+```bash
+ankra cluster ankracloud quota <cluster>
+ankra cluster ankracloud quota <cluster> -o json
+```
+
+Storage is shared by the servers' disks and every PersistentVolumeClaim the Ankra Cloud CSI provisions, so a claim larger than what is left stays `Pending`. Applies and stack deploys that need more storage than is left say so in their warnings. A row marked `(full)` is exhausted.
+
+Storage and public IPv4 are priced separately from the plans:
+
+```bash
+ankra cluster ankracloud pricing --credential-id <credential-id>
+```
+
+## 5. Preflight the request
+
+`preflight` takes exactly the flags `create` takes and builds nothing. It checks the credential, the zone, the plans, the template and the network, and counts the chosen disk sizes against the account's storage quota:
+
+```bash
+ankra cluster ankracloud preflight --name ci --credential-id <credential-id> \
+  --ssh-key-credential-id <ssh-key-credential-id> --zone <zone> \
+  --bastion-plan <plan> --control-plane-plan <plan> \
+  --worker-plan <plan> --worker-disk-gib 40 --worker-disk-tier local-nvme
+```
+
+When it passes, run the same command as `create`.
+
+## Change it later
+
+- **Workers:** add a node group with another plan, disk or CPU pool, and scale or remove the old one. See [Node groups](/guides/operate-ankra-managed-clusters#node-groups).
+- **Control planes:** `ankra cluster ankracloud control-plane set-instance-type` resizes every controller, one at a time on a cluster with three. `control-plane get` says whether a live resize is possible now.
+- **Bastion:** `ankra cluster ankracloud bastion resize`.
+
+## Troubleshooting
+
+| Symptom | Cause and fix |
+|---|---|
+| `invalid --worker-disk-gib`, exit 2 | The size is outside 1 to 4096 GiB. The CLI refuses it before sending anything. |
+| Create refuses a disk size | It is below the plan's or the template's minimum. Raise it, or leave the flag out to use the plan's included disk. |
+| Preflight or create fails with a quota error | The account has no room. Check `ankra cluster ankracloud quota`, then raise the limit in the Ankra Cloud console, pick smaller plans or smaller disks. |
+| A PersistentVolumeClaim stays `Pending` | The account's storage is used up by disks and other volumes. `quota` shows what is left. |
+| A workload crashes with exit 132 | Its image needs AVX2. Move it to a node group pinned to a CPU pool of x86-64 level 3 or more. |
+| `quota` exits 2 | The cluster is not an Ankra Cloud cluster. Quota applies to Ankra Cloud clusters only. |
+
+## Related
+
+- [Ankra Cloud Clusters](/guides/ankra-cloud-clusters) - create, network design, storage classes and day 2.
+- [Ankra Cloud Credentials](/platform/credentials/ankra-cloud)
+- [`ankra cluster ankracloud` reference](/reference/cli/cluster#ankra-cluster-ankracloud)

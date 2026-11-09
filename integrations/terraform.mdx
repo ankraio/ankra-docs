@@ -67,7 +67,7 @@ Each name links to its reference on the Registry through the provider's document
 | Alerts and DNS | `ankra_alert_destination`, `ankra_alert_route`, `ankra_organisation_dns_record`, `ankra_organisation_custom_dns_zone`, `ankra_organisation_domain`, `ankra_dns_credential`, `ankra_cloudflare_credential`, `ankra_cloudflare_dns_record` | `ankra_alert_destinations`, `ankra_alert_routes`, `ankra_organisation_dns_zone`, `ankra_organisation_dns_records`, `ankra_organisation_custom_dns_zones`, `ankra_dns_credentials`, `ankra_cloudflare_credentials`, `ankra_cloudflare_domains` |
 | Applications and [pipelines](/guides/pipeline-reference) | `ankra_application`, `ankra_application_settings`, `ankra_application_auto_deploy`, `ankra_application_ai_config`, `ankra_application_demo_config`, `ankra_application_env_secret`, `ankra_application_deployment`, `ankra_pipeline_repository`, `ankra_pipeline_definition`, `ankra_pipeline_schedule`, `ankra_pipeline_merge_train` | `ankra_applications`, `ankra_application`, `ankra_pipeline_repositories` |
 | Stack profiles, backups and the image registry | `ankra_stack_profile`, `ankra_stack_profile_version`, `ankra_stack_profile_share`, `ankra_stack_profile_logo`, `ankra_backup_vault`, `ankra_object_storage_bucket`, `ankra_registry_project`, `ankra_registry_robot`, `ankra_registry_retention` | `ankra_stack_profiles`, `ankra_backup_vaults`, `ankra_object_storage_buckets`, `ankra_registry_projects`, `ankra_registry_robots` |
-| Organisation and access | `ankra_organisation`, `ankra_organisation_member`, `ankra_api_token`, `ankra_service_token`, `ankra_mcp_server`, `ankra_mcp_tool_grant`, `ankra_ci_settings`, `ankra_ci_pool_member`, `ankra_ai_review_repository`, `ankra_ai_review_related_repository`, `ankra_ai_spend_cap`, `ankra_ai_environment` | `ankra_organisation`, `ankra_organisations`, `ankra_mcp_servers` |
+| Organisation and access | `ankra_organisation`, `ankra_organisation_member`, `ankra_project`, `ankra_oidc_trust_policy`, `ankra_api_token`, `ankra_service_token`, `ankra_mcp_server`, `ankra_mcp_tool_grant`, `ankra_ci_settings`, `ankra_ci_pool_member`, `ankra_ai_review_repository`, `ankra_ai_review_related_repository`, `ankra_ai_spend_cap`, `ankra_ai_environment` | `ankra_organisation`, `ankra_organisations`, `ankra_mcp_servers`, `ankra_projects`, `ankra_project`, `ankra_oidc_trust_policies`, `ankra_cluster_access_policy` |
 | AI, cost, security, services and hosts | `ankra_ai_provider`, `ankra_ai_anthropic_key`, `ankra_ai_openrouter_key`, `ankra_ai_openai_compatible`, `ankra_ai_endpoint`, `ankra_ai_model`, `ankra_ai_lane_model`, `ankra_ai_board_identity`, `ankra_cost_budget`, `ankra_cost_autopilot`, `ankra_cost_autopilot_override`, `ankra_cost_settings`, `ankra_security_disposition`, `ankra_security_compliance_framework`, `ankra_security_report_schedule`, `ankra_service_placement_policy`, `ankra_service_consumer`, `ankra_host_join_token` | `ankra_ai_models`, `ankra_ai_endpoints`, `ankra_ai_lanes`, `ankra_cost_budgets`, `ankra_security_compliance_frameworks`, `ankra_host_targets`, `ankra_deploy_environments` |
 
 Operational commands stay in the CLI: logs, `exec`, metrics, pipeline runs and reruns, `cluster scale`, `cluster upgrade`, chat and the AI board. Stack variables, managed services, stack profile drafts, restore points and migrations have no Terraform resource either.
@@ -332,6 +332,53 @@ output "agent_install_command" {
 If a cluster with the same `cluster_name` already exists, creating the resource adopts it: Ankra updates that cluster with your configuration and Terraform manages it from then on. Because the agent command is only issued on first registration, `helm_command` is empty for an adopted cluster, and Terraform prints a warning saying so. Copy the command from the Ankra UI if you need it.
 
 `terraform destroy` deletes the cluster from Ankra.
+
+## Projects and GitHub OIDC trust
+
+`ankra_project`, `ankra_oidc_trust_policy` and the `ankra_projects`, `ankra_project`, `ankra_oidc_trust_policies` and `ankra_cluster_access_policy` data sources need provider **0.5.0** or newer. All six belong to the organisation, so they need no provider `project_id`, however many projects the organisation has.
+
+**`ankra_project`** creates, renames and deletes a [project](/concepts/projects), like `ankra project create`, `rename` and `delete`. It needs the `projects.manage` permission. Changing `name` or `description` updates the project in place; changing `slug` replaces it, because the platform never changes a slug. Destroy deletes the project, which the platform refuses while the project still holds resources, and the provider never deletes the Default project. Import by ID or slug.
+
+```hcl
+resource "ankra_project" "payments" {
+  name        = "Payments"
+  slug        = "payments"
+  description = "Payments clusters and services"
+}
+
+resource "ankra_service_token" "payments_ci" {
+  name       = "payments-ci"
+  role_slug  = "member"
+  project_id = ankra_project.payments.id
+}
+```
+
+`data.ankra_project` looks one project up by ID or slug (`default` names the Default project), and `data.ankra_projects` lists every project the token's user reaches.
+
+**`ankra_oidc_trust_policy`** lets workflow runs of one GitHub repository exchange their GitHub ID token for a short-lived Ankra token, like `ankra org oidc-trust create`, so CI holds no stored Ankra secret. The workflow signs in with `ankra login --github-oidc`.
+
+```hcl
+resource "ankra_oidc_trust_policy" "infra_deploy" {
+  name                = "infra-deploy"
+  repository_owner    = "my-org"
+  repository_name     = "my-repo"
+  repository_owner_id = 1234567  # gh api users/my-org --jq .id
+  repository_id       = 89012345 # gh api repos/my-org/my-repo --jq .id
+  ref                 = "refs/heads/main"
+  environment         = "production"
+  role_slug           = "operator"
+  ttl_seconds         = 900
+}
+```
+
+- Pin at least one of `ref`, `environment` or `job_workflow_ref` for any role above `viewer`: without them every branch, tag, environment and workflow of the repository matches.
+- `role_slug` is a built-in role. `scopes` narrows the minted tokens to `mcp:read` and `mcp:write`; an empty set is refused. `ttl_seconds` is 60 to 3600, 900 by default, and `allow_pull_request` is `false` by default.
+- The platform has no update for a trust policy, so changing any argument replaces it: the old policy is deleted and every token it minted is revoked at once, then the new one is created.
+- Managing trust policies needs `members.manage` on a person's own API token. Service tokens and tokens pinned to a project are refused, and so is a `role_slug` with permissions the token's user does not hold.
+
+`data.ankra_oidc_trust_policies` lists the organisation's policies, for example to fail a plan in a `check` block when one allows pull request runs.
+
+**`data.ankra_cluster_access_policy`** reads the organisation's [Kubernetes access policy](/guides/cluster-access#organisation-access-policy): the role ceiling for access grants, what a cluster's creator gets, and the limits on elevated grants. It is read-only on purpose. Changing the policy needs `kube_access.policy`, a human-only permission no API token can carry, so propose a change with `ankra org access-policy set` and have an owner or admin apply it. Use the data source in a `check` block or a precondition on `ankra_cluster_access_grant`.
 
 ## Secrets, tokens and settings
 

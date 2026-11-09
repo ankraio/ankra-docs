@@ -1,0 +1,143 @@
+---
+title: Cost Budgets and the Autopilot
+description: Set monthly cost budgets, decide how much the cost autopilot proposes on its own, approve and run the cost changes it files, and read the ledger of what each change saved.
+---
+
+import { CliVersion } from "/snippets/cli-version.jsx";
+
+This guide takes you from a cost figure to a measured saving. You set a monthly **budget** so Ankra warns you before a month overruns, choose the **autopilot** tiers that decide which cost changes Ankra proposes on its own, approve and run those changes as **decisions**, and read the **ledger** to see what each one actually saved.
+
+Where the figures come from, and how a cluster is priced, is on [Cloud Cost](/platform/cloud-cost).
+
+## Before you start
+
+- **Priced clusters.** Budgets and savings read the same figures as the Cost pages. A budget whose scope has no priced cluster reads `unknown`, never zero.
+- **Permissions.** Every member can read budgets, the autopilot policy, decisions and the ledger. Adding, changing and removing a budget, approving and running a decision, and changing the autopilot need `billing.manage`. Changing the autopilot, and running a right-size, also need `clusters.write`.
+- **Your project.** Every fleet read covers the [project](/concepts/projects) you act in. Pass `--all-projects` for the whole organisation, or the global `--project` for another project.
+
+<Warning>
+**Closed beta.** The portal Cost tabs do not show budgets or the autopilot yet; use the CLI, the API or Ankra's AI. A new Cost page that shows them is in closed beta and enabled per organisation on request. [Contact support](/platform/support) to have it turned on for your organisation.
+</Warning>
+
+## 1. Set a budget
+
+A budget is a monthly amount for the organisation, one project, one cluster, one environment label or one application. A scope holds at most one budget.
+
+<CliVersion since="0.49.0" />
+
+```bash
+ankra cost budgets set --scope organisation --name "Fleet" --amount 20000 --currency eur
+ankra cost budgets set --scope project --scope-id payments --name "Payments" --amount 4000 --currency eur
+ankra cost budgets set --scope cluster --scope-id prod-eu --name "prod-eu" --amount 1500 --currency eur --notify-at 90
+ankra cost budgets set --scope environment --scope-id production --name "Production" --amount 8000 --currency eur
+```
+
+`--amount` is per month in the currency's major unit (`1500` or `1500.50`). `--scope-id` takes the project, cluster or application by name or id, or the environment label; an organisation budget takes none.
+
+When the projected month end reaches `--notify-at` percent of the budget (80 unless you set another), Ankra sends a **Budget crossing** notification. Route it to a channel with [notification routing](/guides/notification-routing).
+
+Read where each budget stands:
+
+```bash
+ankra cost budgets list
+```
+
+Each row shows the month so far, the projected month end at the current pace, the hour it would cross the budget, and where the month lands once the changes already approved or running have landed.
+
+Change a budget by its id, sending only what changes:
+
+```bash
+ankra cost budgets set <budget-id> --amount 1800
+ankra cost budgets delete <budget-id>
+```
+
+A budget's scope never changes: delete it and add one on the other scope.
+
+## 2. Choose the autopilot tiers
+
+The autopilot decides which cost changes Ankra **proposes** on its own. It never makes a change itself: every proposal waits for a person to approve and run it.
+
+Each environment kind - `production`, `staging`, `development`, `preview` and `unknown` - takes a tier. On `scheduled` and `managed`, Ankra proposes stopping the cluster outside working hours. On `hands-off` and `ephemeral` it proposes nothing on its own. An organisation that never set a policy is `hands-off` everywhere.
+
+```bash
+ankra cost autopilot get
+ankra cost autopilot set --default development=managed --default preview=ephemeral --default staging=scheduled
+```
+
+`--default KIND=TIER` repeats, and kinds you do not name keep their tier. `get` lists the tier of every live cluster in your project.
+
+Put one cluster in another tier, for a reason and for a while:
+
+```bash
+ankra cost autopilot override staging-1 --tier managed --reason "Load test week, keep it lean"
+ankra cost autopilot override prod-eu --tier hands-off --reason "Launch freeze" --expires-in 72h
+ankra cost autopilot clear prod-eu
+```
+
+A project can also carry its own defaults, which sit between the organisation's policy and a cluster's override.
+
+## 3. Review, approve and run decisions
+
+Every cost change Ankra proposes - a right-size, a right-size ladder, an off-hours schedule, a waste cleanup - is a **decision** with a plan.
+
+```bash
+ankra cost decisions list --status proposed
+ankra cost decisions get <decision-id>
+```
+
+Approve exactly the plan you read by passing its `plan_hash` from `get`:
+
+```bash
+ankra cost decisions approve <decision-id> --plan-hash <plan-hash> --note "Checked with the platform team"
+```
+
+Without `--plan-hash` the command shows the plan and asks before approving. The platform refuses the approval, and approves nothing, when the proposal was proposed again with another plan in the meantime.
+
+Then run it, as you:
+
+```bash
+ankra cost decisions execute <decision-id>
+```
+
+An off-hours schedule creates the stop and start [power schedules](/platform/cluster-power-schedules), a waste cleanup files the cloud cleanup job, and a right-size ladder runs its next wave. A plan that deletes something no snapshot keeps, such as an unattached volume, runs only with `--acknowledge-no-snapshot`.
+
+To stop an approved change before it runs, hold it (`ankra cost decisions hold`, then `release`) or decline it with a reason:
+
+```bash
+ankra cost decisions set-aside <decision-id> --note "Needed for the launch"
+```
+
+An approval lasts seven days. A change approved longer ago that never started reads **approval lapsed** and does not run until it is approved again.
+
+## 4. Read the ledger
+
+Seven days after a change runs, Ankra compares the cluster's run rate before the change with its run rate on day seven and records the difference as the **measured saving**.
+
+```bash
+ankra cost ledger
+ankra cost ledger --all-projects -o json
+```
+
+The header totals the savings measured this calendar month, everything measured so far, and the expected saving of the changes still approved, running or verifying. An expected saving counts as saved only once it is measured. A saving that could not be measured stays `unknown`, never zero, and the row says why. A negative figure means the run rate rose.
+
+## Verify
+
+- `ankra cost budgets list` shows each budget with a projected month end, not `unknown`.
+- `ankra cost autopilot get` shows the tiers you set and your clusters under them.
+- A decision you ran shows `succeeded` in `ankra cost decisions get`, and a week later a measured saving in `ankra cost ledger`.
+
+## Troubleshooting
+
+| Symptom | Cause and fix |
+|---|---|
+| A budget reads `unknown` | No cluster in its scope is priced yet. See [Get a number for every cluster](/platform/cloud-cost#get-a-number-for-every-cluster). |
+| No Budget crossing notification arrived | No route delivers that kind to a channel. Check with [notification routing](/guides/notification-routing). |
+| The autopilot proposes nothing | Every environment kind is `hands-off`, the default. Set a tier with `ankra cost autopilot set --default`. |
+| `approve` is refused | The plan changed after you read it. Run `get` again and approve the new `plan_hash`. |
+| `execute` is refused for a ladder | Its latest wave is still running or inside its seven-day verification. The refusal says which. |
+
+## Related
+
+- [Cloud Cost](/platform/cloud-cost) - the figures, prices and per-project views.
+- [Cluster Power Schedules](/platform/cluster-power-schedules)
+- [`ankra cost` reference](/reference/cli/cost)
