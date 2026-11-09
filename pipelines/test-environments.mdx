@@ -1,0 +1,140 @@
+---
+title: Test environments
+sidebarTitle: Test environments
+description: Test a release on fresh, customer-like Kubernetes clusters before you publish it - a kind environment stage builds one ephemeral Ankra Cloud cluster per matrix leg, deploys the build under test, runs your tests against it and always tears the cluster down. The YAML, the lifecycle, the limits, the approval it needs and what it costs.
+---
+
+import { CliVersion } from "/snippets/cli-version.jsx";
+
+A unit test proves your code. It does not prove your release runs on the Kubernetes and PostgreSQL versions your customers run. A `kind: environment` stage proves that before you publish.
+
+For each leg of the stage's matrix, Ankra builds a fresh cluster with that leg's configuration, deploys the image this run built, runs your tests against it and records the leg's result. It then tears the cluster down, whatever the result, unless you ask to keep a failed leg's cluster for debugging. A `publish` stage that needs the environment stage waits for every leg.
+
+<Info>
+Test environments are built on **Ankra Cloud** as self-managed kubeadm clusters, in your organisation and billed to it. The `test_environment` block is a protected section, so the stage builds nothing until an organisation administrator approves the definition that declares it.
+</Info>
+
+## A Kubernetes x PostgreSQL grid
+
+This pipeline builds once, then tests the image on six clusters, Kubernetes 1.35, 1.36 and 1.37 each with PostgreSQL 16 and 17. It publishes only when all six pass:
+
+```yaml .ankra/pipeline.yaml
+apiVersion: ankra.io/v1
+kind: Pipeline
+metadata:
+  name: release
+on:
+  push:
+    branches: [main]
+stages:
+  - name: build
+    kind: build
+  - name: test-matrix
+    kind: environment
+    needs: [build]
+    matrix:
+      kubernetes: ["1.35", "1.36", "1.37"]
+      postgres: ["16", "17"]
+    test_environment:
+      kubernetes: "${{ matrix.kubernetes }}"
+      services:
+        - postgres: "${{ matrix.postgres }}"
+      deploy: build-under-test
+      test:
+        image: golang:1.26
+        run: go test ./e2e/...
+  - name: publish
+    kind: publish
+    needs: [test-matrix]
+```
+
+`deploy: build-under-test` deploys the image of the one `build` stage the environment stage needs. The tests run as a Job inside the environment cluster and reach the deployment through these variables:
+
+| Variable | Value |
+|----------|-------|
+| `ANKRA_TEST_ENVIRONMENT_URL` | The in-cluster URL of the deployed build |
+| `ANKRA_KUBERNETES_VERSION` | The leg's Kubernetes version |
+| `ANKRA_POSTGRES_VERSION` | The leg's PostgreSQL major version, when the leg has one |
+| `DATABASE_URL` | The connection string of the leg's PostgreSQL, given to both the deployment and the tests |
+
+## The `test_environment` block
+
+| Field | Meaning | Default |
+|-------|---------|---------|
+| `kubernetes` | The cluster's Kubernetes version, a minor such as `"1.36"` or a patch such as `"1.36.2"`, or `${{ matrix.<axis> }}` | Required |
+| `services` | One PostgreSQL service, `- postgres: "<major>"`, from `14`, `15`, `16`, `17` and `18`, or `${{ matrix.<axis> }}` | None |
+| `deploy` | `build-under-test`, or a block: `artifact` (the `build` or `publish` stage whose image is deployed, which must be among the stages this stage needs, directly or through them), `port`, `env` | Required |
+| `deploy.port` | The port the build listens on | `8080` |
+| `test.image` | The image the tests run in. It must be one your organisation's image policy allows | Required |
+| `test.run` | The script that tests the deployment | Required |
+| `test.timeout` | How long the test Job may run | `30m` |
+| `test.env` | Extra variables for the tests | None |
+| `plan` | The Ankra Cloud server plan of every node | The smallest plan the zone offers |
+| `zone` | The Ankra Cloud zone | Chosen by Ankra |
+| `provider` | Where the cluster is built. Only `ankracloud` today | `ankracloud` |
+| `teardown` | `always`, or `on_success` to keep a failed leg's cluster for debugging | `always` |
+| `max_lifetime` | The longest one environment cluster may exist | `2h`, at most `6h` |
+
+The only expression the block accepts is `${{ matrix.<axis> }}` naming an axis of the stage's own matrix. A misspelled axis, an unknown PostgreSQL version and a `test.timeout` that is not shorter than `max_lifetime` are reported when you validate the file, before anything runs.
+
+## The lifecycle
+
+Each leg moves through these phases. `ankra pipeline environments <run>` shows the phase of a leg still in flight:
+
+```
+provisioning -> deploying -> testing -> tearing_down -> destroyed
+                                     \-> held (teardown: on_success, failed leg) -> tearing_down
+```
+
+- **Provisioning** builds the cluster and, for a leg with a service, its PostgreSQL.
+- **Deploying** rolls out the build under test and waits for it to be ready.
+- **Testing** runs the test Job. Its exit code is the leg's result: `passed` or `failed`. A leg can also end `timed_out`, `cancelled` or `error`.
+- **Tearing down** deletes the cluster. The step concludes the moment the leg has a result, so `publish` does not wait for the teardown.
+
+With `teardown: always`, the default, the cluster is torn down whatever happens: when the leg passes, when it fails, when the run is cancelled and when the run dies. An environment that outlives its `max_lifetime` is deleted by the platform's reaper whatever state its run is in. A leg whose cluster cannot be built is retried, then concluded as an `error` and torn down. A teardown is retried until it succeeds. With `teardown: on_success` a failed leg's cluster is kept as `held` for debugging, until its `max_lifetime` runs out and never longer.
+
+Re-running a failed leg builds a new cluster for that leg only. The legs that passed keep their results.
+
+## Limits
+
+| Limit | Value |
+|-------|-------|
+| Live environment clusters per organisation | 6 - one Kubernetes x PostgreSQL grid of six legs at a time. A leg over the cap waits as `queued` and starts when a cluster is torn down |
+| Lifetime of one environment cluster | 2 hours by default, 6 hours at most |
+| Test Job timeout | 30 minutes by default, and always shorter than the lifetime |
+| PostgreSQL services per environment | 1 |
+| Legs per stage | 64, the limit of any matrix |
+
+## Approval and who can build one
+
+`test_environment` is a [protected section](/guides/ankra-pipelines#logic-is-open-authority-is-closed). It decides what clusters your organisation pays for, so a pull request cannot add or widen one, and a definition that declares a new one builds nothing until an organisation administrator approves it. Until then, a run whose `publish` needs the environment stage is refused with a sentence that names the stage and the command to run:
+
+```bash
+ankra pipeline definitions approve <definition id>
+```
+
+`ankra pipeline validate` reports the same pending approval before you push.
+
+A run of a fork's head never builds a test environment, because the clusters are billed to your organisation. The leg concludes with that reason instead.
+
+## Billing
+
+Every environment cluster is an ordinary Ankra Cloud cluster in your organisation, billed like any other for the time it exists. That is usually minutes, because the cluster is torn down when its leg has a result. The defaults keep the cost down: the smallest plan the zone offers, at most six clusters at once, and a two-hour lifetime the reaper enforces even when a run dies. A `plan` or `max_lifetime` you raise is approved with the rest of the block.
+
+Environment clusters are named `te-<id>-k<version>[-pg<major>]` and described as ephemeral test environments of their run. They are left out of your organisation's cluster list, its counts and the fleet cost estimate, so they do not read as your own clusters. Pass `test_environments=only` to the cluster list to find them.
+
+## Read the results
+
+<CliVersion since="0.73.0" command="pipeline environments" />
+
+```bash
+ankra pipeline environments <run>
+```
+
+The command prints a two-axis matrix as a grid, Kubernetes versions down and PostgreSQL versions across, with one cell per leg: `passed 5m12s`, `FAILED`, the phase of a leg still in flight, or `queued`. Under the grid, one line counts the legs and says whether every cluster is torn down. Then each failed leg's message and the last ten lines of its test log follow. `--logs` prints the whole tail, and `-o json` prints the platform's answer as sent. `ankra pipeline get <run>` and `ankra pipeline tests <run>` show the same grid under **Test environments**.
+
+## Related
+
+- [Pipeline reference](/guides/pipeline-reference) - every stage kind and its block
+- [Ankra Pipelines](/guides/ankra-pipelines) - how a run is planned, and which authority it runs under
+- [Ankra Cloud servers and disks](/guides/ankra-cloud-servers-and-disks) - the plans and zones a test environment can use
