@@ -3,6 +3,8 @@ title: Stacks
 description: A Stack is what a cluster should run - Helm add-ons and your own Kubernetes manifests, deployed together in dependency order.
 ---
 
+import { CliVersion } from "/snippets/cli-version.jsx";
+
 A cluster rarely needs just one chart. Monitoring needs a namespace, Prometheus, Grafana and an ingress rule, and they have to go on in the right order. A **Stack** is how you describe that set once in Ankra and deploy it as one unit, to one cluster or to many. [How Ankra Works](/concepts/how-ankra-works) shows where Stacks sit in the overall model.
 
 ## What a Stack contains
@@ -75,6 +77,78 @@ Runtime scopes by ownership, not by namespace. Several Stacks can share a namesp
 ## Stacks in Git
 
 When the cluster has a repository connected, each Stack is written to its own directory, by default `clusters/<cluster-name>-<short-id>/stacks/<stack>/`, with one `values.yaml` per add-on and one YAML file per manifest. Commits to those files are applied to the cluster. See [GitOps](/concepts/gitops).
+
+## Uninstalling a Stack
+
+**Uninstall stack** takes a Stack off the cluster without deleting it. Every add-on, manifest and application in it leaves the cluster, in reverse dependency order. The Stack and every member's definition and values stay in Ankra and in the cluster's GitOps repository, and nothing is committed to Git. **Install stack** deploys it again.
+
+<Warning>
+**Back up the Stack before you uninstall it.** Data is treated exactly as a delete treats it: what a chart or operator removes together with its workload is removed too, and installing the Stack again does not bring it back. Some charts and operators delete their volumes, and the data on them, with their workloads. A manifest that declares a PersistentVolumeClaim directly has that claim deleted. [Protect the Stack or take a restore point](/guides/backups#protect-a-stack) first, and see [Protect Persistent Data](/guides/protect-persistent-data) for when a deleted claim takes its disk with it.
+</Warning>
+
+In the new Ankra portal (`/next` on your portal's address), open the Stack and choose **More**, then **Uninstall stack**. The dialog asks you to type the Stack's name and links to **Back up this stack**. While a draft is open on the Stack, it asks you to deploy or discard the draft first and changes nothing.
+
+From the CLI:
+
+<CliVersion since="0.73.0" />
+
+```bash
+# See what the Stack stores, and take a restore point
+ankra cluster stacks data list shop --cluster my-cluster
+ankra cluster stacks restore-points create shop --cluster my-cluster --wait
+
+# Take the Stack off the cluster, and later deploy it again
+ankra cluster stacks uninstall shop --cluster my-cluster
+ankra cluster stacks install shop --cluster my-cluster
+```
+
+Both commands need the cluster named with `--cluster`. They never act on the cluster `ankra cluster select` saved, which every shell and agent session on the machine shares. `uninstall` says what it removes and asks first: `--yes` answers, and without a terminal `--yes` is required. With `-o json`, both print the platform's answer: the Stack, whether it is installed now, and the members the call moved.
+
+| Exit code | Meaning |
+|-----------|---------|
+| `2` | `--cluster` is missing, or `uninstall` has no terminal to ask on and no `--yes` |
+| `3` | No cluster has the name or id you gave, or the cluster does not have the Stack |
+| `4` | You declined the confirmation |
+| `7` | Your role lacks `stacks.delete` (uninstall) or `stacks.deploy` (install) on the cluster |
+| `8` | The platform refused, and nothing changed. The command prints the platform's reason |
+
+### While a Stack is uninstalled
+
+- Its members stay off the cluster through cluster starts and Git syncs.
+- Changes you make to the Stack and its members are saved, and deployed when you install it.
+- Retrying an earlier deployment of one of its members is refused. Install the Stack instead.
+- Until the uninstall has removed a member, Ankra refuses a change that would alter what that removal deletes: the member's own definition, moving it to another Stack, or the Stack's variables or name.
+- Ankra keeps the uninstalled state itself. It is not written to Git, and a Git commit cannot uninstall or install a Stack.
+
+The Stack page reads **Uninstalling** while members are being removed and **Uninstalled** once they are all off the cluster, and the Stacks list reads **Uninstalled**. `ankra cluster stacks list` shows the Stack as `uninstalled`, and its `-o json` output carries `"uninstalled": true`.
+
+If an uninstall did not finish, the Stack page reads **Partly uninstalled** and names the members Ankra still records as on the cluster. **Uninstall again** removes only those.
+
+### Installing it again
+
+**Install stack**, on the Stack page or under **More**, deploys the Stack again in dependency order, with what it holds now. That includes members added or edited while it was uninstalled. A member that was already off the cluster before the uninstall, such as an add-on you uninstalled on its own, stays off it. Data the uninstall removed does not come back.
+
+### When Ankra refuses
+
+A refused uninstall or install changes nothing, and the reason says what to do first.
+
+| Refused when | Uninstall | Install |
+|--------------|:---------:|:-------:|
+| The cluster is stopped or not online | ✓ | ✓ |
+| The Stack has an open draft. Deploy or discard it first | ✓ | ✓ |
+| The Stack is being deleted | ✓ | ✓ |
+| A member's deployment has not finished: it is still running, or it failed | ✓ |  |
+| A managed service owns the Stack. [Delete the service](/guides/delete-a-managed-service) instead | ✓ |  |
+| The uninstall is still removing members |  | ✓ |
+| The Stack is not uninstalled |  | ✓ |
+
+Before an install, deploying the open draft keeps its changes for the install.
+
+### Uninstall or delete
+
+**Delete stack** removes the Stack itself: its resources leave the cluster, and the deletion is committed to the cluster's GitOps repository when one is connected. Uninstalling keeps the Stack in Ankra and in Git so you can install it again. Both treat data the same way.
+
+Uninstalling needs the `stacks.delete` permission on the cluster, as deleting does, and installing needs `stacks.deploy`. The portal offers each action only to people who may use it. See [Roles & Access](/guides/roles-and-access).
 
 ## Reusing a Stack
 
