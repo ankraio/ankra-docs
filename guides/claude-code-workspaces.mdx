@@ -1,0 +1,191 @@
+---
+title: Offload Claude Code build sessions to Ankra Workspaces
+sidebarTitle: Claude Code on Workspaces
+description: "Run the tests, lint and typechecks of every Claude Code session in your repository's Ankra Workspace instead of on your laptop - shims on Claude's PATH, Bash timeouts that survive a cold workspace, a SessionStart hook that warms it, a CLAUDE.md block, and one worktree per session so parallel agents never collide."
+---
+
+import { CliVersion } from "/snippets/cli-version.jsx";
+
+A Claude Code session spends much of its time running the build: `go test ./...` after every edit, `pnpm typecheck`, `golangci-lint run`, a Playwright suite before it calls the task done. One session does this comfortably on a laptop. Three or four in parallel, each with git hooks that run the same checks again, saturate it, and every session slows down together.
+
+[Ankra Workspaces](/guides/ankra-workspaces) move that work to a warm pod on your organisation's CI pool. This guide sets Claude Code up so that every session uses it **without Claude typing anything different**: the same commands, the same output, the same exit codes, with the CPU and memory spent on the pool instead of your machine.
+
+```mermaid
+flowchart LR
+    subgraph Laptop
+        A[Claude Code session] -->|Bash: go test ./...| B[go shim]
+        B -->|routed| C[ankra exec]
+        B -->|everything else| D[real go]
+    end
+    C -->|worktree snapshot| E[Ankra Workspace pod]
+    E -->|live output and exit code| C
+```
+
+## Prerequisites
+
+- A repository whose checkout can already use a workspace: `ankra exec --check` exits `0` in it. If it does not, work through [Run tests and lint in Ankra Workspaces](/guides/ankra-workspaces) first. That page covers logging in, the `workspaces.use` permission, connecting the repository and the workspace profile.
+- Claude Code installed and working in that repository.
+
+## 1. Put the shims on Claude's PATH
+
+<CliVersion since="0.30.0" />
+
+```bash
+ankra dev install
+ankra dev status
+```
+
+`ankra dev install` links shims for `go`, `gofmt`, `golangci-lint`, `pnpm`, `npm` and `npx` into `~/.local/bin`. Claude Code's Bash tool starts from your shell profile, so the shims reach Claude only when `~/.local/bin` comes before the real tools in that profile. Add the `PATH` line `ankra dev install` prints to `~/.zshrc` or `~/.bashrc` if it asked you to, then start a **new** Claude Code session; a running session keeps the shell it started with.
+
+Check from inside the session. The `!` prefix runs a command in Claude Code's own shell:
+
+```text
+! command -v go
+! ANKRA_EXEC_EXPLAIN=1 go test ./...
+```
+
+The first should print a path under `~/.local/bin`, and the second `route`. A path to the real `go`, or `local`, means the session does not see the shims; see [Troubleshooting](#troubleshooting).
+
+Nothing about Claude's permission rules changes: Claude still runs `go test`, so an existing `Bash(go test:*)` allow rule keeps working.
+
+## 2. Configure the project's Claude Code settings
+
+Add these to the repository's `.claude/settings.json` (shared with the team) or `.claude/settings.local.json` (just you):
+
+```json
+{
+  "env": {
+    "ANKRA_EXEC": "remote",
+    "BASH_DEFAULT_TIMEOUT_MS": "900000",
+    "BASH_MAX_TIMEOUT_MS": "1800000"
+  },
+  "permissions": {
+    "allow": [
+      "Bash(ankra exec:*)",
+      "Bash(ankra workspace status:*)",
+      "Bash(ankra workspace up:*)"
+    ]
+  }
+}
+```
+
+- **`ANKRA_EXEC: remote`** routes exactly like the default `auto`, but when a routable command has to run locally - the workspace is unreachable, you are logged out - the shim says so in one line. That line lands in the session transcript, so you can see when a session quietly went back to building on your laptop. It applies to Claude's commands only; your own terminal keeps the mode `ankra dev mode` set.
+- **The Bash timeouts.** Claude Code stops a command after two minutes by default. A routed command waits for a workspace that is still provisioning (up to 15 minutes, `ANKRA_EXEC_WAIT_TIMEOUT`) and then runs the whole suite, so the default cuts off exactly the runs you wanted offloaded. Set the values to your slowest full suite plus a margin. When Claude Code does stop a routed command, `ankra exec` stops the remote command too: it handles `SIGINT` and `SIGTERM` like Ctrl-C.
+- **The permission rules** let Claude run `ankra exec` for a command the shims leave local, and check or wake the workspace, without a prompt each time. Leave out `ankra workspace down`; tearing a workspace down is your call.
+
+## 3. Warm the workspace when a session starts
+
+A workspace that has not been used for 24 hours is torn down, and the first command after that waits a few minutes while a new one is provisioned. A `SessionStart` hook asks for the workspace as the session opens, so it is warm by the time Claude runs its first test.
+
+Save this as `.claude/hooks/warm-ankra-workspace.sh` and make it executable (`chmod +x`):
+
+```bash
+#!/bin/sh
+ankra exec --check >/dev/null 2>&1 || exit 0
+ankra workspace up >/dev/null 2>&1 || exit 0
+echo "Tests, lint and typechecks in this repository run in its Ankra Workspace through the ankra dev shims. Run them as usual."
+```
+
+Register it in the same settings file, next to the keys from step 2:
+
+```json
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/warm-ankra-workspace.sh"
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+- `ankra exec --check` is cached for an hour, so the hook costs nothing on a checkout that cannot use a workspace, and exits quietly there.
+- `ankra workspace up` without `--wait` returns as soon as provisioning starts; the session does not wait for it.
+- The `echo` is what Claude Code adds to the session's context, so Claude knows from its first turn where its builds run.
+- If the repository has more than one workspace kind (a `node` or `e2e` profile), add an `ankra workspace up --kind <kind>` line for each kind your sessions use.
+
+## 4. Tell Claude how the build works
+
+The shims are transparent, but Claude still carries habits from building on a shared laptop: narrowing a test run to one package to keep the machine responsive, or treating a provisioning message as a failure. Add a block like this to the repository's `CLAUDE.md`:
+
+```markdown
+## Builds run in the Ankra Workspace
+
+`go test`, `go vet`, `go build` (without `-o`), `golangci-lint run`, `pnpm typecheck`,
+`pnpm test`, `pnpm lint`, `vitest run`, `tsc --noEmit` and Playwright runs are routed to
+this repository's Ankra Workspace by the shims on PATH. Output and exit codes are the
+remote command's own.
+
+- Run them exactly as usual. Do not prefix them with `ankra exec`.
+- They do not load this machine, so run the full suite before calling a task done.
+- `go generate`, `go mod tidy`, `gofmt -w` and `golangci-lint run --fix` also run remotely;
+  their changes are applied to this worktree when they finish. Re-read the files they touch.
+- Lines starting `ankra exec:` or `[devbox]` report provisioning or a wait for a run slot.
+  They are not test output.
+- To run something else in the workspace, use `ankra exec -- <command>`. Exit code 196 means
+  it did not run there; run it locally instead.
+```
+
+If your `CLAUDE.md` tells agents to run one lint or typecheck at a time to protect the laptop, scope that rule to commands that run locally. Routed commands share the workspace's memory through its own run-slot queue instead.
+
+## 5. Give every parallel session its own worktree
+
+Run each parallel Claude Code session in its own git worktree, not several sessions in one checkout:
+
+```bash
+git worktree add ../my-repo-feature-a -b feature-a
+cd ../my-repo-feature-a && claude
+```
+
+The workspace keeps a separate checkout for each worktree on your machine, so each session's tests run against that session's own uncommitted changes and never against another session's half-finished edit. All of them share the one warm pod and its Go, lint and pnpm caches, so a new worktree's first run is not a cold build.
+
+The workspace's `resources.memory` is shared by every command running in it at once, and heavy commands queue for a share of it. A wait shows as `[devbox] got a run slot after Ns`. If you regularly run several sessions and those waits grow, raise `resources.cpu` and `resources.memory` in the repository's [workspace profile](/guides/ankra-workspaces#give-a-repository-a-workspace-profile) rather than running fewer sessions.
+
+## Verify
+
+Start a session in the repository and ask Claude for a normal task that ends in a test run, for example *"Run the test suite and fix anything that fails"*. Then, in another terminal:
+
+```bash
+tail -f ~/.claude/logs/ankra-exec.log
+```
+
+Every routed command Claude runs appends one line: the repository, the workspace, `rc=` (the exit code), `mode=remote/api`, the wall time and the command. A line with `mode=not-run/api` is a command that could not run in the workspace and ran locally instead; its reason is in the session transcript.
+
+```bash
+ankra workspace status
+```
+
+shows the workspace each kind is using and whether it is ready.
+
+## Troubleshooting
+
+| What you see | What it means | Fix |
+|---|---|---|
+| Commands route from your terminal but not from Claude Code | The session's shell finds the real tool before the shim | `! command -v go` in the session; put `~/.local/bin` first in the profile Claude Code's shell reads, then start a new session |
+| A test run stops after two minutes with a timeout | Claude Code's Bash timeout is still the default | Set `BASH_DEFAULT_TIMEOUT_MS` and `BASH_MAX_TIMEOUT_MS` (step 2) and add the warm-up hook (step 3) |
+| The transcript shows a one-line notice that a command ran locally | The checkout could not use the workspace for that command | `! ankra exec --check`; `ankra login` and `ankra org current` if you were logged out or in another organisation |
+| Every command runs locally while Claude Code's Bash sandbox is on | The sandbox blocks `ankra` from reaching the Ankra platform | Allow network access to your Ankra platform host in Claude Code's sandbox settings, or run without the sandbox |
+| Claude prefixes everything with `ankra exec` | It does not know the shims route for it | Add the `CLAUDE.md` block (step 4); routed commands behave the same either way |
+| A test fails only for Claude, with changes you did not make | Two sessions are editing one worktree | One worktree per session (step 5) |
+| `The command ran out of memory ...`, exit `137` | Several sessions' commands together exceeded the workspace's memory | Raise `resources.memory` in the workspace profile |
+
+For problems with the workspace itself - provisioning, connecting the repository, the profile - see the [Workspaces troubleshooting table](/guides/ankra-workspaces#troubleshooting).
+
+## Turn it off
+
+```bash
+ankra dev mode local          # every command runs locally, for you and for Claude
+ANKRA_EXEC=local go test ./...  # one command locally
+ankra dev install --uninstall # remove the shims
+```
+
+Remove `ANKRA_EXEC` from `.claude/settings.json` too, since it overrides `ankra dev mode` for Claude's commands.
+
+See also [Pipelines with Claude Code, Codex and the Claude app](/pipelines/coding-agents) for letting the same sessions watch and fix their CI runs, and the CLI reference for [`ankra exec`](/reference/cli/exec), [`ankra dev`](/reference/cli/dev) and [`ankra workspace`](/reference/cli/workspace).
