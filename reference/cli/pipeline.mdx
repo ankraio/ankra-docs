@@ -29,9 +29,11 @@ umbrella run this pipeline run belongs to, useful for correlating with
 'pipeline get' can also select a run by its commit, branch or trigger, and
 wait on or watch it - see 'ankra pipeline get `--help`'.
 
-'pipeline definitions get|approve' are the one exception: they address a
-stored definition directly by its own id and take neither flag - see
-'ankra pipeline definitions `--help`'.
+'pipeline definitions get|approve' address a stored definition directly by
+its own id and take neither flag - see 'ankra pipeline definitions `--help`'.
+'pipeline authority' and 'pipeline policy' act on the organisation: the
+approvals inbox takes the flags only to narrow its listing, and the policy
+takes neither.
 
 ## ankra pipeline artifacts
 
@@ -83,6 +85,78 @@ ankra pipeline artifacts download <artifact-id> [flags]
 | `--out` |   | Local file to write the artifact to (default: the artifact id, in the current directory) |
 | `--repository` |   | Pipeline repository id to act on (mutually exclusive with `--application`) |
 
+## ankra pipeline authority
+
+Read and dismiss pipeline authority requests: what a run raises when its
+definition asks for protected settings (services, network, caches, resources,
+timeouts, permissions, secrets) no administrator has approved.
+
+Approving a request is approving its definition:
+'ankra pipeline definitions approve &lt;definition-id&gt;', which 'get' prints.
+'dismiss' declines it with a reason the run's check and run page then show.
+
+## ankra pipeline authority dismiss
+
+Decline a pending request with a reason the run's check run and run page then
+show. Requires pipelines.manage and a human actor: a service-account token is
+refused. A request already approved, dismissed or superseded answers 409.
+
+```bash
+ankra pipeline authority dismiss <request-id> [flags]
+```
+
+**Examples**
+
+```bash
+ankra pipeline authority dismiss 0b8f6c2e-0000-4000-8000-000000000001 --reason "use the shared cache size"
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+| `--reason` |   | Why the request is declined (required) |
+| `-y`, `--yes` | `false` | Skip the confirmation prompt |
+
+## ankra pipeline authority get
+
+Show one request: the run that raised it, the protected settings it asks for
+against the approved authority, where it stands and who decided it. -o json
+also carries the requesting definition's protected settings as YAML.
+
+```bash
+ankra pipeline authority get <request-id> [flags]
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+
+## ankra pipeline authority list
+
+List pipeline authority requests, newest first. It lists the pending ones
+unless `--status` names another (approved, dismissed, superseded) or all.
+`--application` or `--repository` narrows it to one pipeline; without either it
+reads the whole organisation. Requires pipelines.read.
+
+```bash
+ankra pipeline authority list [flags]
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--application` |   | Application name or id whose pipeline to act on |
+| `--cursor` |   | Continue from a previous page's next_cursor |
+| `--limit` | `50` | How many to list (1-100) |
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+| `--repository` |   | Pipeline repository id to act on (mutually exclusive with `--application`) |
+| `--status` | `pending` | Which requests: pending, approved, dismissed, superseded or all |
+
 ## ankra pipeline branches
 
 List a pipeline's branches, one row per ref, with the newest run on each.
@@ -126,6 +200,35 @@ ankra pipeline branches --application orders-api -o json | jq '.branches[] | sel
 | `--application` |   | Application name or id whose pipeline to act on |
 | `--cursor` |   | Page cursor from a previous listing's next_cursor |
 | `--limit` | `0` | Maximum number of branches to return (server default 20, max 100) |
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+| `--repository` |   | Pipeline repository id to act on (mutually exclusive with `--application`) |
+
+## ankra pipeline caches
+
+List the keyed cache volumes a pipeline repository keeps between runs, most
+recently used first: the key a stage declared, where it is mounted, its size,
+the cluster the volume lives on, and when it lapses the organisation's cache
+retention. A cache is scoped to the default branch or to every other branch;
+the two never share a volume. Requires pipelines.read.
+
+```bash
+ankra pipeline caches [flags]
+```
+
+**Examples**
+
+```bash
+ankra pipeline caches --application my-app
+ankra pipeline caches --repository 5f0c1d6e-0000-4000-8000-000000000001 -o json
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--application` |   | Application name or id whose pipeline to act on |
+| `--cursor` |   | Continue from a previous page's next_cursor |
+| `--limit` | `50` | How many to list (1-100) |
 | `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
 | `--repository` |   | Pipeline repository id to act on (mutually exclusive with `--application`) |
 
@@ -569,6 +672,99 @@ ankra pipeline logs <run> [flags]
 | `--repository` |   | Pipeline repository id to act on (mutually exclusive with `--application`) |
 | `--step` |   | Step key to follow (required when the run has more than one step), or the id of one attempt of it as 'ankra pipeline get' prints for a retried step |
 
+## ankra pipeline policy
+
+Read and change the organisation's pipeline policy: the ceiling every
+pipeline's authority is held to - which network tiers, credentials, node
+selectors, tolerations and runtime classes its pipelines may use, how much
+CPU, memory, cache and GPU a step may ask for, and which webhook hosts and
+external providers are allowed. Both commands need pipelines.manage.
+
+## ankra pipeline policy get
+
+Show the organisation's pipeline policy
+
+```bash
+ankra pipeline policy get [flags]
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+
+## ankra pipeline policy set
+
+Change the pipeline policy settings you name and leave the rest as they are.
+A list flag replaces the whole list; pass it empty (`--allowed-credentials ""`)
+to allow none. Node selectors and tolerations are set through -f, which takes
+the platform's body as YAML or JSON (- reads stdin); a flag wins over the
+document. allowed_image_prefixes belongs to 'ankra org ci-settings' and is not
+writable here: it, updated_by and updated_at are dropped from -f, so the
+document 'get' prints can be edited and sent back.
+
+The policy bounds every pipeline of the organisation, so this confirms first;
+`--yes` skips the prompt.
+
+```bash
+ankra pipeline policy set [flags]
+```
+
+**Examples**
+
+```bash
+ankra pipeline policy set --max-cpu 8 --max-memory 16Gi
+ankra pipeline policy set --allowed-network-tiers restricted,internet --yes
+ankra pipeline policy set -f policy.yaml
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--allowed-credentials` | `[]` | Replace the allowed credentials list; comma-separated or repeatable |
+| `--allowed-network-tiers` | `[]` | Replace the allowed network tiers list; comma-separated or repeatable |
+| `--allowed-runtime-classes` | `[]` | Replace the allowed runtime classes list; comma-separated or repeatable |
+| `--external-providers` | `[]` | Replace the external providers list; comma-separated or repeatable |
+| `-f`, `--file` |   | YAML or JSON file with the settings to change (- reads stdin) |
+| `--max-agent-tool-calls-per-run` | `0` | Most tool calls an agent stage may make in one run |
+| `--max-cache-size` |   | Largest cache volume a stage may declare, as a Kubernetes quantity |
+| `--max-cpu` |   | Most CPU a step may ask for, as a Kubernetes quantity |
+| `--max-gpu` | `0` | Most GPUs a step may ask for |
+| `--max-memory` |   | Most memory a step may ask for, as a Kubernetes quantity |
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+| `--webhook-allowed-hosts` | `[]` | Replace the webhook allowed hosts list; comma-separated or repeatable |
+| `-y`, `--yes` | `false` | Skip the confirmation prompt |
+
+## ankra pipeline release-queue
+
+Count the release runs of a pipeline's branch that are queued or running,
+and name the oldest one. A release behind others waits for them, so this is
+the answer to "why has my merge not shipped yet".
+
+The counts say what the pipeline is doing, not whether a deployment is live.
+It needs the pipelines.read permission.
+
+```bash
+ankra pipeline release-queue [flags]
+```
+
+**Examples**
+
+```bash
+ankra pipeline release-queue --application my-app
+ankra pipeline release-queue --repository <repository-id> -o json
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--application` |   | Application name or id whose pipeline to act on |
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+| `--repository` |   | Pipeline repository id to act on (mutually exclusive with `--application`) |
+
 ## ankra pipeline repositories
 
 Connect a bare Git repository to Ankra Pipelines, list what the
@@ -792,6 +988,41 @@ ankra pipeline rerun <run> [flags]
 | `--repository` |   | Pipeline repository id to act on (mutually exclusive with `--application`) |
 | `--timeout` | `0s` | Give up waiting after this long and exit 5, e.g. 45m (default: wait until the run concludes) |
 | `--wait` | `false` | Wait for the new run to conclude before returning |
+
+## ankra pipeline resource-suggestions
+
+Show right-sizing advice for the stages of the pipeline definition a run was
+planned from: for each stage, the 95th percentile of what its latest
+successful attempts used plus headroom, against what the stage asks for.
+
+Memory is sized from the kernel's memory peak; a stage whose peak reached its
+limit is "at limit" and gets no suggestion, because the limit hid what it
+needed. CPU is sized from mean cores. A stage that is not listed has no
+successful attempt with a usage report yet, which is not the same as using
+nothing. The suggested values go in the stage's resources.memory and
+resources.cpu in .ankra/pipeline.yaml; nothing is written for you.
+
+It needs the pipelines.read permission.
+
+```bash
+ankra pipeline resource-suggestions <run> [flags]
+```
+
+**Examples**
+
+```bash
+ankra pipeline resource-suggestions <run-id> --application my-app
+ankra pipeline resource-suggestions <run-id> --repository <repository-id> --window 50 -o json
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--application` |   | Application name or id whose pipeline to act on |
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+| `--repository` |   | Pipeline repository id to act on (mutually exclusive with `--application`) |
+| `--window` | `0` | Latest successful attempts of each stage to size from, 1 to 100 (default: the platform's, 20) |
 
 ## ankra pipeline run
 
@@ -1503,4 +1734,62 @@ ankra pipeline validate [file] [flags]
 | `--ref` |   | Read the definition from this git reference in the current checkout (for example origin/my-branch) instead of the working tree |
 | `--repository` |   | Pipeline repository id to act on (mutually exclusive with `--application`) |
 | `--spec-file` |   | Validate this definition file, the same as passing it as the argument |
+
+## ankra pipeline workspace-profiles
+
+Read and replace a repository's workspace profiles: what its workspace of each
+kind runs - the image, the size, the service sidecars, the setup commands and
+the pinned tools. 'ankra dev' and 'ankra workspace' bring up workspaces from
+them; a repository with none takes its workspace image from its pipeline.
+
+A caller with workspaces.manage reads the profiles whole; one with only
+workspaces.use reads which kinds exist, each as an empty profile.
+
+## ankra pipeline workspace-profiles get
+
+Show a repository's workspace profiles
+
+```bash
+ankra pipeline workspace-profiles get [flags]
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--application` |   | Application name or id whose pipeline to act on |
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+| `--repository` |   | Pipeline repository id to act on (mutually exclusive with `--application`) |
+
+## ankra pipeline workspace-profiles put
+
+Replace the repository's workspace profiles with the ones in -f: a YAML or
+JSON object keyed by kind (- reads stdin), or the document 'get' prints (it carries
+repository_id), whose profiles member is used. An empty object clears them. Every profile is
+validated as a workspace would be rendered from it. A running workspace picks
+the change up at its owner's next bring-up, which replaces it.
+
+Requires workspaces.manage. The file replaces every profile, so this confirms
+first; `--yes` skips the prompt.
+
+```bash
+ankra pipeline workspace-profiles put [flags]
+```
+
+**Examples**
+
+```bash
+ankra pipeline workspace-profiles get --application my-app -o yaml > profiles.yaml
+ankra pipeline workspace-profiles put --application my-app -f profiles.yaml
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--application` |   | Application name or id whose pipeline to act on |
+| `-f`, `--file` |   | YAML or JSON file with the profiles keyed by kind (- reads stdin) |
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+| `--repository` |   | Pipeline repository id to act on (mutually exclusive with `--application`) |
+| `-y`, `--yes` | `false` | Skip the confirmation prompt |
 
