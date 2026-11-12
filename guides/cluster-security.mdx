@@ -402,21 +402,26 @@ Matching uses a deterministic selector: organisation + CVE + package type + pack
 
 A disposition is created from one occurrence of a finding, and its scope decides what it covers:
 
-| Scope | Covers | Needs |
-|-------|--------|-------|
-| `organisation_addon` (default) | The add-on the occurrence belongs to, on every cluster (for example, Grafana across the fleet) | The occurrence attributed to an add-on with high confidence |
-| `workload` | The one workload it was seen in: cluster, kind, namespace and name | A workload recorded on the occurrence |
-| `image` | The image digest it was seen in, wherever that image runs | An image digest recorded on the occurrence |
+| Scope | Covers | Survives a rollout | Survives an image rebuild | Needs |
+|-------|--------|--------------------|---------------------------|-------|
+| `organisation_addon` (default) | The add-on the occurrence belongs to, on every cluster (for example, Grafana across the fleet) | Yes | Yes | The occurrence attributed to an add-on with high confidence |
+| `namespace` | Every workload in the occurrence's namespace, on that cluster | Yes | Yes | A namespace recorded on the occurrence |
+| `workload` | The one workload it was seen in: cluster, kind, namespace and name. For a Deployment's pods this is the Deployment | Yes | Yes | A workload recorded on the occurrence |
+| `image` | The image digest it was seen in, wherever that image runs | Yes | No | An image digest recorded on the occurrence |
 
-Some images belong to no add-on: pods an operator creates from a custom resource (a CloudNativePG `Cluster`, for example), workloads from plain manifests, control-plane pods, and charts the add-on catalogue does not know. The default scope refuses those, and the refusal names the two scopes that work. Use `workload` to decide for one place, or `image` to decide once for an image that runs in several namespaces or clusters:
+Some images belong to no add-on: your own application's images, pods an operator creates from a custom resource (a CloudNativePG `Cluster`, for example), workloads from plain manifests, control-plane pods, and charts the add-on catalogue does not know. The default scope refuses those, and the refusal names the scopes that work.
+
+For your own application, `namespace` is usually the right choice. Say a CVE comes from a transitive dependency your code never calls, such as a vector database pulled in by an agent framework. A namespace-scoped acceptance keeps covering it after every deploy and every rebuild, and the same CVE anywhere else stays open:
 
 ```bash
-ankra security dispositions preview --occurrence <id> --scope workload --disposition accepted_risk
-ankra security dispositions create --occurrence <id> --scope image --disposition accepted_risk \
-  --reason "No upstream fix; reviewed" --expires-at 2026-12-31
+ankra security dispositions preview --occurrence <id> --scope namespace --disposition accepted_risk --expires-at 2026-12-31
+ankra security dispositions create --occurrence <id> --scope namespace --disposition accepted_risk \
+  --reason "Transitive via crewai; the feature that uses it is not enabled" --expires-at 2026-12-31
 ```
 
-An image-scoped disposition follows the digest, so it stops matching when the image is rebuilt or upgraded and the finding returns for a fresh decision. From chat or the MCP server, pass the same `scope` to `preview_security_disposition` and `create_security_disposition`.
+Use `workload` to decide for one workload in a shared namespace. Scanners report a Deployment's pods against its current ReplicaSet (`crewai-5d8f9c7b6`), which is replaced on every rollout, so a workload disposition created from those pods pins the Deployment and covers every ReplicaSet it rolls out. Use `image` to decide once for one build that runs in several namespaces or clusters. It follows the digest, so it stops matching when the image is rebuilt or upgraded, and the finding returns for a fresh decision.
+
+The review deadline still applies to every scope, so an accepted risk comes back for a decision within a year. From chat or the MCP server, pass the same `scope` to `preview_security_disposition` and `create_security_disposition`. In the Security Center, the **Accept this risk** dialog offers the same choices and suggests the namespace when no add-on owns the image.
 
 <Warning>
 Expiry or fix availability can make findings actionable again and may fire threshold alerts. It does **not** emit a false “new CVE discovered” notification - “new” means newly observed in raw scan data **and** currently actionable.
