@@ -132,8 +132,21 @@ If your tenant restricts Teams Store apps and your Teams administrator is someon
   <Step title="Optionally, set the AI mode">
     The Teams card carries an **AI mode** control. **Ask** is read-only, and **Agent** lets the AI act. With no mode of its own, the tenant follows the organisation's **Default AI mode**, which is **Ask** unless an admin changes it.
   </Step>
-  <Step title="Optionally, send alerts to a Teams channel">
-    Once the bot is in a team, alert **Destinations** let you pick a *Team / Channel*, the same way as for Slack. The bot posts the alert card itself, so you don't need a Power Automate URL. Add the bot to every team whose channels should receive alerts. If a team the bot is already in lists no channels, mention **@Ankra AI** once in that team and reload.
+  <Step title="Optionally, send alerts and pipeline notifications to a Teams channel">
+    Once the bot is in a team, alert **Destinations** let you pick a *Team / Channel*, the same way as for Slack. The bot posts the card itself, so you don't need a Power Automate URL. Add the bot to every team whose channels should receive notifications. If a team the bot is already in lists no channels, mention **@Ankra AI** once in that team and reload.
+
+    A destination only receives what a [notification route](/guides/notification-routing) sends it, so add a route for each kind of notification the channel should hear. For pipeline runs, route the [pipeline notification kinds](/guides/ankra-pipelines#what-is-in-place-today). From the CLI:
+
+    ```bash
+    ankra alerts destinations channels --provider teams     # find the channel id and tenant id
+    ankra alerts destinations create --name "Pipelines in Teams" --type teams \
+      --channel-id "19:...@thread.tacv2" --teams-tenant-id <tenant-id>
+    ankra alerts routes create --destination-id <destination-id> --organisation-wide \
+      --kinds pipeline_run_failed,pipeline_authority_approval_requested,image_gate_blocked,preview_failed
+    ankra alerts routes create --destination-id <destination-id> --organisation-wide --severity critical
+    ```
+
+    The first route sends pipeline failures, approval requests, blocked images and failed previews; the second adds every critical notification. Add `pipeline_run_succeeded` or `preview_ready` only if the channel wants every green run, since they fire on every run. Without `--organisation-wide`, a route delivers only your current project's notifications. Check where a notification would go with `ankra alerts routes preview --kind pipeline_run_failed`.
   </Step>
 </Steps>
 
@@ -143,8 +156,8 @@ Copy this as is:
 
 ```text
 We are rolling out Ankra AI, a Kubernetes operations assistant, in Microsoft Teams.
-It is a bot-only app on the Microsoft Teams Store: no tab, no Graph API permissions,
-and nothing to consent to.
+It is a bot-only app on the Microsoft Teams Store: no tab, and no tenant-wide
+Graph API permissions, so there is no admin consent prompt.
 
 Store listing:
   https://marketplace.microsoft.com/en-us/product/teams-app/WA200012870
@@ -159,9 +172,17 @@ If our tenant blocks all Store apps, upload the app package instead:
   Teams admin center -> Teams apps -> Manage apps -> Upload new app -> select the .zip
 
 If you are asked:
-  - It requests no Microsoft Graph permissions, so there is no admin consent prompt.
-  - It cannot read channel history. It only receives messages that @mention it,
-    replies in a thread it is already part of, and direct messages sent to it.
+  - It requests no tenant-wide Microsoft Graph permissions, so there is no admin
+    consent prompt.
+  - From version 1.1.0 it asks the team owner, when they add it to a team, for
+    permission to read that team's channel messages (resource-specific consent,
+    ChannelMessage.Read.Group). It answers only messages that @mention it, and uses
+    the permission to read the thread it was mentioned in. It reads nothing in
+    teams it was not added to. Version 1.0.0 does not ask for this.
+  - Whether team owners may grant that consent is a tenant setting for
+    resource-specific consent:
+    https://learn.microsoft.com/microsoftteams/resource-specific-consent
+    If it is off, the bot still works, but cannot read the thread it is mentioned in.
   - It opens no inbound connection to our network. It only talks outbound to
     Microsoft's Bot Framework.
   - To remove it later: Manage apps -> Ankra AI -> Block.
@@ -175,13 +196,21 @@ The app package is only for tenants that block Store apps. It installs the same 
 
 <AccordionGroup>
   <Accordion title="Does it need admin consent or Graph permissions?">
-    No. Ankra AI is a bot-only app. Its manifest declares no `webApplicationInfo`, no resource-specific consent (RSC), and no device permissions, so there is no Microsoft Graph scope and no consent prompt. Allowing it in **Manage apps** and in a permission policy is the whole approval.
+    No admin consent. Ankra AI is a bot-only app and asks for no tenant-wide Microsoft Graph scope, so allowing it in **Manage apps** and in a permission policy is the whole tenant approval.
+
+    From version 1.1.0, its manifest also declares one resource-specific consent (RSC) permission, `ChannelMessage.Read.Group`. A team owner grants it for their own team when they add the app; it never covers other teams. Whether team owners may grant RSC is a tenant setting; see Microsoft's [resource-specific consent](https://learn.microsoft.com/microsoftteams/resource-specific-consent) guide. If it is off, the bot still installs and works, but it cannot read the thread it is mentioned in. Version 1.0.0 declares no RSC permission. **Manage apps** shows which version your tenant has.
   </Accordion>
   <Accordion title="Can it read our channel history?">
-    No. The bot only receives messages addressed to it: an `@Ankra AI` mention, a reply in a thread it is already part of, or a direct message. It does not request the resource-specific consent that would grant access to channel messages.
+    Only in teams it was added to, and only to answer. With version 1.1.0, Teams delivers that team's channel messages to the bot, which:
+
+    - Answers only messages that `@mention` it. Everything else in a channel goes unanswered.
+    - When mentioned inside a thread, reads that thread so it knows what "this" refers to, for example the alert card the thread started from.
+    - Copies a plain reply onto an Ankra board ticket's timeline only when the thread mirrors that ticket, and ignores every other unmentioned message.
+
+    With version 1.0.0, it only receives `@mentions` and direct messages.
   </Accordion>
   <Accordion title="What data leaves Microsoft Teams?">
-    Only the messages people send to the bot, plus the IDs needed to reply (tenant, conversation and user). These reach the Ankra platform so the assistant can answer, and the conversation is stored against your Ankra organisation. Nothing else is read or exported.
+    The messages people send to the bot, the thread a mention was made in (version 1.1.0), and replies in threads that mirror an Ankra board ticket, plus the IDs needed to reply (tenant, conversation and user). These reach the Ankra platform so the assistant can answer, and the conversation is stored against your Ankra organisation. Unmentioned channel messages outside those threads are not stored or exported.
   </Accordion>
   <Accordion title="Does it need a firewall or network change?">
     No. The bot runs in Ankra's platform and talks outbound to Microsoft's Bot Framework, which relays to Teams. Nothing connects inbound to your network, and there is no IP range to allow-list.
@@ -203,7 +232,7 @@ The same as [in Slack](#what-the-bot-can-do-in-slack):
 - Confirm or deny the AI's proposed changes.
 - Work tickets from their thread.
 
-Every button runs as your own linked Ankra user. Instead of `/ankra`, type `help`, `status` or `logout` to the bot.
+Every button runs as your own linked Ankra user. Instead of `/ankra`, type `help`, `status`, `connect` or `logout` to the bot. `status` (or `whoami`) shows a card with your connection and a **Connect** or **Disconnect** button. `login` works for `connect`, and `signout` or `disconnect` for `logout`. Slack accepts the same words.
 
 ### If something does not work
 
@@ -211,7 +240,7 @@ Every button runs as your own linked Ankra user. Instead of `/ankra`, type `help
 | --- | --- |
 | **Ankra AI** is missing from the Teams app search, or needs approval | Your tenant restricts Store apps. A Teams administrator allows it under **Teams apps** → **Manage apps** (see [what to send them](#what-to-send-your-teams-administrator)). |
 | **Invalid Bot** when adding the app | The app is fine, but the bot registration behind it can't be reached. Contact Ankra support: this can't be fixed from your tenant. |
-| The bot doesn't answer | Mention **@Ankra AI**. In a channel, it ignores plain messages unless they reply in a thread it is already part of. |
+| The bot doesn't answer | Mention **@Ankra AI**. In a channel or group chat it answers only messages that mention it, including replies in its own threads. |
 | **This Teams workspace is not linked to an Ankra organisation yet** | The tenant isn't connected. An Ankra organisation admin needs to [connect it](#connecting-microsoft-teams) with the claim code from the welcome card. |
 | The channel says the setup code was sent privately | Check your personal chats for one from **Ankra AI**. If the channel names someone else, open a personal chat with **Ankra AI** and say hi to get the code yourself. |
 | The claim code is rejected | It has expired (codes last up to 24 hours, and the card shows when) or another organisation already used it. Message the bot for a new one. |
