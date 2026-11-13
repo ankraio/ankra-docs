@@ -28,6 +28,32 @@ A refused write prints the platform's sentence and exits 2 when the request
 named the wrong thing (400, 422), 3 when the ticket is not in your
 organisation (404) and 1 when the tickets' state refused it (409).
 
+## ankra tickets assign
+
+Assign a ticket to an agent (`--agent`, the agent task's id from 'ankra ai tasks
+list') or to an organisation member (`--user`, the member's user id), never
+both. `--unassign` clears the assignee.
+
+```bash
+ankra tickets assign <ticket> (--agent <agent-task-id> | --user <user-id> | --unassign) [flags]
+```
+
+**Examples**
+
+```bash
+ankra tickets assign T-42 --agent 0b6f1c1e-7c0e-4b7e-9a57-0d5f3c1a2b3c
+ankra tickets assign T-42 --unassign
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--agent` |   | The agent task to assign the ticket to (its id) |
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+| `--unassign` | `false` | Clear the assignee |
+| `--user` |   | The organisation member to assign the ticket to (their user id) |
+
 ## ankra tickets close
 
 Close a ticket with a resolution: fixed, no_action, duplicate, wont_fix,
@@ -337,6 +363,63 @@ ankra tickets nest T-51 --root T-42 --reason "Same expired certificate"
 | `--reason` |   | Why this ticket is a symptom of the root, shown on both timelines (up to 1000 characters) |
 | `--root` |   | The root ticket to nest under: its number (42, T-42) or UUID |
 
+## ankra tickets plan
+
+A ticket can carry a plan: what will be done about it, written before the
+work starts. 'draft' records a plan you wrote; 'review' approves the plan on
+the ticket or asks for changes. 'ankra tickets get' shows a ticket's plan
+status.
+
+## ankra tickets plan draft
+
+Record a plan on the ticket from a file, or from stdin with '`--file` -'. An
+open ticket only: a closed one answers not found.
+
+```bash
+ankra tickets plan draft <ticket> --file <path> [flags]
+```
+
+**Examples**
+
+```bash
+ankra tickets plan draft T-42 --file plan.md
+printf '1. Renew the certificate\n2. Roll the ingress\n' | ankra tickets plan draft T-42 --file -
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--file` |   | The file holding the plan, or - for stdin (required) |
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+
+## ankra tickets plan review
+
+Review the plan on the ticket: `--verdict` approve lets the work start,
+request_changes sends it back with your `--rationale`. `--expected-updated-at`
+takes the ticket's updated_at as you read it ('ankra tickets get -o json');
+the platform then refuses the review (exit 1) if the ticket changed since.
+
+```bash
+ankra tickets plan review <ticket> --verdict approve|request_changes [flags]
+```
+
+**Examples**
+
+```bash
+ankra tickets plan review T-42 --verdict approve
+ankra tickets plan review T-42 --verdict request_changes --rationale "Roll the staging ingress first"
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--expected-updated-at` |   | Refuse the review if the ticket's updated_at is no longer this |
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+| `--rationale` |   | Why; shown on the ticket's timeline |
+| `--verdict` |   | approve or request_changes (required) |
+
 ## ankra tickets settings
 
 Configure the AI board
@@ -418,6 +501,203 @@ ankra tickets settings projects set <project> [flags]
 | `--slack-channel` |   | Slack channel id for this project's AI board threads (for example C0123ABCD) |
 | `--teams-conversation` |   | Teams conversation id for this project's AI board threads (19:...@thread.tacv2) |
 
+## ankra tickets sync
+
+Ticket sync mirrors the AI board outbound: each connection creates one issue
+per ticket in Jira or Linear, or posts signed events to a webhook, and relays
+the ticket's timeline after. A connection filters what it syncs by kind and
+priority. Delivery is automatic and at least once; nothing flows back from the
+tracker, and tickets closed before a connection existed are not back-filled.
+
+## ankra tickets sync connections
+
+Manage the connections that mirror tickets to Jira, Linear or a webhook
+
+## ankra tickets sync connections create
+
+Create a connection that mirrors tickets to an external tracker. What it
+needs depends on `--provider`:
+
+```text
+jira     --base-url, --project-key, --email and an optional --issue-type.
+         The secret is the Atlassian API token of --email.
+linear   --team-id ('ankra tickets sync destinations' lists the teams a key
+         can file into). The secret is the Linear API key.
+webhook  --url (https). The secret is the signing secret events are signed
+         with; --unsigned creates the connection without one.
+```
+
+The secret is never taken as an argument. Pipe it on stdin with `--secret-stdin`,
+or run in a terminal to be asked for it with the input hidden. The platform
+stores it in its secret store and never returns it. Organisation admins only.
+
+```bash
+ankra tickets sync connections create --name <name> --provider jira|linear|webhook [flags]
+```
+
+**Examples**
+
+```bash
+cat linear-key.txt | ankra tickets sync connections create --name linear --provider linear \
+  --team-id 5b1f0c7e-3a55-4d0b-9a57-0d5f3c1a2b3c --secret-stdin
+ankra tickets sync connections create --name jira --provider jira --base-url https://example.atlassian.net \
+  --project-key OPS --email ops@example.com --kind incident --min-priority high
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--base-url` |   | Jira: the site's URL, such as https://example.atlassian.net |
+| `--disabled` | `false` | Create the connection switched off |
+| `--email` |   | Jira: the Atlassian account the API token belongs to |
+| `--event-scope` |   | all relays the ticket's timeline; anchor_only creates the issue and stays quiet after |
+| `--issue-type` |   | Jira: the issue type to create |
+| `--kind` | `[]` | Only sync tickets of this kind, repeatable: incident, insight, gap, automation, request, chore |
+| `--min-priority` |   | Only sync tickets at this priority or above: urgent, high, medium or low |
+| `--name` |   | Connection name (required) |
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+| `--project-key` |   | Jira: the project issues are created in |
+| `--provider` |   | jira, linear or webhook (required) |
+| `--secret-stdin` | `false` | Read the Jira API token, Linear API key or webhook signing secret from stdin |
+| `--team-id` |   | Linear: the team issues are created in ('ankra tickets sync destinations') |
+| `--unsigned` | `false` | Webhook: create the connection without a signing secret |
+| `--url` |   | Webhook: the https endpoint events are posted to |
+
+## ankra tickets sync connections delete
+
+Delete a connection and its stored credential. Tickets stop syncing to its
+tracker; issues already created there stay. Organisation admins only. It asks
+first; `--yes` skips the question and is required when there is no terminal to
+ask on.
+
+```bash
+ankra tickets sync connections delete <connection-id> [flags]
+```
+
+**Examples**
+
+```bash
+ankra tickets sync connections delete 5b1f0c7e-3a55-4d0b-9a57-0d5f3c1a2b3c --yes
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+| `-y`, `--yes` | `false` | Skip the confirmation prompt (required when stdin is not a terminal) |
+
+## ankra tickets sync connections get
+
+Show one ticket sync connection, without its credential
+
+```bash
+ankra tickets sync connections get <connection-id> [flags]
+```
+
+**Examples**
+
+```bash
+ankra tickets sync connections get 5b1f0c7e-3a55-4d0b-9a57-0d5f3c1a2b3c
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+
+## ankra tickets sync connections list
+
+List the organisation's ticket sync connections. Stored credentials are never returned.
+
+```bash
+ankra tickets sync connections list [flags]
+```
+
+**Examples**
+
+```bash
+ankra tickets sync connections list
+ankra tickets sync connections list -o json
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+
+## ankra tickets sync connections update
+
+Change a connection: only what you pass changes. `--rotate-secret` reads a new
+credential from stdin (`--secret-stdin`) or a hidden prompt and replaces the
+stored one; for Jira it needs `--email` too. An update that changes the
+settings or rotates the credential also clears the connection's failure state
+and retries delivery at once; one that only renames, switches or filters it
+does not. Organisation admins only.
+
+```bash
+ankra tickets sync connections update <connection-id> [flags]
+```
+
+**Examples**
+
+```bash
+ankra tickets sync connections update 5b1f0c7e-3a55-4d0b-9a57-0d5f3c1a2b3c --disable
+cat new-key.txt | ankra tickets sync connections update <connection-id> --rotate-secret --secret-stdin
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--base-url` |   | Jira: the site's URL, such as https://example.atlassian.net |
+| `--disable` | `false` | Switch the connection off |
+| `--email` |   | Jira: the Atlassian account the API token belongs to |
+| `--enable` | `false` | Switch the connection on |
+| `--event-scope` |   | all relays the ticket's timeline; anchor_only creates the issue and stays quiet after |
+| `--issue-type` |   | Jira: the issue type to create |
+| `--kind` | `[]` | Only sync tickets of this kind, repeatable: incident, insight, gap, automation, request, chore |
+| `--min-priority` |   | Only sync tickets at this priority or above: urgent, high, medium or low |
+| `--name` |   | A new name |
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+| `--project-key` |   | Jira: the project issues are created in |
+| `--rotate-secret` | `false` | Replace the stored credential with one read from stdin or a hidden prompt |
+| `--secret-stdin` | `false` | Read the Jira API token, Linear API key or webhook signing secret from stdin |
+| `--team-id` |   | Linear: the team issues are created in ('ankra tickets sync destinations') |
+| `--url` |   | Webhook: the https endpoint events are posted to |
+
+## ankra tickets sync destinations
+
+List the Linear teams a tracker credential can file into, so a connection can
+target one. Only Linear has a destination list: a Jira connection names its
+project with `--project-key` and a webhook its `--url`. With `--connection` the
+saved connection's stored credential is used; without it a credential is read
+from stdin (`--secret-stdin`) or a hidden prompt, used for this one lookup and
+not stored. Nothing is written. Organisation admins only.
+
+```bash
+ankra tickets sync destinations --provider <provider> [--connection <connection-id>] [flags]
+```
+
+**Examples**
+
+```bash
+ankra tickets sync destinations --provider linear --connection 5b1f0c7e-3a55-4d0b-9a57-0d5f3c1a2b3c
+cat linear-key.txt | ankra tickets sync destinations --provider linear --secret-stdin
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--connection` |   | Use this saved connection's stored credential (its id) |
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+| `--provider` |   | linear, the one tracker with a destination list (required) |
+| `--secret-stdin` | `false` | Read the credential from stdin |
+
 ## ankra tickets transition
 
 Move a ticket to another status
@@ -460,4 +740,27 @@ ankra tickets unlink T-50 4f1c2d0e-8a6b-4c1e-9b7a-2d4e6f8a0b1c
 |------|---------|-------------|
 | `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
 | `--relation` |   | Remove only the link with this relation |
+
+## ankra tickets workspace
+
+Attach an AI workspace to a ticket, or detach the current one
+
+```bash
+ankra tickets workspace <ticket> (--workspace <workspace-id> | --detach) [flags]
+```
+
+**Examples**
+
+```bash
+ankra tickets workspace T-42 --workspace 5b1f0c7e-3a55-4d0b-9a57-0d5f3c1a2b3c
+ankra tickets workspace T-42 --detach
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--detach` | `false` | Detach the workspace the ticket has |
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+| `--workspace` |   | The AI workspace to attach (its id) |
 

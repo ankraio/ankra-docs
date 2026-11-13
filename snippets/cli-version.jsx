@@ -1,5 +1,5 @@
 export const CliVersion = ({ since, command, note }) => {
-  const latestStableCli = "0.76.0";
+  const latestStableCli = "0.77.0";
   const parse = (version) => String(version).split(".").map((part) => parseInt(part, 10) || 0);
   const requested = parse(since);
   const stable = parse(latestStableCli);
