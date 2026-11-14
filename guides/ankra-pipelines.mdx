@@ -924,6 +924,21 @@ Needs `pipelines.manage` and a human actor - a service token cannot approve. Ans
 - **An old approval whose proving runs were pruned stops counting.** The last-approved fallback answers from the run history, so an approval with no surviving default-branch run to prove it is no longer a candidate. It fails closed and says so rather than silently: the run resolves to the baseline and its own status carries "No administrator has approved any authority for this repository yet" with the approve action beside it. Re-approving fixes it, because only the current default-branch definition can be approved and that definition is the newest default-branch run's own.
 </Warning>
 
+### The scan takes its settings from the platform
+
+The gate has to judge what the platform scanned, not what the repository under review allowed it to see. So the `scan` stage's Trivy leg ignores any Trivy settings the repository carries:
+
+- a `.trivyignore`, `trivy.yaml` or `trivy-secret.yaml` committed anywhere in the checkout
+- any `TRIVY_*` variable a stage's `env` or secrets declare
+
+Without that, a pull request could add an ignore file and drop a CVE before the gate read the report, leaving no record of who decided it or until when. The step log names each variable it dropped, for example `[scan] ignoring TRIVY_SEVERITY: Trivy takes no settings from the pipeline`.
+
+To stop a finding blocking a run:
+
+- **Trivy:** fix it, by upgrading the package or the base image. Filesystem (lockfile) findings in the checkout are reported but never block; the image findings are what the gate judges. How strict that is belongs to the organisation's `ci_image_gate` and `ci_ignore_unfixed` [settings](#organisation-ci-settings).
+- **Semgrep:** the repository's `.semgrepignore` and inline `nosemgrep` comments still apply. They are part of the code under review, so a reviewer sees them in the diff.
+- **Semgrep or Checkov, without changing the code:** record a code finding disposition with [`ankra security code-dispositions create`](/reference/cli/security#ankra-security-code-dispositions-create). It covers one rule in one file, is audited, and an accepted risk expires. A CRITICAL finding is never waived.
+
 ### What a step runs as
 
 Every step is a hardened batch/v1 Job in the `ankra-ci` namespace, which enforces the Pod Security Standards' Restricted profile: uid and gid 65532, the `RuntimeDefault` seccomp profile, no privilege escalation, a read-only root filesystem, every capability dropped, no service account token, no service links, one attempt, an explicit deadline and a TTL. A pipeline cannot ask for host privilege, host namespaces, host paths or control-plane placement; the request is refused at plan time. The one relaxation is the rootless BuildKit pod a `build` stage runs, in its own `ankra-ci-build` namespace under the Baseline profile - never privileged, never root, and no pipeline can name its own build or checkout image: both are Ankra's own, pinned by digest. That build pod names no seccomp or AppArmor profile at all, which is the only spelling of "leave the builder alone" Baseline admits, and nothing can change it to `Unconfined`. On nodes whose runtime reads that as a confining default the builder cannot start, and the build is routed to Ankra's own builders instead ([`build_runtime_confined`](#when-something-fails)).
