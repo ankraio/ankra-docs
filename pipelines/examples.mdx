@@ -235,7 +235,10 @@ The tests run against a real Postgres sidecar on three Python versions, side by 
 
 ```mermaid
 flowchart LR
-    checkout --> t1[test 3.11] & t2[test 3.12] & t3[test 3.13]
+    checkout --> d1[deps 3.11] & d2[deps 3.12] & d3[deps 3.13]
+    d1 --> t1[test 3.11]
+    d2 --> t2[test 3.12]
+    d3 --> t3[test 3.13]
     pg[(postgres:16 sidecar)] -.-> t1 & t2 & t3
 ```
 
@@ -267,25 +270,35 @@ services:
 stages:
   - name: "checkout"
     kind: "checkout"
-  - name: "test"
+  - name: "deps"
     kind: "run"
     image: "python:${{ matrix.python }}-slim"
     needs: ["checkout"]
+    matrix:
+      python: ["3.11", "3.12", "3.13"]
+    network: "egress-https"
+    env:
+      PIP_CACHE_DIR: "/workspace/.ankra-python-cache/pip"
+    run: |
+      python -m venv .venv-${{ matrix.python }}
+      .venv-${{ matrix.python }}/bin/pip install -r requirements.txt
+    cache:
+      - key: "pip-${{ matrix.python }}-${{ hashFiles('requirements.txt') }}"
+        paths: [".ankra-python-cache/pip"]
+        restore_keys: ["pip-${{ matrix.python }}-"]
+        fallback: "none"
+  - name: "test"
+    kind: "run"
+    image: "python:${{ matrix.python }}-slim"
+    needs: ["deps"]
     matrix:
       python: ["3.11", "3.12", "3.13"]
     services: ["postgres"]
     network: "services"
     env:
       DATABASE_URL: "postgresql://postgres:test@postgres:5432/billing"
-      PIP_CACHE_DIR: "/workspace/.ankra-python-cache/pip"
     run: |
-      pip install -r requirements.txt
-      pytest --junitxml=reports/junit.xml
-    cache:
-      - key: "pip-${{ matrix.python }}-${{ hashFiles('requirements.txt') }}"
-        paths: [".ankra-python-cache/pip"]
-        restore_keys: ["pip-${{ matrix.python }}-"]
-        fallback: "none"
+      .venv-${{ matrix.python }}/bin/pytest --junitxml=reports/junit.xml
     artifacts:
       - name: "junit"
         paths: ["reports/junit.xml"]
@@ -297,7 +310,7 @@ stages:
       memory: "2Gi"
 ```
 
-- `network: services` lets the stage reach its sidecar by name. It is a protected tier, so it applies after an administrator approves the definition.
+- `network: services` lets the stage reach its sidecar by name and nothing beyond the run, PyPI included. So the `deps` stage installs the requirements on `egress-https` into a virtual environment in the run's workspace, and the test stage runs from it. It is a protected tier, so it applies after an administrator approves the definition.
 - The matrix value is part of the cache key, so each Python version keeps its own wheels.
 
 ## A repository with no application
