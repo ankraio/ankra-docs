@@ -18,7 +18,8 @@ on:
   # Nightly on master's tip: build and scan the image as the next pull request
   # would, so an advisory published while nobody merges reaches the image gate,
   # and master's failure card in Slack, the next morning instead of as one red
-  # pull request after another. Publish is push-only, so this never publishes.
+  # pull request after another. It also asks YouTube whether every embedded film
+  # is still public (film-check). Publish is push-only, so this never publishes.
   # The platform fires a schedule only from a schedules row: after changing the
   # cron here, change it there too (`ankra pipeline schedules list --application
   # ankra-docs`).
@@ -30,6 +31,7 @@ on:
         - "build"
         - "scan"
         - "gate"
+        - "film-check"
   manual: {}
 concurrency:
   # A pull request run's ankra.ref is its base branch, so keying on the ref alone
@@ -100,3 +102,46 @@ stages:
     when:
       events:
         - "push"
+  # Every film the docs embed goes through snippets/youtube.jsx as
+  # <YouTube id="..." />. A film made private on the channel keeps rendering,
+  # as 'Video unavailable', until someone notices: 13 of 16 were private when
+  # ankra-chd34o found them (2026-11-09). This check is ankra-d48csa. The
+  # nightly asks YouTube's oEmbed endpoint about every id: 200 is public and
+  # embeddable, 403 private or embedding disabled, 404 no such video. A
+  # failing nightly is the alert (the run's failure card). Schedule, manual
+  # and re-runs only, never a pull request or push: a network call there
+  # would make pull request checks flaky.
+  - name: "film-check"
+    kind: "run"
+    image: "curlimages/curl:8.23.0@sha256:3fb7e13e5d179a845c97d78204f3f1064d1907037f26a3ebf91710571151fd93"
+    needs:
+      - "checkout"
+    when:
+      events:
+        - "schedule"
+        - "manual"
+        - "rerun"
+    run: |
+      set -eu
+      tags=$(find . -name '*.mdx' ! -path './node_modules/*' -exec grep -ho '<YouTube' {} + | wc -l | tr -d ' ')
+      found=$(find . -name '*.mdx' ! -path './node_modules/*' -exec grep -ho '<YouTube[^>]*' {} + | grep -o 'id="[^"]*"' | sed 's/id="\(.*\)"/\1/')
+      n=$(echo "$found" | grep -c . || true)
+      [ "$tags" -eq "$n" ] || { echo "FAILED: $tags <YouTube embeds but $n ids read on the same line as the tag (an id on a later line is not checked)"; exit 1; }
+      [ "$n" -gt 0 ] || { echo "FAILED: no <YouTube id=...> embed found"; exit 1; }
+      ids=$(echo "$found" | sort -u)
+      bad=0
+      for id in $ids; do
+        code=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 20 --retry 2 --retry-delay 5 \
+          "https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v=${id}&format=json") || code="000"
+        if [ "$code" = "200" ]; then
+          echo "ok   $id"
+        else
+          echo "FAIL $id (HTTP $code)"
+          bad=$((bad + 1))
+        fi
+      done
+      if [ "$bad" -ne 0 ]; then
+        echo "FAILED: $bad film(s) not confirmed public (403: private or embedding disabled; 404: no such video; any other code: YouTube did not answer, re-run before swapping). Swap or remove the embed, and grep the website repo (astro/src/lib/films.ts) for the same id."
+        exit 1
+      fi
+      echo "all $(echo "$ids" | wc -l | tr -d ' ') films public"
