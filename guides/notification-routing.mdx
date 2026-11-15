@@ -8,7 +8,7 @@ import { CliVersion } from "/snippets/cli-version.jsx";
 A notification can reach a destination by two independent paths:
 
 - **An alert's own destinations.** On an alert rule, **Notifications** → **Destinations** attaches destinations directly. When the alert fires, Ankra delivers to every destination on that list.
-- **A notification route.** Under **Alerting** → **Destinations** → **Routing rules**, a rule in one project or organisation-wide matches notifications by kind, severity, cluster, and source, and sends them to one destination. Routes cover every notification kind, not only alerts.
+- **A notification route.** Under **Alerting** → **Destinations** → **Routing rules**, a rule in one project or organisation-wide matches notifications by kind, severity, cluster, source, application and branch or pull request, and sends them to one destination. Routes cover every notification kind, not only alerts.
 
 Both paths can point at the same destination at the same time. That is a supported configuration, and it delivers once.
 
@@ -39,7 +39,7 @@ The netting happens before anything is queued, so a de-duplicated rule never pro
 
 ## How a rule matches
 
-A routing rule sets any combination of four filters. Every filter it sets must match; a filter it leaves empty matches everything.
+A routing rule sets any combination of six filters. Every filter it sets must match; a filter it leaves empty matches everything.
 
 | Filter | Empty means | Matches when |
 |---|---|---|
@@ -47,6 +47,8 @@ A routing rule sets any combination of four filters. Every filter it sets must m
 | Severity | All severities | The notification's severity is exactly the rule's severity |
 | Cluster | All clusters | The notification is about that cluster |
 | Source | All sources | The notification's source id is exactly the rule's source id - for alert firings, the alert id |
+| Application | All applications | The notification is about that application. A notification that names no application never matches a rule that sets this filter |
+| Reference pattern | All branches, tags and pull requests | The branch, tag or pull request the notification is about matches the rule's glob, see [Scope a route to one application and its default branch](#scope-a-route-to-one-application-and-its-default-branch). A notification that names no reference never matches a rule that sets this filter |
 
 A rule with no filters at all matches every notification. Disabled rules are skipped entirely.
 
@@ -72,6 +74,42 @@ Anything organisation-level, and any project without a rule, still reaches the o
 <Note>
 Two things do not follow the project yet. When you ask the Ankra bot something in `#ankra-tools`, it answers from your default project. Remediation approval cards still go to the organisation's single Slack remediation destination.
 </Note>
+
+## Scope a route to one application and its default branch
+
+A pipeline run outcome, an image gate verdict or an authority approval belongs to the organisation, not to a cluster, so the **Cluster** filter can never narrow them (a PR preview does name the cluster it was published on). Two filters can:
+
+- **Application** - the rule matches only notifications about that application. In the rule form it is the **Application** picker; in the CLI, `--application <name-or-id>`; in the API, `application_id`.
+- **Reference pattern** - a glob over the branch, tag or pull request the notification is about. In the rule form it is the branch or reference field; in the CLI, `--reference-pattern <glob>`; in the API, `reference_pattern`. `*` matches within one path segment, `**` across segments and `?` one character other than `/`. No whitespace, and `!`, `+`, `[` and `]` are refused. At most 255 characters.
+
+A branch's reference is `refs/heads/<branch>`, and a pattern is tried against it both whole and without that prefix, so `main` and `refs/heads/main` both match a push to `main`. A pull request's reference is `pull/<number>`, so `main` never matches a pull request into `main`, and `pull/*` matches every pull request and nothing else: a branch literally named `pull/55` does not match it. A tag's reference is `refs/tags/<tag>`, so `refs/tags/v*` follows releases and a bare `v*` does not.
+
+The kinds that carry a reference are the pipeline run outcomes (`pipeline_run_failed`, `pipeline_run_succeeded`), the pipeline authority's approval request and approval (`pipeline_authority_approval_requested`, `pipeline_authority_approved`), the image gate (`image_gate_blocked`) and PR previews (`preview_ready`, `preview_failed`). Each names its application when the repository has one; a run of a repository connected without an application names none, so only a reference pattern can scope it. A rule that sets either filter never matches a notification without the value: an alert firing or a GitOps sync is not about every branch, the same way an organisation-wide notification is not about every cluster.
+
+The rule behind a `#cicd-notify` channel - every failed run and every blocked image gate on one application's default branch, nothing from pull requests. The pattern names the branch literally, so write `master` where that is the default:
+
+<CliVersion since="0.24.0" />
+
+<CodeGroup>
+
+```bash CLI
+ankra alerts routes create --destination-id <destination-id> --kinds pipeline_run_failed,image_gate_blocked \
+  --application <application-name-or-id> --reference-pattern main
+ankra alerts routes preview --kind pipeline_run_failed --severity warning --application <application-name-or-id> --reference refs/heads/main
+ankra alerts routes preview --kind pipeline_run_failed --severity warning --application <application-name-or-id> --reference pull/55
+```
+
+
+```bash cURL
+curl -X POST https://platform.ankra.app/api/v1/org/notifications/routes \
+  -H "Authorization: Bearer <your-token>" \
+  -H "Content-Type: application/json" \
+  -d '{"kinds": ["pipeline_run_failed", "image_gate_blocked"], "application_id": "<application-id>", "reference_pattern": "main", "destination_id": "<destination-id>"}'
+```
+
+</CodeGroup>
+
+With the rule in the application's project or organisation-wide, the first preview reaches the channel and the second does not, because `pull/55` is not `main`. Both filters add to a rule's [specificity](#evaluation-order), one point each.
 
 ## Kinds: one, several, or everything except
 
@@ -149,6 +187,8 @@ Specificity counts the filters that name a value:
 | Severity | Yes |
 | Cluster | Yes |
 | Source | Yes |
+| Application | Yes |
+| Reference pattern | Yes |
 | Project | Yes |
 
 The walk keeps a running set of destinations, starting empty. Each matching rule adds to it or removes from it, and the set that survives is what gets delivered.
@@ -223,6 +263,8 @@ curl -X POST https://platform.ankra.app/api/v1/org/notifications/routes/preview 
 
 Pass `--alert-id` (or `alert_id`) whenever you are previewing an alert firing: without it the preview cannot know which destinations the alert itself covers, and will show the route deliveries that de-duplication would drop.
 
+For a pipeline, gate or preview notification, pass `--application` and `--reference` (`application_id` and `reference` in the API, such as `refs/heads/main` or `pull/12`) : a rule scoped to an application does not match a preview without one, and a rule with a reference pattern does not match a preview without a reference.
+
 ## Managing rules from the CLI
 
 <CodeGroup>
@@ -231,6 +273,7 @@ Pass `--alert-id` (or `alert_id`) whenever you are previewing an alert firing: w
 ankra alerts routes list
 ankra alerts routes create --destination-id <destination-id> --kinds execution_failed,resource_reconcile_failed
 ankra alerts routes create --destination-id <destination-id> --exclude-kinds alert_trigger_fired
+ankra alerts routes create --destination-id <destination-id> --kinds pipeline_run_failed,image_gate_blocked --application <application-name-or-id> --reference-pattern main
 ankra alerts routes update <route-id> --priority 10 --stop-on-match
 ankra alerts routes preview --kind execution_failed --severity critical
 ankra alerts routes delete <route-id>
@@ -238,7 +281,7 @@ ankra alerts routes delete <route-id>
 
 </CodeGroup>
 
-`--kinds` takes a comma-separated list and `--exclude-kinds` takes the same list negated; the two are mutually exclusive. The single-value `--kind` flag still works and is equivalent to `--kinds` with one entry.
+`--kinds` takes a comma-separated list and `--exclude-kinds` takes the same list negated; the two are mutually exclusive. The single-value `--kind` flag still works and is equivalent to `--kinds` with one entry. `--application` takes an application name or id and `--reference-pattern` a glob; both work on `create` and `update`.
 
 ## Related
 
