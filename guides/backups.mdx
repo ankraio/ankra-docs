@@ -220,6 +220,8 @@ ankra cluster stacks data list shop
 
 That lists the stack's data assets - standalone persistent volume claims, and the databases an operator runs - under the names the selection uses.
 
+Only data a member of the stack owns is listed as the stack's, and each asset says why it is: a member owns it - a manifest or application that declares it, the add-on whose Helm release installed it, or a database operator's link to an object one of them declares - or it sits in a namespace only this stack uses and carries no sign of belonging to something else. Data the sweep of the stack's namespaces finds that no member owns - another stack's database in a shared namespace, an orphan claim - is listed separately as **Not owned by this stack**. It is never captured or restored as this stack's, and the requested total does not count it. From CLI v0.24.0 the list shows the reason in its **Owned via** column; with `-o json` it is each asset's `attribution`, and the separate list is `unattributed_assets`.
+
 <Tabs>
   <Tab title="CLI">
     ```bash
@@ -347,7 +349,7 @@ The platform accepts the restore and answers with the sequence it will follow, w
 3. Restore the restore point's assets onto the cluster through the backup data plane.
 4. Scale the workloads back up over the restored data.
 
-`--yes` skips the typed confirmation for scripts. `--force` is needed when the stack's data has changed since the restore point was taken: the refusal compares the restore point's assets against the stack's current inventory, and **an inventory whose live database scan did not run counts as drift**, because "we could not read it" is not "it is unchanged".
+`--yes` skips the typed confirmation for scripts. `--force` is needed when the stack's data has changed since the restore point was taken: the refusal compares the restore point's assets against the stack's current inventory, and **an inventory whose live database scan did not run counts as drift**, because "we could not read it" is not "it is unchanged". `--force` does not reach the ownership check that runs before it: a restore point carrying a volume no member of the stack owns today is refused outright, see [Troubleshooting](#troubleshooting).
 
 <Warning>
 **CloudNativePG and Percona databases cannot be restored in place yet.** A restore point carrying one is refused with `Restoring this restore point in place is not supported yet: it carries a database this platform cannot yet recreate in place.` The ordinary restore path would report success over unchanged data, which is worse than refusing - see [Restoring in place](/concepts/backup-vaults#restoring-in-place). Volumes captured by Velero and databases captured as logical dumps, including every `ankra migrate` import, restore in place today.
@@ -399,6 +401,7 @@ An organisation with no vault at all gets a call to action rather than a report 
 | `This organisation has no ready backup vault to write a restore point to.` | No vault is `ready` | Register or provision one, above |
 | `This selection covers none of the stack's data, so the restore point would carry nothing.` | The selection excluded everything the stack holds | `ankra cluster stacks data list <stack>` to see the asset names, then widen the selection |
 | `This stack's data has changed since the restore point was taken` | Drift between the restore point and the live inventory, **or** an inventory whose database scan did not run | Take a fresh restore point, or restore with `--force` if the drift is expected |
+| `This restore point carries volumes this stack does not own, so restoring it in place would replace another stack's data; it cannot be restored in place.` | The in-place sequence would remove and replace a claim the stack's live inventory lists as not owned by this stack, or one in a namespace none of the stack's members use - another stack's data in a shared namespace, or an orphan, such as a restore point taken before the inventory became stack-scoped. The message names the claims. `--force` does not override this refusal; drift and ownership are separate checks | Restore that data from the restore point of the stack that owns it. When the message says the stack no longer exists on the cluster, its data comes back through a [clone](/guides/clone-stack), not an in-place restore. A claim that really is this stack's but sits in a shared namespace needs a member that declares it before the next restore point is taken |
 | `Restoring this restore point in place is not supported yet` | The restore point carries a CloudNativePG or Percona database | Not yet available. The capture is still good and the databases are still in the vault |
 | `Only a complete restore point can be restored.` | The restore point is `creating` or `failed` | `ankra runs get <run-id>` on the run that was sealing it |
 | `This cluster is not online, so its data cannot be restored right now.` | The target cluster is stopped or its agent is not connected | Bring the cluster back, then retry |
