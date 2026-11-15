@@ -1,6 +1,6 @@
 ---
 title: Log Sources
-description: Connect Grafana Loki, Elasticsearch or OpenSearch so Ankra can search historical logs and power log-aware AI troubleshooting
+description: Connect Grafana Loki, Elasticsearch, OpenSearch or VictoriaLogs so Ankra can search historical logs and power log-aware AI troubleshooting
 ---
 
 <Note>
@@ -16,7 +16,7 @@ No log store to connect? [Ankra hosted logs](/guides/hosted-logs) keeps a cluste
 When you connect a log source to Ankra:
 
 - **Historical log search** - Query logs across pods and namespaces without leaving the cluster view
-- **AI-powered troubleshooting** - Ankra AI can search Loki, Elasticsearch or OpenSearch during incident analysis
+- **AI-powered troubleshooting** - Ankra AI can search Loki, Elasticsearch, OpenSearch or VictoriaLogs during incident analysis
 - **Complements live streaming** - Use **Live stream** for tailing current pod output; use **Search** for time-ranged queries over your log store
 - **Agent-mediated access** - Queries run from inside your cluster, so in-cluster Loki/Elastic endpoints and external SaaS endpoints both work when the agent can reach them
 
@@ -29,9 +29,12 @@ When you connect a log source to Ankra:
 | Grafana Loki | `http://loki-gateway.monitoring.svc:80` | Bearer token; optional `X-Scope-OrgID` for multi-tenant Loki / Grafana Cloud |
 | Elasticsearch | `https://elasticsearch.logging.svc:9200` | API key (recommended) or basic auth |
 | OpenSearch | `https://opensearch.logging.svc:9200` | Bearer token or basic auth |
+| VictoriaLogs | `http://<release>-victoria-logs-single-server.logging.svc:9428` | Bearer token or basic auth; optional tenant `<account>` or `<account>:<project>`, sent as `AccountID` and `ProjectID` |
+
+VictoriaLogs answers on the `-server` Service of the victoria-logs-single chart, port 9428; victoria-logs-cluster answers on its `vlselect` Service, port 9471. Ankra sends LogsQL to `/select/logsql/query`.
 
 <Warning>
-Use **index-scoped** credentials for Elasticsearch/OpenSearch. Ankra health checks call `{index}/_count`, not `/_cluster/health`, so least-privilege API keys work without false "degraded" status.
+Use **index-scoped** credentials for Elasticsearch/OpenSearch. Ankra health checks call `{index}/_count`, not `/_cluster/health`, so least-privilege API keys work without false "degraded" status. On VictoriaLogs the probe is a `field_names` query, not `/health`, which answers without credentials, so a read-only credential proves itself the same way.
 </Warning>
 
 ---
@@ -46,7 +49,7 @@ Use **index-scoped** credentials for Elasticsearch/OpenSearch. Ankra health chec
     Choose **Log Source** under **Logs** in the sidebar.
   </Step>
   <Step title="Pick a provider">
-    Select **Grafana Loki**, **Elasticsearch**, or **OpenSearch**.
+    Select **Grafana Loki**, **Elasticsearch**, **OpenSearch** or **VictoriaLogs**.
   </Step>
   <Step title="Enter the endpoint">
     Provide the HTTP endpoint reachable from the Ankra agent inside the cluster.
@@ -55,17 +58,19 @@ Use **index-scoped** credentials for Elasticsearch/OpenSearch. Ankra health chec
     ```
     http://loki-gateway.monitoring.svc:80
     https://elasticsearch.logging.svc:9200
+    http://<release>-victoria-logs-single-server.logging.svc:9428
     ```
     For Grafana Cloud Loki, use the tenant query URL from your Grafana Cloud stack.
   </Step>
   <Step title="Configure provider options">
     - **Loki** - Optional tenant ID (`X-Scope-OrgID`) for multi-tenant deployments
+    - **VictoriaLogs** - Optional tenant, `<account>` or `<account>:<project>`, each a whole number, sent as the `AccountID` and `ProjectID` headers; anything else is refused
     - **Elasticsearch / OpenSearch** - Index pattern (default `*`) and optional field mappings if your shipper uses non-standard field names
     - **Verify TLS certificate** - Enable when the endpoint presents a publicly trusted or cluster-trusted certificate; leave off for self-signed in-cluster endpoints
   </Step>
   <Step title="Add credentials (if required)">
     Choose the auth type that matches your deployment:
-    - **API Token** - Bearer token (Loki, OpenSearch, Grafana Cloud)
+    - **API Token** - Bearer token (Loki, OpenSearch, VictoriaLogs, Grafana Cloud)
     - **API Key** - Elasticsearch `Authorization: ApiKey …` header
     - **User Account** - HTTP basic auth
   </Step>
@@ -76,7 +81,7 @@ Use **index-scoped** credentials for Elasticsearch/OpenSearch. Ankra health chec
 
 ---
 
-## Field mappings (Elasticsearch / OpenSearch)
+## Field mappings
 
 If you ship logs with Fluent Bit's kubernetes filter, the defaults usually work:
 
@@ -89,6 +94,18 @@ If you ship logs with Fluent Bit's kubernetes filter, the defaults usually work:
 | Container | `kubernetes.container_name` |
 
 Override these in the **Advanced field mappings** section when your index template uses different names.
+
+For **VictoriaLogs**, the defaults are the store's reserved fields plus the names Vector's `kubernetes_logs` source writes, which is what the victoria-logs charts' bundled collector ships:
+
+| Logical field | Default path |
+|---------------|--------------|
+| Timestamp | `_time` |
+| Message | `_msg` |
+| Namespace | `kubernetes.pod_namespace` |
+| Pod | `kubernetes.pod_name` |
+| Container | `kubernetes.container_name` |
+
+Override them the same way.
 
 For **Loki**, structured filters use label names (defaults: `namespace`, `pod`, `container` for Promtail/Alloy).
 
@@ -107,7 +124,7 @@ spec:
     tenant_id: my-tenant
 ```
 
-Accepted fields are `provider`, `endpoint`, `credential_name`, `tenant_id`, `index_pattern`, `field_mappings` and `verify_ssl` - see the [ImportCluster schema](/reference/importcluster#spec-log-source) for what each one means. Any other top-level field is refused with an error naming it, rather than ignored, and `provider` must be `loki`, `elasticsearch` or `opensearch`.
+Accepted fields are `provider`, `endpoint`, `credential_name`, `tenant_id`, `index_pattern`, `field_mappings` and `verify_ssl` - see the [ImportCluster schema](/reference/importcluster#spec-log-source) for what each one means. Any other top-level field is refused with an error naming it, rather than ignored, and `provider` must be `loki`, `elasticsearch`, `opensearch` or `victorialogs`.
 
 <Warning>
 **Credentials never go in Git.** A `username`, `password`, `token` or `auth_scheme` inside the block is refused by name: silently ignoring it would leave a live secret in your repository while you believe it is in effect. Create the credential in the platform and reference it with `credential_name`.
@@ -122,7 +139,7 @@ Accepted fields are `provider`, `endpoint`, `credential_name`, `tenant_id`, `ind
 1. Open **Logs** in the cluster sidebar
 2. Switch to the **Search** tab (visible when the log source feature is enabled)
 3. Pick a time range and optional namespace/pod/container filters
-4. Enter a text search or toggle **Raw query** for LogQL (Loki) or JSON query-DSL (Elasticsearch/OpenSearch)
+4. Enter a text search or toggle **Raw query** for LogQL (Loki), LogsQL (VictoriaLogs) or JSON query-DSL (Elasticsearch/OpenSearch)
 5. Use **Load older** to page backward in time
 
 From a pod's **Logs** tab, **Search history** deep-links into Search with that pod pre-filtered.
