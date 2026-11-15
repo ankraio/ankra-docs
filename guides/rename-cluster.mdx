@@ -1,0 +1,72 @@
+---
+title: "Rename a Cluster"
+description: "Give a running cluster a new name in Ankra without rebuilding it - what the rename changes, what keeps the old name, and what to update afterwards."
+---
+
+import { CliVersion } from "/snippets/cli-version.jsx";
+
+A rename changes the name Ankra knows a cluster by. The cluster keeps running as it is: nothing is rebuilt, no node is replaced, no data moves, and the cluster id stays the same.
+
+<CliVersion since="0.78.0" command="ankra cluster rename" />
+
+## Before you start
+
+- You need `clusters.write` on the cluster.
+- The new name must be 1 to 53 lowercase letters, digits and hyphens. It must start with a letter, end with a letter or digit, and must not already belong to another cluster in the organisation (in any project).
+- **These two kinds of cluster cannot be renamed yet.** The platform refuses and changes nothing:
+  - **A cluster synced with a connected GitOps repository.** Its cluster file in the repository is named after the cluster.
+  - **An Ankra Cloud cluster.** Its load balancers are owned by the cluster's name.
+
+## Rename the cluster
+
+Give the cluster by its current name or its id:
+
+```bash
+ankra cluster rename my-cluster my-cluster-dev
+ankra cluster rename <cluster-id> my-cluster-dev -o json
+```
+
+The API equivalent is `PATCH /api/v1/org/clusters/imported/{cluster_id}/name` with `{"name": "my-cluster-dev"}`. The answer carries the new name, the previous name, and the GitOps directory the cluster resolves to.
+
+If you selected the cluster with `ankra cluster select`, that selection follows the rename.
+
+## What changes and what does not
+
+| | After a rename |
+|---|---|
+| Name in the portal, the cluster list, `ankra` commands and Ankra AI | The new name |
+| Cluster id | Unchanged |
+| Server names, hostnames and Kubernetes node names | Keep the old name. They were set when each node was created, and a running node cannot change its name. Nodes added later get the same prefix, which Ankra reads from the existing nodes |
+| The cluster's DNS zone (`*.ankra.cc` or your own root) and the hosts of applications already deployed | Unchanged. They are keyed by the cluster id or were fixed at the first deploy |
+| GitOps directory (`clusters/<old-name>-<suffix>/`) | Unchanged. Ankra keeps the cluster on the directory it already used, so stored paths stay valid |
+| Hosted metrics and logs | Unchanged. They are labelled with the cluster id |
+| Kubeconfig contexts, kube tokens, access grants, API and service tokens | Keep working. They reach the cluster by its id |
+| Backups, restore points, alert routes and notification routing | Unchanged. They are tied to the cluster id |
+| A `cluster` label set in your own Prometheus or Alertmanager | Keeps working. Ankra still places firings that carry the old name on this cluster |
+
+## After the rename
+
+**ImportCluster files.** `ankra cluster apply` finds a cluster by the file's `metadata.name`. A file that still names the old cluster is refused with a message that names the new name. It never creates a second cluster:
+
+```text
+Cluster 'my-cluster' was renamed to 'my-cluster-dev', so this file no longer names a cluster. Set metadata.name to 'my-cluster-dev' and apply again, or apply with --cluster <cluster-id>. Nothing was changed, and no second cluster was created.
+```
+
+Change `metadata.name` to the new name before the next apply, or keep the file as it is and pass `--cluster my-cluster-dev`. The file's own path in your repository can stay where it is.
+
+**Kubeconfig.** Existing contexts are named `ankra-<old-name>` and keep working. For a context under the new name, run:
+
+```bash
+ankra cluster kubeconfig add my-cluster-dev
+ankra cluster kubeconfig remove my-cluster   # removes the old context
+```
+
+**Pipelines.** A `.ankra/pipeline.yaml` whose `runs_on.cluster` names the cluster by its old name is refused until you change it to the new name, or to the cluster id, which never changes.
+
+**Reusing the old name.** While the renamed cluster exists, the old name stays reserved for `cluster apply`, so an old file cannot recreate it. Renaming the cluster back releases it. The reservation ends when the cluster is deleted.
+
+## Next steps
+
+- [Cluster Settings](/platform/cluster-settings) - the cluster's environment, agent, GitOps and access
+- [Import a cluster](/guides/import-cluster) - the ImportCluster file and `ankra cluster apply`
+- [Kubeconfig](/guides/kubeconfig) - contexts and short-lived tokens
