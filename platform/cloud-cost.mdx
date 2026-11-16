@@ -19,7 +19,7 @@ All figures are **estimates** built from list prices for the resources Ankra can
 
 Ankra prices a cluster once two things are in place:
 
-1. **A price source for its capacity.** For a public provider, a [cloud credential](/platform/credentials) for that provider; Ankra Cloud clusters need nothing more. For Proxmox VE, VMware, HPE Morpheus or your own hardware, a [rate card](#private-capacity-rate-cards).
+1. **A price source for its capacity.** For AWS, Google Cloud or Azure, a [cloud credential](/platform/credentials) for that provider. Hetzner, OVHcloud, UpCloud, DigitalOcean, Scaleway and Ankra Cloud clusters need no credential of yours. For Proxmox VE, VMware, HPE Morpheus or your own hardware, a [rate card](#private-capacity-rate-cards).
 2. **The cluster online**, so the [agent](/concepts/cluster-agent) can sync its nodes and volumes.
 
 Until then, `ankra cost cluster my-cluster` says what is missing, such as no credential, no rate card, cluster offline or pricing still resolving. A cluster that cannot be priced is shown as **not priced**, never as free. The state values are listed in the [Cost API reference](/reference/cost-api#readiness-states).
@@ -34,13 +34,14 @@ ankra cost cluster my-cluster
 | Provider | Price source |
 |----------|--------------|
 | AWS, Google Cloud, Azure | Each provider's public price catalogue, per region |
-| Hetzner | Hetzner's own price list, read every hour with the organisation's Hetzner credential, per location |
+| Hetzner | Hetzner's own price list, per location, read every hour with Ankra's own Hetzner credential; no credential of yours is used |
 | Ankra Cloud | Ankra Cloud's published plan and storage prices, read every hour; no credential of your own is needed |
-| OVHcloud, UpCloud, DigitalOcean, Scaleway | Ankra's built-in book of published list prices |
+| UpCloud, DigitalOcean | Each provider's published list, read every hour with Ankra's own credential; Ankra's built-in book of list prices when that read fails |
+| OVHcloud, Scaleway | Ankra's built-in book of published list prices |
 | Proxmox VE, VMware, HPE Morpheus, imported hardware | Your [rate card](#private-capacity-rate-cards) |
 
 <Note>
-**Hetzner.** A server ordered before the 2026-06-15 price increase is priced from the earlier list. Without a Hetzner credential, Ankra uses its built-in copy of the list and reports `medium` confidence instead of `high`. A server that ran for only part of the month reads slightly low, and servers outside the cluster, such as CI runners in the same project, are not in any cluster's estimate.
+**Hetzner.** A server ordered before the 2026-06-15 price increase is priced from the earlier list. When Ankra cannot read Hetzner's live list, it uses its built-in copy of the list and reports `medium` confidence instead of `high`. A server that ran for only part of the month reads slightly low, and servers outside the cluster, such as CI runners in the same project, are not in any cluster's estimate.
 
 **Ankra Cloud.** When Ankra cannot read the price list, it keeps the last prices it read and lowers the confidence. Until it has read them once, the clusters read as pricing still being collected, never as free.
 </Note>
@@ -94,7 +95,7 @@ On the API, a read without a project is your current project; `project_id=all` o
 `ankra cost savings` reads the savings model, each recommendation with an estimated monthly saving and the basis it rests on:
 
 - **Right-size idle capacity.** When a large share of a cluster's run rate sits idle.
-- **Stop non-production clusters off-hours.** A known non-production cluster with no enabled [power schedule](/platform/cluster-power-schedules) is offered weeknight and weekend stops. A cluster without a known environment label is never offered this.
+- **Stop non-production clusters off-hours.** A cluster with no enabled [power schedule](/platform/cluster-power-schedules) is offered weeknight and weekend stops only when a person chose its environment label, the label does not say production, and both its ingress traffic and its own workloads were measured as quiet in the stop window. The label a new cluster gets by default does not count as chosen.
 - **Reduce unallocated spend.** Raised when a quarter or more of a cluster's run rate is not allocated to any workload.
 
 The total counts each cluster once, at its best lever, and counts only measured and billed savings; estimates are shown beside it. Approving and running a change goes through [cost decisions](/guides/cost-budgets-and-autopilot), and what each change saved is in `ankra cost ledger`.
@@ -111,13 +112,13 @@ A waste scan runs every six hours and lists resources that bill while doing no w
 | Load balancer with no targets | A load balancer that forwards to nothing |
 | Released persistent volume | A Kubernetes volume stuck in `Released`, still billing while no claim can bind it |
 
-Each finding shows its monthly cost, or "price unknown". The provider-side scan covers Hetzner accounts; the released-volume check covers every cluster. A credential that could not be listed is shown as a partial scan, not as "no waste". `ankra cost waste resolve` records a finding as resolved, and `ankra cost waste resolved` lists what was; see the [`ankra cost` reference](/reference/cli/cost) for what each needs.
+Each finding shows its monthly cost, or "price unknown". The provider-side scan covers Hetzner accounts; the released-volume check covers every cluster. A credential that could not be listed is shown as a partial scan, not as "no waste". `ankra cost waste resolve` deletes or releases the cloud resource a finding names: a stopped server gets a snapshot kept for seven days before it is deleted, and an unattached volume is deleted only with written consent (`--consent`). `ankra cost waste resolved` totals what the cleanup resolved, by kind; see the [`ankra cost` reference](/reference/cli/cost) for what each needs.
 
 ## What if the node groups changed?
 
 `ankra cost estimate` prices a change before you make it: change a node group's count, resize or add a group, or add a load balancer, and it returns today's bill, the predicted bill and the change. Nothing is saved or applied.
 
-<CliVersion since="0.17.0" command="cost estimate" />
+<CliVersion since="0.77.0" command="cost estimate" />
 
 ```bash
 # What the cluster costs today
@@ -165,7 +166,7 @@ With the Cost area turned on, **Cost** in the sidebar has six tabs:
 | Tab | What it holds |
 |-----|-----------------|
 | **Overview** | **Your monthly cost picture** and **Where the money goes**, with a statement to download |
-| **Explore spend** | Spend by cluster, namespace, environment and application, with filters |
+| **Explore spend** | Spend by application, cluster or provider, with the namespaces below it and filters |
 | **Savings** | The savings recommendations and waste findings that wait for a decision, and **Approved changes and what they saved** |
 | **Budgets & alerts** | Budgets with their forecast, share and owner (**New budget**), and the cost notifications |
 | **Compare options** | **Mix and match clusters** across providers |
@@ -191,7 +192,7 @@ In chat and over MCP, Ankra AI reads the same figures with `get_fleet_cloud_cost
 
 ## Budgets and the cost autopilot
 
-A **budget** is a monthly amount for the organisation, one project, one cluster, one environment label or one application. It shows spend so far, the projected month end and the hour it would cross the budget. Ankra raises a **Budget crossing** notification when the projection reaches the notice threshold (80% unless you set another); route it with [notification routing](/guides/notification-routing). Ankra also emails the budget's owner, or the organisation's admins when it has none, when the month first reaches the threshold, again when it is projected past the budget, and again when it is spent past it, each at most once per budget per month. Anyone who muted the notification for that scope is left out.
+A **budget** is a monthly amount for the organisation, one project, one cluster, one environment label or one application. It shows spend so far, the projected month end and the hour it would cross the budget. Ankra raises a **Budget crossing** notification when the projection reaches the notice threshold (80% unless you set another); route it with [notification routing](/guides/notification-routing). Ankra also emails the budget's owner, or the organisation's admins when the budget has no owner or the owner is no longer an active member, when the month first reaches the threshold, again when it is projected past the budget, and again when it is spent past it, each at most once per budget per month. Anyone who muted the notification for that scope is left out.
 
 The **cost autopilot** decides how much Ankra may do about cost without asking. Each environment kind (production, staging, development, preview, unknown) takes a tier: hands-off, scheduled, managed or ephemeral. An organisation that never set a policy is hands-off everywhere, so every change waits for a person. You can override one cluster's tier and set daily quiet hours, and give a project its own defaults, which sit between the organisation's policy and a cluster's override.
 
