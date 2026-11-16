@@ -70,31 +70,33 @@ This is a check on the request, not on what a pod can do. A member whose grant l
 
 ## Managing access
 
-Open a cluster and go to its **Access** view. The page adapts to your role:
+Open **Infrastructure → Clusters → *your cluster* → Kubectl access** (`/next/clusters/<cluster-id>/access`). The page has two sections:
 
-- **Admins** can list organisation members, view existing grants and their reconcile status, create new grants, and revoke them.
-- **Members** see whether they have access and can generate a kubeconfig if they do.
+- **Your access**: whether you have kubectl access to this cluster, with **Give myself access…** where your role allows it.
+- **Who has access**: every grant, newest first, with **Give access…** for someone who can manage access and **Remove…** on each row. Access that has ended leaves this list within a minute.
+
+A cluster where the feature is off says **Kubectl access is not turned on for this cluster**.
 
 <Note>
 A grant is required to mint tokens and reach the cluster **for every user, including organisation admins**. Being able to manage access does not itself include kubectl access - admins who want to use `kubectl` must create a grant for themselves too.
 
-The one exception is whoever created or imported the cluster. By default they are given a cluster-scoped `cluster-admin` grant at create time, so they can generate a kubeconfig straight away. An [organisation access policy](#organisation-access-policy) can change that role, or turn the creator grant off. It is an ordinary grant - it appears in the **Access** view and in `ankra cluster access list`, and it can be revoked like any other.
+The one exception is whoever created or imported the cluster. By default they are given a cluster-scoped `cluster-admin` grant at create time, so they can generate a kubeconfig straight away. An [organisation access policy](#organisation-access-policy) can change that role, or turn the creator grant off. It is an ordinary grant - it appears under **Who has access** and in `ankra cluster access list`, and it can be revoked like any other.
 </Note>
 
 ### Grant access
 
 <Steps>
   <Step title="Pick a member">
-    Choose an active organisation member by email. The target must already be a member of the organisation.
+    Select **Give access…** and choose the **Person**. They must already be a member of the organisation.
   </Step>
   <Step title="Choose role and scope">
-    Select a role (`view`/`edit`/`admin`/`cluster-admin`) and a scope (whole `cluster` or a single `namespace`).
+    Pick the **Access** (`view`, `edit`, `admin` or `cluster-admin`) and **Where**: **Whole cluster**, or **One namespace** and its **Namespace**. Set **Ends after**, and a **Reason** where the policy asks for one.
   </Step>
   <Step title="Create the grant">
-    Ankra records the grant and begins reconciling it onto the cluster.
+    Select **Give access**. Ankra records the grant and begins reconciling it onto the cluster.
   </Step>
   <Step title="Wait for the grant to apply">
-    The grant starts as `pending` while the RBAC is applied on the cluster. A token can be minted as soon as the grant exists, but `kubectl` returns `Forbidden` until the status reaches `applied` - check it in the **Access** view or with `ankra cluster access list`.
+    The grant starts as `pending` while the RBAC is applied on the cluster. A token can be minted as soon as the grant exists, but `kubectl` returns `Forbidden` until the status reaches `applied` - check it under **Who has access** or with `ankra cluster access list`.
   </Step>
   <Step title="Share the kubeconfig step">
     The member adds an Ankra context to their kubeconfig - see [Accessing clusters with kubectl](/guides/kubeconfig). For a namespace-scoped grant, they should pass `--namespace` with the granted namespace.
@@ -114,7 +116,7 @@ Because RBAC is applied on the cluster by the agent, each grant carries a reconc
 
 ### Revoke access
 
-Delete an individual grant to remove that binding, or use **revoke all** to clear every grant and invalidate any tokens minted for the cluster in one action.
+Select **Remove…** on a row under **Who has access** and confirm to remove that person's access. To revoke every kubeconfig for the cluster and delete every grant in one action, use the `revoke-all` route in the API table below. Grants that come from an organisation role stay until the role changes, and the response counts them.
 
 ### From the CLI
 
@@ -185,7 +187,7 @@ An organisation access policy sets the limits every grant in the organisation is
 
 ### Who can see and change it
 
-- **Changing the policy** needs the `kube_access.policy` permission, held by owners and admins. It is human-only: an API token carries it only if the token's scopes name it explicitly, so an unscoped or `*` token is refused with `403 permission_denied (kube_access.policy)`. In practice a signed-in owner or admin changes the policy in the new Ankra interface: **Organisation settings → Roles**, section **Kubernetes access policy** (`/next/organisation/roles` on your portal's address).
+- **Changing the policy** needs the `kube_access.policy` permission, held by owners and admins, and a signed-in session. It is human-only and no API token can be created with it, so even an owner's or admin's token is refused with `403 permission_denied (kube_access.policy)`. A signed-in owner or admin changes the policy under **Identity & access → Roles**, section **Kubernetes access policy** (`/next/organisation/roles`), with **Change policy…**, or applies a [proposal](#propose-a-change-from-the-cli).
 - **Reading the policy** needs any of `kube_access.manage`, `kube_access.policy` or `kube_access.elevate`.
 
 <CliVersion since="0.28.0" command="org access-policy get" />
@@ -193,7 +195,7 @@ An organisation access policy sets the limits every grant in the organisation is
 <CodeGroup>
 
 ```bash CLI
-# Read the policy (there is no set command: changes are made signed in)
+# Read the policy
 ankra org access-policy get
 ```
 
@@ -204,7 +206,21 @@ curl https://platform.ankra.app/api/v1/org/cluster-access-policy \
 
 </CodeGroup>
 
-The policy is read and written at `GET` and `PUT /api/v1/org/cluster-access-policy`, and at `/org/cluster-access-policy` for a browser session. On a `PUT`, an omitted `elevated_max_ttl_seconds` or `require_reason_from_role` keeps its stored value, and `null` clears it.
+An API token reads the policy at `GET /api/v1/org/cluster-access-policy`. The `PUT` on the same path refuses every token, so the policy is changed only from a signed-in session, with **Change policy…**. On a `PUT`, an omitted `elevated_max_ttl_seconds` or `require_reason_from_role` keeps its stored value, and `null` clears it.
+
+### Propose a change from the CLI
+
+<CliVersion since="0.43.0" command="org access-policy set" />
+
+Someone with `kube_access.manage` can propose a change without being able to make it. Nothing changes when the command runs: the platform records the proposal and prints the policy before and after, the proposal id, when it expires (7 days) and a link. Pass only what should change, and a `--reason` the approver reads:
+
+```bash
+ankra org access-policy set --max-role edit --creator-role view --reason "No standing admin access"
+ankra org access-policy proposals          # the pending proposal; --status all adds decided ones
+ankra org access-policy proposal <id>      # one proposal, before and after
+```
+
+An owner or admin opens the link signed in, or finds the proposal under **Identity & access → Roles → Kubernetes access policy**, and selects **Apply…** or **Dismiss…**. A proposal made before the policy changed again cannot be applied as it is. `--wait` blocks until the proposal is decided. A newer proposal replaces one that is still pending.
 
 ### What happens to existing grants
 
@@ -261,10 +277,10 @@ For automation that needs break-glass access, such as an incident bot or an oper
 
 <Steps>
   <Step title="Create a break-glass role">
-    Under **Organisation → Roles**, create a custom role holding only `kube_access.elevate` and `kube_access.use`, with its Kubernetes access set to `view`.
+    Under **Identity & access → Roles**, create a custom role holding only `kube_access.elevate` and `kube_access.use`, with its Kubernetes access set to `view`.
   </Step>
   <Step title="Create a service account for the automation">
-    Under **Organisation → Service tokens**, create a [service token](/guides/service-tokens) with that role. The automation has standing read-only access and nothing more.
+    Under **Identity & access → API and automation**, in **Service tokens**, create a [service token](/guides/service-tokens) with that role. The automation has standing read-only access and nothing more.
   </Step>
   <Step title="Elevate when a person approves">
     When a person approves out of band (in chat, in your ticketing tool), the automation calls `elevate` with a short expiry and a reason that points at the approval. The elevation ends on its own when it expires.
@@ -305,27 +321,25 @@ Every grant and policy change is also in the [audit log](/guides/audit-log): `cl
 
 ## Availability
 
-- Cluster Access requires the access gateway to be enabled for your deployment. When it is not enabled, the access endpoints return `404` and the **Access** view reports the feature as unavailable.
+- Cluster Access requires the access gateway to be enabled for your deployment. When it is not enabled, the access endpoints return `404` and **Kubectl access** says **Kubectl access is not turned on for this cluster**.
 - [Sandbox clusters](/guides/cluster-sandbox) do not support Cluster Access.
 
 ---
 
 ## API
 
-All endpoints are organisation-scoped and operate on a specific cluster. Managing grants requires the `kube_access.manage` permission (owners and admins); write operations require a CSRF header for browser-originated requests.
-
-The table below lists the **session-authenticated portal endpoints**. The CLI and API tokens use token-authenticated equivalents under `/api/v1/clusters/{cluster_id}/...` (`/access/grants` for managing grants, `/access/elevate` for break-glass, `/k8s-token` and `/kubeconfig` for consuming access) - see the [kubectl access API table](/guides/kubeconfig#api).
+These are the routes the CLI and an API token use. The grant routes act on one cluster and need the `kube_access.manage` permission (owners and admins). The policy routes act on the organisation.
 
 | Method | Path | Purpose |
 |--------|------|---------|
-| `GET` | `/org/clusters/{cluster_id}/access/capabilities` | Whether access is enabled, and if the caller can manage / already has access |
-| `GET` | `/org/clusters/{cluster_id}/access/members` | Organisation members eligible for a grant |
-| `GET` | `/org/clusters/{cluster_id}/access/grants` | List existing grants and their reconcile status |
-| `POST` | `/org/clusters/{cluster_id}/access/grants` | Create a grant |
-| `DELETE` | `/org/clusters/{cluster_id}/access/grants/{grant_id}` | Delete a grant |
-| `POST` | `/org/clusters/{cluster_id}/access/kubeconfig` | Generate a kubeconfig for the caller |
-| `POST` | `/org/clusters/{cluster_id}/access/revoke-all` | Revoke all grants and tokens for the cluster |
-| `GET` | `/org/cluster-access-policy` | Read the organisation access policy |
-| `PUT` | `/org/cluster-access-policy` | Change the organisation access policy |
+| `GET` | `/api/v1/clusters/{cluster_id}/access/grants` | List existing grants and their reconcile status |
+| `POST` | `/api/v1/clusters/{cluster_id}/access/grants` | Create a grant |
+| `DELETE` | `/api/v1/clusters/{cluster_id}/access/grants/{grant_id}` | Delete a grant |
+| `POST` | `/api/v1/clusters/{cluster_id}/access/elevate` | Give the caller time-boxed access, see [Break-glass elevation](#break-glass-elevation) |
+| `POST` | `/api/v1/clusters/{cluster_id}/access/revoke-all` | Revoke every kubeconfig for the cluster and delete every grant, except grants that come from an organisation role. An organisation admin only |
+| `GET` | `/api/v1/org/cluster-access-policy` | Read the organisation access policy |
+| `PUT` | `/api/v1/org/cluster-access-policy` | Change the organisation access policy. Refused for every API token, see [Organisation access policy](#organisation-access-policy) |
+
+The routes a member uses to get a token or a kubeconfig are in the [kubectl access API table](/guides/kubeconfig#api).
 
 See [Accessing clusters with kubectl](/guides/kubeconfig) for how members consume their access, and the [API Reference](/api-reference/introduction) for full schemas.

@@ -1,0 +1,170 @@
+---
+title: Fix a vulnerable image with a pull request
+description: Find a vulnerability in one of your application images, let Ankra open the base-image pull request, follow it to a verified rescan, or accept the risk.
+---
+
+import { CliVersion } from "/snippets/cli-version.jsx";
+
+When a scanner finds a vulnerability in an image your own application builds, and a fixed version of the package exists, Ankra can open the fix for you: one pull request per repository that moves the Dockerfile base image to the fixed version. This guide takes one finding from the list to a rescan that proves it is gone. When there is no fix, it ends with recording a decision instead.
+
+You end up with a merged pull request, a rebuilt image, and the finding under **Resolved** in **Security → Vulnerabilities**.
+
+## Before you start
+
+- **A scanner on the cluster that runs the image.** A cluster with no report is not counted anywhere. See [Turn on scanning](/guides/cluster-security#turn-on-scanning).
+- **The `security.manage` permission** to open fix pull requests or accept a risk; built-in admins and owners have it. Without it the button stays disabled and the page says "A security manager can start a remediation." See [Roles and access](/guides/roles-and-access).
+- **An application in Ankra that builds the image**, with its repository and a GitHub credential set. Ankra writes through that application's own credential. An image no application of yours builds (an add-on's, or a third-party image in a manifest) cannot get a pull request: see [What can go wrong](#what-can-go-wrong).
+- **A Dockerfile whose `FROM` line pins the version the scanner found.** Ankra changes only `FROM` lines.
+
+## Fix the finding
+
+<Tabs>
+  <Tab title="Portal">
+    <Steps>
+      <Step title="Find the finding">
+        Open **Security → Vulnerabilities**. The list opens on **Open** issues, with the ones used by attackers first. Narrow it with **All clusters**, the severity choice and **A fix is published** under the next-step choice, or search by issue, package or title.
+
+        Select the issue's title. Its page opens with the CVE and package above the title, its severity, and **Read the advisory**.
+      </Step>
+      <Step title="Read the fix Ankra offers">
+        The first card on the issue's page says what can be done:
+
+        | The card says | What it means |
+        |---|---|
+        | **Ankra prepared a fix plan for this issue.** | The fix is already on the Overview. Select **Review the fix plan** |
+        | **A fix is published and is in no plan yet.** | Ankra can open the pull requests from here. It says how many application images the rebuild covers and how many containers it clears |
+        | **You apply this one.** | A newer image clears it, but Ankra cannot run that fix. Each image is listed with the reason |
+        | **No release carries the fix yet.** or **No fix is published yet.** | There is nothing to apply. Go to [Accept the risk when there is no fix](#accept-the-risk-when-there-is-no-fix) |
+
+        **How an issue like this gets fixed**, further down, lists every route and any pull requests Ankra already opened, under **Pull requests opened by Ankra**.
+      </Step>
+      <Step title="Open the pull request">
+        On a card that reads **A fix is published and is in no plan yet.**, select **Open or reuse fix pull requests**. The button reads **Starting…** while Ankra works, and a row appears for each repository with the status **Fix in progress**.
+
+        From a fix plan instead, **Review the fix plan** opens the review: **The exact change** shows the `FROM` lines it changes, and **Rollout and proof** shows the risk and how the fix is verified. Select **Open 1 pull request** (or **Open *n* pull requests** for several repositories).
+
+        Each pull request is on a new branch whose name starts with `ankra/security/`. Only `FROM` lines change, and the repository's own CI runs on it. Where an Ankra pull request for the same finding and repository is already open, Ankra reuses it.
+      </Step>
+      <Step title="Merge it">
+        Select **Review the fix pull request** to open it on GitHub. Review and merge it as you would any change.
+
+        Ankra merges it for you only when the application's **Keep it safe** setting is **Ankra runs it**, and only once its checks and its Ankra AI review pass.
+      </Step>
+      <Step title="Follow it in Fix activity">
+        Open **Security → Fix activity**. Every fix someone started is listed under **Needs you**, **In progress** or **Earlier**, each with its one status word:
+
+        | Status | Means |
+        |---|---|
+        | **Fix in progress** | The pull request is open and its commits run through Ankra Pipelines |
+        | **Waiting for rescan** | The pipeline passed. The fix is not proven until the clusters are scanned again |
+        | **Fixed** | A rescan of every affected cluster after the fix found nothing left |
+        | **Your turn** | Ankra stopped and needs you |
+        | **Uncertain** | The deadline for proof passed without it. This never means clean |
+        | **Cancelled** | Someone stopped the fix |
+
+        Open **What happened** on a row to read every step Ankra recorded: the pull request it opened or reused, the pipeline run it started, and each rescan check with how many affected clusters were rescanned and how many occurrences are still active. **Open the pipeline run** opens the build in the application.
+      </Step>
+    </Steps>
+  </Tab>
+  <Tab title="CLI">
+    <CliVersion since="0.77.0" />
+
+    Find the finding and read its id:
+
+    ```bash
+    ankra security findings --fixable true --known-exploited
+    ankra security finding <finding-id>
+    ```
+
+    See exactly what Ankra would change, without opening anything: per repository, the `FROM` lines that would move, the branch it would use, and any Ankra pull request already open; per image Ankra cannot act on, the reason.
+
+    ```bash
+    ankra security finding rebuild-plan <finding-id>
+    ```
+
+    Open the pull requests and have Ankra follow them through Ankra Pipelines to a verified rescan. The command asks first; `--yes` skips the question and is required when there is no terminal.
+
+    ```bash
+    ankra security remediations start <finding-id>
+    ```
+
+    `ankra security finding rebuild <finding-id>` opens the same pull requests without following them.
+
+    Follow the run, then read its steps:
+
+    ```bash
+    ankra security remediations list --finding <finding-id>
+    ankra security remediations get <run-id>
+    ```
+
+    A run reads `verified` only once every affected cluster was rescanned after the fix with no active occurrence. `ankra security remediations cancel <run-id>` stops a live run; the pull request and any running pipeline stay open for their reviewers.
+  </Tab>
+</Tabs>
+
+## Verify
+
+1. In **Security → Fix activity**, the fix reads **Fixed**, and its row says **Rescan verified** with the time.
+2. In **Security → Vulnerabilities**, select **Resolved**. The issue is listed there, and its page says "**Resolved.** No cluster’s newest scan finds it any more: it was fixed, or its workload is gone."
+
+From the CLI, `ankra security remediations get <run-id>` shows the status `verified`.
+
+## Accept the risk when there is no fix
+
+When no fixed version is published, or the issue does not affect you, record a decision so your team knows it was looked at.
+
+<Tabs>
+  <Tab title="Portal">
+    <Steps>
+      <Step title="Choose the decision">
+        On the issue's page, select **Accept the risk** to take it off the open count until a review date, or **Acknowledge** to record that your team has seen it while it stays open and counted. Where a fix exists, both are under **Not fixing it now?**
+      </Step>
+      <Step title="Say what it covers and why">
+        Under **What this decision covers**, choose the scope: the add-on on every cluster, everything in one namespace, one workload, or one exact image. For your own application the namespace is usually right, because it survives every deploy and rebuild. Write the **Reason**, and for an accepted risk pick the **Review date**: from tomorrow, and never more than a year out.
+
+        An issue used by attackers warns: "Attackers use this issue somewhere. Accepting takes it off the open count without fixing it."
+      </Step>
+      <Step title="Save it">
+        Select **Accept the risk** (or **Acknowledge**). The issue's page now reads **Risk accepted** with what it covers, and the issue moves to the **Accepted** tab in **Security → Vulnerabilities**.
+      </Step>
+    </Steps>
+  </Tab>
+  <Tab title="CLI">
+    Preview what the decision would cover, then write it. Take the occurrence id from `ankra security finding <finding-id>`.
+
+    ```bash
+    ankra security dispositions preview --occurrence <occurrence-id> --scope namespace --disposition accepted_risk --expires-at 2026-12-31
+    ankra security dispositions create --occurrence <occurrence-id> --scope namespace --disposition accepted_risk \
+      --reason "The affected feature is not enabled" --expires-at 2026-12-31
+    ```
+  </Tab>
+</Tabs>
+
+<Warning>
+An accepted risk comes back for review on its date. **Security → Accepted risks** lists it under **Needs review** as the date approaches; keeping it needs a new reason, and **Reopen for fixing** puts it back on the open count.
+</Warning>
+
+## What can go wrong
+
+The issue's page and `ankra security finding rebuild-plan` give the reason per image, the CLI in slightly different words. The ones you are most likely to meet, as the portal words them:
+
+| Message | What to do |
+|---|---|
+| None of your applications builds this image, so the fix is a newer image where it is deployed. | The image belongs to an add-on or a third-party chart. Change its version where it is declared, or select **Ask Ankra where to change it** |
+| The image is built by more than one application (*names*), so the repository to change is ambiguous | Fix the Dockerfile in the right repository yourself |
+| The application has no repository configured | Connect the application's repository, then try again |
+| The application has no GitHub credential | Give the application a GitHub credential, then try again |
+| No FROM line in the application's Dockerfile pins the installed version … so there is no base image to bump | The vulnerable package does not come from a pinned base image. Update the package in the Dockerfile yourself |
+| The repository has no Dockerfile at *path* on *branch* | Check the Dockerfile path the application's component builds from |
+
+A fix that ends **Your turn** or used up its attempts says what to do on its row: "Review the fix pull request and the last pipeline failure. Correct the change or build issue before starting another attempt." An **Uncertain** fix says "Check the deployed image and restore scan coverage before declaring this fix complete.", with **Check rescan coverage**.
+
+## Where to go next
+
+<CardGroup cols={2}>
+  <Card title="Cluster security" icon="shield-halved" href="/guides/cluster-security">
+    Every Security view, fix kind and decision explained.
+  </Card>
+  <Card title="Get started with Ankra CI" icon="gears" href="/get-started/ankra-ci">
+    The pipeline that builds and scans the rebuilt image.
+  </Card>
+</CardGroup>
