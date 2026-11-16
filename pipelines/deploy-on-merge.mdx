@@ -1,0 +1,228 @@
+---
+title: Deploy on merge from an Ankra pipeline
+sidebarTitle: Deploy on merge
+description: Build an image once in a pull request, publish that tested image when it merges, and get it onto a cluster, with or without an Ankra Application.
+---
+
+import { CliVersion } from "/snippets/cli-version.jsx";
+
+A merge to your default branch starts a push run of your Ankra pipeline. This guide makes that run publish the image the pull request already built and tested, and then puts the image on a cluster. You end up with a merge that ships on its own, and a command that tells you whether it has. It takes about 20 minutes once the pipeline itself runs.
+
+There are two routes. Pick the one that matches your repository:
+
+| Your repository | How the image reaches a cluster | Route |
+| --- | --- | --- |
+| Backs an [Ankra Application](/concepts/applications) | Ankra deploys the published `sha-<7>` image to every environment that follows the branch (push to deploy) | [With an application](#with-an-application) |
+| Has no application, and the cluster's workloads live in a [GitOps repository](/concepts/gitops) Ankra syncs | A pipeline stage commits the new image to the GitOps repository, and Ankra syncs the cluster from it | [Without an application](#without-an-application-a-gitops-commit) |
+
+A `kind: deploy` stage does not deploy to Kubernetes: it releases a bundle to host targets outside a cluster. Use one of the two routes above for a cluster.
+
+## Before you start
+
+- **A pipeline that runs.** The repository is connected, a CI cluster has workers, and pull request runs go green. If not, follow [Set up and run Ankra Pipelines](/guides/ankra-pipelines) first.
+- **A `gate` before every `publish`.** A `publish` step refuses by name when its run has no successful `gate` upstream that judged the same digest the build pushed.
+- **Someone who can approve.** `promote_from` and `secrets` are protected sections, so a member with `pipelines.manage`, signed in as a person, approves the definition on the default branch ([Approve the definition's protected authority](/guides/ankra-pipelines#connect-a-repository-push-see-the-run)).
+- **For the application route:** the application has been deployed once, by `ankra application ship` or `ankra application deploy`, and you hold `applications.deploy` to change push to deploy or roll back.
+- **For the GitOps route:** the organisation has a registry connected, a [GitOps repository](/concepts/gitops) synced to the cluster, and a token that can push to that repository.
+- **The CLI.** v0.74.0 or later for `ankra pipeline release-queue` and `ankra application rollback`.
+
+## Build once, publish the tested image
+
+Both routes start here. Without it, a merge builds, scans and gates the merged commit again. With `promote_from: pull_request`, a push whose tree a pull request run already tested publishes that run's image instead:
+
+```yaml
+  - name: "publish"
+    kind: "publish"
+    needs: ["gate"]
+    when:
+      events: ["push"]
+    publish:
+      promote_from: "pull_request"
+```
+
+A push is promoted only when a pull request run of the same repository tested exactly the pushed tree and every stage `publish` needs passed there. A squash merge of a pull request that was up to date with its base has that tree; one that was behind builds in full, unless the [merge train](/pipelines/merge-train) merged it, because a train car tests the merged tree. A fork's run is never promoted. The full rules are in [Promote a tested image instead of rebuilding](/guides/pipeline-reference#promote-a-tested-image-instead-of-rebuilding).
+
+## With an application
+
+<CliVersion since="0.74.0" />
+
+<Steps>
+  <Step title="Commit the publish stage and approve it">
+    Add `promote_from: pull_request` to the application's `publish` stage as above, merge it, and approve the definition:
+
+    ```bash
+    ankra pipeline authority list --application my-app
+    ankra pipeline definitions approve <definition-id>
+    ```
+
+    **Check:** `ankra pipeline get --application my-app --branch main --trigger push --latest` prints `Authority: approved`.
+  </Step>
+  <Step title="Choose which environments follow the merge">
+    Read the application's push to deploy switch, then decide per environment:
+
+    ```bash
+    ankra application auto-deploy get <application-id>
+    ankra application environments my-app
+    ankra application environments set my-app staging --branches main
+    ankra application environments set my-app production --disable
+    ```
+
+    Here staging follows every merge to `main`, and production waits for an explicit deploy. In the portal the same rule is an environment's **Branches it follows**: **Add a branch or pattern**, then **Save branches**. The portal says "Changing this does not deploy anything. The next push to a matching branch does." [Application environments](/guides/application-environments) covers patterns and other clusters.
+
+    **Check:** the `FOLLOWS` column of `ankra application environments my-app` reads `main` for staging and `manual` for production.
+  </Step>
+  <Step title="Merge a pull request and follow the release">
+    Merge a pull request whose run passed, then wait on the push run it starts:
+
+    ```bash
+    ankra pipeline get --application my-app --branch main --trigger push --latest --wait --timeout 30m
+    ankra pipeline release-queue --application my-app
+    ```
+
+    `release-queue` counts the release runs of the branch that are queued or running and names the oldest: a release behind others waits for them.
+
+    **Check:** the push run concludes `success`, and its `publish` step's outputs carry `image_tag` (`sha-<7>`) and `image_digest`. A promoted run skips its build and test stages.
+  </Step>
+  <Step title="Verify the rollout">
+    ```bash
+    ankra application deployments <application-id>
+    ```
+
+    **Check:** the staging deployment runs the `sha-<7>` tag from the previous step, and production still runs its earlier tag. To ship production, run `ankra application deploy` with that tag, or turn push to deploy on for it.
+  </Step>
+</Steps>
+
+### Roll back
+
+```bash
+ankra application rollback my-app --cluster my-cluster
+ankra application rollback my-app --cluster my-cluster --to sha-1a2b3c4
+```
+
+Without `--to` the command changes nothing: it prints the tag the deployment runs, the tags it could go back to, and what a rollback does not undo (a migrated schema, data written since, changed secrets, Stack edits). With `--to` it asks, then puts that tag back, and holds the rollback until a newer build is observed so push to deploy does not undo it.
+
+<Warning>
+A rollback changes the image only. Data written and schema migrated since stay as they are.
+</Warning>
+
+## Without an application: a GitOps commit
+
+A repository with no application publishes its image to the organisation's registry as `<repository>/<component>`, named after the repository and the build stage (`build-api` gives `<repository>/api`). A later stage then writes the published reference into the GitOps repository, and Ankra syncs the cluster from Git.
+
+<Steps>
+  <Step title="Store a token for the GitOps repository">
+    Create an organisation variable, here `GITOPS_TOKEN`, holding a token that can push to the GitOps repository and nothing more. See [Organisation secrets](/guides/organisation-secrets).
+
+    A `credentials` binding with `from: git` does not fit here: its token is for the run's own repository, not for another one.
+  </Step>
+  <Step title="Add the publish and bump stages">
+    ```yaml
+    secrets:
+      - name: "gitops_token"
+        from: "org_variable"
+        key: "GITOPS_TOKEN"
+    stages:
+      - name: "checkout"
+        kind: "checkout"
+      - name: "build-api"
+        kind: "build"
+        needs: ["checkout"]
+        build:
+          dockerfile: "api/Dockerfile"
+          context: "api"
+      - name: "scan-api"
+        kind: "scan"
+        needs: ["build-api"]
+        scan:
+          scanners: ["trivy"]
+      - name: "gate-api"
+        kind: "gate"
+        needs: ["scan-api"]
+        gate:
+          require_stages: ["scan-api"]
+      - name: "publish-api"
+        kind: "publish"
+        needs: ["gate-api"]
+        when:
+          events: ["push"]
+        publish:
+          promote_from: "pull_request"
+      - name: "bump-gitops"
+        kind: "run"
+        image: "alpine/git:2.54.0"
+        network: "egress-https"
+        needs: ["publish-api"]
+        when:
+          events: ["push"]
+        secrets: ["gitops_token"]
+        env:
+          IMAGE: "${{ needs.publish-api.outputs.image_ref }}"
+        run: |
+          cat > /tmp/git-credential-gitops <<'EOF'
+          [ "$1" = get ] || exit 0
+          printf 'username=x-access-token\npassword=%s\n' "$(cat /run/agent-secrets/gitops_token)"
+          EOF
+          git -c credential.helper= -c credential.helper='!sh /tmp/git-credential-gitops' \
+            clone --depth 1 https://github.com/my-org/my-gitops.git /workspace/gitops
+          cd /workspace/gitops
+          sed -i "s|image: .*/api:.*|image: ${IMAGE}|" clusters/my-cluster/manifests/api.yaml
+          git add -A
+          git -c user.name="Ankra pipeline" -c user.email="pipeline@example.com" \
+            commit -m "Deploy api ${IMAGE}" || exit 0
+          git -c credential.helper= -c credential.helper='!sh /tmp/git-credential-gitops' push origin HEAD
+    ```
+
+    Replace the GitOps repository, the file and the `sed` expression with the line in your repository that names the image. `image_ref` is the full pushed reference, `<repository>:<tag>`, that `publish-api` wrote. The bump runs on pushes only, and only after `publish-api` succeeded. `alpine/git` must be inside the organisation's image policy.
+
+    **Check:** `ankra pipeline validate` reports no `fatal`, and lists `bump-gitops` as skipped for a pull request.
+  </Step>
+  <Step title="Approve, merge, and follow the bump">
+    The `secrets` block is protected, so approve the definition on the default branch, then merge a pull request:
+
+    ```bash
+    ankra pipeline definitions approve <definition-id>
+    ankra pipeline get --repository <repository-id> --branch main --trigger push --latest --wait --timeout 30m
+    ankra pipeline logs <run-id> --step bump-gitops
+    ```
+
+    **Check:** the `bump-gitops` log ends with the push to the GitOps repository, and that repository has a new commit naming the image.
+  </Step>
+  <Step title="Verify the rollout">
+    Ankra detects the commit and syncs the cluster from it ([How Ankra syncs your cluster](/concepts/gitops#how-ankra-syncs-your-cluster)).
+
+    ```bash
+    ankra cluster operations list
+    ankra cluster get deployments api -n my-namespace -o yaml
+    ```
+
+    **Check:** the newest operation is the sync of your commit, and the deployment's container image is the `image_ref` from the run. To roll back, revert the GitOps commit; Ankra syncs the previous image.
+  </Step>
+</Steps>
+
+## What can go wrong
+
+| What you see | Why | What to do |
+| --- | --- | --- |
+| "This build has nowhere to push: the pipeline's repository is bound to no application, so it publishes to the organisation's registry, and this organisation has no registry connected yet." | No organisation registry | Connect the organisation's registry, or bind the repository to an application, and run again |
+| "This build has nowhere to push: the pipeline's repository is bound to no application, so its image is named &lt;repository&gt;/&lt;component&gt; after the repository and the build stage, and either this stage is not named build or build-&lt;component&gt;, or the component or the repository's name is not one a registry accepts (lower-case letters and digits, joined by hyphens, underscores or periods). Rename the stage, or bind the repository to an application, and start the run again." | The build stage is named neither `build` nor `build-<component>`, or a name is not one a registry accepts | Rename the stage, for example `build-api` |
+| The push run builds and tests again instead of promoting | The merged tree is not one a pull request run tested (the pull request was behind its base), or a stage drew a value from the event | Merge through the [merge train](/pipelines/merge-train), or keep event values out of the build |
+| The check run says "No administrator has approved any authority for this repository yet, so this run executes with none." | The definition's protected sections are not approved, so `promote_from` and `secrets` did not apply | Approve the default-branch definition, then re-run |
+| The run is green and the application did not move | Push to deploy is off for that environment, or its rule does not match the branch | `ankra application environments my-app`: `manual` means pushes do not deploy there |
+| The `bump-gitops` step times out on `git clone` | The stage has no network tier; a `run` stage defaults to `none` | Keep `network: "egress-https"` on the stage |
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Application environments" icon="code-branch" href="/guides/application-environments">
+    Branch rules per environment, and environments on other clusters.
+  </Card>
+  <Card title="Merge train" icon="train" href="/pipelines/merge-train">
+    Test every pull request as it will merge, so every merge promotes.
+  </Card>
+  <Card title="pipeline.yaml reference" icon="book" href="/guides/pipeline-reference">
+    `publish`, `promote_from`, `secrets` and every other key.
+  </Card>
+  <Card title="GitOps" icon="git-alt" href="/concepts/gitops">
+    How Ankra syncs a cluster from Git.
+  </Card>
+</CardGroup>

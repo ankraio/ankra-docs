@@ -129,13 +129,22 @@ Ankra builds one car per pass, because the next car needs the commit this one wr
     Without it, a car is evicted with `pipeline_not_triggered`.
   </Step>
   <Step title="Enable the train">
-    <CliVersion since="0.30.0" />
+    <Tabs>
+      <Tab title="Portal">
+        Open **Applications → &lt;your application&gt; → Technical details → Pipelines**, or for a repository with no application its page at `/next/pipelines/<repository-id>`. Under **Merge train**, **The merge train is off** explains the train. Press **Switch on the merge train**, set **Pull requests tested at once** in **Switch on the merge train?**, and press **Switch on the merge train** again to confirm.
+      </Tab>
+      <Tab title="CLI">
+        <CliVersion since="0.30.0" />
 
-    ```bash
-    ankra pipeline train enable --max-cars 2
-    ```
+        ```bash
+        ankra pipeline train enable --max-cars 2
+        ```
 
-    Run it from inside the repository's checkout, or name it with `--application <name>` or `--repository <id>`. This needs `pipelines.manage`. `--max-cars` takes 1 to 8 and defaults to 1.
+        Run it from inside the repository's checkout, or name it with `--application <name>` or `--repository <id>`.
+      </Tab>
+    </Tabs>
+
+    This needs `pipelines.manage`. The number of pull requests tested at once (`--max-cars`) takes 1 to 8 and defaults to 1. **Check:** the **Merge train** section shows a **Queue** and **Change settings**, and `ankra pipeline train list` prints the empty train.
   </Step>
   <Step title="Require the train's check on the base branch">
     Ankra posts an **Ankra merge train** check on every pull request it holds, and concludes it `success` only immediately before it merges. In GitHub's branch protection, require that check, pinned to the Ankra GitHub App rather than any source. Every merge then goes through the train. A pull request outside the train shows the check as expected and waiting, and cannot merge.
@@ -147,9 +156,12 @@ Ankra builds one car per pass, because the next car needs the commit this one wr
 
 ## Put a pull request on the train
 
-There are three ways in, and they all lead to the same queue.
+There are four ways in, and they all lead to the same queue: by hand (portal or CLI), by label, by merge when green, and [by Ankra itself](#auto-admit-let-ankra-add-pull-requests).
 
 <Tabs>
+  <Tab title="Portal">
+    Under **Merge train**, press **Add a pull request**. In **Add a pull request to the merge train**, enter the **Pull request number** and, to pin the commit you reviewed, its full SHA under **Head commit**. Press **Add #&lt;number&gt; to the train**. The pull request appears in the **Queue** with its **Status**, **Attempt**, **Tested as** and **Test run**. Its row's options hold **Move to the front…** and **Remove from the train…**.
+  </Tab>
   <Tab title="CLI">
     ```bash
     ankra pipeline train add 412                     # put #412 at the end of the train
@@ -161,13 +173,54 @@ There are three ways in, and they all lead to the same queue.
     Add the `ankra:merge-train` label to the pull request, in any letter case. Removing the label only removes an entry the label put there.
   </Tab>
   <Tab title="Merge when green">
-    Comment **`@ankraai merge when green`**, press the button in the portal, or ask Ankra AI. On a repository with the train on, the request enters the train instead of merging directly. See [AI in pull requests](/pipelines/ai-in-pull-requests#merge-when-green).
+    Comment **`@ankraai merge when green`**, or ask Ankra AI. On a repository with the train on, the request enters the train instead of merging directly. See [AI in pull requests](/pipelines/ai-in-pull-requests#merge-when-green).
   </Tab>
 </Tabs>
 
 **Who may add a pull request.** You need `pipelines.operate` and must be a person, not a service token. You also need one of these: organisation administrator, the pull request's author, or write access to the repository on GitHub through your verified GitHub identity. You can always remove an entry you added yourself. When GitHub cannot be asked, nothing changes and the command says so.
 
 **Pushing to a pull request in the train takes it out** (`head_changed`). The train merges the head a person put in it, never one that arrived later. Push your fix, then add it again.
+
+## Auto-admit: let Ankra add pull requests
+
+With auto-admit on, the train adds pull requests by itself. A draft, an `ankra:hold` label or a blocked review keeps a pull request out, whatever the criterion.
+
+<Tabs>
+  <Tab title="Portal">
+    Under **Merge train**, press **Change settings**. In **Merge train settings**:
+
+    - **Add pull requests by itself**: **Off** (a pull request joins only when someone adds it), **Trial** (Ankra records which pull requests it would add, and adds none) or **On**.
+    - **When Ankra adds a pull request by itself**: **When its own pipeline run has passed**, **When its own run has passed, and record when ready would have added it**, or **As soon as it is marked ready, before its own run has finished**.
+    - **Protected paths**: one file pattern per line, such as `alembic/**`. A pull request that changes one of these files always waits for its own pipeline run to pass before Ankra adds it.
+
+    Press **Save settings**. These changes apply to the next pull requests the train takes.
+  </Tab>
+  <Tab title="CLI">
+    <CliVersion since="0.51.0" command="pipeline train enable --auto-admit" />
+
+    ```bash
+    ankra pipeline train enable --auto-admit shadow
+    ankra pipeline train enable --auto-admit on --auto-admit-criterion ready_shadow
+    ankra pipeline train enable --auto-admit-protected-paths 'alembic/**,deploy/**'
+    ```
+
+    A flag you leave out keeps its current value. `--auto-admit-protected-paths-default` restores the default list and `--auto-admit-protected-paths-none` protects nothing.
+  </Tab>
+</Tabs>
+
+| Criterion | A pull request enters |
+| --- | --- |
+| `green` (every repository's default) | Once its own run has passed |
+| `ready_shadow` | At green, and Ankra records which pull requests `ready` would have added while their run was going, as `ready_shadow_admit` in `ankra pipeline train list`. Use it to read what `ready` would do |
+| `ready` | When it is marked ready, before its own run has passed, unless a step of that run already failed or GitHub says it does not merge cleanly. If its own run fails before its car has passed, it leaves the train as `pull_request_run_red`. A pull request that changes a protected path, or whose list of changes could not be read in full, keeps the green rule |
+
+<Warning>
+At `ready` the car's run is the only run that has to pass before the merge. Use it only once this repository's cars run everything its pull request runs do.
+</Warning>
+
+- **Protected paths** are at most 50 GitHub-style patterns of at most 256 characters; the last matching pattern wins and a leading `!` excludes. The default list is `alembic/**`, `deploy/charts/*/values.yaml` and `deploy/charts/*/values.schema.json`. An empty `--auto-admit-protected-paths` is refused.
+- **Who may set it.** A service account token may set `green` or `ready_shadow`. Setting `ready` or changing the protected paths needs a human member.
+- **Check:** the **Merge train** section's settings read, for example, "On. Ankra adds a pull request by itself once its own pipeline run has passed." With **Trial**, they read "Trial only. Ankra records which pull requests it would add once their checks pass, and adds none."
 
 ## Stacked pull requests
 
@@ -229,7 +282,7 @@ flowchart LR
 | `pipeline_not_triggered` | evicted | The pipeline has no `on.pull_request` trigger matching the base branch |
 | `fork` | evicted | Pull requests from forks are never merged automatically |
 | `host_unavailable` | evicted | GitHub could not be reached for this pull request for over three hours |
-| `pull_request_run_red` | evicted | [Auto-admit](/reference/cli/pipeline#ankra-pipeline-train-enable) put it in before its own run had passed, and that run failed at the head the train holds. Fix it and push, or re-run the run |
+| `pull_request_run_red` | evicted | [Auto-admit](#auto-admit-let-ankra-add-pull-requests) put it in before its own run had passed, and that run failed at the head the train holds. Fix it and push, or re-run the run |
 | `nothing_to_merge` | evicted | The base branch already contains the change |
 | `pull_request_closed` | cancelled | The pull request was closed |
 | `merged_outside_train` | cancelled | Someone merged it outside the train |
