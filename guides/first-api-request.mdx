@@ -1,0 +1,139 @@
+---
+title: Make your first Ankra API request
+sidebarTitle: Your first API request
+description: Create a token that may call the Ankra REST API, list your clusters with one request, and read the answer.
+---
+
+import { CliVersion } from "/snippets/cli-version.jsx";
+
+You end up with a token that calls the Ankra REST API and a working request that lists your organisation's clusters. It takes about five minutes.
+
+## Before you start
+
+- **An Ankra account in an organisation.** The request lists the clusters of the organisation the token is made in.
+- **Two-step sign-in on your account**, to make the token in the portal. Without it, **Create token** is missing and **Your account → API access** shows **Add a second step to sign in first**. Set it up first: [Account security](/platform/account-security).
+- **A shell with `curl`**, or Python or Node.js for the other examples. `jq` is optional, for reading the answer.
+
+## Steps
+
+<Steps>
+  <Step title="Create a token with Full API access">
+    The token must be a REST token. A token made for editor tools is refused by every REST route, and the portal preselects that kind.
+
+    <Tabs>
+      <Tab title="Portal">
+        1. Open **Your account → API access** (`/next/account/api`) and select **Create token**.
+        2. In **Name**, say where the token is used, for example `my-first-api-call`.
+        3. Under **What can it do?**, select **Full API access**.
+        4. Choose a lifetime under **Expires after**, then select **Create token**.
+        5. Reveal the token and copy it, tick **I have stored it somewhere safe**, then select **Done**. Ankra shows the token only once.
+      </Tab>
+      <Tab title="CLI">
+        With the [Ankra CLI](/integrations/ankra-cli) logged in to your organisation, create a token without `--scopes`:
+
+        <CliVersion since="0.6.0" />
+
+        ```bash
+        ankra tokens create my-first-api-call
+        ```
+
+        The CLI prints `API token created successfully!`, the token's id and expiry, and the token once, under `Token (save this, it won't be shown again):`.
+      </Tab>
+    </Tabs>
+
+    **You should see** the token under **Your tokens** reading **Full API access** with its expiry date, or in `ankra tokens list`.
+
+    For CI/CD, Terraform or anything else that runs without you, make a [service token](/guides/service-tokens) instead. It belongs to the organisation and keeps working after you leave it.
+  </Step>
+  <Step title="Put the token in an environment variable">
+    ```bash
+    export ANKRA_API_TOKEN="<your-token>"
+    ```
+
+    **You should see** the token's first characters with `echo "${ANKRA_API_TOKEN:0:6}"`. Keep the token out of files you commit.
+  </Step>
+  <Step title="Make the request">
+    Send the token as a bearer token to `GET /api/v1/clusters`:
+
+    <Tabs>
+      <Tab title="cURL">
+        ```bash
+        curl -sS \
+          -H "Authorization: Bearer $ANKRA_API_TOKEN" \
+          -H "Accept: application/json" \
+          https://platform.ankra.app/api/v1/clusters
+        ```
+      </Tab>
+      <Tab title="Python">
+        ```python
+        import os
+        import requests
+
+        headers = {"Authorization": f"Bearer {os.environ['ANKRA_API_TOKEN']}"}
+        response = requests.get("https://platform.ankra.app/api/v1/clusters", headers=headers)
+        response.raise_for_status()
+        print(response.json())
+        ```
+      </Tab>
+      <Tab title="Node.js">
+        ```javascript
+        const response = await fetch("https://platform.ankra.app/api/v1/clusters", {
+          headers: { Authorization: `Bearer ${process.env.ANKRA_API_TOKEN}` },
+        });
+        if (!response.ok) throw new Error(await response.text());
+        console.log(await response.json());
+        ```
+      </Tab>
+    </Tabs>
+
+    **You should see** a JSON object with three keys: `result`, `pagination` and `metrics`. An error answers with a JSON body holding `detail` instead; see [What can go wrong](#what-can-go-wrong).
+  </Step>
+  <Step title="Read the answer">
+    `result` is the list of clusters. Each one has its `id`, `name`, `kind`, `state` and `environment`, among other fields. Print one line per cluster with `jq`:
+
+    ```bash
+    curl -sS -H "Authorization: Bearer $ANKRA_API_TOKEN" \
+      https://platform.ankra.app/api/v1/clusters \
+      | jq -r '.result[] | "\(.id)  \(.name)  \(.state)"'
+    ```
+
+    `pagination` says which page you read: `page`, `page_size`, `total_pages` and `total_count`. The list holds 25 clusters per page unless you pass `page_size` (at most 100), so read `total_pages` before you assume you have them all:
+
+    ```bash
+    curl -sS -H "Authorization: Bearer $ANKRA_API_TOKEN" \
+      "https://platform.ankra.app/api/v1/clusters?page=1&page_size=100"
+    ```
+
+    **You should see** the same clusters as under **Clusters** in the portal. The `id` is what other cluster endpoints take as `cluster_id`.
+  </Step>
+</Steps>
+
+## Verify
+
+Print only the HTTP status of the request:
+
+```bash
+curl -sS -o /dev/null -w '%{http_code}\n' \
+  -H "Authorization: Bearer $ANKRA_API_TOKEN" \
+  https://platform.ankra.app/api/v1/clusters
+```
+
+It prints `200`.
+
+## What can go wrong
+
+| What you see | Why | What to do |
+| --- | --- | --- |
+| `403` `{"detail":"MCP-scoped tokens can only access the MCP endpoint"}` | The token was made with **Editor tools: read and change** or **Editor tools: read only**. Those tokens work only with the [MCP server](/platform/mcp-server) | Create another token and select **Full API access** |
+| `400` `{"detail":"Bearer token not provided"}` | The `Authorization` header is missing, usually because `ANKRA_API_TOKEN` is empty in this shell | Run the `export` again in the shell you call from |
+| `401` `{"detail":"Invalid token"}` | The token is expired, revoked, or copied incompletely | Check it under **Your account → API access**; select **Renew** or create a new one |
+| Fewer clusters than the portal shows | The organisation uses [projects](/concepts/projects). A token that is not pinned acts in the organisation's default project, never in the project you last selected in the portal | Send `X-Ankra-Project-Id: <project-id>` with the request; see [Organisation and project](/api-reference/introduction#organisation-and-project) |
+| No **Create token** button | Your account has no two-step sign-in | Select **Set up two-step sign-in** on the same page |
+| `429` `{"detail":"Too Many Requests"}` | The request rate went over the limit | Wait the seconds in the `Retry-After` header, then retry |
+
+## Where to go next
+
+- [API introduction](/api-reference/introduction): authentication, the organisation and project headers, errors, rate limits and both pagination shapes.
+- The **Endpoints** pages of the API reference: every operation with its parameters and response shape.
+- [Service tokens](/guides/service-tokens): a credential for automation that belongs to the organisation.
+- [API tokens](/reference/tokens): every kind of token Ankra issues.

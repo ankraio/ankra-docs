@@ -1,0 +1,172 @@
+---
+title: Script the Ankra CLI
+description: The values a script or CI job relies on - credential order, JSON output, exit codes 0 to 9, waiting for long operations and shell completion.
+---
+
+import { CliVersion } from "/snippets/cli-version.jsx";
+
+The `ankra` CLI keeps a contract for scripts, CI jobs and coding agents: where it takes its credential from, what it prints on stdout, and what each exit code means. This page lists those values. For installing the CLI and its command families, see [Ankra CLI](/integrations/ankra-cli); for every command and flag, see the [CLI reference](/reference/cli/index).
+
+<CliVersion since="0.71.0" />
+
+## Credentials, organisation and project
+
+Each value is taken from the first place in the row that sets it.
+
+| Value | Order |
+|---|---|
+| Token | `--token`, then the login `ankra login` saved in `~/.ankra.yaml` (or the file `--config` names), then `ANKRA_API_TOKEN` |
+| Base URL | With `--token`: `--base-url`, `ANKRA_BASE_URL`, the saved one, the default. With a saved login: `--base-url`, the saved one, the default. With `ANKRA_API_TOKEN`: `--base-url`, `ANKRA_BASE_URL`, the default |
+| Organisation | `--org`, then `ANKRA_ORG` (a name or an id). Then, with a saved login, the organisation `ankra org switch` saved; with `--token` or `ANKRA_API_TOKEN`, the token's own organisation |
+| Project | `--project`, then `ANKRA_PROJECT` (a slug, name or id). Then, with a saved login, the project `ankra project switch` saved. Then what the platform applies to the token: its pin, else the organisation's Default project |
+
+A saved login wins over `ANKRA_API_TOKEN`. When both are set and differ, the CLI uses the login and prints on stderr:
+
+```text
+Note: ANKRA_API_TOKEN env var is set but differs from saved login token. Using login token.
+```
+
+Run `ankra logout` to clear the saved login, or pass `--token`. With no credential at all, every command exits 6 and says:
+
+```text
+not logged in: run `ankra login`, or provide a token via --token or ANKRA_API_TOKEN
+```
+
+Check which credential a job is using before its first real command:
+
+```bash
+ankra login status -o json
+```
+
+The document carries `logged_in`, `base_url`, `token_source` (`flag`, `config` or `env`), `token_name` and the `organisation` the token acts in. `ankra login status` exits 6 when no credential is configured or the platform rejects it.
+
+## Structured output
+
+| Flag | Prints |
+|---|---|
+| none | Human-readable text, tables and hints |
+| `-o json` | One JSON document on stdout |
+| `-o yaml` | One YAML document on stdout |
+
+- A command takes `-o` when its reference lists `-o`, `--output`.
+- With `-o json` or `-o yaml`, stdout carries only the document. Hints, notes and errors go to stderr.
+- A value other than `json` or `yaml` is refused with exit 2 before the command sends anything.
+- `ankra pipeline get --watch -o json` prints one JSON object per line, one for each state change.
+- `ankra tokens rotate` prints only the new token on stdout when stdout is not a terminal, so `TOKEN=$(ankra tokens rotate <token_id>)` works. With `-o json` it prints the whole response.
+
+```bash
+ankra login status -o json | jq -r '.organisation.organisation_id'
+```
+
+## Exit codes
+
+| Code | Meaning | What a script does |
+|---|---|---|
+| `0` | Success | Continue |
+| `1` | API or runtime failure | Read stderr; retry if the failure is transient |
+| `2` | Bad flags, arguments or subcommand | Fix the invocation. A retry fails the same way |
+| `3` | The targeted resource does not exist | Treat as done after a delete, or stop |
+| `4` | A confirmation was declined | Pass the command's `--yes` flag in a job with no terminal |
+| `5` | `--wait` or `--timeout` ran out before the work finished | The work may still finish. Check it before you submit it again |
+| `6` | Missing, expired or rejected credentials | Sign in again or replace the token |
+| `7` | Signed in, but the role lacks the permission | Ask for a role that holds it. Signing in again does not help |
+| `8` | A preflight found a block, so nothing was changed | Fix what the message names, then run again |
+| `9` | Nothing failed, but the work is not finished: it waits on a pause or on a person's step | Wait, or do the step, then run the same command again |
+
+### Exit code 9
+
+Code 9 is not a failure. The command stopped because the next step is not its own:
+
+| Command | Why it exits 9 | What to do |
+|---|---|---|
+| `ankra chat "<question>"` | The conversation paused on a condition and resumes by itself. The `-o json` document's `state` reads `waiting` | Pass `--wait` to follow it through its pauses (it exits 5 if a pause outlasts `--wait-timeout`, default 4 hours), or read it later with `ankra chat show` |
+| `ankra application ship` | The setup pull request that adds `.ankra/pipeline.yaml` is not merged. The `-o json` state reads `waiting_for_setup_pull_request` | Merge the pull request, then run `ship` again. It continues from where it stopped |
+
+The same `ship` run exits 8 with state `setup_pull_request_blocked` when the pipeline's gate blocks the setup pull request's run.
+
+```bash
+ankra application ship . --cluster staging -o json > ship.json
+case $? in
+  0) echo "Live" ;;
+  9) echo "Waiting for a person: $(jq -r '.state' ship.json)"; exit 0 ;;
+  *) exit 1 ;;
+esac
+```
+
+## Waiting for long operations
+
+A command that starts work on the platform returns as soon as the platform accepts it, unless you pass `--wait`.
+
+| Flag | Default | Effect |
+|---|---|---|
+| `--wait` | off | Block until the operation finishes and report success or failure |
+| `--timeout` | The command's reference gives it: `10m0s` where a command that starts a platform operation sets no other | How long `--wait` waits. When it runs out the command exits 5 |
+
+- Exit 5 means the CLI stopped waiting, not that the work stopped. Without `--wait` the CLI says: "Avoid submitting the same change again while it may still be running (duplicate node groups can double cost)."
+- Follow the selected cluster's operations with `ankra cluster operations list --watch`, or read one with `ankra cluster operations list <execution-id>`.
+- Wait for a pipeline run by what a job knows about it, such as its commit: `ankra pipeline get --head-sha "$(git rev-parse HEAD)" --trigger pull_request --latest --wait --timeout 45m`. It exits 0 when the run succeeded, 1 when it concluded any other way, 2 when several runs match and `--latest` was not given, 3 when nothing matches and 5 when `--timeout` ran out.
+- Some commands wait in their own way. `--wait` on `ankra org access-policy set` waits for an owner or admin to decide the proposal: 0 applied, 4 dismissed, 1 expired or replaced, 5 still pending.
+
+## Confirmation prompts
+
+Commands that delete, uninstall or deprovision ask before they act. Declining exits 4, and so does a prompt in a job with no terminal, because it reads no answer. Pass `--yes` on the commands that offer it (the reference lists it under **Flags**).
+
+## Shell completion
+
+```bash
+ankra completion install
+```
+
+`install` detects your shell; `--shell bash|zsh|fish|powershell` names it.
+
+| Shell | Script | Profile change |
+|---|---|---|
+| bash | `$XDG_DATA_HOME/bash-completion/completions/ankra` (default `~/.local/share/...`) when that directory exists, otherwise `~/.ankra-completion.bash` | Adds a `source` line to `~/.bashrc` in the second case |
+| zsh | `~/.zsh/completions/_ankra` | Adds that directory to `fpath` and runs `compinit` from `~/.zshrc` |
+| fish | `~/.config/fish/completions/ankra.fish` | None: fish loads it |
+| powershell | `~/.config/ankra/completion.ps1` | Adds a line to the PowerShell profile |
+
+Restart the shell afterwards. To print a script instead of installing it, run `ankra completion bash`, `zsh`, `fish` or `powershell`.
+
+## Running in CI
+
+A CI job runs where no `ankra login` is saved, so the CLI reads `ANKRA_API_TOKEN`.
+
+1. Make a [service token](/guides/service-tokens) with **Full API access** and the lowest role the job needs. It belongs to the organisation, so it keeps working when the person who made it leaves.
+2. Store it in your CI system's secret store and expose it to the job as `ANKRA_API_TOKEN`.
+3. Start the job with `ankra login status`, so a missing or rejected token fails the job at once with exit 6.
+
+```bash
+ankra login status -o json | jq -r '.token_source'
+```
+
+The command prints `env`. Without `ANKRA_BASE_URL` the CLI also prints on stderr which default base URL it uses.
+
+A GitHub Actions job can sign in with no stored token. An organisation admin first creates a trust policy for the repository with `ankra org oidc-trust create`; the job, with `permissions: id-token: write`, then runs:
+
+```bash
+ankra login --github-oidc --organisation-id <organisation-id>
+```
+
+It exchanges the job's GitHub ID token for a short-lived Ankra token, masks both in the log and saves the token for the rest of the job.
+
+## Environment variables
+
+| Variable | Effect |
+|---|---|
+| `ANKRA_API_TOKEN` | The token, when no `--token` is passed and no login is saved |
+| `ANKRA_BASE_URL` | The API base URL, with `--token` or `ANKRA_API_TOKEN` |
+| `ANKRA_ORG` | The organisation, by name or id, when no `--org` is passed |
+| `ANKRA_PROJECT` | The project, by slug, name or id, when no `--project` is passed |
+| `ANKRA_AGENT` | Names a coding agent the CLI does not detect, as `<name>` or `<name>/<version>`, for the audit log |
+| `DO_NOT_TRACK=1`, `ANKRA_TELEMETRY=off` | Send only the User-Agent |
+| `ANKRA_PROJECT_SCOPE_WARNING=off` | Silence the one-time stderr warning that a read may cover the whole organisation |
+
+Every request names the CLI, its version and the command path, never its arguments or flags. Under a coding agent the CLI also names the agent and a digest of its session, so the [audit log](/guides/audit-log) shows which agent ran what.
+
+## Related
+
+- [Ankra CLI](/integrations/ankra-cli) - install, sign in and the command families
+- [Service tokens](/guides/service-tokens) - organisation tokens for CI
+- [Give a coding agent least privilege](/guides/least-privilege-for-coding-agents) - limit what an agent's CLI and MCP calls can do
+- [CLI, MCP, API or Terraform](/concepts/cli-mcp-api-terraform) - which way to automate Ankra
