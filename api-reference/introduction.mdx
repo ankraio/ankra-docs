@@ -1,132 +1,126 @@
 ---
 title: Introduction
-description: Automate cluster operations, integrate with CI/CD, and build on the Ankra platform via REST.
+description: How the Ankra REST API authenticates, picks the organisation and project, reports errors, pages results and limits request rates.
 ---
 
-Automate cluster operations, integrate with your CI/CD, and build on top of the Ankra platform.
+import { CliVersion } from "/snippets/cli-version.jsx";
 
-The Ankra REST API lets you programmatically manage Ankra resources - such as clusters and add-ons - run operations, and retrieve statuses from your own tools, scripts, and pipelines.
+The Ankra REST API lets your own tools, scripts and pipelines manage Ankra resources such as clusters and add-ons, start operations and read their status. The Ankra CLI and MCP clients use the same API.
 
----
+To make your first call, follow [Call the Ankra API: your first request](/guides/first-api-request). This page describes the rules every call follows. The **Endpoints** pages of this reference list every operation with its parameters and response shape, generated from the API's OpenAPI document.
 
-## Quickstart
+## Base URL
 
-### 1) Generate an API token
-
-1. Click your profile avatar (bottom-left) in the Ankra dashboard.
-2. **Profile → API Tokens → Create**.
-3. Name the token (choose MCP access only if an MCP client will use it) and **copy it somewhere safe**.
-
-> You won’t be able to view the token again after closing the dialog.
-
-<Note>
-That is a **personal** token: it acts as you, and it stops working if you leave the organisation. For anything that runs without a person behind it - CI/CD, Terraform, an agent - create a [service token](/guides/service-tokens) instead. It is owned by the organisation, carries a role you pick rather than all of your authority, and survives offboarding.
-</Note>
-
-### 2) Make your first request
-
-**Bash (cURL)**
-
-```bash
-export ANKRA_API_TOKEN="<your-token>"
-
-curl -sS \
-  -H "Authorization: Bearer $ANKRA_API_TOKEN" \
-  -H "Accept: application/json" \
-  https://platform.ankra.app/api/v1/clusters
+```text
+https://platform.ankra.app/api/v1
 ```
 
-**Python**
-
-```python
-import requests
-
-headers = {"Authorization": "Bearer <your-token>"}
-resp = requests.get("https://platform.ankra.app/api/v1/clusters", headers=headers)
-resp.raise_for_status()
-print(resp.json())
-```
-
-**Node.js**
-
-```javascript
-const res = await fetch("https://platform.ankra.app/api/v1/clusters", {
-  headers: { Authorization: "Bearer <your-token>" }
-});
-if (!res.ok) throw new Error(await res.text());
-console.log(await res.json());
-```
-
----
+The `/api/v1` routes are the public API and take an API token. Routes under `/org` and `/chat` serve the Ankra portal: they authenticate with the browser's sign-in session, never with a token, and need the `X-Ankra-CSRF` header on every change. Some portal reads also answer under `/api/v1`: a `GET` there that has no `/api/v1` route of its own is served by the portal's route for the same path, and only to a personal token with no scopes and no project pin. Any other token is refused with `403`, and a change never goes this way.
 
 ## Authentication
 
-Use an API token in the `Authorization` header:
+Send an API token in the `Authorization` header:
 
 ```http
 Authorization: Bearer <your-token>
 ```
 
-* Tokens are created in the dashboard or with `ankra tokens create`. A token acts with its owner's role (a service token with the role it was given); scopes only add [MCP server](/platform/mcp-server) access.
-* Revoke a personal token anytime from **Profile → API Tokens**, and a [service token](/guides/service-tokens) from **Organisation → Service tokens**.
-* Prefer separate tokens for different use cases (e.g., CLI vs. CI/CD).
-* A service token is pinned to its organisation: the `X-Ankra-Organisation-Id` override that `ankra --org` uses is refused for it.
+A token is one of two kinds, never both:
 
-### Security best practices
+| Kind | How you make it | Reaches |
+| --- | --- | --- |
+| REST token | **Full API access** under **Your account → API access**, `ankra tokens create <name>` without `--scopes`, or a [service token](/guides/service-tokens) | Every `/api/v1` route your role allows |
+| MCP token | **Editor tools: read only** or **Editor tools: read and change**, or `--scopes mcp:read` / `mcp:read,mcp:write` | Only the [MCP server](/platform/mcp-server) at `/api/v1/mcp` |
 
-* Treat tokens like passwords - never commit them to source control.
-* Grant only the minimum required permissions.
-* Rotate/revoke tokens regularly and immediately if you suspect compromise.
-* Store tokens as secrets in your CI/CD system (e.g., GitHub Actions, GitLab CI, Jenkins).
-* Use a [service token](/guides/service-tokens) for automation, so the credential is not tied to one
-  person's membership and can be reviewed and revoked by any administrator.
+An MCP token on a REST route is refused with `403` and `MCP-scoped tokens can only access the MCP endpoint`.
 
-**CLI example (authenticate once):**
+- A personal token acts as you, with your role, and stops working when you leave the organisation. In the portal, **Create token** appears only once your account has two-step sign-in. See [API tokens](/reference/tokens).
+- A [service token](/guides/service-tokens) belongs to the organisation and carries the role you give it. Use one for CI/CD, Terraform and anything else that runs without a person behind it. Service tokens are under **Identity & access → API and automation** (`/next/organisation/automation`).
+- Revoke a personal token from its **Revoke** option under **Your account → API access**. It stops working at once.
+
+<CliVersion since="0.6.0" />
 
 ```bash
-export ANKRA_API_TOKEN="<your-token>"
+ankra tokens create my-script --expires 2027-01-31T00:00:00Z
 ```
 
-**GitHub Actions example:**
+Keep tokens out of source control: store them as secrets in your CI/CD system, for example as `ANKRA_API_TOKEN` in GitHub Actions:
 
 ```yaml
 env:
   ANKRA_API_TOKEN: ${{ secrets.ANKRA_API_TOKEN }}
 ```
 
----
+## Organisation and project
+
+A token is bound to the organisation it was made in. Two optional headers move one request elsewhere:
+
+| Header | What it does | Refused with |
+| --- | --- | --- |
+| `X-Ankra-Organisation-Id: <organisation-id>` | Runs the request in another organisation you are a member of (this is what `ankra --org` sends) | `Not a member of the requested organisation`; `Service account tokens cannot act outside their organisation`; `Pinned tokens cannot act outside their organisation`; `Invalid organisation override header` (`400`) for a value that is not a UUID |
+| `X-Ankra-Project-Id: <project-id>` | Runs the request in another [project](/concepts/projects) of the organisation that you reach | `Project not found in this organisation`; `Pinned tokens cannot act outside their project`; `Invalid project override header` (`400`) |
+
+Naming the organisation or project the token already acts in is accepted and changes nothing. MCP tokens take neither header.
+
+While the organisation has projects on, a request acts in, in this order: the project the token is pinned to, the project in `X-Ankra-Project-Id`, or the organisation's default project. A token never follows the project you last selected in the portal, so a script that sees fewer clusters than the portal shows is usually reading the default project. See [Tokens and projects](/concepts/projects#tokens-and-projects).
 
 ## Errors
 
-The API uses standard HTTP status codes. Error responses include a machine-readable body to help diagnose issues.
+Errors answer with a standard HTTP status and a JSON body with a `detail` field. For most errors `detail` is a message:
 
-| Code | Meaning                        |
-| ---- | ------------------------------ |
-| 200  | Success                        |
-| 400  | Bad request / validation       |
-| 401  | Missing or invalid token       |
-| 403  | Insufficient permissions       |
-| 404  | Resource not found             |
-| 429  | Too many requests (rate limit) |
-| 5xx  | Server errors                  |
+```json
+{"detail": "MCP-scoped tokens can only access the MCP endpoint"}
+```
 
----
+A request that fails validation answers `422`, and `detail` is a list with one entry per problem, each naming the field (`loc`), the reason (`msg`) and the value sent (`input`).
 
-## Pagination & filtering
+| Code | Meaning |
+| --- | --- |
+| `200` | Success |
+| `400` | Malformed request, for example `Bearer token not provided` or `Invalid authorization header format` |
+| `401` | `Invalid token`: the token is expired, revoked or mistyped |
+| `403` | The token may not do this: wrong kind of token, a permission your role lacks, or a header it may not send |
+| `404` | Not found |
+| `422` | Validation failed |
+| `429` | Too many requests, see [Rate limits](#rate-limits) |
+| `5xx` | Server error |
 
-Endpoints that return collections may support pagination and filters. Refer to the endpoint’s page for available query parameters and response shapes.
+## Rate limits
 
----
+Every `/api/v1` response carries your budget in three headers:
+
+| Header | Value |
+| --- | --- |
+| `X-RateLimit-Limit` | Requests allowed per minute |
+| `X-RateLimit-Remaining` | Requests left in the current budget |
+| `X-RateLimit-Reset` | Seconds until the budget is full again |
+
+When the budget runs out, the API answers `429` with `{"detail":"Too Many Requests"}` and a `Retry-After` header giving the seconds to wait. Wait that long, then retry. The Ankra CLI does not retry a `429` for you. The [MCP server](/platform/mcp-server) has its own per-token limits.
+
+## Pagination
+
+Lists come in one of two shapes. The endpoint's page in this reference says which one it uses.
+
+**Pages.** Pass `page` (from 1) and `page_size`. `GET /api/v1/clusters` defaults to 25 per page and takes at most 100. The answer carries the items in `result` and a `pagination` object with `page`, `page_size`, `total_pages` and `total_count`:
+
+```bash
+curl -sS -H "Authorization: Bearer $ANKRA_API_TOKEN" \
+  "https://platform.ankra.app/api/v1/clusters?page=2&page_size=50"
+```
+
+**Cursors.** Pass `limit`, and `cursor` from the previous answer's `next_cursor`. Keep going until `next_cursor` is `null`. `GET /api/v1/org/deployments`, for example, defaults to 20 per call and takes at most 100:
+
+```bash
+curl -sS -H "Authorization: Bearer $ANKRA_API_TOKEN" \
+  "https://platform.ankra.app/api/v1/org/deployments?limit=50&cursor=<next-cursor>"
+```
 
 ## Versioning
 
-This reference covers the **v1** API (`/api/v1`). Breaking changes are introduced only in new major versions; minor, non-breaking updates may be added to v1.
+This reference covers the v1 API, served under `/api/v1`.
 
----
+## Help
 
-## Help & support
-
-* Check the endpoint pages for required parameters and examples.
-* Review token permissions if you receive 401/403 errors.
-* If you’re stuck, [contact support](/platform/support).
-
+- Read the endpoint's page for its parameters and response shape.
+- On a `401` or `403`, check the token's kind and your role first: [API tokens](/reference/tokens).
+- If you are stuck, [contact support](/platform/support).
