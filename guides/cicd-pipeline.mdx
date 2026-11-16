@@ -63,7 +63,7 @@ Ankra installs these encrypted GitHub Actions secrets on the application reposit
 | `ANKRA_REGISTRY_USERNAME` | Username of the application's own push robot on the organisation registry project (`robot$<project>+app-<application-id>`) |
 | `ANKRA_REGISTRY_PASSWORD` | That robot's secret |
 
-The robot is minted per application when the application is set up, so no two applications share a registry login. Rotate or revoke it from the application's **Settings** → **Image registry**, or with `ankra application registry robot rotate|revoke` - see [Robot accounts](/concepts/applications#robot-accounts).
+The robot is minted per application when the application is set up, so no two applications share a registry login. Rotate or revoke it from the application's **Settings** → **Registry**, or with `ankra application registry robot rotate|revoke` - see [Robot accounts](/concepts/applications#robot-accounts).
 
 The generated workflow uses the secrets with `docker/login-action`. It does not use `GITHUB_TOKEN` package permissions and does not publish a public package.
 
@@ -87,7 +87,7 @@ Ankra does not write the login secrets for a registry you operate unless you han
 
 ## Registry storage
 
-Every project on your organisation's Ankra registry has a storage limit, **50 GiB by default**, and a full project refuses every image push, so builds stop publishing. The limit is per registry project: an [extra project](/reference/cli/registry#ankra-registry-projects) has the same limit as your own. A build whose image the registry refuses fails at its push with nothing wrong about the build itself; free space or ask for more storage, then re-run the pipeline.
+Every project on your organisation's Ankra registry has a storage limit, **50 GiB by default**, and a full project refuses every image push, so builds stop publishing. The limit is per registry project: an [extra project](/reference/cli/registry#ankra-registry-projects) has the same limit as your own. A build whose image a full project refuses fails at its push with nothing wrong about the build itself; free space (it comes back at the weekly garbage collection, see below) or ask for more storage, then re-run the pipeline.
 
 Read how full the registry is under **Organisation settings** → **Registry storage**, which also lists the repositories that take the space, or from the CLI:
 
@@ -98,7 +98,7 @@ ankra registry storage                # usage against the limit, per project
 ankra registry storage repositories   # what takes the space, largest first
 ```
 
-The `ankra-ci/` repositories hold the images Ankra builds and scans in CI, one per pipeline run and pull request, and are usually what fills the registry; the others hold the images your applications publish. Sizes are approximate, because a layer shared by several images is counted for each of them: rank repositories by them, do not add them up. From 80 % full the page and the CLI point at the ways out, and **Plan and billing** and an application's **Settings** → **Image registry** show the same meter. Reading needs `credentials.read`; retention and storage are organisation settings, so a member or token confined to one project is refused.
+The `ankra-ci/` repositories hold the images Ankra builds and scans in CI, one per pipeline run and pull request, and are usually what fills the registry; the others hold the images your applications publish. Sizes are approximate, because a layer shared by several images is counted for each of them: rank repositories by them, do not add them up. From 80 % full the CLI, and a notice on the **Applications** list and the **Build & delivery** overview, point at the ways out; the **Registry storage** page always lists them under **Make room**. **Plan and billing** shows the same meter, and so does an application's **Settings** → **Registry** when it publishes to the Ankra registry. Reading needs `credentials.read`; retention and storage are organisation settings, so a member or token confined to one project is refused.
 
 ### Image retention
 
@@ -107,21 +107,21 @@ The registry does not keep every image forever. A retention policy runs once a d
 The policy is yours to set, for the whole organisation and per repository pattern - typically a short one for CI build images, which every pipeline run adds to:
 
 ```bash
-ankra registry storage retention                                     # policy, rules, slots, the daily time
+ankra registry storage retention                                     # the policy, its rules, the daily time
 ankra registry storage retention set --keep-days 14 --keep-latest 5
 ankra registry storage retention rule add 'ankra-ci/**' --keep-days 7 --keep-latest 2
 ankra registry storage retention run                                 # clean up now instead of at the daily time
 ```
 
-- A rule replaces the organisation policy for the repositories its pattern matches; where rules overlap, the most specific pattern decides. Patterns are lower-case letters, digits and `. _ / -`, with `*` matching within one path segment and `**` across segments; braces and commas are not accepted, so write one rule per pattern. A rule added with `--application` is tied to that application and shows with it.
-- Two protections hold whatever you choose: the newest image of every repository is never deleted (`--keep-latest` is at least 1), and a policy you set also keeps every image pulled in the last 7 days, so an image a workload started from recently is not deleted under it.
-- A change that keeps fewer images asks first, in the portal and in the CLI (`--yes` skips the prompt), because what it no longer keeps is deleted at the next run. `--reset` goes back to the platform default.
-- The registry runs at most 15 retention rules per project. The policy and each rule take one for the days (when above 0) and one for the newest, the pulled-recently protection takes one, and rules with the same keep value share one where that cannot change which rule decides a repository. The page and `ankra registry storage retention` show how many are used; a save that would need more is refused and nothing is written.
-- Every save carries the version it read. When someone else changed retention in between, the platform refuses the save: the portal shows who changed what and saves nothing of yours, and the CLI reads the new retention and applies your change to it once.
+- A rule replaces the organisation policy for the repositories its pattern matches in your organisation's own registry project (an extra project follows the organisation policy alone); where rules overlap, the most specific pattern decides. Patterns are lower-case letters, digits and `. _ / -`, with `*` matching within one path segment and `**` across segments; braces and commas are not accepted, so write one rule per pattern. A rule added with `--application` is tied to that application and shows with it.
+- Two protections hold whatever you choose: the newest tagged image of every repository is never deleted (`--keep-latest` is at least 1; untagged images, such as the leftovers of an overwritten tag, are kept only by the days), and a policy you set also keeps every image pulled in the last 7 days, so an image a workload started from recently is not deleted under it.
+- A change that keeps fewer images asks first: the portal measures it against the rule that governs each repository, the CLI against the organisation policy (`--yes` skips the prompt), because what it no longer keeps is deleted at the next run. `--reset` goes back to the platform default.
+- The registry runs at most 15 retention rules per project. The policy and each rule take one for the days (when above 0) and one for the newest, the pulled-recently protection takes one, and rules with the same keep value share one where that cannot change which rule decides a repository. The page and `ankra registry storage retention` (from CLI v0.26.0) show how many are used; a save that would need more is refused and nothing is written.
+- A save from the portal, or from the CLI from v0.25.1, carries the version it read. When someone else changed retention in between, the platform refuses the save: the portal shows who changed what and saves nothing of yours, and the CLI reads the new retention and applies your change to it once. A save over the API or an MCP tool is checked only when it sends that version as `expected_version`.
 
 Two consequences worth planning for:
 
-- A rollback can only reach a version that is still in the registry: one of the newest kept, or one pushed within the policy's days.
+- A rollback can only reach a version that is still in the registry: one of the newest kept, one pushed within the policy's days, or, under a policy you set, one pulled in the last 7 days.
 - A workload still running an image older than that keeps running, because the image is cached on its node, but it cannot be rescheduled onto a fresh node once the image is gone. Redeploy long-lived workloads from a recent build.
 
 Changing or running retention needs `credentials.write`. A registry you operate yourself is never touched: retention there is yours to configure.
@@ -134,7 +134,7 @@ When tighter retention is not enough, ask Ankra for a bigger limit from the **Re
 ankra registry storage request --size 100 --reason "Three services now publish nightly images"
 ```
 
-[Ankra AI](/platform/ai-assistant) and the [MCP tools](/platform/mcp-tools) read storage and retention, change and run retention, and request more the same way.
+[Ankra AI](/platform/ai-assistant) and the [MCP tools](/platform/mcp-tools) read storage and retention, change and run retention, and request more, under the same permissions.
 
 ## Existing applications
 
