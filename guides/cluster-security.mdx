@@ -107,7 +107,11 @@ From chat or the MCP server the tool is `enable_security_baseline`, confirmed be
 - **Pod Security Standards, enforced by Kubernetes itself.** The profile ships an `ankra-pod-security` ConfigMap declaring the standard (`baseline` or `restricted`), the policy mode and the exempt namespaces. The Ankra agent labels every other namespace for [Pod Security Admission](https://kubernetes.io/docs/concepts/security/pod-security-admission/), the admission controller built into every API server: `pod-security.kubernetes.io/audit` and `/warn` at the standard in Audit mode, and `/enforce` as well once you switch the cluster to Enforce. Labels are only ever raised, so a namespace you hold at a stricter level keeps it, and the agent records what it set so switching back to Audit restores the previous state.
 - **A guard for the enforce label.** A ValidatingAdmissionPolicy (Kubernetes 1.30 or newer) refuses lowering the enforce label of a managed namespace below the declared floor for anyone but the agent. It fails open: an admission it cannot evaluate is admitted.
 
-No policy engine runs on the cluster. Kyverno is available as the opt-in `ankra-policy-engine` profile, for image-signature verification and policies of your own.
+The baseline adds no policy engine: the API server itself evaluates the namespace labels and the guard, with no admission webhook and no extra pod. A cluster that installed the baseline while it still carried Kyverno keeps those Kyverno add-ons, and the policy mode then sets both. Kyverno is available as the opt-in `ankra-policy-engine` profile, for image-signature verification and policies of your own.
+
+<Warning>
+`ankra security policy-mode off --cluster my-cluster` permanently uninstalls every Kyverno add-on on the cluster (charts `kyverno` and `kyverno-policies`), whether an older baseline, the `ankra-policy-engine` profile or you installed it, and leaves Pod Security Admission in Audit. Switching back to `audit` or `enforce` does not reinstall Kyverno.
+</Warning>
 
 **Sizing.** The platform sizes the baseline from the cluster's shape. A control plane below **8 GB** of memory, or one whose size the platform cannot determine, gets the **lite** shape: one image scan at a time, and the cluster carries a notification saying so. A control plane of 8 GB or more gets the standard shape, and three or more workers let two scans run at once.
 
@@ -115,7 +119,7 @@ No policy engine runs on the cluster. Kyverno is available as the opt-in `ankra-
 |---|---|---|
 | `pod_security_standard` | `baseline` | The standard every managed namespace is labelled with; `restricted` flags most off-the-shelf charts |
 | `policy_mode` | `Audit` | Audit reports and warns and never blocks; Enforce makes the API server refuse pods that violate the standard |
-| `pod_security_exempt_namespaces` | `kube-system`, `kube-public`, `kube-node-lease`, `kyverno`, `trivy-system`, `ankra`, `argocd`, `hcloud`, `calico-system`, `tigera-operator`, `cert-manager` | Namespaces the standard is never applied to |
+| `pod_security_exempt_namespaces` | `kube-system`, `kube-public`, `kube-node-lease`, `kyverno`, `trivy-system`, `ankra`, `argocd`, `hcloud`, `calico-system`, `tigera-operator`, `cert-manager` | Namespaces the standard is never applied to. `kube-system`, `kube-public`, `kube-node-lease`, `ankra` and the agent's own namespace stay exempt whatever the list says; a single `-` exempts nothing else |
 | `trivy_scan_concurrency` | `1` | Image scans that run at once |
 | `trivy_scan_job_timeout` | `10m` | How long one image scan may run |
 | `trivy_infra_assessment_enabled` | `false` | The CIS node assessment |
@@ -242,6 +246,14 @@ ankra cluster baseline --cluster my-cluster  # the cluster's Ankra Baseline scor
 ```
 
 Per cluster, `ankra security stacks`, `stack <name>`, `namespaces`, `pods`, `pod <namespace> <pod>`, `addon <addon-name>`, `history`, `benchmarks` and `network-exposure` take `--cluster`. The portal has no view for the CIS benchmark controls of one cluster or for its NetworkPolicy exposure score; use `ankra security benchmarks --cluster my-cluster` and `ankra security network-exposure --cluster my-cluster`. Every command is in the [`ankra security` reference](/reference/cli/security), and every MCP tool is under [Security Center in MCP tools](/platform/mcp-tools#security-center).
+
+### NetworkPolicy exposure score
+
+`ankra security network-exposure --cluster my-cluster` scores how tightly the cluster's NetworkPolicies are written, ingress and egress separately, each from 0 to 100 (higher is tighter). Each score is the average of two halves: coverage, the share of workloads a policy selects in that direction, and tightness, the share of allow rules scoped to a named workload identity. The findings list every workload no policy selects (high severity on ingress, medium on egress, because egress default-deny is uncommon) and every rule broader than a named identity. From chat or the MCP server the tool is `get_cluster_network_policy_overprivilege`.
+
+<Warning>
+The score is computed from the policy objects, not from traffic. It does not check that your CNI enforces NetworkPolicy, it does not score ports, and it counts only Deployments, StatefulSets and DaemonSets: a direction with none of them reads `n/a (no workloads to score)`. A default-deny in every namespace with no allow rules scores 100 while it blocks every flow, so a high score means the policies are written tightly, not that traffic reaches where it should. Use it to find workloads nobody has scoped, never to decide that a policy change is safe.
+</Warning>
 
 ## Related
 
