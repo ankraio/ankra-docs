@@ -35,7 +35,7 @@ An **assignment** ties a member to a role at a scope. When the role includes Kub
 |------|----------------|
 | `owner` | Full control, including organisation deletion and ownership transfer |
 | `admin` | Full control except deleting the organisation (includes billing and the audit log) |
-| `operator` | Day-2 operations: deploy, operate clusters, act on alerts, `kubectl` write and exec |
+| `operator` | Day-2 operations: deploy, operate clusters, act on alerts, and apply, exec and reveal Secret values through the platform. `kubectl` itself needs a [Cluster Access](/guides/cluster-access) grant |
 | `member` | Build and deploy stacks, variables, and applications |
 | `viewer` | Read-only access plus ask-mode AI |
 
@@ -52,7 +52,7 @@ The Kubernetes access level a custom role bundles (`view`, `edit`, `admin` or `c
 Two permissions control the edges of Kubernetes access:
 
 - **`kube_access.policy`** changes the organisation access policy. Owners and admins hold it. It is human-only, so an API token carries it only if the token's scopes name it.
-- **`kube_access.elevate`** is break-glass: its holder can give itself time-boxed, reasoned access to a cluster within the policy, and nothing else. It cannot grant anyone else, create a standing grant, list grants or change the policy. A custom role holding only `kube_access.elevate` and `kube_access.use`, with Kubernetes access set to `view`, is the recommended role for automation that needs break-glass access - see [Break-glass elevation](/guides/cluster-access#break-glass-elevation).
+- **`kube_access.elevate`** is break-glass: its holder can give itself time-boxed, reasoned access to a cluster within the policy, and nothing else. It cannot grant anyone else, create a standing grant, list grants or change the policy. A custom role holding only `kube_access.elevate` and `kube_access.use`, with Kubernetes access set to `view`, is the recommended role for automation that needs break-glass access - see [Break-glass elevation](/guides/cluster-access#break-glass-elevation). The portal's role editor cannot make that role: it gives `kube_access.elevate` only at the **Manage** level of **Kubernetes and cluster operations**, together with `kube_access.manage` and `kube_access.policy`. Create it with the API instead (`POST /api/v1/org/organisation/roles` with the permission list); the CLI has no command that creates roles.
 
 ---
 
@@ -208,18 +208,22 @@ A project-only member can be made an organisation member later by changing the m
 
 ## Cluster groups
 
-A **cluster group** is a named set of clusters used as an assignment scope. Groups can be:
+A **cluster group** is a named set of clusters used as an assignment scope. A group is one of two kinds:
 
-- **Static** - you pin specific clusters as members.
-- **Dynamic** - a label selector evaluated against cluster labels, so clusters join and leave the group automatically as their labels change.
+- **Ones I pick** - you pin specific clusters as members.
+- **By label** - a `key=value` label evaluated against the clusters, so clusters join and leave the group automatically as their labels change.
 
-Manage groups on the **Roles** page of your organisation (**Organisation → Roles**, section **Cluster Groups**). A preview shows exactly which clusters a group currently resolves to before you use it in an assignment.
+Manage groups under **Identity & access → Roles**, in the **Cluster groups** section. Only people who manage roles see it; anyone else reads "Cluster groups are shown to people who manage roles".
+
+1. Click **New group** and give it a **Name**.
+2. Under **Which clusters**, choose **Ones I pick** and tick the **Clusters**, or choose **By label** and write the **Label**, such as `environment=production`. Before you save, the form says which clusters match: "Matches <clusters> today.", or "No cluster has this label today. A new cluster with it joins on its own."
+3. Click **Create group**. The group is listed as **By label** or **Picked**, with who holds a role on it ("Nobody has a role on this group yet." until you assign one).
 
 ### Matching on a cluster's environment
 
-In a dynamic group, the `environment` key matches the **Environment** set on each cluster - on the cluster's **Overview** page, with `--environment` on any `ankra cluster <provider> create` or `ankra cluster managed create`, or later with `ankra cluster update <cluster> --environment <name>`. The match is exact and case-sensitive, so `production` does not match a cluster set to `Production`, and a cluster with no environment never matches. Change a cluster's environment and it moves in or out of every group on that key, but access does not follow at once: platform permissions catch up within about a minute, and the Kubernetes access those assignments bundle within about a minute and a half. That applies in both directions, so a cluster moved out of `production` keeps the access its old groups gave for that long.
+In a group **By label**, the `environment` key matches the label set on each cluster. Set it under **Clusters → <your cluster> → Settings → General**: click **Change what it’s used for**, open **Change its label** and type the **Label**. From the CLI, pass `--environment` to any `ankra cluster <provider> create` or `ankra cluster managed create`, or run `ankra cluster update <cluster> --environment <name>` later. The match is exact and case-sensitive, so `production` does not match a cluster labelled `Production`, and a cluster with no label never matches. Change a cluster's label and it moves in or out of every group on that key, but access does not follow at once: platform permissions catch up within about a minute, and the Kubernetes access those assignments bundle within about a minute and a half. That applies in both directions, so a cluster moved out of `production` keeps the access its old groups gave for that long.
 
-Every other key matches the cluster's labels. Labels cannot be set from the console or the CLI yet, so build environment-based access on the `environment` key.
+Every other key matches the cluster's other labels. Neither the portal nor the CLI sets those, so build environment-based access on the `environment` key.
 
 ---
 
@@ -228,75 +232,77 @@ Every other key matches the cluster's labels. Labels cannot be set from the cons
 Give a DevOps team full control of production, including Secret values, and everyone else read-only access with no actions.
 
 <Steps>
-  <Step title="Mark the production clusters">
-    Set **Environment** to `production` on each production cluster's **Overview** page.
+  <Step title="Label the production clusters">
+    On each production cluster, open **Settings → General**, click **Change what it’s used for**, open **Change its label** and set **Label** to `production`. The **Name and use** section then shows **Label** `production`.
   </Step>
   <Step title="Create a production group">
-    Under **Organisation → Roles → Cluster Groups**, create a **dynamic** group with the selector `environment` = `production`. Check that the preview lists exactly your production clusters.
+    Under **Identity & access → Roles → Cluster groups**, click **New group**, choose **By label** and write `environment=production`. Check that the form matches exactly your production clusters, then click **Create group**.
   </Step>
   <Step title="Create the DevOps role">
-    Create a custom role holding the permissions the team needs - for full control, `kubernetes.read`, `kubernetes.write`, `kubernetes.exec`, `kubernetes.secrets_reveal` and `clusters.operate` - and give it the `cluster-admin` Kubernetes access level so `kubectl` has full control too. The `admin` level stops short of that: it does not manage cluster-wide objects such as nodes, namespaces and custom resource definitions. The built-in `operator` role holds the same platform permissions but bundles no `kubectl` access.
+    Under **Custom roles**, click **New role** and give it a **Name**. Under **What it may do**, set **Kubernetes and cluster operations** to **Change** (this holds `kubernetes.write`, `kubernetes.exec`, `kubernetes.secrets_reveal` and `clusters.operate` on top of `kubernetes.read`) and **Clusters and backups** to **Change** (this holds `kube_access.use`, which `kubectl` access needs). Under **Kubernetes access on clusters**, click **Add Kubernetes access**, set **Where** to **Whole cluster** and **Rights** to **Cluster admin**, so `kubectl` has full control too. **Admin** stops short of that: it does not manage cluster-wide objects such as nodes, namespaces and custom resource definitions. Click **Create role**. The built-in `operator` role holds the same platform permissions but bundles no `kubectl` access.
   </Step>
-  <Step title="Assign it to the production group">
-    Assign the DevOps role to each team member with the production group as the scope.
+  <Step title="Give it on the production group">
+    For each team member, go to **Identity & access → People**, open the options on their row, choose **Give more access on some clusters…**, pick the DevOps role under **Role** and the production group under **On**, and click **Give access**. The dialog lists it under **Extra access they have now**.
   </Step>
   <Step title="Give everyone else viewer">
-    Assign `viewer` at organisation scope. Viewers read resources across every cluster but cannot apply, delete, restart, scale, open a terminal or reveal Secret values.
+    On each other member's row choose **Change role…**, pick **Viewer** and click **Make Viewer**. Viewers read resources across every cluster but cannot apply, delete, restart, scale, open a terminal, read pod logs or reveal Secret values.
   </Step>
 </Steps>
 
 <Warning>
-Assignments only add permissions. A role assigned at organisation scope also reaches production, so do not give anyone outside the DevOps team a writing role at organisation scope. Scope it to a non-production group instead, such as a dynamic group on `environment` = `staging`.
+Assignments only add permissions. A role assigned at organisation scope also reaches production, so do not give anyone outside the DevOps team a writing role at organisation scope. Scope it to a non-production group instead, such as a group on `environment=staging`.
 </Warning>
 
 <Note>
-`viewer` still reads pod logs, ConfigMaps and environment values written directly into a pod spec, because `kubernetes.read` covers them. Only Secret values need `kubernetes.secrets_reveal`, so keep credentials in Secrets.
+`viewer` still reads ConfigMaps and environment values written directly into a pod spec, because `kubernetes.read` covers them. Pod logs need `kubernetes.logs`, which `member` and every role above it hold and `viewer` does not, because logs carry whatever a workload prints. Secret values need `kubernetes.secrets_reveal`, so keep credentials in Secrets.
 </Note>
 
 ---
 
 ## Assigning a role
 
-<Steps>
-  <Step title="Open Roles & Access">
-    Go to **Organisation → Roles**. The same page holds **Cluster Groups** if you need a group scope. It is shown to members who can manage members (`admin` and `owner` by default).
-  </Step>
-  <Step title="Pick a member and role">
-    Choose an organisation member, then a built-in or custom role.
-  </Step>
-  <Step title="Choose the scope">
-    Assign at the organisation, a single cluster, a cluster group, or a [project](/concepts/projects). On the **People** page, **Give more access on some clusters** offers the same places, with each project listed as `<name> (project)`.
-  </Step>
-  <Step title="Save">
-    Ankra applies the assignment immediately. If the role bundles Kubernetes access, it reconciles the grants onto every cluster in scope.
-  </Step>
-</Steps>
+Changing roles needs the `members.manage` permission (`admin` and `owner` by default).
 
-To list the built-in and custom roles from the [CLI](/reference/cli/org):
+<Tabs>
+  <Tab title="Portal">
+    <Steps>
+      <Step title="Open People">
+        Go to **Identity & access → People** (`/next/organisation/people`). Each member's row has an options menu.
+      </Step>
+      <Step title="Change the organisation role">
+        Choose **Change role…**, pick the role under **Role** (a custom role comes on top of what a Viewer may do), and click **Make** followed by the role's name, for example **Make Operator**. The dialog says "The new role applies the next time they load a page. Extra roles on single clusters stay."
+      </Step>
+      <Step title="Or add a role on some clusters">
+        Choose **Give more access on some clusters…**, pick a **Role**, and pick where under **On**: a cluster, a cluster group or a [project](/concepts/projects), each project listed as `<name> (project)`. Click **Give access**. A cluster group or a project follows its clusters: a cluster that joins it is covered too. To remove one, click **Take back** beside it under **Extra access they have now**.
+      </Step>
+      <Step title="Check it">
+        Open the member's row. Their page shows their role, the extra access they hold and what they can do in each area. If the role bundles Kubernetes access, Ankra reconciles the grants onto every cluster in scope.
+      </Step>
+    </Steps>
+  </Tab>
+  <Tab title="CLI">
+    <CliVersion since="0.50.0" command="org assign, org member role" />
 
-<CliVersion since="0.6.0" />
+    List the built-in and custom roles, change a member's organisation role, or grant a role at one scope:
 
-```bash
-ankra org roles
-```
+    ```bash
+    ankra org roles
+    ankra org member role dev@example.com --role operator
+    ankra org assign dev@example.com --role operator --scope cluster --scope-id prod-eu
+    ankra org assign dev@example.com --role admin --scope project --scope-id edge
+    ```
 
-To grant a member a role at one scope from the terminal, use `ankra org assign`. `--scope` is `organisation` (the default), `cluster`, `cluster_group` or `project`, and every scope but `organisation` needs `--scope-id`: a cluster name or id, a cluster group id, or a project slug, name or id. `--role` takes a built-in role or the id of a custom role.
+    `ankra org member role` takes `owner`, `admin`, `operator`, `member`, `viewer` or `project` (project-only, with `--project` and `--project-role`). For `ankra org assign`, `--scope` is `organisation` (the default), `cluster`, `cluster_group` or `project`, and every scope but `organisation` needs `--scope-id`: a cluster name or id, a cluster group id, or a project slug, name or id. `--role` takes a built-in role or the id of a custom role.
 
-<CliVersion since="0.50.0" command="org assign" />
-
-```bash
-ankra org assign dev@example.com --role viewer
-ankra org assign dev@example.com --role operator --scope cluster --scope-id prod-eu
-ankra org assign dev@example.com --role admin --scope project --scope-id edge
-```
-
-The CLI has no commands for cluster groups, or for listing and revoking assignments; manage those on the **Roles** page. `ankra project members <project>` lists who reaches a project and whether each person's role was given for the whole organisation or for that project. See [Projects in the CLI](/integrations/ankra-cli#projects).
+    The CLI has no commands for cluster groups, or for listing and revoking assignments; manage those in the portal. `ankra project members <project>` lists who reaches a project and whether each person's role was given for the whole organisation or for that project. See [Projects in the CLI](/integrations/ankra-cli#projects).
+  </Tab>
+</Tabs>
 
 ---
 
 ## Audit log
 
-Every access change - invitations, role assignments, cluster-group edits, revocations - is recorded in the organisation **Audit log** under **Organisation → Audit log**, so you can see who changed what and when.
+Every access change - invitations, role assignments, cluster-group edits, revocations - is recorded in the organisation's [audit log](/guides/audit-log) under **Identity & access → Audit log**, so you can see who changed what and when.
 
 ---
 
