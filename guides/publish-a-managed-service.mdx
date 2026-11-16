@@ -1,0 +1,148 @@
+---
+title: Publish a Managed Service
+description: Turn a stack profile your organisation owns into a managed service package that others in the organisation can set up and connect to applications.
+tag: "Closed Beta"
+---
+
+import { CliVersion } from "/snippets/cli-version.jsx";
+
+<Warning>
+**Closed beta.** Publishing a service is part of [Managed services](/concepts/managed-services), which is in closed beta and enabled per organisation on request. [Contact support](/platform/support) to have it turned on for your organisation.
+</Warning>
+
+Publishing turns one version of a stack profile your organisation owns into a package in your organisation's service catalogue. You say what kind of service the profile runs, which Kubernetes Service applications connect to, and which Secret holds its login. From then on, anyone who can deploy applications sets it up from the catalogue like one of Ankra's own services: Ankra installs the pinned profile version into a namespace named after each service, hands each connected application the address and login as environment variables, and checks the service's health.
+
+At the end you have a package marked **Published by this organisation** in the catalogue, ready to [set up](/guides/set-up-a-managed-service).
+
+---
+
+## Before you start
+
+- **Managed services are turned on for your organisation.** **Infrastructure → Managed services** opens. If it says `Managed services are not available to your organisation yet.`, choose **Contact support**.
+- **A stack profile your organisation owns, with a version that is not withdrawn.** A profile shared with your organisation, or a public one, cannot be published by you. See [Stack Profiles](/concepts/stack-profiles) to build one.
+- **The profile runs an engine Ankra can connect applications to.** The kinds of service are PostgreSQL, Redis, NATS, OpenSearch, S3-compatible object storage, VictoriaLogs and VictoriaMetrics. Something people use directly, such as a web tool, belongs in a stack profile, not a service.
+- **Your role holds `profiles.write`.** Without it the page says `Your role cannot publish services.` Trying a connection on a running demo also needs `stacks.deploy`.
+- **Optional: a running demo of the profile.** With one, Ankra fills in the connection for you and tries it before you publish. The portal has no page that launches a demo: launch it with `ankra stack-profiles demo launch`, as under [Stack Profile Demos](/guides/stack-profile-demos).
+
+---
+
+## Publish the profile
+
+<Tabs>
+  <Tab title="Portal">
+    <Steps>
+      <Step title="Open the publish page">
+        Go to **Build & delivery → Stack profiles** and choose **Make this a service** on a profile your organisation owns. From the catalogue, **Infrastructure → Managed services → Catalogue** has a **Publish your own service** section whose **Choose a stack profile** button opens the same list.
+
+        The page **Publish *your profile* as a service** opens with **What this profile installs**: the add-ons in the profile's latest version and their namespaces.
+      </Step>
+      <Step title="Check what Ankra suggests">
+        Under the add-ons, a card labelled **AI suggestion** says what the profile runs (`This runs <engine>`), and that kind is chosen for you below. Ankra also matches the chart names, so a well-known chart is suggested even without the card. If the card says **This is an application people use, not a service**, install the profile from **Stack profiles** instead of publishing it.
+      </Step>
+      <Step title="Fill it from a running demo (optional)">
+        Under **Fill it from a running demo**, the page looks for a running demo of the profile. When it finds one, choose **Fill from the running demo**: Ankra reads the demo's Services and Secrets, never the Secret values, and fills in the connection. The page says **The connection below was filled from the demo.** and names any value it could not find.
+
+        Ankra also checks whether two services from the package could share one cluster. **Two services from this package can share a cluster.** is the answer you want. When it says they would collide, it lists the cluster-wide objects, such as a ClusterRole or a CRD, that both would claim.
+
+        Without a running demo, the section says `No demo of this profile is running.` Fill in the next steps by hand.
+      </Step>
+      <Step title="Choose the kind of service">
+        Under **What kind of service is it?**, choose the **Kind of service**. It decides which connection details applications receive, and sets the **Port** and the **Category** to their usual values.
+      </Step>
+      <Step title="Say where applications find it">
+        Under **Where applications find it**, enter the **Kubernetes Service** applications connect to and its **Port**, and the **Kubernetes Secret**, in the same namespace, that holds the login. Ankra reads that Secret on the cluster whenever it connects an application, so the password is never copied into the catalogue. **Where do I find these?** explains where the chart usually creates them.
+
+        **What a connected application receives** lists each environment variable and where its value comes from. The usual places are filled in. To change one, open **Change where a value comes from** and choose **A key of the Secret**, **A fixed value**, **The Service's host name**, or **The Service's host name and port**. A password or other credential cannot be a fixed value.
+      </Step>
+      <Step title="Try it on the demo (optional)">
+        With a running demo, choose **Try it on the demo**. Ankra runs the same readiness check that checks a published service, inside the demo's namespace. **The connection works on the demo.** means applications will be able to connect the way you described.
+      </Step>
+      <Step title="Name the package and publish">
+        Under **How it appears in the catalogue**, check the **Name in the catalogue** (lowercase letters, digits and single hyphens, starting with a letter, at most 63 characters), the **Version** (three numbers, such as `1.0.0`), the **Profile version it installs**, and the **Category**. Setting up the service installs exactly that profile version.
+
+        Choose **Publish to the service catalogue**. The package's page opens.
+      </Step>
+    </Steps>
+  </Tab>
+  <Tab title="CLI">
+    <CliVersion since="0.45.1" />
+
+    Write a package file for one version of the profile, naming the protocol consumers speak (`nats`, `opensearch`, `postgres`, `redis`, `s3`, `victorialogs` or `victoriametrics`):
+
+    ```bash
+    ankra services packages init --profile <profile-id> --profile-version <version-id> \
+      --name my-cache --protocol redis -f my-cache.json
+    ```
+
+    Publishing refuses the file until its `connection` names the Service, the port, the Secret and which key of the Secret holds each field. With a running demo of the profile, let Ankra fill them in, then try the connection and check that two services can share a cluster:
+
+    ```bash
+    ankra stack-profiles demo launch <profile-id>
+    ankra services packages propose --profile <profile-id> --demo <workspace-id> -f my-cache.json
+    ankra services packages probe --profile <profile-id> --demo <workspace-id> -f my-cache.json --wait
+    ankra services packages collisions --profile <profile-id> --demo <workspace-id>
+    ```
+
+    `probe --wait` exits 0 only when the connection worked, and `collisions` exits 0 only when nothing collides. Then publish:
+
+    ```bash
+    ankra services packages publish -f my-cache.json
+    ```
+
+    To make a service from one Helm chart instead of an existing profile, give `init` the chart with `--addon`, `--registry` and `--chart-version`: it creates a stack profile holding that chart, then writes the package pinned to it. `--generate-secret` with `--generate-key` makes that profile generate the service's credentials in each service's namespace. See [`ankra services packages init`](/reference/cli/services#ankra-services-packages-init).
+  </Tab>
+  <Tab title="MCP">
+    `create_chart_service_profile` makes one Helm chart into a stack profile a package can be published over, `get_service_profile_pin` returns the pin a package needs for a profile version, and `publish_service_package` publishes the package from its contract document.
+  </Tab>
+</Tabs>
+
+<Warning>
+A published version never changes. To change anything, publish a new **Version** number. Publishing the same name and version again with different settings is refused.
+</Warning>
+
+---
+
+## Verify
+
+1. Open **Infrastructure → Managed services → Catalogue**. The package is listed, marked **Published by this organisation**. From the command line, `ankra services packages list` lists it.
+2. Open it and choose **Set up**, then follow [Set Up a Managed Service](/guides/set-up-a-managed-service). Once the service runs, its page shows its **Service health** and **Readiness**, as for Ankra's own services: see [Health and readiness](/concepts/managed-services#health-and-readiness).
+
+A package published from the portal runs on **Your infrastructure** and has no settings to choose at setup. Each service set up from it runs in its own namespace, named after the service, whatever namespace the profile names on its own.
+
+---
+
+## What can go wrong
+
+| What you see | Cause | Remedy |
+|--------------|-------|--------|
+| `Choose a stack profile to publish.` | The publish page was opened without a profile | Choose **Go to stack profiles**, then **Make this a service** on your profile |
+| `Your role cannot publish services.` | Your role lacks `profiles.write` | Ask an organisation owner or admin for that permission |
+| `Only the organisation that owns this profile can publish it.` | The profile is shared with your organisation or public | Publish a profile your organisation owns |
+| `This stack profile has no version that can be published.` | Every version of the profile is withdrawn | Save a new version of the profile, then publish that |
+| `Ankra did not recognise a kind of service from these charts.` | The add-ons match no kind Ankra connects applications to | Choose the kind yourself if the engine speaks one of the protocols, or install the profile from **Stack profiles** |
+| `Your role cannot try a connection on a demo.` | Your role lacks `stacks.deploy` | Publish without trying, or ask for the permission |
+| **The connection did not work on the demo.** | The Service, port, Secret or a key is wrong | Correct the connection and choose **Try it on the demo** again |
+| **Two services from this package would collide on one cluster.** | The profile creates a cluster-wide object whose name does not change with the namespace | Change the profile so each service's objects have their own names, save a new version, and publish that |
+| `A package with this name and version number is already published with different settings, or the profile changed while you were publishing.` | The version number is taken | Choose a new **Version** and publish again |
+| `This profile version has been withdrawn, so it cannot be published.` | The chosen profile version is withdrawn | Choose another **Profile version it installs** |
+| `Ankra refused the package: ...` | The platform's check of the package failed, with the reason | Correct what it names and publish again |
+| `We could not confirm whether the package was published.` | The answer was lost | Check the **Catalogue** before you publish again |
+
+---
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Set up a managed service" icon="rocket" href="/guides/set-up-a-managed-service">
+    Set the published package up for an application.
+  </Card>
+  <Card title="Stack profile demos" icon="flask" href="/guides/stack-profile-demos">
+    Run the profile on your staging cluster before you publish it.
+  </Card>
+  <Card title="Connect to a managed service" icon="plug" href="/guides/connect-to-a-managed-service">
+    The variables a connected application reads, for each kind of service.
+  </Card>
+  <Card title="Stack profiles" icon="layer-group" href="/concepts/stack-profiles">
+    Build and version the profile a package installs.
+  </Card>
+</CardGroup>
