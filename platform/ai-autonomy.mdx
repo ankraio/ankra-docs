@@ -1,53 +1,102 @@
 ---
 title: AI Autonomy
-description: Control what Ankra's AI may do on its own - the global pause, the auto-remediation policy, approval rules, and proactive insight thresholds.
+description: Stop Ankra AI, choose how far it may fix alerts on its own and who approves the rest, and tune the health check it runs by itself.
 ---
 
-The **Autonomy** section under **AI** → **Settings** → **Autonomy** is the single place where organisation admins decide how much Ankra's AI does without a human in the loop. Everything on this page is organisation-wide.
+import { CliVersion } from "/snippets/cli-version.jsx";
+
+**Ankra AI → Autonomy and approvals** (`/next/organisation/ai-autonomy`) is where you decide what Ankra AI may do in your organisation without asking a person first, who approves the rest, and how to stop it. Everything on the page applies to the whole organisation.
 
 <Info>
-Autonomy is opt-in. A new organisation starts with auto-remediation disabled and no active agents - nothing runs autonomously until an admin turns it on here.
+On a new organisation, auto-remediation is off, and the [default agents](/platform/ai-agents#the-default-team) run only when someone starts them. Nothing changes a cluster on its own until someone turns it on here.
 </Info>
 
-## Stopping the AI
+## Before you start
 
-The **Stopping the AI** card at the top of the page has two stops, from least to most disruptive. Both apply to everyone in the organisation and take effect immediately.
+- **A role that manages Ankra AI** (the `ai.manage` permission, which owners and admins have) to stop Ankra AI or change the policy. Without it the page reads **Your role can look at these settings but not change them.**
+- **A role that manages the organisation** (`organisation.manage`) to change **Finding problems on its own**.
+- **A Slack webhook** under **Integrations & alerts → Notification destinations** if fixes are to be approved in Slack. See [Notification routing](/guides/notification-routing).
 
-1. **Pause autonomous actions** - chat, diagnosis and read-only investigation keep working, but the AI cannot change anything without a person approving it first. It switches off the auto-remediation policy and pauses every running agent. Resuming restores exactly what the pause switched off - it never enables anything that was off before the pause. The pause is stored on the server, so any admin can resume it from anywhere.
-2. **Stop all AI** - the emergency stop. Nothing keeps working: it cancels every running AI session and agent run, expires pending approvals, and blocks chat for everyone until an administrator resumes it. Use it during an incident, not to tighten a policy.
+## Stop Ankra AI
 
-Both are also in the CLI as `ankra ai autonomy pause` and `ankra ai autonomy stop-all`, with `resume` and `start-all` to undo them - see [`ankra ai`](/reference/cli/ai).
+The page opens with two stops, from the gentler to the harder. Both apply to everyone in the organisation straight away.
 
-## Auto-Remediation Policy
+| Stop | What keeps working | What it does | Undo |
+| --- | --- | --- | --- |
+| **Pause autonomous actions** | Chat, finding causes and read-only investigation | Ankra AI cannot change anything until a person approves it. It turns auto-remediation off and pauses every AI agent | **Resume autonomous actions** switches back on exactly what the pause switched off, and nothing else |
+| **Stop all AI** | Nothing | Cancels every running AI conversation and agent run, expires approvals that are waiting, and blocks chat for everyone. Use it during an incident, not to tighten a policy | **Resume all AI** |
 
-The policy is off on a new organisation: firing alerts are not handed to an agent until an admin switches it on. When enabled, the remediation agent can act on detected incidents, within these limits:
+<Tabs>
+  <Tab title="Portal">
+    1. Under **Stop Ankra AI**, press **Pause autonomous actions…** or **Stop all AI…**.
+    2. Enter a **Reason**. Everyone in the organisation can read the reason for a pause; only people who manage Ankra AI can read the reason for a stop.
+    3. Press **Pause autonomous actions** or **Stop all AI now**.
 
-- **Autonomy level** - **Observe only** (diagnose and report, never touch the cluster), **Propose** (every corrective action goes to Slack for approval; the default), or **Autonomous** (low-risk reversible actions run on their own; the rest ask first).
-- **Approvals** - approval requests go to a Slack webhook; you can name the users allowed to approve.
-- **Limits** - a cap on actions per incident (5 by default) and a cooldown before the same alert on the same cluster is picked up again (30 minutes by default).
-- **Per-action rules** - override individual tools (for example `delete_pod` or `restart_deployment`) to **Run automatically**, **Ask on Slack**, or **Never run**. **Run automatically** means that action runs with no approval card at all.
-- **Cluster scope** - apply the policy to all clusters or an explicit allow-list.
+    **You should see** the pause card read **Paused**, or, after a stop, the stop card read **Stopped** and a banner across the page: **All Ankra AI is stopped**.
+  </Tab>
+  <Tab title="CLI">
+    <CliVersion since="0.13.0" />
 
-Enabling the policy asks for confirmation and shows what the chosen level authorises before saving.
+    ```bash
+    ankra ai autonomy pause --reason "investigating a bad deploy"
+    ankra ai autonomy stop-all --reason "incident in progress"
+    ankra ai autonomy status
+    ```
 
-## Ticket Desk
+    `ankra ai autonomy resume` and `ankra ai autonomy start-all` undo them.
+  </Tab>
+  <Tab title="MCP">
+    `pause_ai_autonomy` and `resume_ai_autonomy` pause and resume autonomous actions. Stopping all AI has no MCP tool. See [MCP tools](/platform/mcp-tools).
+  </Tab>
+</Tabs>
 
-The ticket desk auto-files board tickets from proactive insights. Pick which severities create tickets and where ticket notifications go (a Slack channel or Teams conversation). See the [AI Board](/platform/ai-board) for how filed tickets are worked.
+## Fixing alerts automatically
 
-A drafted plan waits for a verdict from a reviewer agent. Bind the reviewer here, or turn the review requirement off so plans go straight to a person - otherwise plans park in review with nothing able to clear them.
+When an alert fires, Ankra AI can find the cause and apply the smallest safe fix. The **Auto-remediation** switch turns this on for every alert in the organisation that Ankra AI is sent. Turning it on asks you to confirm with **Turn auto-remediation on**.
 
-## Board Staffing
+| Field | What it decides | Starting value |
+| --- | --- | --- |
+| **What Ankra AI may do on its own** | **Only look**: finds the cause and reports it, never changes the cluster. **Ask first**: every fix is sent to Slack for a person to approve or deny. **Fix small things on its own**: low-risk fixes that can be undone run on their own, everything else asks first | **Ask first** |
+| **Slack webhook for approvals** | Where the approve and deny buttons are posted. **Manage Slack webhooks** opens **Notification destinations** | **No webhook** |
+| **Fixes in one incident** | After this many fixes in one incident, Ankra AI hands over to a person. 1 to 50 | 5 |
+| **Wait before the same alert is handled again** | Minutes, for the same alert on the same cluster. 1 to 1440 | 30 |
+| **Rules for single fixes** | A rule for one fix that overrides the level: **Run on its own**, **Ask on Slack first** or **Never run**. **Add a rule for** offers `restart_deployment`, `scale_deployment`, `rollback_deployment`, `delete_pod`, `delete_resource`, `cordon_node`, `drain_node` and `apply_manifest` | No rules |
+| **Who may approve** | Slack member IDs. With none listed, anyone in the Slack channel can approve or deny | **Anyone in the channel** |
+| **Only some clusters** | Off: alerts on every cluster are handled. On: only alerts on the **Clusters Ankra AI may fix** | Off |
+| **Clusters Ankra AI leaves alone** | Alerts on these clusters are always left to people: no fixes and no approval requests | None |
 
-Board tickets are only worked by an agent you designate here. Until one is, every ticket the AI files is escalated straight to a person. Platform-created agents need the board identity before they can be designated; both live on the same card.
+<Warning>
+A rule set to **Run on its own** runs that fix with no approval at all, whatever the level. Set it only for a fix you would approve every time.
+</Warning>
 
-## Proactive Insight Thresholds
+Press **Save changes**. **You should see** **Saved. The next alert that fires follows this policy.** Fixes waiting for approval are also listed in [Needs you](/platform/activity-inbox).
 
-Tune when the platform flags cluster health issues - the restart-count threshold and how recent restarts must be to count. Leave a field empty to use the platform default. The **Analyse cluster health issues automatically** toggle in the same section turns the analysis on or off entirely; see [AI Insights](/platform/ai-insights).
+<CliVersion since="0.12.0" />
 
-## Permissions
+`ankra ai remediation policy` prints the saved policy, and `get_remediation_policy` reads it over MCP. Both are read-only: the policy changes only in the portal. An organisation that never saved a policy reads **Not set up yet. These are the platform's starting values.** in the portal.
 
-Everything on this page requires organisation **admin**. Members can view the current policy but not change it.
+To choose which alerts Ankra AI investigates and what it does for each, set up a watch. See [Watch for a problem](/guides/ai-watching).
 
-## Next
+## Tickets and the board
 
-See how these controls fit with chat modes, connection modes and agent autonomy in [What it can change without asking](/platform/ai-overview#what-it-can-change-without-asking).
+Where ticket threads are posted and whether plans need an independent review are set on the ticket desk: **Open the ticket desk** under **Tickets and the board**. See [Set up the ticket desk](/guides/ticket-desk).
+
+The portal cannot change which agents work board tickets, or the identity they act as. Use `designate_board_worker` over MCP and `ankra ai board-identity` in the CLI. See [Agents that work tickets](/platform/ai-agents#agents-that-work-tickets).
+
+## Finding problems on its own
+
+This section decides whether Ankra AI checks your clusters' health by itself. What it finds is what auto-remediation and the ticket desk act on.
+
+| Field | What it decides |
+| --- | --- |
+| **Check cluster health on its own** | On: each problem it finds gets a likely cause, the steps to fix it and questions to ask Ankra AI. Off: nothing below runs, and no ticket or fix is started from a health check |
+| **Restarts before a pod counts as unstable** | Leave it empty to use the platform's default |
+| **Hours that restarts are counted over** | Only restarts within this many hours count. Leave it empty for the default |
+| **Leave out system namespaces** | Skip `kube-system` and the other system namespaces when checking workloads |
+
+**You should see** **Saved. The next health check uses these settings.** Who is told about what Ankra AI finds is set in **Notification routes** (**Open Notification routes**). See [AI Insights](/platform/ai-insights).
+
+## Next steps
+
+- [What it can change without asking](/platform/ai-overview#what-it-can-change-without-asking) - how these controls fit with conversation modes, connection modes and agent autonomy
+- [AI agents](/platform/ai-agents) - autonomy for one agent
