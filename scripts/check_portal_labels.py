@@ -75,7 +75,7 @@ GENERATED_DIRECTORY = os.path.join("reference", "cli")
 GENERATED_PAGES = {"changelog.mdx", os.path.join("integrations", "ankra-cli-changelog.mdx")}
 REGENERATE = "python3 scripts/gen_portal_inventory.py --frontend-repo <ankra-frontend checkout> (git fetch it first)"
 # The inventory is a copy, so it ages. Past this many days the run says so: a label the portal gained since
-# the copy was taken fails here although the page is right.
+# the copy was taken fails here although the page is right. A warning, and a failure under --strict.
 INVENTORY_WARN_AFTER_DAYS = 14
 
 FENCE = re.compile(r"^\s*```")
@@ -465,7 +465,7 @@ def main(argv):
     if aged:
         print(
             annotate(
-                "warning",
+                "error" if strict else "warning",
                 "scripts/portal-inventory.json",
                 None,
                 f"the portal inventory was read {age} days ago ({inventory.where()}). A label or route the portal gained "
@@ -494,7 +494,7 @@ def main(argv):
         for entry in stale:
             what = f'label "{entry["label"]}"' if "label" in entry else entry["route"]
             print("  " + annotate(level, entry["page"], None, f"{what} no longer fails"), file=sys.stderr)
-    return 1 if new or (strict and stale) else 0
+    return 1 if new or (strict and (stale or aged)) else 0
 
 
 if __name__ == "__main__":
