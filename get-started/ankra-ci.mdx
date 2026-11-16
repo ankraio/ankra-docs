@@ -39,6 +39,7 @@ This tutorial takes one repository from nothing to a green check on a pull reque
 - **An Ankra organisation where you are an administrator.** Choosing the CI cluster and approving a pipeline are administrator actions. Anyone with pipeline access can do the rest.
 - **A cluster connected to Ankra** with a healthy agent and some spare capacity. Any cluster works, and it does not have to be dedicated to CI: steps run in their own `ankra-ci` namespace, in a worker pool kept apart from the agent's deploy work. Many teams start on their staging cluster and move CI to its own cluster later.
 - **The repository connected to Ankra** through the [Ankra GitHub App](/integrations/github), [GitLab](/integrations/gitlab) or [Bitbucket Cloud](/integrations/bitbucket-cloud). On GitHub, the App needs the **Checks: write** permission to post the `Ankra pipeline` check.
+- **A payment method on the organisation, if the cluster is not connected yet.** An organisation without one cannot create or connect a cluster. It may still run pipelines: steps on your own cluster never count against anything, and steps Ankra builds for you count against a free allowance of 100 minutes a month. Once that is spent, a new run stops with **Run did not start: add a payment method**. [Why was I refused?](/guides/why-was-i-refused) has each message and how to clear it.
 - **The Ankra CLI**, logged in to the right organisation:
 
 <CliVersion since="0.16.0" />
@@ -63,11 +64,13 @@ Pipelines run on one cluster per organisation, the **pipeline cluster**. Until y
     ```
   </Tab>
   <Tab title="Portal">
-    Open **Settings → Pipelines**. Under **Pipeline cluster**, pick the cluster in **Cluster** and click **Save**.
+    Open **Build & delivery → Builds and clusters** (`/next/organisation/pipelines`). Under **Where pipelines run**, pick the cluster in **Cluster** and click **Save changes**.
   </Tab>
 </Tabs>
 
-**You should see** your cluster named as the pipeline cluster in `ankra org ci-settings get`, or in the portal.
+**You should see** your cluster named as the pipeline cluster in `ankra org ci-settings get`. In the portal the page says **Saved. The next pipeline run uses these settings. Runs already going finish where they are.**, and **No cluster runs pipelines yet** is gone from **Where pipelines run**.
+
+When your cluster cannot build an image, the run stops, unless **Build on Ankra when your cluster cannot** is on under **Build rules** on the same page. With it on, the image is built on Ankra's build cluster instead. Turn it off if your code must never leave your own infrastructure.
 
 From CLI 0.71.0, `ankra org ci-settings set` also prints a warning under its output when the cluster it names has no sandbox runtime. The setting is saved all the same: the warning is about Ankra AI, which runs code on its own, to fix a build or regenerate a lockfile, only behind a sandbox, and refuses such a command until the cluster has one. On a cluster Ankra built with kubeadm, add a node group labelled `ankra.cloud/sandbox-runtime=gvisor`, for example `ankra cluster node-group add <cluster-name> --name sandbox --labels ankra.cloud/sandbox-runtime=gvisor`, or create an Ankra Cloud cluster with `ankra cluster ankracloud create --sandbox-nodes 1`. Image builds cannot run under gVisor, so that group comes beside the workers, never instead of them.
 
@@ -75,17 +78,12 @@ From CLI 0.71.0, `ankra org ci-settings set` also prints a warning under its out
 
 The Ankra agent on every cluster starts with **zero** pipeline workers, which means pipelines are switched off there. Give it some. Each worker runs one pipeline step at a time, separately from the agent's deploy and read work, so a busy pipeline never delays a deploy.
 
-<Tabs>
-  <Tab title="CLI">
-    ```bash
-    ankra cluster agent ci set --workers 2 --cluster <cluster-name>
-    ankra cluster agent ci get --cluster <cluster-name>
-    ```
-  </Tab>
-  <Tab title="Portal">
-    In **Settings → Pipelines**, under **Workers and step placement**, set **Pipeline-step workers** to `2` and click **Save**.
-  </Tab>
-</Tabs>
+```bash
+ankra cluster agent ci set --workers 2 --cluster <cluster-name>
+ankra cluster agent ci get --cluster <cluster-name>
+```
+
+The portal has no control for pipeline workers. Use `ankra cluster agent ci set`.
 
 Ankra applies the setting through the agent's own release. A recent agent picks up the new count straight away, and an older one restarts to pick it up. Do not `helm upgrade` the agent yourself to change it, because Ankra re-renders that release and would overwrite your value.
 
@@ -106,8 +104,8 @@ Ankra applies the setting through the agent's own release. A recent agent picks 
 
     The output starts with `Connected my-org/my-repo as repository <repository-id>`. Keep that id - the commands below take it as `--repository <repository-id>`, and `ankra pipeline repositories list` shows it again later.
   </Tab>
-  <Tab title="New portal (application)">
-    When the repository already backs an [Ankra application](/concepts/applications), open the application in the new Ankra portal (`/next` on your portal's address, for example `https://platform.ankra.app/next/applications`), then **Technical details → Pipelines**. Under **Connect this repository to pipelines**, pick the **Source connection**, click **Review pipeline connection**, then **Confirm pipeline connection**.
+  <Tab title="Portal (application)">
+    When the repository already backs an [Ankra application](/concepts/applications), open **Applications → <your application> → Technical details → Pipelines** (`/next/applications`). Under **Connect this repository to pipelines**, pick the **Source connection**, click **Review pipeline connection**, then **Confirm pipeline connection**.
 
     For an application, use `--application <application-name>` in the commands below instead of `--repository`. Inside a checkout of the application's repository you can leave it out: the CLI works it out from your `origin` remote and says which application it picked.
   </Tab>
@@ -115,7 +113,7 @@ Ankra applies the setting through the agent's own release. A recent agent picks 
 
 The connect output's second line reads `Definition: absent` until a pipeline file is on the default branch. That is expected - step 5 stores one.
 
-**You should see** the repository in `ankra pipeline repositories list`, and under **Settings → Pipelines** in the portal.
+**You should see** the repository in `ankra pipeline repositories list`. In the portal, an application's repository shows under the application's **Technical details → Pipelines**, and a repository with no application has its own page at `/next/pipelines/<repository-id>`.
 
 ## 4. Add `.ankra/pipeline.yaml`
 
@@ -242,7 +240,7 @@ ankra pipeline definition put .ankra/pipeline.yaml --repository <repository-id>
 On GitHub, every later run reads `.ankra/pipeline.yaml` from the commit it runs, so changing the file in a pull request changes that pull request's run. On GitLab and Bitbucket Cloud the stored definition is what runs, so run `definition put` again whenever you change the file.
 
 <Tip>
-You can also ask Ankra's AI to check a pipeline in the portal chat - "validate this .ankra/pipeline.yaml" with the file pasted in - which needs no repository at all.
+You can also ask Ankra AI to check a pipeline in **Ask Ankra** - "validate this .ankra/pipeline.yaml" with the file pasted in - which needs no repository at all.
 </Tip>
 
 ## 6. Open a pull request and watch the run
@@ -282,7 +280,9 @@ Approve it:
 
 <Tabs>
   <Tab title="Portal">
-    Open **Settings → Pipelines**. **Pending approvals** lists every repository waiting, with the protected settings it asks for. Review them and click **Approve**. You can also approve from the run page, or press **Approve authority** on the GitHub check if your GitHub account is linked to your Ankra profile.
+    Open **Build & delivery → Builds and clusters**. **Pipeline settings waiting for approval** lists every request, with the repository, the change, who asked and how many settings. Click **Review** on the row, compare **Approved now** with **Asks for**, and click **Approve these settings**.
+
+    On an application's run page, **Pipeline policy → Review authority for approval** opens the same review with **Approve for future runs**. You can also press **Approve authority** on the GitHub check if your GitHub account is linked to your Ankra profile.
   </Tab>
   <Tab title="CLI">
     The pull request comment prints the exact command with the definition id filled in. Read what you are granting, then approve it:
