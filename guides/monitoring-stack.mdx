@@ -1,74 +1,42 @@
 ---
-title: Build a Monitoring Stack
-description: Deploy a complete observability stack with metrics, logs, and alerting using kube-prometheus-stack and Loki
+title: Build a monitoring Stack
+description: Run your own Prometheus, Grafana, Alertmanager and Loki on a cluster as one Stack, with logs shipped by Grafana Alloy and alerts sent to Slack.
 ---
 
-<Note>
-This guide walks you through building a complete observability stack with Prometheus for metrics, Loki for logs, Grafana for visualization, and Alertmanager for notifications.
-</Note>
+import { CliVersion } from "/snippets/cli-version.jsx";
 
-<Frame caption="Building a Monitoring Stack on Ankra">
-  <video
-    controls
-    autoPlay
-    muted
-    loop
-    playsInline
-    className="w-full aspect-video rounded-xl"
-    src="https://fsn1.your-objectstorage.com/ankra-vod/docs/ai-monitoring-stack.mp4"
-  ></video>
-</Frame>
+This guide builds an observability [Stack](/concepts/stacks) of your own: Prometheus for metrics, Grafana to look at them, Alertmanager for notifications, Loki for logs and Grafana Alloy to ship the logs. You end up with an `observability` Stack on your cluster and a Grafana that shows both metrics and logs. It takes about 30 minutes.
 
-<Card title="AI Prompts" icon="wand-magic-sparkles" href="#ai-prompts">
-  Use these prompts with the AI Assistant (`⌘+J`) to get recommendations for building your stack.
-</Card>
+Ankra already shows each cluster's [metrics](/platform/cluster-metrics) and [logs](/platform/logs), and can keep container logs for you with [Ankra Hosted Logs](/guides/hosted-logs). Build this Stack when you want your own dashboards, PromQL and LogQL, longer retention or Alertmanager routing.
 
----
+| Add-on | Chart | Purpose |
+|-----------|---------|---------|
+| `kube-prometheus-stack` | Prometheus Community `kube-prometheus-stack` | Prometheus, Grafana, Alertmanager, node-exporter and kube-state-metrics |
+| `loki` | Grafana `loki` | Stores and queries logs |
+| `alloy` | Grafana `alloy` | Reads every pod's logs and sends them to Loki |
 
-## What You'll Build
+## Before you start
 
-A production-ready observability stack:
+- **A cluster connected to Ankra** and online, with a default StorageClass: Prometheus, Grafana and Loki keep data on volumes. See [Import a cluster](/guides/import-cluster).
+- **A role that may create and deploy Stacks** on that cluster. See [Create and change a stack](/guides/create-and-change-a-stack).
+- **The charts.** They come from the Prometheus Community registry (`https://prometheus-community.github.io/helm-charts`) and the Grafana registry (`https://grafana.github.io/helm-charts`). If **Find a chart** does not list them, [connect those Helm registries](/guides/registries) first.
+- **The organisation's encryption key and the `ankra` CLI**, to seal the Grafana password and the Slack webhook URL. On **Infrastructure → Variables and secrets**, **Encryption key** must not read **No encryption key yet**; click **Make the key** if it does. See [SOPS](/guides/sops).
 
-| Component | Purpose |
-|-----------|---------|
-| **kube-prometheus-stack** | Prometheus, Grafana, Alertmanager, and exporters in one chart |
-| **Loki** | Log aggregation-like Prometheus, but for logs |
-| **Promtail** | Ships logs from pods to Loki |
----
+## Step 1: Start the Stack
 
-## Prerequisites
+Open **Infrastructure → Clusters → &lt;your cluster&gt;**, then **Stacks** under **Technical details**. Click **Create a stack**, keep **Compose a stack**, enter `observability` as the **Stack name**, and click **Start the draft**.
 
-- A cluster imported into Ankra with the agent connected
-- Helm registries added for:
-  - **Prometheus Community** (`https://prometheus-community.github.io/helm-charts`)
-  - **Grafana** (`https://grafana.github.io/helm-charts`)
-
----
-
-## Step 1: Create the Stack
-
-<Steps>
-  <Step title="Open Stack Builder">
-    Navigate to your cluster → **Stacks** → **Create Stack**.
-  </Step>
-  <Step title="Name Your Stack">
-    Name it `observability` or `monitoring-and-logging`.
-  </Step>
-</Steps>
-
----
+The stack editor opens and reads **No resources yet**.
 
 ## Step 2: Add kube-prometheus-stack
 
-This chart bundles everything you need for metrics: Prometheus, Grafana, Alertmanager, node-exporter, and kube-state-metrics.
-
 <Steps>
-  <Step title="Add the Chart">
-    Click **+ Add** → search for `kube-prometheus-stack` from the Prometheus Community repository.
+  <Step title="Pick the chart">
+    Click **Add → Helm add-on**, search **Find a chart** for `kube-prometheus-stack` and pick the Prometheus Community chart. In **Configure**, choose the newest release in **Pinned chart version**, keep `kube-prometheus-stack` as the **Add-on name**, and enter `monitoring` as the **Namespace**.
   </Step>
-  <Step title="Configure Prometheus">
-    Click the component and set these values:
-    
+  <Step title="Set the values">
+    Paste this into **Values**. The Grafana password and the Slack URL are placeholders: you seal and set them in Step 5.
+
     ```yaml
     prometheus:
       prometheusSpec:
@@ -84,63 +52,49 @@ This chart bundles everything you need for metrics: Prometheus, Grafana, Alertma
               resources:
                 requests:
                   storage: 50Gi
-    ```
-  </Step>
-  <Step title="Configure Grafana">
-    ```yaml
     grafana:
-      adminPassword: "your-secure-password"  # Change this
+      adminPassword: change-me
       persistence:
         enabled: true
         size: 10Gi
-      # Add Loki as a data source (we'll deploy it next)
       additionalDataSources:
         - name: Loki
           type: loki
           url: http://loki-gateway.monitoring.svc.cluster.local
           access: proxy
           isDefault: false
-    ```
-  </Step>
-  <Step title="Configure Alertmanager for Slack">
-    ```yaml
     alertmanager:
       config:
         global:
-          slack_api_url: 'https://hooks.slack.com/services/YOUR/WEBHOOK/URL'
+          slack_api_url: https://hooks.slack.com/services/change-me
         route:
-          receiver: 'slack'
-          group_by: ['alertname', 'namespace']
+          receiver: slack
+          group_by: ["alertname", "namespace"]
           group_wait: 30s
           group_interval: 5m
           repeat_interval: 4h
         receivers:
-          - name: 'slack'
+          - name: slack
             slack_configs:
-              - channel: '#alerts'
+              - channel: "#alerts"
                 send_resolved: true
     ```
+
+    Click **Add to draft**. The add-on appears in the **Graph** and the status line reads **All changes saved**.
   </Step>
 </Steps>
 
-<Tip>
-**Encrypt sensitive values with SOPS:** In the manifest edit view, click the **SOPS** button to encrypt secrets like `grafana.adminPassword` and `slack_api_url`. This ensures sensitive values are stored encrypted in your GitOps repository. See [SOPS Encryption](/guides/sops) for setup instructions.
-</Tip>
-
----
-
-## Step 3: Add Loki for Logs
-
-Loki is a log aggregation system designed to work seamlessly with Grafana. It's lightweight because it only indexes metadata, not the full log content.
+## Step 3: Add Loki
 
 <Steps>
-  <Step title="Add Loki">
-    Click **+ Add** → search for `loki` from the Grafana repository.
-    
-    Use the **loki** chart (not loki-distributed for simpler setups).
+  <Step title="Pick the chart">
+    Click **Add → Helm add-on**, search for `loki` and pick the Grafana `loki` chart. Choose the newest **Pinned chart version**, keep `loki` as the **Add-on name**, and enter `monitoring` as the **Namespace**.
   </Step>
-  <Step title="Configure Loki">
+  <Step title="Set the values">
+    This runs Loki as a single binary on a volume, which suits one cluster. Paste into **Values** and click **Add to draft**:
+
     ```yaml
+    deploymentMode: SingleBinary
     loki:
       auth_enabled: false
       commonConfig:
@@ -156,17 +110,6 @@ Loki is a log aggregation system designed to work seamlessly with Grafana. It's 
             index:
               prefix: index_
               period: 24h
-    
-    # For production, configure object storage:
-    # storage:
-    #   type: s3
-    #   bucketNames:
-    #     chunks: loki-chunks
-    #     ruler: loki-ruler
-    #   s3:
-    #     endpoint: s3.amazonaws.com
-    #     region: us-east-1
-    
     singleBinary:
       replicas: 1
       resources:
@@ -176,131 +119,135 @@ Loki is a log aggregation system designed to work seamlessly with Grafana. It's 
       persistence:
         enabled: true
         size: 20Gi
-    
+    backend:
+      replicas: 0
+    read:
+      replicas: 0
+    write:
+      replicas: 0
     gateway:
       enabled: true
     ```
   </Step>
-  <Step title="Connect Dependency">
-    In the Stack Builder, draw a connection from **loki** to **kube-prometheus-stack** to ensure Loki deploys first (so Grafana can connect to it).
-  </Step>
 </Steps>
 
----
+## Step 4: Add Grafana Alloy
 
-## Step 4: Add Promtail for Log Collection
-
-Promtail runs as a DaemonSet on every node, collecting logs from all pods and shipping them to Loki.
+Alloy reads the logs of every pod through the Kubernetes API and sends them to Loki, labelled with namespace, pod and container. One replica is enough for a small cluster.
 
 <Steps>
-  <Step title="Add Promtail">
-    Click **+ Add** → search for `promtail` from the Grafana repository.
+  <Step title="Pick the chart">
+    Click **Add → Helm add-on**, search for `alloy` and pick the Grafana `alloy` chart. Choose the newest **Pinned chart version**, keep `alloy` as the **Add-on name**, and enter `monitoring` as the **Namespace**.
   </Step>
-  <Step title="Configure Promtail">
+  <Step title="Set the values">
+    Paste into **Values** and click **Add to draft**:
+
     ```yaml
-    config:
-      clients:
-        - url: http://loki-gateway.monitoring.svc.cluster.local/loki/api/v1/push
-      
-      snippets:
-        # Add useful labels from pod metadata
-        pipelineStages:
-          - cri: {}
-          - labeldrop:
-              - filename
-          - match:
-              selector: '{app=~".+"}'
-              stages:
-                - json:
-                    expressions:
-                      level: level
-                - labels:
-                    level:
-    
-    resources:
-      requests:
-        memory: 64Mi
-        cpu: 50m
-      limits:
-        memory: 128Mi
-        cpu: 100m
+    controller:
+      type: deployment
+      replicas: 1
+    alloy:
+      configMap:
+        content: |
+          discovery.kubernetes "pods" {
+            role = "pod"
+          }
+
+          discovery.relabel "pods" {
+            targets = discovery.kubernetes.pods.targets
+            rule {
+              source_labels = ["__meta_kubernetes_namespace"]
+              target_label  = "namespace"
+            }
+            rule {
+              source_labels = ["__meta_kubernetes_pod_name"]
+              target_label  = "pod"
+            }
+            rule {
+              source_labels = ["__meta_kubernetes_pod_container_name"]
+              target_label  = "container"
+            }
+          }
+
+          loki.source.kubernetes "pods" {
+            targets    = discovery.relabel.pods.output
+            forward_to = [loki.write.default.receiver]
+          }
+
+          loki.write "default" {
+            endpoint {
+              url = "http://loki-gateway.monitoring.svc.cluster.local/loki/api/v1/push"
+            }
+          }
     ```
   </Step>
-  <Step title="Connect Dependency">
-    Draw a connection from **promtail** to **loki**-Promtail needs Loki running to ship logs.
+  <Step title="Set the order">
+    Select `kube-prometheus-stack`, open its **Parents** tab and tick `loki` under **Depends on**, so Loki is up before Grafana looks for it. Then select `alloy` and tick `loki` too.
+
+    The **Graph** draws `loki` first, with `kube-prometheus-stack` and `alloy` after it.
   </Step>
 </Steps>
 
----
-
-## Step 5: Deploy
+## Step 5: Deploy, then seal the secrets
 
 <Steps>
-  <Step title="Review the Stack">
-    Your Stack Builder should show:
-    
-    ```
-    promtail → loki → kube-prometheus-stack
-    ```
-    
-    This ensures correct deployment order.
+  <Step title="Deploy">
+    Click **Review changes**, read the **Draft change log**, then click **Create and deploy stack**. The editor reads "Deployment accepted. Follow the operation for its outcome." Follow it in **Deployments** in the editor, or the cluster's **Operations**.
   </Step>
-  <Step title="Save and Deploy">
-    Click **Save**, then **Deploy**. Watch progress in **Operations**.
-  </Step>
-  <Step title="Verify Deployment">
-    After 3-5 minutes, all pods should be running:
-    - `prometheus-*`
-    - `grafana-*`
-    - `alertmanager-*`
-    - `loki-*`
-    - `promtail-*` (one per node)
-  </Step>
-</Steps>
+  <Step title="Seal the two secret keys">
+    Mark `adminPassword` and `slack_api_url` as encrypted. Ankra seals them with your organisation's key whenever it writes the Stack to Git, and the cluster decrypts them when it deploys.
 
----
+    <CliVersion since="0.20.0" />
 
-## Step 6: Explore in Grafana
-
-<Steps>
-  <Step title="Access Grafana">
-    Port-forward to access locally:
     ```bash
-    kubectl port-forward svc/kube-prometheus-stack-grafana 3000:80 -n monitoring
-    ```
-    Or configure an ingress in the values.
-  </Step>
-  <Step title="Log In">
-    - **Username:** `admin`
-    - **Password:** The value you set in `grafana.adminPassword`
-  </Step>
-  <Step title="Query Metrics">
-    Go to **Explore** → Select **Prometheus** → Try:
-    ```promql
-    sum(rate(container_cpu_usage_seconds_total{namespace="default"}[5m])) by (pod)
+    ankra cluster encrypt addon --name kube-prometheus-stack \
+      --key adminPassword --key slack_api_url \
+      --stack observability --cluster my-cluster
     ```
   </Step>
-  <Step title="Query Logs">
-    Go to **Explore** → Select **Loki** → Try:
-    ```logql
-    {namespace="default"} |= "error"
-    ```
-  </Step>
-  <Step title="Correlate Metrics and Logs">
-    The power of this stack: when you see a spike in metrics, click through to see logs from that exact time range.
+  <Step title="Set the real values">
+    In the stack editor, click **Start a draft**, select `kube-prometheus-stack`, and replace the two placeholders in **Values** with your Grafana password and your Slack webhook URL. Click **Review changes**, then **Deploy reviewed changes**.
+
+    The values are sealed when the Stack is written to Git, so your repository holds `ENC[...]` for both keys. Until that write, Ankra stores the values as you typed them, in plain text.
   </Step>
 </Steps>
 
----
+## Verify
 
-## Production Considerations
+1. The pods are running (3 to 5 minutes after the deploy):
+
+   ```bash
+   ankra cluster get pods -n monitoring --cluster my-cluster
+   ```
+
+   You see `prometheus-*`, `alertmanager-*`, `*-grafana-*`, `loki-*` and `alloy-*` pods reading `Running`.
+2. Open Grafana. Ankra has no port-forward command; with a kubeconfig from the cluster's **Kubectl access** page (see [Kubeconfig](/guides/kubeconfig)), run:
+
+   ```bash
+   kubectl port-forward svc/kube-prometheus-stack-grafana 3000:80 -n monitoring
+   ```
+
+   Open `http://localhost:3000` and sign in as `admin` with the password you set. To reach it without a port-forward, give Grafana an Ingress in its values, or put it behind a [Cloudflare Tunnel](/guides/cloudflare-tunnel).
+3. In **Explore**, pick **Prometheus** and run:
+
+   ```promql
+   sum(rate(container_cpu_usage_seconds_total{namespace="default"}[5m])) by (pod)
+   ```
+4. In **Explore**, pick **Loki** and run:
+
+   ```logql
+   {namespace="monitoring"}
+   ```
+
+   Log lines from the monitoring pods appear.
+
+## For production
 
 <AccordionGroup>
-  <Accordion title="Scale Loki for High Volume">
-    For clusters generating >100GB/day of logs, use distributed mode:
-    
+  <Accordion title="Keep Loki's logs in object storage">
+    For high log volume, store chunks in an S3-compatible bucket (see [Object storage buckets](/guides/object-storage-buckets)) instead of the volume:
+
     ```yaml
-    # Use loki-distributed chart instead
     loki:
       schemaConfig:
         configs:
@@ -313,15 +260,17 @@ Promtail runs as a DaemonSet on every node, collecting logs from all pods and sh
               period: 24h
       storage:
         type: s3
+        bucketNames:
+          chunks: my-loki-chunks
+          ruler: my-loki-ruler
         s3:
-          endpoint: s3.amazonaws.com
-          region: us-east-1
-          bucketnames:
-            chunks: your-loki-chunks-bucket
-            ruler: your-loki-ruler-bucket
+          endpoint: <s3-endpoint>
+          region: <region>
     ```
+
+    For more volume still, switch `deploymentMode` to `SimpleScalable` and give `backend`, `read` and `write` replicas.
   </Accordion>
-  <Accordion title="Increase Prometheus Retention">
+  <Accordion title="Keep Prometheus data longer">
     ```yaml
     prometheus:
       prometheusSpec:
@@ -336,9 +285,19 @@ Promtail runs as a DaemonSet on every node, collecting logs from all pods and sh
                   storage: 100Gi
     ```
   </Accordion>
-  <Accordion title="Add Recording Rules">
-    Pre-compute expensive queries:
-    
+  <Accordion title="Keep Loki's logs for a set time">
+    ```yaml
+    loki:
+      limits_config:
+        retention_period: 168h
+      compactor:
+        retention_enabled: true
+        delete_request_store: filesystem
+    ```
+  </Accordion>
+  <Accordion title="Add recording rules">
+    In `kube-prometheus-stack`'s values:
+
     ```yaml
     additionalPrometheusRulesMap:
       recording-rules:
@@ -350,25 +309,14 @@ Promtail runs as a DaemonSet on every node, collecting logs from all pods and sh
                 expr: sum(rate(container_cpu_usage_seconds_total[5m])) by (namespace)
     ```
   </Accordion>
-  <Accordion title="Configure Log Retention">
-    Set how long Loki keeps logs:
-    
-    ```yaml
-    loki:
-      limits_config:
-        retention_period: 168h  # 7 days
-      compactor:
-        retention_enabled: true
-    ```
-  </Accordion>
 </AccordionGroup>
 
----
+## Add your own alerts
 
-## Adding Custom Alerts
+Each rule goes under `additionalPrometheusRulesMap` in `kube-prometheus-stack`'s values; Alertmanager sends what fires to Slack.
 
 <AccordionGroup>
-  <Accordion title="Pod Restart Alert">
+  <Accordion title="A pod restarts too often">
     ```yaml
     additionalPrometheusRulesMap:
       pod-alerts:
@@ -385,7 +333,7 @@ Promtail runs as a DaemonSet on every node, collecting logs from all pods and sh
                   description: "Pod has restarted {{ $value }} times in the last hour"
     ```
   </Accordion>
-  <Accordion title="High Error Rate Alert">
+  <Accordion title="High error rate">
     ```yaml
     additionalPrometheusRulesMap:
       app-alerts:
@@ -394,7 +342,7 @@ Promtail runs as a DaemonSet on every node, collecting logs from all pods and sh
             rules:
               - alert: HighErrorRate
                 expr: |
-                  sum(rate(http_requests_total{status=~"5.."}[5m])) 
+                  sum(rate(http_requests_total{status=~"5.."}[5m]))
                   / sum(rate(http_requests_total[5m])) > 0.05
                 for: 5m
                 labels:
@@ -404,7 +352,7 @@ Promtail runs as a DaemonSet on every node, collecting logs from all pods and sh
                   description: "Error rate is {{ $value | humanizePercentage }}"
     ```
   </Accordion>
-  <Accordion title="Disk Space Alert">
+  <Accordion title="Low disk space">
     ```yaml
     additionalPrometheusRulesMap:
       node-alerts:
@@ -413,7 +361,7 @@ Promtail runs as a DaemonSet on every node, collecting logs from all pods and sh
             rules:
               - alert: DiskSpaceLow
                 expr: |
-                  (node_filesystem_avail_bytes{mountpoint="/"} 
+                  (node_filesystem_avail_bytes{mountpoint="/"}
                   / node_filesystem_size_bytes{mountpoint="/"}) < 0.1
                 for: 10m
                 labels:
@@ -425,115 +373,57 @@ Promtail runs as a DaemonSet on every node, collecting logs from all pods and sh
   </Accordion>
 </AccordionGroup>
 
----
-
-## Troubleshooting
+## What can go wrong
 
 <AccordionGroup>
-  <Accordion title="Logs Not Appearing in Loki">
-    1. Check Promtail pods are running on all nodes:
+  <Accordion title="No logs in Loki">
+    1. Check the Alloy pod and its logs:
        ```bash
-       kubectl get pods -n monitoring -l app.kubernetes.io/name=promtail
+       ankra cluster get pods -n monitoring --name alloy --cluster my-cluster
+       ankra cluster logs -l app.kubernetes.io/name=alloy -n monitoring --tail 50 --follow=false --cluster my-cluster
        ```
-    2. Check Promtail logs for errors:
+    2. Check Loki answers, from the Alloy pod (take its name from the first command):
        ```bash
-       kubectl logs -n monitoring -l app.kubernetes.io/name=promtail --tail=50
-       ```
-    3. Verify Loki is reachable from Promtail:
-       ```bash
-       kubectl exec -n monitoring -it $(kubectl get pod -n monitoring -l app.kubernetes.io/name=promtail -o name | head -1) -- wget -q -O- http://loki-gateway.monitoring.svc.cluster.local/ready
+       ankra cluster exec <alloy-pod> -n monitoring --cluster my-cluster -- wget -qO- http://loki-gateway.monitoring.svc.cluster.local/ready
        ```
   </Accordion>
-  <Accordion title="Grafana Can't Connect to Loki">
-    1. Verify the Loki data source URL matches your service name
-    2. Check Loki gateway is running:
+  <Accordion title="Grafana cannot reach Loki">
+    1. Check the Loki data source URL matches the gateway service:
        ```bash
-       kubectl get svc -n monitoring | grep loki
+       ankra cluster get services -n monitoring --cluster my-cluster
        ```
-    3. Test from Grafana pod:
-       ```bash
-       kubectl exec -n monitoring -it $(kubectl get pod -n monitoring -l app.kubernetes.io/name=grafana -o name) -- curl http://loki-gateway.monitoring.svc.cluster.local/ready
-       ```
+    2. Check the data source in Grafana's **Connections** points at `http://loki-gateway.monitoring.svc.cluster.local`.
   </Accordion>
-  <Accordion title="High Memory Usage">
-    - **Prometheus:** Reduce scrape frequency, shorten retention, drop unused metrics
-    - **Loki:** Reduce retention period, use object storage instead of filesystem
-    - **Promtail:** Limit which logs are collected using `pipelineStages` to drop verbose logs
+  <Accordion title="A pod stays Pending">
+    A volume could not be created, usually because the cluster has no default StorageClass. Check with `ankra cluster get storageclasses --cluster my-cluster`, then make one the default or set `storageClassName` in the values.
   </Accordion>
-  <Accordion title="Slow Log Queries">
-    1. Add more labels in Promtail for better filtering
-    2. Use time range filters in queries
-    3. For production, use Loki distributed mode with more queriers
+  <Accordion title="The deployment fails">
+    Open the cluster's **Operations** for the failing step. A downgrade or a missing chart version is refused before anything is applied; see [Create and change a stack](/guides/create-and-change-a-stack#what-can-go-wrong).
+  </Accordion>
+  <Accordion title="Memory use is high">
+    - **Prometheus:** shorten retention, scrape less often, drop metrics you do not use.
+    - **Loki:** shorten retention, move chunks to object storage.
   </Accordion>
 </AccordionGroup>
 
----
+## Ask Ankra AI
 
-## AI Prompts
+Press `⌘J` (or `Ctrl+J`) to open **Ask Ankra** and describe what you need, for example:
 
-Press `⌘+J` to open the AI Assistant and use these prompts to get recommendations for your stack:
+```
+Build an observability stack on this cluster with kube-prometheus-stack,
+Loki with 7 day retention and Grafana Alloy for pod logs, and send
+alerts to Slack.
+```
 
-<AccordionGroup>
-  <Accordion title="Complete Observability Stack">
-    ```
-    Build an observability stack with:
-    - kube-prometheus-stack for metrics
-    - Loki for logs with 7 day retention
-    - Promtail to collect logs from all pods
-    - Configure Grafana with both data sources
-    - Send alerts to Slack
-    ```
-  </Accordion>
-  <Accordion title="Production Stack with Object Storage">
-    ```
-    Create a production monitoring stack:
-    - Prometheus with 30 day retention on 100GB storage
-    - Loki configured for S3 storage in us-east-1
-    - Alertmanager with Slack notifications to #platform-alerts
-    - Include alerts for pod restarts, high CPU, and disk space
-    ```
-  </Accordion>
-  <Accordion title="Lightweight Stack for Dev Clusters">
-    ```
-    I need a lightweight observability stack for a dev cluster.
-    Keep total memory under 2GB. Include Prometheus, Loki, and 
-    Grafana but with minimal retention (3 days for both).
-    ```
-  </Accordion>
-  <Accordion title="Add Logging to Existing Prometheus">
-    ```
-    I already have kube-prometheus-stack running. Add Loki and 
-    Promtail to my stack and configure the Loki data source in 
-    my existing Grafana.
-    ```
-  </Accordion>
-  <Accordion title="Debug Log Collection Issues">
-    ```
-    My Promtail isn't sending logs to Loki. Help me troubleshoot
-    and fix the configuration.
-    ```
-  </Accordion>
-</AccordionGroup>
+```
+I already run kube-prometheus-stack in the observability stack. Add Loki
+and Alloy to it and add Loki as a Grafana data source.
+```
 
-<Tip>
-The AI provides recommendations for components, dependencies, and values. Just describe what you need, build based on the guidance, and deploy.
-</Tip>
+## Next steps
 
----
-
-## Next Steps
-
-<CardGroup cols={2}>
-  <Card title="Configure Ankra Alerts" icon="bell" href="/guides/alerts">
-    Set up Ankra alerts alongside Prometheus Alertmanager.
-  </Card>
-  <Card title="GitOps Sync" icon="git-alt" href="/concepts/gitops">
-    Store your observability stack configuration in Git.
-  </Card>
-  <Card title="Add Tracing" icon="route" href="https://grafana.com/docs/tempo/latest/">
-    Complete the observability trifecta with Tempo for distributed tracing.
-  </Card>
-  <Card title="Explore with AI" icon="wand-magic-sparkles" href="/platform/ai-assistant">
-    Use the AI to query your logs and metrics in natural language.
-  </Card>
-</CardGroup>
+- [Alerts](/guides/alerts) - Ankra's own alerts, beside Alertmanager.
+- [Notification routing](/guides/notification-routing) - where Ankra sends them.
+- [GitOps](/concepts/gitops) - keep the Stack in your own repository.
+- [SOPS](/guides/sops) - seal other values in your Stacks.

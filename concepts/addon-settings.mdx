@@ -7,18 +7,22 @@ Once an add-on is deployed, you decide how Ankra keeps it that way: whether drif
 
 ## Overview
 
-On the native engine, the default for new clusters, the Ankra agent applies these settings with Helm. A cluster still on ArgoCD uses the same fields for the add-on's ArgoCD Application. The [Deployment Engines](/concepts/deployment-engines#feature-parity) parity table shows how each engine honours them. You can change the settings from:
+On the native engine, the default for new clusters, the Ankra agent applies these settings with Helm. A cluster still on Argo CD uses the same fields for the add-on's Argo CD Application. The [Deployment Engines](/concepts/deployment-engines#feature-parity) parity table shows how each engine honours them.
 
-- **Stack Builder** - click any add-on and open the **Settings** tab
-- **Standalone Add-ons** - open the add-on and click **Settings**
+You change the settings in two places:
 
-Changes made in the Stack Builder are applied when you save the stack. Changes to standalone add-ons are applied immediately.
+- **The stack editor.** Select the add-on in its Stack and open the **Deployment settings** tab. Your changes go into the Stack's draft like any other edit, and reach the cluster when you review and deploy the draft (**Review changes**, then **Deploy reviewed changes**). See [Create and change a stack](/guides/create-and-change-a-stack).
+- **The CLI.** `ankra cluster addons settings get <addon>` reads them and `ankra cluster addons settings set <addon>` changes them; see the [CLI reference](/reference/cli/cluster).
+
+The add-on's own page under **Add-ons** shows its saved and installed values, not these settings.
+
+The **Deployment settings** tab groups the sync policy, sync options, sync window and ignore rules under **Argo CD synchronization**, with the line "These options apply when Argo CD deploys this add-on." The native engine also honours several of them; the note under [Sync Options](#sync-options) lists which.
 
 ---
 
 ## Settings Profiles
 
-Profiles are pre-configured bundles of settings optimized for common scenarios. Select a profile to quickly apply recommended values, or choose **Custom** to configure each setting individually.
+Profiles are pre-configured bundles of settings for common scenarios. Ankra keeps them with each add-on's settings (the API returns them as `available_profiles`), but neither the **Deployment settings** tab nor `ankra cluster addons settings set` offers a profile choice: both set each value on its own. Use the table as a starting point for the values to set.
 
 | Profile | Automated Sync | Auto Prune | Self Heal | Health Check | Revision Limit | Best For |
 |---------|:-:|:-:|:-:|:-:|:-:|---------|
@@ -27,7 +31,6 @@ Profiles are pre-configured bundles of settings optimized for common scenarios. 
 | **Production Critical** | Off | Off | Off | On | 20 | Critical workloads requiring manual control |
 | **Stateful** | On | Off | On | Off | 10 | Databases, message queues, stateful apps |
 
-Changing any individual setting automatically switches the profile to **Custom**.
 
 ---
 
@@ -37,11 +40,11 @@ The sync policy determines how Ankra responds to changes in the desired state an
 
 ### Automated Sync
 
-When enabled, your add-on is synced automatically whenever its desired state changes. When disabled, you must trigger syncs manually.
+In the portal: **Sync automatically**. When enabled, your add-on is synced automatically whenever its desired state changes. When disabled, you must trigger syncs manually.
 
 ### Auto Prune
 
-When enabled alongside Automated Sync, Kubernetes resources that are no longer part of the add-on's desired state are deleted automatically. This keeps your cluster clean but means removing a resource from your stack will delete it from the cluster.
+In the portal: **Remove resources deleted from the definition**. When enabled alongside Automated Sync, Kubernetes resources that are no longer part of the add-on's desired state are deleted automatically. This keeps your cluster clean but means removing a resource from your stack will delete it from the cluster.
 
 <Warning>
 Auto Prune can delete resources that were removed from your Git repository. Make sure you intend to remove them before enabling this option.
@@ -49,7 +52,7 @@ Auto Prune can delete resources that were removed from your Git repository. Make
 
 ### Self Heal
 
-When enabled alongside Automated Sync, manual changes made directly to the cluster are reverted automatically. If someone modifies a resource with `kubectl`, the drift is detected and the resource is restored to match the desired state.
+In the portal: **Reconcile changes made outside the definition**. When enabled alongside Automated Sync, manual changes made directly to the cluster are reverted automatically. If someone modifies a resource with `kubectl`, the drift is detected and the resource is restored to match the desired state.
 
 ---
 
@@ -74,29 +77,35 @@ Sync options apply only to add-ons on clusters that still use the [ArgoCD engine
 | **Replace** | Use `kubectl replace` instead of `kubectl apply`. Useful when apply fails due to field conflicts |
 | **Fail on Shared Resource** | Fail the sync if a resource is already managed by another ArgoCD Application |
 
-<Tip>
-**Server-Side Apply** and **Create Namespace** are enabled by default in most profiles. Server-Side Apply is recommended because it handles large objects and field conflicts better than client-side apply.
-</Tip>
+In the portal, sync options are the **Sync options** field under **Argo CD synchronization**, one option per line. A new add-on starts with `CreateNamespace=true` and `ServerSideApply=true`. As the note above says, they matter only on the Argo CD engine.
 
 ---
 
-## Health & Revisions
+## Deployment behaviour
+
+The **Deployment settings** tab opens with these, under **Deployment behavior**.
+
+| Setting (portal label) | What it does | Default |
+|------|------|------|
+| **Helm wait timeout in seconds** | How long the Helm install or upgrade waits for the add-on's resources. | Empty: the platform default |
+| **Roll back when deployment fails** | Rolls the release back to its previous revision when the deployment fails. | On |
+| **Keep failed resources for investigation** | Leaves the resources of a failed deployment on the cluster so you can inspect them. | Off |
 
 ### Strict Health Check
 
-When enabled, Ankra requires **all** resources created by the add-on to report a healthy status before considering the deployment successful. This is useful for production-critical add-ons where partial deployments are unacceptable.
+In the portal: **Require strict health checks**. When enabled, Ankra requires **all** resources created by the add-on to report a healthy status before considering the deployment successful. This is useful for production-critical add-ons where partial deployments are unacceptable.
 
 When disabled (default), the sync is considered successful as soon as resources are applied, regardless of their health status.
 
 ### Revision History Limit
 
-Controls how many previous revisions are retained (1-100; Helm's `--history-max` on the native engine). Higher values consume more storage but make it easier to audit changes and understand deployment history. The default is **10**.
+In the portal: **Revisions to retain**. Controls how many previous revisions are retained (1-100; Helm's `--history-max` on the native engine). Higher values consume more storage but make it easier to audit changes and understand deployment history. The default is **10**.
 
 ---
 
 ## Retry Policy
 
-The retry policy controls automatic retry behaviour when a sync operation fails.
+The retry policy controls automatic retry behaviour when a sync operation fails. In the portal it is the **Retry policy** group: **Retry limit**, **Initial retry delay**, **Retry delay multiplier** and **Maximum retry delay**.
 
 | Field | Description | Default |
 |-------|-------------|---------|
@@ -111,7 +120,7 @@ Retries use exponential backoff: each retry waits longer than the previous one, 
 
 ## Sync Window
 
-Sync windows restrict when your add-on may be synchronized. This is useful for enforcing change-management policies, such as only allowing deployments during business hours or maintenance windows.
+Sync windows restrict when your add-on may be synchronised. In the portal, tick **Restrict sync to a schedule** under **Argo CD synchronization**, then fill in **Sync schedule**, **Sync window duration** and **Sync timezone**. This is useful for enforcing change-management policies, such as only allowing deployments during business hours or maintenance windows.
 
 | Field | Description | Example |
 |-------|-------------|---------|
@@ -125,7 +134,7 @@ When a sync window is active, the add-on is only synced during the defined windo
 
 ## Ignore Differences
 
-Ignore Differences lets you skip specific fields when comparing the desired state with the live state (cluster). This prevents false drift reports caused by fields that are mutated at runtime by Kubernetes controllers, webhooks, or operators.
+Ignore Differences lets you skip specific fields when comparing the desired state with the live state (cluster). In the portal, open **Differences to ignore** under **Argo CD synchronization** and select **Add difference rule**; each rule has **Group**, **Kind**, **Name** and **Namespace**, and the matching methods **JSON pointers**, **jq path expressions** and **Field managers**, one entry per line. An add-on takes up to 100 rules. This prevents false drift reports caused by fields that are mutated at runtime by Kubernetes controllers, webhooks, or operators.
 
 ### Why Ignore Differences?
 
@@ -314,9 +323,6 @@ Managed Fields Managers is the broadest matching method. It ignores **all** fiel
 **RespectIgnoreDifferences is automatic.** When you add ignore rules, the `RespectIgnoreDifferences=true` sync option is automatically enabled. You do not need to add it manually.
 </Info>
 
-<Info>
-**Custom profile.** Adding or modifying ignore rules automatically switches your settings profile to **Custom**.
-</Info>
 
 ---
 
@@ -344,7 +350,7 @@ ankra cluster addons settings set cnpg-cluster \
 ```
 
 <Info>
-**The Stateful profile turns it on.** Choosing **Stateful** for an add-on enables its backup override, because an add-on somebody chose stateful settings for is an add-on with data. As with every other setting, changing one by hand switches the profile to **Custom**.
+**The Stateful profile turns it on.** Applying the **Stateful** profile enables an add-on's backup override, because an add-on somebody chose stateful settings for is an add-on with data. The portal and the CLI do not apply profiles; set `--backup-enabled` yourself.
 </Info>
 
 ---

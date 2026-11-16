@@ -1,0 +1,123 @@
+---
+title: Find out why your bill went up, and bring it down
+sidebarTitle: Find out why your bill went up
+description: Trace a rise in cloud cost to the cluster, the change and the workload behind it, read what you could save, and set a budget that warns you next time.
+---
+
+import { CliVersion } from "/snippets/cli-version.jsx";
+
+Your cloud spend went up and you want to know why. This guide follows the money from the organisation's run rate down to the cluster, the change that moved it and the namespace or Stack that costs most, then reads the savings Ankra found and sets a budget so the next rise reaches you before the invoice does. It takes about 15 minutes.
+
+Every figure here is an estimate from published prices or your rate cards, less any effective discount you set, as described on [Cloud Cost](/platform/cloud-cost). Use it to find causes and trends, not to reconcile an invoice to the cent.
+
+## Before you start
+
+- **Priced clusters.** A cluster with no price source reads **not priced**, never zero; see [Get a number for every cluster](/platform/cloud-cost#get-a-number-for-every-cluster).
+- **The `ankra` CLI**, signed in to your organisation. The steps use it because every organisation has it.
+- **`billing.manage`** to add a budget in the last step. Every member can read the figures.
+- **The portal's Cost area** is optional: it is in closed beta and enabled per organisation on request. Where it is on, each step names the tab that shows the same figures.
+
+<CliVersion since="0.49.0" />
+
+## 1. See when the run rate moved
+
+```bash
+ankra cost summary --all-projects
+ankra cost trend --days 30 --all-projects
+```
+
+`summary` shows the current run rate and the projected month end. `trend` draws the run rate per day. Days when the set of priced clusters changed - a cluster created, deleted, stopped, or losing its price - are listed apart: the line moved there without anything being spent. A rise outside those days is real spend.
+
+In the portal: **Cost → Overview**.
+
+## 2. Find the change that moved it
+
+```bash
+ankra cost events --all-projects
+```
+
+Events are listed newest first: application releases, node-count changes, scheduled and manual stops and starts, executed cost decisions, clusters entering or leaving pricing, and resolved waste. Each one says how the cluster's run rate changed between the priced hour before it and the first priced hour at least 30 minutes after it. When several events share that window, such as a release and the scale-up it caused, the move is theirs together and each row says "shared".
+
+Note the cluster named on the events around the day the run rate rose.
+
+## 3. Read the cluster
+
+```bash
+ankra cost cluster my-cluster
+```
+
+This shows the cluster's totals, the breakdown by component, how the cost is allocated to its namespaces, and whether the cluster is fully priced. Compare the component that grew with the event you noted: more nodes show up as compute, a new volume as storage.
+
+In the portal: the cluster's **Cost** page, under **How the monthly rate is built** and **Servers in this cluster**.
+
+## 4. Find the workload
+
+```bash
+ankra cost namespaces my-cluster --days 7
+ankra cost object stack my-cluster my-stack
+```
+
+`namespaces` lists the costliest 25 namespaces with their total, latest and peak, so a namespace that grew stands out. `object stack` prices one Stack on its own; `object application` and `object namespace` do the same for an application or a namespace.
+
+In the portal: **Cost → Explore spend**, or **Cost by namespace** on the cluster's **Cost** page.
+
+You now know which cluster, which change and which workload. If the rise is expected, such as a new service or more traffic, set a budget in step 6 so the new level is watched.
+
+## 5. Read what you could save
+
+```bash
+ankra cost savings
+```
+
+Each recommendation names its cluster, its estimated monthly saving and its basis: **measured** (from observed usage), **billed** (an off-hours stop on billed compute) or **estimate** (capacity less requests, with no usage measured). The total counts only measured and billed savings, each cluster once at its best lever. The levers are:
+
+- right-size idle capacity,
+- reduce run rate no namespace claims,
+- stop a known non-production cluster on weeknights and weekends.
+
+Approving and running one of them is a cost decision: see [Review, approve and run decisions](/guides/cost-budgets-and-autopilot#3-review-approve-and-run-decisions). Resources that bill while doing no work, such as an unattached volume or a load balancer with no targets, are listed under [Orphaned and idle resources](/platform/cloud-cost#orphaned-and-idle-resources).
+
+In the portal: **Cost → Savings**.
+
+## 6. Set a budget that warns you
+
+<Tabs>
+  <Tab title="CLI">
+    ```bash
+    ankra cost budgets set --scope cluster --scope-id my-cluster \
+      --name "my-cluster" --amount 1500 --currency eur --notify-at 80
+    ```
+
+    `--amount` is per month. `--scope` can also be `organisation`, `project`, `environment` (a cluster label) or `application`; a scope holds one budget.
+  </Tab>
+  <Tab title="Portal (closed beta)">
+    Open **Cost → Budgets & alerts** and click **New budget**. Choose **What it covers** (**The whole organisation**, **One cluster** or **Clusters with one label**), give it a **Name**, a **Monthly budget** and a **Currency**, optionally an **Owner**, and set **Notice at (% of the budget)**. Click **Add the budget**.
+  </Tab>
+</Tabs>
+
+When the projected month end reaches the notice threshold, Ankra raises a **Budget crossing** notification; route it to a channel with [notification routing](/guides/notification-routing). The budget's owner, or the organisation's admins when it has none, also gets an email when the month first reaches the threshold, when it is projected past the budget and when it is spent past it.
+
+## Verify
+
+```bash
+ankra cost budgets list
+```
+
+Your budget is listed with the month so far, the projected month end and the hour it would cross the budget.
+
+## What can go wrong
+
+| What you see | What to do |
+| --- | --- |
+| A cluster reads **not priced** | It has no price source, or it is offline. `ankra cost cluster <name>` says which; see [Get a number for every cluster](/platform/cloud-cost#get-a-number-for-every-cluster). |
+| The trend jumps on a day with no change of yours | Check the days listed apart in `ankra cost trend`: a cluster entered pricing, so the line moved without any new spend. |
+| An event says the move is unknown | A start alone in a window whose run rate fell (or a stop in one where it rose) did not make that move; the row says which way the run rate went. Something else moved it. |
+| A namespace bucket is drawn `·` | No hour in that bucket was metered. It is unknown, not zero. A namespace drawn `_` was metered and allocated nothing. |
+| `ankra cost savings` lists clusters it could not analyse | The model analyses the biggest priced clusters within a limit; `ankra cost settings get` shows it. |
+| A budget reads `unknown` | No cluster in its scope is priced. |
+
+## Next steps
+
+- [Cloud Cost](/platform/cloud-cost) - how every figure is priced, rate cards for private capacity, and comparing providers.
+- [Cost budgets and the autopilot](/guides/cost-budgets-and-autopilot) - let Ankra propose cost changes and measure what they saved.
+- [Power schedules](/platform/cluster-power-schedules) - stop non-production clusters out of hours.
