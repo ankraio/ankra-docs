@@ -1,6 +1,6 @@
 ---
 title: Stacks
-description: A Stack is what a cluster should run - Helm add-ons and your own Kubernetes manifests, deployed together in dependency order.
+description: Learn how a Stack groups Helm add-ons, applications and your own manifests, and deploys them together in dependency order.
 ---
 
 import { CliVersion } from "/snippets/cli-version.jsx";
@@ -9,16 +9,17 @@ A cluster rarely needs just one chart. Monitoring needs a namespace, Prometheus,
 
 ## What a Stack contains
 
-- **[Add-ons](/concepts/addons)** - Helm charts, each with a chart version and its values.
+- **[Add-ons](/concepts/addons)** - Helm charts, each with a pinned chart version and its values.
+- **[Applications](/concepts/applications)** - applications you registered in Ankra, each pinned to a version.
 - **[Manifests](#manifests)** - your own Kubernetes YAML: namespaces, Secrets, CRDs, RBAC, custom resources.
 - **[Variables](/concepts/variables)** - Stack-level values referenced as `${{ ankra.name }}`. A Stack variable overrides a cluster or organisation variable of the same name.
-- **Dependency edges** - which component has to succeed before another one starts.
+- **Dependency edges** - which member has to succeed before another one starts.
 
-A cluster usually has several Stacks, one concern each, rather than one Stack that holds everything.
+A cluster usually has several Stacks, one concern each (ingress, observability, a database), rather than one Stack that holds everything, so each one changes and rolls back on its own.
 
 ## Deployment order
 
-Components that do not depend on anything deploy in parallel. A component with parents waits until they have succeeded, so a namespace manifest goes before the add-ons and resources that live in it, and an operator goes before the custom resources it reconciles.
+Members that do not depend on anything deploy in parallel. A member with parents waits until they have succeeded, so a namespace manifest goes before the add-ons and resources that live in it, and an operator goes before the custom resources it reconciles.
 
 ```mermaid
 flowchart LR
@@ -28,6 +29,8 @@ flowchart LR
 ```
 
 Here the namespace deploys first, then the ConfigMap, then the add-on that reads both.
+
+Between Stacks, the order comes from each Stack's **Deploy wave**, set in **Stack settings**: Stacks in lower waves deploy first, and the dependencies inside each Stack still order its members.
 
 ## Manifests
 
@@ -52,27 +55,47 @@ rules:
     verbs: ["get", "list"]
 ```
 
-**Secrets in manifests.** If a manifest carries a password or key and the cluster is connected to Git, list the key names under **Encrypted Keys (SOPS)** in the manifest editor, for example `password` or `stringData.admin-user`. Ankra encrypts those values with SOPS before it writes the manifest to Git and decrypts them when it deploys. SOPS needs a one-time setup for the organisation - see [SOPS](/guides/sops).
+**Secrets in manifests.** A password or key does not belong in a manifest as plain text. Store it as an organisation secret under **Infrastructure → Variables and secrets** and put its reference, `${SECRET_SLOT:<id>}`, where the value goes; the editor shows the reference with a lock and the secret's name, and Ankra resolves it at deploy time, so the value stays in Ankra and is sealed in Git. See [Organisation Secrets](/guides/organisation-secrets). When the cluster is connected to Git, the keys to encrypt with SOPS are declared in the manifest's `encrypted_paths`, for example `stringData.admin-user`; the Stack editor has no field for it, so declare it in the cluster YAML or with `ankra cluster encrypt`. Ankra encrypts those values before it writes the manifest to Git and decrypts them when it deploys. SOPS needs a one-time setup for the organisation - see [SOPS](/guides/sops).
 
-**Operational notes.** Every manifest and add-on has an **AGENTS.md** tab where you and Ankra's AI record what matters when changing it, such as upgrade order or fields that must stay pinned. Editing it never triggers a redeploy. See [Teach Your Agents with AGENTS.md](/platform/agents-md).
+**Operational notes.** Every member has a **Notes** tab holding its **Operational notes · AGENTS.md**, where you and Ankra AI record what matters when changing it, such as upgrade order or fields that must stay pinned. The notes are stored in Git with the member, as a plain markdown file, and the Stack editor refuses notes that look like they carry a credential. See [Teach Your Agents with AGENTS.md](/platform/agents-md).
 
 ## Building a Stack
 
-In the portal, open the cluster's **Stacks** and click **+ Create**. In the Stack Builder, **Add Add-on** adds a Helm chart and **Add Manifest** adds your own YAML. Drag from one component to another to add a dependency edge, and click a component to edit its values or YAML. The **Variables** tab holds the Stack's own variables. **Create Stack** saves the Stack and deploys it.
+Stacks live under **Infrastructure → Clusters → &lt;your cluster&gt; → Stacks**, in the cluster menu's **Technical details**. **Create a stack** offers three starts:
 
-A Stack that has not been deployed yet shows a **Draft** badge in the list, or **AI draft** when Ankra's AI proposed it.
+- **Compose a stack** - add Helm add-ons and manifests yourself, and connect what depends on what.
+- **Use a stack profile** - start from a versioned [stack profile](/concepts/stack-profiles), answering the inputs this cluster needs.
+- **Bring a Git definition** - use a Stack already declared in the cluster's connected repository. There is nothing to import: Ankra adds every Stack declared there on its next sync.
 
-You can also describe what you need to Ankra's AI (`⌘J`) and let it propose the Stack, for example:
+Composing asks for a **Stack name**, which is also the Stack's name in Git, and an optional **Description**. **Start the draft** opens the Stack editor.
+
+In the editor, **Add** offers **Helm add-on**, **Application** and **Manifest**. Each member opens in its own resource editor; for an add-on its tabs are described in [Add-ons](/concepts/addons#what-an-add-on-is-made-of). A dependency is drawn on the graph, from a prerequisite's right handle to a dependent's left handle, or ticked on the dependent's **Parents** tab. The Stack's own description, variables and deploy wave are in **More → Stack settings**.
+
+## Drafts, review and deployment
+
+Every change to a Stack starts as a **shared draft** and deploys only after it is reviewed. Everyone who opens the Stack edits the same draft, and the editor shows the changes others save as they happen. While a draft is open, the Stack reads **Shared draft**; a Stack that has never been deployed reads **Draft only, not deployed**; otherwise it shows its **Deployed definition**.
+
+**Review changes** lists every change in the draft. Deploying it is one confirmation:
+
+- **Create and deploy stack**, for a new Stack: it is committed to Git and its members deploy in dependency order.
+- **Deploy reviewed changes**: only the changed members are applied.
+- **Deploy changes and removals**, when the draft removes members: the whole draft is written to Git, and removed members are uninstalled from the cluster. Their persistent data stays.
+
+**More → Discard draft** throws the draft away without deploying anything.
+
+You can also ask Ankra AI to do the editing: **More → Edit with Ankra** asks it to stage the changes in the Stack's draft for your review. A prompt such as this one works the same from chat:
 
 > I need a monitoring stack with Prometheus, Grafana and alerting for this cluster.
 
 In chat every change needs your confirmation. The same Stack tools are available to MCP clients with the `mcp:write` scope - see the [MCP Tool Reference](/platform/mcp-tools#stacks).
 
-## What a Stack Is Running
+## What a Stack is running
 
-The Stack page shows what a Stack declares: its add-ons and manifests and the deployments that applied them. The **Runtime** tab shows what those components actually put on the cluster right now, in four panels: **Endpoints** (the hosts and paths its Ingresses publish), **Pods**, **Services** and **Events**.
+The Stack page has four views. **Graph** and **Table** show the members and their dependencies, **Changes** lists what the open draft would change, and **Deployments** shows the deployments that applied the Stack.
 
-Runtime scopes by ownership, not by namespace. Several Stacks can share a namespace and one Stack can span several, so Ankra follows the objects it recorded for the Stack and their owner references down to ReplicaSets, Jobs and Pods. When the cluster cannot answer a listing, the tab says so rather than showing an empty list. It reads the cluster only while it is open.
+What a member actually put on the cluster is on its **Live state** tab: the last state the cluster reported for it, its health, and the time of its last job update. For a deployed member it also reads the member's namespace: its pods with their phase, readiness and restarts, the warnings reported for those pods, and the logs of a pod you pick, including the previous container instance. The evidence is namespace-wide, so pods of other resources in the same namespace appear too, and it refreshes every 15 seconds while the tab is visible. A member that exists only in the draft has no runtime evidence until it is deployed.
+
+**More → History and rollback** lists every recorded version of each member, lets you compare two versions, and restores the one you pick. Restoring needs the `clusters.operate` permission.
 
 ## Stacks in Git
 
@@ -86,7 +109,7 @@ When the cluster has a repository connected, each Stack is written to its own di
 **Back up the Stack before you uninstall it.** Data is treated exactly as a delete treats it: what a chart or operator removes together with its workload is removed too, and installing the Stack again does not bring it back. Some charts and operators delete their volumes, and the data on them, with their workloads. A manifest that declares a PersistentVolumeClaim directly has that claim deleted. [Protect the Stack or take a restore point](/guides/backups#protect-a-stack) first, and see [Protect Persistent Data](/guides/protect-persistent-data) for when a deleted claim takes its disk with it.
 </Warning>
 
-In the new Ankra portal (`/next` on your portal's address), open the Stack and choose **More**, then **Uninstall stack**. The dialog asks you to type the Stack's name and links to **Back up this stack**. While a draft is open on the Stack, it asks you to deploy or discard the draft first and changes nothing.
+In the portal, **Uninstall stack** is in the Stack's **More** menu. The dialog asks you to type the Stack's name and links to **Back up this stack**. While a draft is open on the Stack, it asks you to deploy or discard the draft first and changes nothing.
 
 From the CLI:
 
@@ -152,8 +175,8 @@ Uninstalling needs the `stacks.delete` permission on the cluster, as deleting do
 
 ## Reusing a Stack
 
-- **Clone to Cluster** in a Stack's menu copies it to another cluster, including one in another organisation. Encrypted values are not copied. See [Clone Stacks](/guides/clone-stack).
-- **Save as Profile** turns a deployed Stack into a versioned, parameterised template you can deploy on any cluster. See [Stack Profiles](/concepts/stack-profiles).
+- **More → Clone to another cluster** copies a Stack to another cluster, including one in another organisation, and **Clone stacks** on the Stacks list copies several at once. Encrypted values are not copied. See [Clone Stacks](/guides/clone-stack).
+- **Create a reusable profile from this stack**, at the foot of the Stack editor, opens a stack profile draft built from the Stack: a versioned, parameterised template you can deploy on any cluster. See [Stack Profiles](/concepts/stack-profiles).
 
 ## Next
 
