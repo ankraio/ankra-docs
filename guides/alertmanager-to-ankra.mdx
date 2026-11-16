@@ -1,0 +1,155 @@
+---
+title: Send your Alertmanager alerts to Ankra
+sidebarTitle: Alertmanager to Ankra
+description: "Point an Alertmanager you already run at Ankra with an alert ingest credential, see its alerts arrive, route them, and silence noisy ones."
+---
+
+import { CliVersion } from "/snippets/cli-version.jsx";
+
+An Alertmanager you already run, such as the one kube-prometheus-stack installs, can deliver its alerts into Ankra instead of, or as well as, straight to Slack. Each alert then shows up in Ankra next to the alerts Ankra's own rules raise: under **Ankra AI → Watching**, as a notification under the bell, and through your [notification routes](/guides/notification-routing).
+
+You end up with:
+
+- an **alert ingest credential**, pinned to the cluster the alerts are about
+- an Alertmanager **webhook receiver** that posts to Ankra with the credential's token
+- a test alert you watched arrive, and a way to silence alerts in the cluster's Alertmanager
+
+## Before you start
+
+- **A role that manages alerts.** Without it **Integrations & alerts → Alert ingest credentials** reads **Your role can look at these credentials but not change them. Someone who manages alerts can.** See [Roles and access](/guides/roles-and-access).
+- **An Alertmanager you can configure**, able to reach `https://platform.ankra.app` over HTTPS.
+- **A place for the token that is not plain Git.** Ankra shows the token once. Keep it in a Kubernetes Secret, or encrypt it with [SOPS](/guides/sops) if your Alertmanager configuration lives in a GitOps repository.
+- **For silences:** the Ankra CLI, logged in, and a role with `alerts.write` on the cluster.
+
+## 1. Create an ingest credential
+
+<Steps>
+  <Step title="Add the credential">
+    Open **Integrations & alerts → Alert ingest credentials** (`/next/organisation/alert-ingest`) and click **Add credential**.
+
+    In **Add an ingest credential**, enter a **Name** such as `production-alertmanager`, and under **Cluster** choose the cluster the alerts are about. **No cluster: alerts about the whole organisation** files them against no cluster. Click **Add credential**.
+  </Step>
+  <Step title="Copy the path and the token">
+    The dialog reads **production-alertmanager is ready** and **Copy the token now. Ankra never shows it again.** It shows:
+
+    - **Webhook path** - `/webhooks/alerts/<credential-id>`. The full address is `https://platform.ankra.app/webhooks/alerts/<credential-id>`.
+    - **Token** - shown this once.
+
+    Copy both, then click **Done**.
+  </Step>
+</Steps>
+
+**You should see** the credential in the list with **About** and the cluster's name, and **Not used yet**.
+
+<Warning>
+The token cannot be shown again or changed in place. If you lose it, add a new credential, point Alertmanager at it, and delete the old one.
+</Warning>
+
+## 2. Point Alertmanager at Ankra
+
+Add a webhook receiver that posts to the address with the token as a bearer token, and route alerts to it. In `alertmanager.yml`:
+
+```yaml
+route:
+  receiver: ankra
+receivers:
+  - name: ankra
+    webhook_configs:
+      - url: https://platform.ankra.app/webhooks/alerts/<credential-id>
+        send_resolved: true
+        http_config:
+          authorization:
+            type: Bearer
+            credentials_file: /etc/alertmanager/secrets/ankra-alert-ingest/token
+```
+
+`credentials_file` reads the token from a mounted Secret, so it never sits in the configuration. `credentials: <your-token>` works too, if the file is itself kept secret. `send_resolved: true` lets Ankra close the firing when Alertmanager says the alert resolved.
+
+With kube-prometheus-stack, the same `route` and `receivers` go under `alertmanager.config` in the add-on's values, and the Secret is mounted with `alertmanager.alertmanagerSpec.secrets`, which mounts it under `/etc/alertmanager/secrets/<secret-name>/`. To keep your existing receivers, add `ankra` as a second receiver and send alerts to both with a `continue: true` route.
+
+A sender that cannot set an `Authorization` header can send the token in an `X-Ankra-Alert-Token` header instead.
+
+## 3. See an alert arrive
+
+To check the path before a real alert fires, post one test alert in Alertmanager's own format:
+
+```bash
+curl -sS -X POST https://platform.ankra.app/webhooks/alerts/<credential-id> \
+  -H "Authorization: Bearer <your-token>" \
+  -H "Content-Type: application/json" \
+  -d '{"version": "4", "status": "firing", "receiver": "ankra", "groupKey": "ankra-test",
+       "alerts": [{"status": "firing", "labels": {"alertname": "AnkraIngestTest", "severity": "warning"},
+                   "annotations": {"summary": "Test alert"}, "startsAt": "2026-11-16T10:00:00Z",
+                   "fingerprint": "ankra-ingest-test"}]}'
+```
+
+The answer counts what Ankra took from the delivery: `received`, `firing_new`, `firing_refreshed`, `resolved` and `skipped`.
+
+**You should see:**
+
+- On **Alert ingest credentials**, the credential reads **Last used** with the time, instead of **Not used yet**.
+- On **Integrations & alerts → Alert rules**, an alert named `AnkraIngestTest` with the badge **From Alertmanager** and the line **Sent in by your monitoring system (Alertmanager)**. Ankra makes one such alert for each `alertname` a credential delivers.
+- Under **Ankra AI → Watching → All signals**, the same alert, firing.
+
+Each alert takes its severity from the `severity` label (`critical`, `warning` or `info`) and is a warning when the label is missing. An alert with no `alertname` label is filed as `external-alert`.
+
+To close the test firing, send the same body again with both `status` values set to `resolved` and an `endsAt` time. To stop an alert reaching anyone in Ankra, switch it off or delete it on **Alert rules**; its conditions stay in Alertmanager, so in Ankra you change only its name, description and destinations.
+
+## 4. Decide who is told
+
+An ingested alert starts with no destinations of its own, so [notification routes](/guides/notification-routing) decide where its firings go, and a critical or warning firing that no route matches goes to the [home channel](/guides/webhooks#home-channel). To send it to a channel directly, open the alert's **Change…** on **Alert rules** and tick it under **Tell these destinations**. Check the result with **Where would it go?** on **Integrations & alerts → Notification routes**, with **Kind** set to **Alert firing**.
+
+## 5. Silence noisy alerts in the cluster
+
+A silence stops matching alerts at the source, in the cluster's own Alertmanager, so they reach neither Ankra nor any other receiver until it ends. The Ankra CLI and MCP server reach the Alertmanager through the cluster's Ankra agent; it is found by its labels.
+
+<CliVersion since="0.73.0" />
+
+```bash
+ankra cluster select my-cluster
+ankra cluster alertmanager silences create --matcher alertname=KubeVersionMismatch \
+  --duration 2w --comment "pending upgrade"
+ankra cluster alertmanager silences list
+ankra cluster alertmanager silences expire <silence-id> --yes
+```
+
+Each `--matcher` is `name=value` for an exact match or `name=~regex`, and at least one must be exact so a silence cannot mute everything. `--duration` runs from `5m` to `30d` and is `2h` when you leave it out; `--comment` is required. For a cluster that runs several Alertmanagers or a non-standard install, add `--namespace`, `--service` and `--port`. The MCP tools are `list_alertmanager_silences`, `create_alertmanager_silence` and `expire_alertmanager_silence`, see [MCP tools](/platform/mcp-tools).
+
+**You should see** the new silence in `ankra cluster alertmanager silences list`, and no new firing of that alert in Ankra while it lasts.
+
+To hold back one firing in Ankra only, without touching Alertmanager, snooze it with `ankra alerts triggers snooze`, see [Alerts](/guides/alerts#follow-a-firing).
+
+## Move or remove a credential
+
+- **Pin it to another cluster** - open the credential's options menu (**…**) and choose **Pin to another cluster…**, pick the **Cluster** and click **Save**. Its address and token stay the same, so Alertmanager keeps delivering. From the CLI:
+
+  ```bash
+  ankra alerts ingest-credentials list
+  ankra alerts ingest-credentials rebind <credential-id> --cluster my-cluster
+  ```
+
+- **Delete it** - **Delete…**, then **Delete credential**. Alerts posted with its token are refused from then on.
+
+## What can go wrong
+
+Alertmanager logs the answer of a failed delivery. Ankra answers:
+
+| Answer | Why | What to do |
+|--------|-----|-----------|
+| `400` `Missing token header` | No `Authorization: Bearer` and no `X-Ankra-Alert-Token` header | Check `http_config.authorization` in the receiver |
+| `401` `Invalid webhook token` | The token is wrong, or the credential is switched off or deleted | Copy the token again into the Secret, or add a new credential |
+| `400` `Unsupported payload version` | The body is not Alertmanager's version `4` webhook format | Send Alertmanager's own webhook payload |
+| `400` `Invalid payload` | The body is not valid JSON in that format | Check what the sender posts |
+| `413` `Payload too large` | One delivery is too big | Lower `max_alerts` on the webhook receiver |
+| `429` `Rate limit exceeded` | The credential sent too many deliveries too fast | Group alerts with `group_wait` and `group_interval` in Alertmanager |
+| `503` and **The credential or its cluster changed while the alert was being delivered, retry the delivery** | The credential was re-pinned or its cluster moved during the delivery | Nothing: Alertmanager retries on its own |
+
+**The credential reads Cluster gone.** The cluster it was pinned to is deleted or archived. Alerts still arrive but have no cluster to land on. Pin it to another cluster as above; `ankra alerts ingest-credentials list` shows such a pin as `BROKEN`.
+
+Alertmanager does not retry a `4xx` answer, so fix the cause and wait for the next notification of the group.
+
+## Next
+
+- [Alerts](/guides/alerts) - Ankra's own alert rules, beside the ones Alertmanager sends
+- [Notification routing](/guides/notification-routing) - where ingested firings go
+- [Monitoring stack](/guides/monitoring-stack) - install Prometheus and Alertmanager with kube-prometheus-stack

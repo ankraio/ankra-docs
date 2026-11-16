@@ -1,121 +1,165 @@
 ---
-title: Kubernetes Nodes
-description: Inspect a node's health, capacity, placement, GPUs and cached images, and act on it
+title: Kubernetes nodes
+description: Read every node Kubernetes reports for a cluster, check one node's conditions and workloads, and cordon, uncordon or drain it safely.
 ---
 
 import { CliVersion } from "/snippets/cli-version.jsx";
 
-<Note>
-The node page answers "what is this machine, is it healthy, and what can it run?" in one screen - including the accelerator on a GPU node.
-</Note>
+**Kubernetes → Nodes** lists the node objects Kubernetes keeps for a cluster, grouped by node group. A node's own page shows its conditions, the pods on it and its scheduling state, and is where you cordon, uncordon or drain it. The machines behind the nodes, and adding or resizing node groups, are on [Nodes](/platform/cluster-nodes).
 
-## Accessing nodes
+## Before you start
 
-Navigate to your cluster and click **Kubernetes → Nodes** in the sidebar, then click a node. The same page is reachable from the cluster overview's node table and the Command Palette (`⌘+K`).
+- **Permission to change scheduling.** Reading nodes needs no more than a built-in role. Cordon and uncordon need `kubernetes.write` on the cluster. A drain needs `kubernetes.write` and `kube_access.use`, and reads the node through your [cluster access grant](/guides/cluster-access). See [Roles and access](/guides/roles-and-access).
+- **A cluster agent that is online.** Scheduling changes need a live read of the node. While the agent is offline the list shows the last one Ankra recorded, and the buttons that change scheduling stay disabled.
 
-From the CLI, list the nodes or describe one node with its events:
+## Open the node list
 
-<CliVersion since="0.13.0" />
+Go to **Clusters → <your cluster> → Technical details → Kubernetes → Nodes** (`/next/clusters/<cluster-id>/kubernetes/nodes`). **Technical details** is a group in the cluster menu that folds away; open it if it is closed. In the Kubernetes menu, **Nodes** is under **Cluster**.
+
+The page is headed **Nodes**. A line under the filters says where the list came from: "Read live from the cluster." or "Served from the platform cache.". When the agent is offline it reads "The cluster agent is offline: this list is the last one the platform recorded."
+
+### What the list shows
+
+| Part | What it says |
+|---|---|
+| Summary | **Ready** (ready nodes over all nodes, with how many are cordoned or not ready), **vCPU** and **Memory** (summed node capacity), and **Node groups**, or **Node pools** on managed Kubernetes, with how many nodes they request |
+| **Node groups** | How much of each group's CPU and memory pods have reserved and use. **Manage nodes and groups** opens the node groups page |
+| **Runtime** | What each node group used over the last hour: **CPU used**, **Memory used**, **Network traffic** and **Disk used** |
+| Each node | Its name, readiness, a **Cordoned** badge, a badge for each pressure it reports (such as **Memory pressure**), its roles, kubelet version, operating system and architecture, allocatable CPU and memory, and its age, instance type, zone, taint count and container runtime |
+| Machines that did not join | A machine the provider runs but Kubernetes does not report, marked **Not joined**, with **Inspect provisioning operations** |
+
+### Find a node
+
+- Type in **Filter loaded nodes by name…** to narrow the list.
+- Tick **Needs attention only** to show nodes that are not ready, have unknown readiness, are cordoned or report pressure, and provider machines missing from Kubernetes.
+- Sort by **Name**, **Readiness**, **CPU capacity**, **Memory capacity**, **Created date**, **Kubernetes version**, **Operating system** or **Container runtime**, ascending or descending.
+
+The count beside the tools reads, for example, "3 of 12 nodes". Click a node's name to open its page.
+
+## Read one node
+
+A node's page (`/next/clusters/<cluster-id>/kubernetes/nodes/<node-name>`) opens with a card of facts: readiness, **Cordoned** or **Schedulable**, roles, kubelet version, operating system, kernel, internal and external IP, allocatable and capacity, the taint count and the container runtime. Capacity is what the node can hold, not what it uses: for usage, see [Cluster metrics](/platform/cluster-metrics) with the **Node filter** set to this node.
+
+When the page cannot read the node live, it says "Current node state is not verified" and shows the platform's last recorded observation with its age. Scheduling changes wait for a live read; click **Read node again**.
+
+The sections below the card:
+
+| Section | What it shows |
+|---|---|
+| **Conditions** | Each condition Kubernetes reports (`Ready`, `MemoryPressure`, `DiskPressure`, `PIDPressure` and any others), with its reason, its last transition and its status. `Ready` is healthy when `True`; the pressure conditions are healthy when `False`. A condition Kubernetes does not report stays unknown. |
+| **Workload impact** | The active pods on the node, how many are not confirmed ready, and the applications they belong to, each with **Inspect application**. Pods that need a look are listed by name. |
+| **Recovery checks** | Node readiness, scheduling and how many assigned pods are observed ready, each from a live read. **Refresh recovery evidence** reads them again. Pods may have moved to other nodes, so check each application before you conclude it has recovered. |
+| **Maintenance review** | Open **Review maintenance evidence** before you plan a drain: the pods that need an eviction assessment (with node-local data, persistent storage or no controller called out), the disruption budgets that cover them, how many other ready nodes there are, and the unreserved CPU and memory on those nodes. **Inspect pending workloads** lists pending pods. |
+| **Workloads** | Every pod assigned to the node, from the platform cache, with its namespace, readiness, restarts and phase. Click a pod to open it. |
+| **Scheduling** | **Review cordon** or **Review uncordon**, **Read node again** and **Review node drain**. |
+
+The node page has no labels, annotations or cached-image panels, and no GPU card. Read those from the CLI (below). GPU utilisation, memory, temperature and power are charted under **GPU telemetry** on [Cluster metrics](/platform/cluster-metrics), with a connected Prometheus.
+
+## Cordon or uncordon a node
+
+Cordoning stops new pods from being scheduled on a node. Pods already on it keep running. It does not prepare the node for shutdown: drain it for that.
+
+<Tabs>
+  <Tab title="Portal">
+    <Steps>
+      <Step title="Review the change">
+        On the node's page, under **Scheduling**, click **Review cordon** (or **Review uncordon** on a cordoned node). A dialog asks **Cordon this node?** or **Return this node to scheduling?**
+      </Step>
+      <Step title="Confirm">
+        Click **Cordon node** or **Uncordon node**. Ankra checks the node's identity and revision again before it applies the change. The page reads "Request accepted. Waiting for a live observation of the scheduling change." until the node reports the new state, then "Observed cordoned. Existing pods remain on this node." or "Observed schedulable. Workload health is reported separately."
+      </Step>
+    </Steps>
+
+    To cordon or uncordon several nodes at once, tick them in the node list, then click **Review cordon** or **Review uncordon** and **Confirm scheduling change**. A review covers at most 20 nodes, and each node is checked again before its state changes.
+  </Tab>
+  <Tab title="CLI">
+    <CliVersion since="0.17.0" />
+
+    ```bash
+    ankra cluster cordon <node-name>
+    ankra cluster uncordon <node-name>
+    ```
+  </Tab>
+  <Tab title="MCP">
+    `cordon_node` and `uncordon_node` ([MCP tools](/platform/mcp-tools)).
+  </Tab>
+</Tabs>
+
+**Check:** the node shows **Cordoned** (or **Schedulable**) on its page and in the node list.
+
+## Drain a node
+
+A drain cordons the node, then evicts its pods while Kubernetes enforces their disruption budgets, so their controllers start them elsewhere. DaemonSet pods, static mirror pods and completed pods stay on the node. A drain does not back up data or check that the replacement pods are ready.
+
+<Warning>
+Pods with `emptyDir` or `hostPath` data lose that data when they are evicted, and pods without a workload controller may not be recreated. The drain review lists both and asks you to accept each before it starts.
+</Warning>
+
+<Steps>
+  <Step title="Open the drain review">
+    On the node's page, under **Scheduling**, click **Review node drain**. The page **Drain <node-name>** reads the node and its workloads live and lists **Pods on this node** and **Matching disruption budgets**.
+  </Step>
+  <Step title="Accept each risk the review names">
+    Under **Review the drain**, tick each box the review shows. It shows only the ones that apply: **Allow eviction of pods using emptyDir or hostPath**, **Allow eviction of pods without a workload controller**, **Allow the Ankra agent to be evicted from this node and restart on another one.**, and **Allow this drain to leave workloads, and possibly the cluster, offline until the node is uncordoned.**. Click **Refresh live review** if the cluster changed while you read.
+  </Step>
+  <Step title="Confirm the drain">
+    Click **Review drain confirmation**, type the node's name and click **Start drain**. The page turns into the drain's receipt: **Drain in progress**, with **State**, **Started**, **Updated** and **Remaining evictable pods**.
+  </Step>
+  <Step title="Wait for it to finish">
+    Disruption budgets can hold an eviction back, so a drain can take a while. **Cancel drain** stops it from evicting more pods and keeps the node cordoned. If the receipt is headed **Drain needs attention** and says "The runner is not active. Review this receipt and resume the same operation when ready.", click **Resume drain**. When the drain finishes, the receipt is headed **Drain completed** and links to **Review node scheduling and uncordon when ready**.
+  </Step>
+</Steps>
+
+**Check:** **Remaining evictable pods** reads 0, and the node's **Workloads** section lists only DaemonSet, static and completed pods.
+
+The node stays cordoned after the drain. Uncordon it when the maintenance is done.
+
+### Drain from the CLI
+
+<Warning>
+`ankra cluster drain` deletes the pods instead of evicting them, so it does not consult PodDisruptionBudgets and a budget at its limit does not hold it back. Check the budgets first, and use the portal's drain for a node that carries a quorum member.
+</Warning>
+
+```bash
+# Print the plan without changing anything, then drain
+ankra cluster drain <node-name> --dry-run
+ankra cluster drain <node-name>
+```
+
+## Read a node from the CLI
 
 ```bash
 ankra cluster get nodes
-ankra cluster describe node <name>
+ankra cluster describe node <node-name>
+ankra cluster describe node <node-name> -o yaml
+ankra cluster top nodes
 ```
 
----
+`describe` shows the node's conditions and the events scoped to it; `-o yaml` prints the whole node object, including its labels, annotations, capacity and allocatable. `top nodes` shows live CPU and memory per node from metrics-server.
 
-## The node header
+## What can go wrong
 
-Chips carry state, the fact strip carries identity:
+**"Scheduling changes require kubernetes.write for this cluster."**
+Your role cannot cordon or uncordon. Ask an administrator for a role with `kubernetes.write`.
 
-- **Readiness** - `Ready`, `NotReady` or `Unknown` from the kubelet's `Ready` condition, plus **Scheduling disabled** when the node is cordoned.
-- **Role** - `Worker`, `Control Plane` or any other `node-role.kubernetes.io/*` label.
-- **Accelerator** - on a GPU node, the GPU count and product (`1× NVIDIA H100 80GB HBM3`).
-- **Age, instance type, location (provider · region · zone), node group, kubelet version and internal IP.**
+**"Draining this node requires kubernetes.write and kube_access.use for this cluster."**
+**Review node drain** is hidden until your role holds both permissions.
 
-Everything that describes the host itself (operating system, kernel, runtime, architecture, addresses) lives in the **Host** card below.
+**"The live node review could not be read. Check your cluster access grant and try again."**
+The drain review reads the node through your access grant. Check that you hold one for this cluster on [Cluster access](/guides/cluster-access), then click **Try again**.
 
-The **⋯ Actions** menu holds cordon, uncordon, drain and delete.
+**"The drain was not started"**
+The platform refused the drain as you reviewed it, usually because the cluster changed in between. Click **Refresh live review**, read the review again and confirm.
 
----
+**"Scheduling request outcome unknown"**
+Ankra could not tell whether the change was applied. Click **Read node again** and check the node's state before you change it again.
 
-## Overview tab
-
-### Stat tiles
-
-One figure per tile, always the **allocatable** amount: **CPU**, **Memory**, **GPU** (only on accelerator nodes), **Storage** and **Pods** - the last one counts the pods placed on the node against its `pods` capacity. Capacity and the kubelet's reservation are in the **Allocatable** card.
-
-### Accelerator
-
-When a node advertises a GPU resource (`nvidia.com/gpu`, an `nvidia.com/mig-*` profile, `amd.com/gpu`, `gpu.intel.com/*`, `habana.ai/gaudi`) or carries NVIDIA GPU Feature Discovery labels, an **Accelerator** card appears under the tiles. On an NVIDIA node it reads the labels the GPU operator stamps on the node:
-
-| Fact | Source label |
-|------|--------------|
-| Product, family, compute capability | `nvidia.com/gpu.product`, `nvidia.com/gpu.family`, `nvidia.com/gpu.compute.*` |
-| GPU count and memory per GPU | `nvidia.com/gpu.count`, `nvidia.com/gpu.memory` |
-| CUDA driver and runtime | `nvidia.com/cuda.driver-version.full`, `nvidia.com/cuda.runtime-version.full` (or the legacy split `cuda.driver.*` / `cuda.runtime.*` labels) |
-| Sharing | `nvidia.com/gpu.sharing-strategy` and `nvidia.com/gpu.replicas` (time-slicing, MPS), `nvidia.com/mig.*` (MIG capability, strategy, active profile and its state), `nvidia.com/mps.capable`, `nvidia.com/vgpu.present` |
-| Driver upgrade | `nvidia.com/gpu-driver-upgrade-state` and the `nvidia.com/gpu-driver-upgrade-enabled` annotation |
-| GPU operator components | every `nvidia.com/gpu.deploy.*=true` label |
-
-The card leads with the five facts that decide what can run: GPU count × memory, CUDA driver, CUDA runtime, sharing strategy and (on MIG-capable parts) the MIG configuration. **More details** reveals MPS and vGPU capability, the driver-upgrade state, compute mode, machine type, when discovery last ran, the operator components deployed, and how many GPUs the device plugin currently advertises as allocatable.
-
-A node whose driver is still installing shows **Not advertised yet** - the labels are there but `nvidia.com/gpu` has no allocatable capacity, so nothing can be scheduled on it yet.
-
-#### Live telemetry
-
-With a [Prometheus metrics source](/integrations/prometheus) connected, the Accelerator card reads the DCGM exporter the GPU operator ships and shows, per GPU: utilisation, framebuffer in use, temperature, power draw, SM clock, memory bandwidth, the last XID error if there is one, and the pod currently attached to the GPU. A **GPU workloads** list underneath names every pod on the node requesting a GPU resource, linked to its pod page.
-
-The queries match DCGM series on the node's `Hostname` label (the GPU operator sets it from the node name), falling back to `kubernetes_node` and `node` for scrape configurations that relabel it. If Prometheus is connected but has no DCGM series for the node, the card says so rather than showing empty gauges - check that the exporter's ServiceMonitor is being scraped.
-
-### Conditions
-
-One row per kubelet condition: a health dot, the condition, its reason and when it last changed. Pressure conditions (`MemoryPressure`, `DiskPressure`, `PIDPressure`, `NetworkUnavailable`) are healthy when `False` and a **Problem** when `True`; `Ready` is the other way round. Only a condition that needs attention shows its label and the kubelet's message; the card's subtitle says how many do.
-
-### Host
-
-Operating system, architecture, kernel and container runtime, every address the kubelet reports, the pod CIDR(s) and the cloud provider with its instance ID. **Identifiers** reveals the machine ID, system UUID, boot ID and full provider ID with one-click copy.
-
-### Allocatable
-
-Allocatable against capacity for every resource the node reports - CPU, memory, ephemeral storage, pods, huge pages and extended resources such as `nvidia.com/gpu` or MIG profiles - with a bar showing the share the scheduler can actually use.
-
-### Scheduling
-
-Whether the node is cordoned, and its taints with their effect (`NoExecute` is highlighted).
-
-### Labels, annotations and cached images
-
-Three collapsed panels at the end of the page, each with a count in its header:
-
-- **Labels** grouped by prefix (`nvidia.com`, `feature.node.kubernetes.io`, `topology.kubernetes.io`, …). Large groups start collapsed; type in **Search labels** to find a key or value across every group, and click a label to copy `key=value`.
-- **Annotations**, with copy and expand for long values.
-- **Cached images** - what the kubelet has pulled, largest first, with the total on disk in the header.
-
----
-
-## Pods tab
-
-Every pod scheduled on the node with phase, readiness, restarts and age, with bulk delete. The tab badge shows the pod count.
-
----
-
-## Metrics tab
-
-The node's Metrics tab reads your connected Prometheus, not the built-in platform metrics. With a [Prometheus metrics source](/integrations/prometheus) connected: CPU, memory, disk and network usage over the selected time range. On a GPU node a **GPU** section follows with utilisation, memory used, power draw and temperature charts per GPU.
-
-Without a metrics source, the tab explains how to connect one.
-
----
-
-## Manifest tab
-
-The node's full manifest, editable in place.
-
----
+**"This node was not found in the current Kubernetes read."**
+The node left the cluster, or was renamed. Click **Back to nodes**.
 
 ## Related
 
-- [Cluster metrics](/platform/cluster-metrics) - built-in metrics and a connected Prometheus
-- [Kubernetes Resources](/platform/kubernetes-insights)
-- [Managed Kubernetes](/guides/managed-kubernetes) - node groups on cloud clusters
+- [Nodes](/platform/cluster-nodes) - the machines behind a cluster and its node groups
+- [Cluster metrics](/platform/cluster-metrics) - usage over time, per node
+- [Cluster overview and health](/platform/cluster-overview-and-health) - the Nodes health check
+- [Kubernetes resources](/platform/kubernetes-insights)
