@@ -1,28 +1,152 @@
 ---
-title: Use Your Own Domain
-description: Put your clusters and applications on a domain you own - delegate it to Ankra, serve a zone you keep at Cloudflare or another DNS provider from every cluster, or publish individual records - and get certificates for the hostnames.
+title: Use your own domain
+description: Put an application or a whole cluster on a domain you own - one CNAME per application, a zone at Cloudflare or another provider, or a delegated root - with certificates.
 ---
 
 import { CliVersion } from "/snippets/cli-version.jsx";
 
 Every cluster Ankra builds with public DNS gets a generated hostname under `ankra.cc`, and every Ingress on that cluster's zone is published and certified on its own. This guide is for the next step: hostnames on a domain you own, such as `app.example.com`.
 
-There are three ways to do it. Pick by where the domain's DNS is hosted and how much of it Ankra should manage.
+Pick by how much of the domain Ankra should manage and where its DNS is hosted.
 
 | You want | Where the DNS lives | Use |
 |---|---|---|
-| Ankra to run the whole domain: every generated hostname, every cluster's zone and every preview under it | Delegated to Ankra's nameservers | [Delegate a root domain](#delegate-a-root-domain-to-ankra) |
-| Ingress hostnames on a zone you keep in your own account, published by every cluster | Cloudflare | [Serve a Cloudflare zone](#serve-a-cloudflare-zone-from-every-cluster) |
+| One application on a hostname you own | Anywhere you can add a CNAME record | [Put an application on your own domain](#put-an-application-on-your-own-domain) |
+| Ingress hostnames on a zone you keep in your own account, published by your clusters | Cloudflare | [Serve a Cloudflare zone](#serve-a-cloudflare-zone-from-your-clusters) |
 | The same, at another DNS provider | Any provider with an external-dns webhook | [Serve a zone with a webhook credential](#serve-a-zone-with-a-webhook-credential) |
+| Ankra to run the whole domain: every generated hostname, every cluster's zone and every preview under it | Delegated to Ankra's nameservers | [Delegate a root domain](#delegate-a-root-domain-to-ankra) |
 | A few records by hand: an alias, a TXT verification, an MX | Ankra's zone or Cloudflare | [Publish individual records](#publish-individual-records) |
 
-A domain held in Avura has its own short path: see [Use Avura Domains with Ankra](/guides/avura-domains).
+A domain held in Avura has its own path: see [Use Avura domains with Ankra](/guides/avura-domains).
+
+The organisation's domains are on **Infrastructure → Domains** (`/next/organisation/domains`): the organisation's Ankra domain and its records, **Cluster names**, **Your own domains**, **DNS providers** and **Records at your DNS providers**.
 
 ## Before you start
 
-- **Organisation admin.** Registering a root domain, connecting a DNS credential, declaring a zone and changing records need it. Every member can read.
+- **The right permission.** Changing an application's domain needs a role that may change its deployments; without one the page says "Your role doesn't allow deployment changes." On **Infrastructure → Domains**, connecting a DNS provider and changing records needs `organisation.manage` (an organisation admin), adding a domain for every cluster needs `credentials.write`, and adding one for picked clusters needs `clusters.write`. Every member can read. See [Roles and access](/guides/roles-and-access).
 - **Clusters with public DNS and the networking stack**, so each cluster runs the external-dns and cert-manager the lanes below build on.
-- **Ankra CLI** logged in (`ankra org current`).
+- **For the CLI steps**, the Ankra CLI signed in (`ankra org current`).
+
+## Put an application on your own domain
+
+The application keeps its Ankra address, and also answers on your domain: you point a CNAME record at the Ankra address, Ankra adds the domain to the application's deployment, and the cluster issues its certificate. Nothing changes at the organisation level.
+
+<Steps>
+  <Step title="Open the application's address settings">
+    Open **Applications → &lt;your application&gt; → Settings → Address**. The **Your own domain** card names the environment it changes ("Your own domain · production") and links to the others. **Address** shows the environment's current address.
+
+    The environment must be deployed and public first. If it is private, the **Ankra address** section offers **Review and use this address**: Ankra generated a hostname for the environment and sets up its DNS record. Use it, then come back.
+  </Step>
+  <Step title="Enter your domain">
+    Type the hostname into **Your domain**, for example `app.example.com`. The card shows the record to add:
+
+    | Type | Name | Target |
+    |---|---|---|
+    | CNAME | `app.example.com` | the environment's Ankra address |
+
+    Click **Copy the target**.
+  </Step>
+  <Step title="Point DNS at the application">
+    At your DNS provider, add that CNAME record. Some providers ask only for the part before your domain (`app`). If the domain is at Cloudflare and connected to Ankra, you can add it on **Infrastructure → Domains** under **Records at your DNS providers** instead (see [Publish individual records](#publish-individual-records)).
+
+    Back on the card, click **Check**. **Points here** means "Your domain points at this environment." **Not pointing here yet** means the record is not visible yet: DNS changes can take a while, and proxied or flattened records can hide it from this check. Wait and click **Check** again.
+  </Step>
+  <Step title="Add the domain to the deployment">
+    Click **Review and add domain**. The **Add your own domain** dialog opens the deployment review for this environment; nothing changes until you confirm. Click **Review deployment**, read it, then **Confirm deployment**.
+
+    The card shows the deployment's progress. **Done** closes it; closing it does not stop the change.
+  </Step>
+  <Step title="Wait for the certificate">
+    When the deployment finishes, the domain is listed under **Your domains here**. The application's addresses show its certificate state: **HTTPS on its way** while the certificate is issued, then **HTTPS ready**: "Visitors reach this domain over HTTPS."
+  </Step>
+</Steps>
+
+**Check it answers:**
+
+```bash
+dig +short app.example.com
+curl -sI https://app.example.com
+```
+
+The name resolves through the CNAME to the cluster, and the response carries a valid certificate for `app.example.com`.
+
+To move the application off its old address, update links and redirects to the new domain; the Ankra address keeps working beside it. To take a domain away, click **Remove app.example.com** under **Your domains here**, which opens the same review.
+
+If the card says "This application can't take its own domain yet: its deployment settings have no place for one", the application's deployment files have no `ingress_extra_hosts` option. Add one, then refresh the repository setup.
+
+## Serve a Cloudflare zone from your clusters
+
+Keep the zone in your Cloudflare account, and let your clusters publish their Ingress hostnames into it.
+
+<Steps>
+  <Step title="Create a scoped Cloudflare API token">
+    In Cloudflare, create an API token with **Zone:Read** on the zones Ankra should see and **DNS:Edit** on the zones it should write to. Never use the Global API Key: it carries every permission on every zone in the account.
+  </Step>
+  <Step title="Connect it">
+    <Tabs>
+      <Tab title="Portal">
+        On **Infrastructure → Domains**, under **DNS providers**, click **Connect** on the **Cloudflare** row. In **Connect Cloudflare**, fill in **Name** (how Ankra and your domains refer to this token) and **API token**, and **Account ID** only when the token can reach more than one Cloudflare account. **Test the token** checks it without saving anything; then click **Connect**.
+
+        The **Cloudflare** row now shows **Connected**, the token's name and when it expires.
+      </Tab>
+      <Tab title="CLI">
+        The token is read from the environment or from stdin, never from a flag:
+
+        <CliVersion since="0.24.0" command="org cloudflare, custom-dns-zones add --cloudflare-credential" />
+
+        ```bash
+        ANKRA_CLOUDFLARE_API_TOKEN=<token> ankra org cloudflare connect production
+        ankra org cloudflare domains
+        ```
+
+        `--verify-only` checks a token without storing it. `--account-id` pins the domain listing to one Cloudflare account and is only needed for a token that spans several.
+      </Tab>
+    </Tabs>
+
+    Ankra verifies the token with Cloudflare before it stores anything, and refuses a token that reaches no zones. A user token and an account-owned token both connect.
+  </Step>
+  <Step title="Declare the zone">
+    <Tabs>
+      <Tab title="Portal">
+        Click **Add your own domain**. Under **Where does its DNS live?** choose **Cloudflare**, enter the **Domain**, and pick the **Cloudflare token** if you connected more than one. Under **Clusters that serve it**, choose **Every cluster, new ones too** or **Only the clusters I pick**. Click **Add domain**.
+      </Tab>
+      <Tab title="CLI">
+        ```bash
+        ankra org custom-dns-zones add --zone example.com --cloudflare-credential production
+        ankra org custom-dns-zones list
+        ```
+
+        To serve the zone from one cluster only, or with a different credential on one cluster, declare it on the cluster instead. A cluster's own declaration wins over the organisation's on that cluster:
+
+        ```bash
+        ankra cluster custom-dns-zones add <cluster> --zone example.com --cloudflare-credential production
+        ```
+      </Tab>
+    </Tabs>
+
+    Before anything is stored, Ankra asks Cloudflare which zone holds the name (`apps.example.com` lands in the `example.com` zone) and what the credential's token may do there. The declaration is refused when no zone the token can see holds the name, when Cloudflare reports that the token may not edit DNS records in it, when Cloudflare rejects the token, or when the credential needs reconnecting; each refusal names the fix. When Cloudflare does not report the token's permissions, the declaration is stored and the CLI says so beside the zone the records will land in. When Cloudflare answers the check with a server error or rate-limits it, nothing is stored and the answer asks you to try again.
+
+    Every cluster that serves the zone, including clusters created later when you chose every cluster, gets its own external-dns for the zone within about two minutes, with the credential's API token in a Secret beside it. It runs upsert-only: it never changes or deletes a record someone else made.
+  </Step>
+</Steps>
+
+**Check it.** Under **Your own domains**, the domain's badge reads **Working** once "Records answer and reach the cluster", or **Waiting for DNS** with the sentence that says what is left, such as the name servers to set at your registrar. Click **Check now** to ask public DNS again.
+
+## Serve a zone with a webhook credential
+
+For a DNS provider other than Cloudflare, use any provider that speaks the external-dns webhook protocol. The credential is the webhook provider URL including its token. The portal has no form for this credential; store it with the CLI:
+
+```bash
+ankra org dns credentials create --name my-dns --webhook-provider-url <webhook-url-with-token>
+ankra org custom-dns-zones add --zone example.dev --credential my-dns
+```
+
+Once the credential exists, **Add your own domain** on **Infrastructure → Domains** also offers **Another DNS provider**, and the **Other DNS providers** row lists the webhook. The URL goes to the platform's secret store and no read returns it. Each cluster that serves a zone with a DNS credential, Cloudflare or webhook, is given the token or URL in a Secret for its external-dns; when the cluster writes its Stacks to a GitOps repository, that Secret is sealed with the organisation's SOPS key, or committed in plain text if the organisation has no SOPS key. Creating the credential again under the same name re-points every cluster at once, which is how a rotated token rolls out.
+
+The rules for both zone lanes:
+
+- A zone that overlaps the domain Ankra already serves for the organisation is refused, because Ankra's own controllers publish there. A zone above it is accepted.
+- **Remove…** in the domain row's options menu, or `ankra org custom-dns-zones remove --zone example.dev`, withdraws the declaration. Ankra removes the controllers it rendered and stops renewing the zone's certificates; the zone's records are yours and are left untouched.
 
 ## Delegate a root domain to Ankra
 
@@ -43,102 +167,68 @@ The domain becomes the organisation's own Ankra domain in place of `ankra.cc`. T
     ```
   </Step>
   <Step title="Register the domain">
-    ```bash
-    ankra org domain set example.com
-    ankra org domain get
-    ```
+    <Tabs>
+      <Tab title="Portal">
+        Open **Ankra AI → AI workspaces**. Under **Domains for previews**, enter the domain in **Custom Ankra domain** and click **Save changes**.
+      </Tab>
+      <Tab title="CLI">
+        ```bash
+        ankra org domain set example.com
+        ankra org domain get
+        ```
+      </Tab>
+    </Tabs>
 
-    If the delegation is not in place yet, the command is refused and names the nameservers to point at. In the console, this is the **Custom Ankra domain** field under **AI** → **Settings** → **Workspaces**.
+    If the delegation is not in place yet, the change is refused and names the nameservers to point at.
   </Step>
   <Step title="Bring the cluster zones back">
     ```bash
     ankra cluster domain <cluster> --enable
     ```
 
-    Each cluster's zone is re-created under the new root and keeps its label. Repeat for every cluster whose domain you removed.
+    Each cluster's zone is re-created under the new root and keeps its label. Repeat for every cluster whose domain you removed. On **Infrastructure → Domains**, each cluster's row under **Cluster names** shows **Being set up** until its zone is ready.
   </Step>
 </Steps>
 
 Records you already publish in the domain that no cluster's Ingress claims are left alone: each cluster's external-dns owns only the records it created. What the switch does and does not touch is set out in [What a root-domain switch does and does not touch](/concepts/applications#what-a-root-domain-switch-does-and-does-not-touch).
 
 <Note>
-The **Preview domain** field beside it is a different setting. It decides only where pull request previews and demos are published, and changes nothing else. Set it with `ankra org ai-environment set --demo-base-domain`. See [AI Workspaces](/platform/ai-workspaces#custom-ankra-domain).
+The **Preview domain** field beside it is a different setting. It decides only where pull request previews and demos are published, and changes nothing else. Set it there, or with `ankra org ai-environment set --demo-base-domain`. See [AI Workspaces](/platform/ai-workspaces#custom-ankra-domain).
 </Note>
-
-## Serve a Cloudflare zone from every cluster
-
-Keep the zone in your Cloudflare account, and let every cluster in the organisation publish its Ingress hostnames into it.
-
-<Steps>
-  <Step title="Create a scoped Cloudflare API token">
-    In Cloudflare, create an API token with **Zone:Read** on the zones Ankra should see and **DNS:Edit** on the zones it should write to. Never use the Global API Key: it carries every permission on every zone in the account.
-  </Step>
-  <Step title="Connect it">
-    The token is read from the environment or from stdin, never from a flag:
-
-    <CliVersion since="0.24.0" command="org cloudflare, custom-dns-zones add --cloudflare-credential" />
-
-    ```bash
-    ANKRA_CLOUDFLARE_API_TOKEN=<token> ankra org cloudflare connect production
-    ankra org cloudflare domains
-    ```
-
-    Ankra verifies the token with Cloudflare before it stores anything, and refuses a token that reaches no zones. `--verify-only` checks a token without storing it. A user token and an account-owned token both connect; `--account-id` pins the domain listing to one Cloudflare account and is only needed for a token that spans several.
-  </Step>
-  <Step title="Declare the zone for every cluster">
-    ```bash
-    ankra org custom-dns-zones add --zone example.com --cloudflare-credential production
-    ankra org custom-dns-zones list
-    ```
-
-    Before anything is stored, Ankra asks Cloudflare which zone holds the name (`apps.example.com` lands in the `example.com` zone) and what the credential's token may do there. The declaration is refused when no zone the token can see holds the name, when Cloudflare reports that the token may not edit DNS records in it, when Cloudflare rejects the token, or when the credential needs reconnecting; each refusal names the fix. When Cloudflare does not report the token's permissions, the declaration is stored and the CLI says so beside the zone the records will land in. When Cloudflare answers the check with a server error or rate-limits it, nothing is stored and the answer asks you to try again.
-
-    Every cluster in the organisation, the ones running now and every one created later, gets its own external-dns for the zone within about two minutes. It runs upsert-only: it never changes or deletes a record someone else made.
-  </Step>
-</Steps>
-
-To serve the zone from one cluster only, or with a different credential on one cluster, declare it on the cluster instead. A cluster's own declaration wins over the organisation's on that cluster:
-
-```bash
-ankra cluster custom-dns-zones add <cluster> --zone example.com --cloudflare-credential production
-```
-
-## Serve a zone with a webhook credential
-
-For a DNS provider other than Cloudflare, use any provider that speaks the external-dns webhook protocol. The credential is the webhook provider URL including its token.
-
-```bash
-ankra org dns credentials create --name my-dns --webhook-provider-url <webhook-url-with-token>
-ankra org custom-dns-zones add --zone example.dev --credential my-dns
-```
-
-The URL goes to the platform's secret store and no read returns it. Creating the credential again under the same name re-points every cluster at once, which is how a rotated token rolls out.
-
-The rules for both zone lanes:
-
-- A zone that overlaps the domain Ankra already serves for the organisation is refused, because Ankra's own controllers publish there. A zone above it is accepted.
-- `ankra org custom-dns-zones remove --zone example.dev` withdraws the declaration. Ankra removes the controllers it rendered, and the zone's records are yours and are left untouched.
 
 ## Publish individual records
 
-In the organisation's Ankra zone (the one `ankra org dns zone` shows), records start `pending` and turn `active` once they are published:
+<Tabs>
+  <Tab title="Portal">
+    **In the organisation's Ankra domain:** on **Infrastructure → Domains**, click **Add record** on the organisation's Ankra domain card. Give a **Name**, a **Type** (CNAME, A or TXT), a **Value** and a **Time to live** (Auto suits nearly everything). A record's options menu changes or deletes it. A new record shows **Being set up**, then **Active**.
 
-```bash
-ankra org dns add chat CNAME lb-1234.example-lb.com --ttl 300
-ankra org dns update chat target.example.com
-ankra org dns delete chat
-```
+    **In a connected Cloudflare or Avura domain:** under **Records at your DNS providers**, pick the **Domain**, then click **Add record**, or use a record's options menu for **Change…** and **Delete…**. For a Cloudflare record of type A, AAAA or CNAME, **Send traffic through Cloudflare** proxies it. The change is made at the provider and answers within a few minutes.
+  </Tab>
+  <Tab title="CLI">
+    In the organisation's Ankra zone (the one `ankra org dns zone` shows), records start `pending` and turn `active` once they are published:
 
-In a connected Cloudflare domain, records take effect immediately:
+    ```bash
+    ankra org dns add chat CNAME lb-1234.example-lb.com --ttl 300
+    ankra org dns update chat target.example.com
+    ankra org dns delete chat
+    ```
 
-```bash
-ankra org cloudflare records example.com
-ankra org cloudflare add example.com app A 203.0.113.10 --ttl 300
-ankra org cloudflare add example.com www CNAME app.example.com --proxied
-ankra org cloudflare delete example.com app
-```
+    In a connected Cloudflare domain, records take effect immediately:
 
-`records` marks each record `ankra` or `external`, so you can tell what Ankra published from what was written by hand, by Terraform or by a cluster controller. Deleting a record live traffic depends on takes the hostname down at once.
+    ```bash
+    ankra org cloudflare records example.com
+    ankra org cloudflare add example.com app A 203.0.113.10 --ttl 300
+    ankra org cloudflare add example.com www CNAME app.example.com --proxied
+    ankra org cloudflare delete example.com app
+    ```
+
+    `records` marks each record `ankra` or `external`, so you can tell what Ankra published from what was written by hand, by Terraform or by a cluster controller.
+  </Tab>
+</Tabs>
+
+<Warning>
+Deleting a record that live traffic depends on takes the hostname down within minutes.
+</Warning>
 
 ## Certificates
 
@@ -153,24 +243,29 @@ dig +short app.example.com
 curl -sI https://app.example.com
 ```
 
-The name resolves to the cluster's load balancer, and the response carries a valid certificate for it. `ankra cluster custom-dns-zones list <cluster>` shows each zone the cluster serves and whether the organisation or the cluster declared it.
+The name resolves to the cluster's load balancer (or, for an application's CNAME, to its Ankra address), and the response carries a valid certificate for it. `ankra cluster custom-dns-zones list <cluster>` shows each zone the cluster serves and whether the organisation or the cluster declared it.
 
-## Troubleshooting
+## What can go wrong
 
 | Symptom | Cause and fix |
 |---|---|
+| **Not pointing here yet** on the application's **Check** | The CNAME is not visible yet, or a proxied or flattened record hides it. Wait for DNS, or check the record at your provider. |
+| The domain shows **HTTPS failed** | "Its certificate could not be issued. Check that the domain points here." Fix the record, then wait for cert-manager to retry. |
 | An Ingress on your domain never resolves, and external-dns logs `All records are already up to date` | The cluster's own external-dns only publishes its Ankra zone. Declare your zone with one of the lanes above. |
+| **Waiting for DNS**: "Public DNS does not send *your domain* to Cloudflare yet." | At your registrar, set the domain's name servers to the ones Cloudflare gives you. This can take up to a day. |
+| **Not working**: "The DNS provider it was added with is no longer connected" | Connect the provider again under **DNS providers**, or remove the domain. |
 | `ankra org domain set` is refused, listing zones and records | They still live under the old root. Remove each one as listed, then register again. |
 | `ankra org domain set` is refused, naming nameservers | The domain is not delegated yet, or delegation has not propagated. Point the NS records at the named nameservers and wait. |
-| `custom-dns-zones add` is refused for overlapping | The zone overlaps the organisation's Ankra domain. Use the domain either as the root or as a custom zone, not both. |
-| `cloudflare connect` is refused: the token reaches no zones | The token's zone resources exclude every zone. Give it **Zone:Read** on the zones Ankra should see. |
-| `custom-dns-zones add --cloudflare-credential` is refused: the credential cannot reach the zone, or may not edit DNS records there | No Cloudflare zone the token can see holds the name, or the token lacks **DNS:Edit** on it. Give the token **Zone:Read** and **DNS:Edit** on the zone in Cloudflare, or name a credential that has them. |
-| `ankra org cloudflare credentials` shows `needs-reconnect`, and declaring a zone with the credential is refused | Ankra no longer holds the credential's API token. Connect again under the same name: `ANKRA_CLOUDFLARE_API_TOKEN=<token> ankra org cloudflare connect <name>` repairs the credential in place, and every zone bound to it follows without being declared again. |
+| Adding the zone is refused for overlapping | The zone overlaps the organisation's Ankra domain. Use the domain either as the root or as a custom zone, not both. |
+| Connecting Cloudflare is refused: the token reaches no zones | The token's zone resources exclude every zone. Give it **Zone:Read** on the zones Ankra should see. |
+| Declaring the zone is refused: the credential cannot reach the zone, or may not edit DNS records there | No Cloudflare zone the token can see holds the name, or the token lacks **DNS:Edit** on it. Give the token **Zone:Read** and **DNS:Edit** on the zone in Cloudflare, or name a credential that has them. |
+| The **Cloudflare** row shows **Connect again**, or `ankra org cloudflare credentials` shows `needs-reconnect` | Ankra no longer holds the credential's API token. Click **Connect again** and paste a token, or run `ANKRA_CLOUDFLARE_API_TOKEN=<token> ankra org cloudflare connect <name>`: the credential is repaired in place, and every zone bound to it follows without being declared again. |
+| The **Cloudflare** row shows **Token expired** | Cloudflare refuses the token. Click **Connect a new token**, move your domains to it, then disconnect the old one. |
 | The certificate stays pending | The hostname does not resolve yet, so the HTTP-01 challenge cannot complete. Check with `dig`. |
 
 ## Related
 
 - [Applications: the preview URL](/concepts/applications#the-preview-url) - the root domain and custom zones in depth.
-- [Organisation Settings: DNS records](/platform/organisation-settings#dns-records)
+- [Use Avura domains with Ankra](/guides/avura-domains)
 - [Gateway API](/guides/gateway-api) - HTTPRoute hostnames publish the same way.
 - [`ankra org` reference](/reference/cli/org#ankra-org-domain)
