@@ -1,0 +1,155 @@
+---
+title: Migrate from Argo CD
+description: Move the applications Argo CD deploys on a cluster into Ankra Stacks one at a time, run both copies side by side, switch over and remove Argo CD.
+---
+
+import { CliVersion } from "/snippets/cli-version.jsx";
+
+This tutorial moves one Argo CD Application that deploys a Helm chart into an Ankra Stack, runs the two copies side by side, switches traffic to the Ankra copy and removes the Argo CD Application. Repeat it for each Application, then uninstall Argo CD.
+
+Ankra has no importer for Argo CD Applications. You declare each one again in Ankra, from the chart, version and values the Application already names. The table below says where each Argo CD idea goes.
+
+## What maps to what
+
+| In Argo CD | In Ankra |
+|---|---|
+| A cluster Argo CD deploys to | A cluster in Ankra, with the Ankra agent installed. See [Add a Cluster](/guides/import-cluster) |
+| An `Application` with a Helm chart source | A Helm add-on in a [Stack](/concepts/stacks): `repoURL` is the chart's registry, `chart` the chart, `targetRevision` the pinned chart version, `helm.values` the add-on's values, `destination.namespace` its namespace |
+| An `Application` with a directory of plain manifests | Manifests in a Stack |
+| An `Application` with a Kustomize source | Manifests in a Stack. Ankra does not run Kustomize: render the overlay with `kustomize build` and add the output |
+| `syncOptions: CreateNamespace=true` | Nothing to set: an add-on's release creates its namespace if it does not exist |
+| Sync waves and the order Applications deploy in | Dependencies inside a Stack: a resource waits for its **Parents**. See [Stacks](/concepts/stacks). Between Stacks, a Stack's `deploy_wave` sets the order |
+| An `ApplicationSet` that stamps one definition onto many clusters | A [stack profile](/concepts/stack-profiles): one versioned definition with parameters, launched on each cluster |
+| An `AppProject` limiting who deploys what, where | [Roles and access](/guides/roles-and-access) and [projects](/guides/set-up-projects) |
+| Repository credentials for a private chart repository | A Helm registry connected to the organisation. See [Helm Registries](/guides/registries) |
+| The Git repository Argo CD watches, with automated sync | The cluster's [GitOps](/concepts/gitops) repository. Ankra writes its own layout under `clusters/<cluster-name>-<short-id>/` and syncs pushes back to the cluster |
+
+## Before you start
+
+- **The cluster is in Ankra and its agent is connected.** Import it as [Add a Cluster](/guides/import-cluster) describes.
+- **Ankra's own deployment engine on that cluster is Ankra's, not ArgoCD.** Go to **Infrastructure → Clusters → &lt;your cluster&gt; → Settings → Upgrades and maintenance** and read **Deployment engine**. **Default engine** should read **Ankra’s own engine**. If it reads **ArgoCD**, Ankra itself deploys add-ons on that cluster through Argo CD: removing Argo CD would break them. Move them first with **Move add-ons off ArgoCD**, as [Deployment Engines](/concepts/deployment-engines) describes.
+- **You can read the Application in Argo CD**, with the `argocd` CLI or the Argo CD UI.
+- **If the chart comes from a private repository**, connect it under **Build & delivery → Helm registries** first. See [Helm Registries](/guides/registries).
+- **If the cluster has a GitOps repository in Ankra**, it is a repository of its own, not the one Argo CD watches. Connecting a repository that already holds files at the paths Ankra writes can replace them, so use a new, empty repository. See [GitOps](/concepts/gitops#connecting-a-repository-to-a-cluster-that-already-has-state).
+
+<Steps>
+  <Step title="Read the Application in Argo CD">
+    Print the Application's definition:
+
+    ```bash
+    argocd app get my-app -o yaml
+    ```
+
+    Note five things from `spec`: the chart registry (`source.repoURL`), the chart (`source.chart`), the chart version (`source.targetRevision`), the values (`source.helm.values` or `source.helm.valuesObject`) and the namespace (`destination.namespace`).
+
+    You now have everything Ankra needs to deploy the same release.
+  </Step>
+  <Step title="Create a Stack for it">
+    Go to **Infrastructure → Clusters → &lt;your cluster&gt; → Technical details → Stacks** and click **Create a stack**. Choose **Compose a stack**, enter a **Stack name** such as `my-app`, and click **Start the draft**.
+
+    The Stack editor opens on an empty draft. Nothing deploys until you review it.
+  </Step>
+  <Step title="Add the chart as an add-on, in a new namespace">
+    Click **Add → Helm add-on**. Under **Find a chart**, search for the chart and choose it from the registry the Application names, then choose the **Pinned chart version** that matches `targetRevision`.
+
+    Fill in the add-on:
+    - **Add-on name**: a name of its own, such as `my-app-ankra`. The add-on's Helm release takes this name.
+    - **Namespace**: a namespace Argo CD does not use, such as `my-app-ankra`. The release creates it.
+    - **Values**: paste the Application's values.
+
+    Click **Add to draft**. The add-on appears in the Stack's graph.
+
+    <Note>
+    The new name and namespace are what let the two copies run side by side. Argo CD renders a chart and applies its objects without a Helm release, so they lack the release annotations Helm records ownership in. When existing objects block an install, Ankra takes them over only if they belong to a Helm release that no longer exists, so installing into Argo CD's namespace under the same names fails with `Helm ownership conflict for release <namespace>/<name>: existing objects carry no coherent helm ownership metadata (created outside helm, or partially stamped)`.
+    </Note>
+  </Step>
+  <Step title="Deploy the Stack">
+    Click **Review changes**, read the change list, then click **Create and deploy stack**.
+
+    The editor reports **Deployment accepted. Follow the operation for its outcome.** Go to **Infrastructure → Clusters → &lt;your cluster&gt; → Technical details → Operations**: the Stack's operation runs to success.
+  </Step>
+  <Step title="Run both copies side by side">
+    Both copies now run: Argo CD's in its namespace, Ankra's in `my-app-ankra`. Compare them before you move any traffic.
+
+    <Tabs>
+      <Tab title="Portal">
+        Open the Stack under **Infrastructure → Clusters → &lt;your cluster&gt; → Technical details → Stacks** and switch to **Table**: the add-on's **Observed state** column shows what the cluster reports. Pods of both copies are listed under **Infrastructure → Clusters → &lt;your cluster&gt; → Technical details → Kubernetes**.
+      </Tab>
+      <Tab title="CLI">
+        <CliVersion since="0.18.0" />
+
+        ```bash
+        ankra cluster select my-cluster
+        ankra cluster stacks list my-app
+        ankra cluster operations list --name my-app
+        ankra cluster get pods -n my-app-ankra
+        ```
+      </Tab>
+    </Tabs>
+
+    <Warning>
+    A chart that creates cluster-wide objects under fixed names (CustomResourceDefinitions, ClusterRoles, admission webhooks) cannot install a second copy beside the first: the operation fails with the Helm ownership conflict above, naming the objects. For such a chart, plan a short window instead: delete the Argo CD Application with its resources (Step 7), then deploy the Stack.
+    </Warning>
+  </Step>
+  <Step title="Switch traffic to the Ankra copy">
+    Move whatever sends traffic to the application onto the Ankra copy: the Ingress or Gateway route host, a DNS record, or the Service address other workloads call. Where that lives in the chart's values, change it in the add-on: open the Stack, select the add-on, click **Start a draft**, change its **Values**, then **Review changes** and deploy.
+
+    Check that requests reach the Ankra copy before you go on.
+  </Step>
+  <Step title="Remove the Argo CD Application">
+    Delete the Application and the objects it created:
+
+    ```bash
+    argocd app delete my-app --cascade
+    ```
+
+    Argo CD removes its copy; the Ankra copy keeps running. Delete through Argo CD rather than removing the objects by hand, so Argo CD does not sync them back.
+  </Step>
+</Steps>
+
+Repeat these steps for each Application. Move Applications that others depend on first, and declare the order inside each Stack with **Parents**.
+
+## Remove Argo CD
+
+When no Application is left:
+
+1. Check **Infrastructure → Clusters → &lt;your cluster&gt; → Settings → Upgrades and maintenance** again: under **Deployment engine**, **Default engine** reads **Ankra’s own engine**.
+2. Uninstall Argo CD the way you installed it, following [Argo CD's documentation](https://argo-cd.readthedocs.io/en/stable/).
+3. If you keep Argo CD's Git repository, archive it, so no one commits to a repository nothing deploys from.
+
+## Verify
+
+- Under **Infrastructure → Clusters → &lt;your cluster&gt; → Technical details → Stacks**, each migrated Stack is listed and its last operation under **Operations** succeeded.
+- `argocd app list` returns no Application for this cluster.
+- If the cluster has a GitOps repository, **Infrastructure → Clusters → &lt;your cluster&gt; → Settings → GitOps** reads **In sync**, and the repository holds a folder per Stack under `clusters/<cluster-name>-<short-id>/stacks/`.
+
+## What can go wrong
+
+<AccordionGroup>
+  <Accordion title="The operation fails with a Helm ownership conflict">
+    The add-on's objects already exist in the cluster under the same names. If the message says the objects `carry no coherent helm ownership metadata`, they are Argo CD's: give the add-on a name and namespace of its own, or remove the Argo CD Application first. If it names a `live release`, the chart is already installed by Helm under another release: remove one of the two.
+  </Accordion>
+  <Accordion title="The chart is not in Find a chart">
+    The chart's repository is not connected to the organisation. Connect it under **Build & delivery → Helm registries** (see [Helm Registries](/guides/registries)) and open **Add → Helm add-on** again.
+  </Accordion>
+  <Accordion title="The default engine was not changed">
+    **Use Ankra’s engine by default** refuses while something on the cluster still depends on ArgoCD, and lists what it found. Move those add-ons with **Move add-ons off ArgoCD** first. See [Deployment Engines](/concepts/deployment-engines).
+  </Accordion>
+</AccordionGroup>
+
+## Where to go next
+
+<CardGroup cols={2}>
+  <Card title="Stacks" icon="layer-group" href="/concepts/stacks">
+    How resources in a Stack depend on each other and deploy.
+  </Card>
+  <Card title="GitOps" icon="git-alt" href="/concepts/gitops">
+    Keep the cluster's Stacks in Git and change them by commit.
+  </Card>
+  <Card title="Stack Profiles" icon="clone" href="/concepts/stack-profiles">
+    Replace an ApplicationSet with one definition launched on many clusters.
+  </Card>
+  <Card title="Deployment Engines" icon="gears" href="/concepts/deployment-engines">
+    How Ankra applies add-ons, and moving a cluster off ArgoCD.
+  </Card>
+</CardGroup>

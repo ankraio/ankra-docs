@@ -3,15 +3,24 @@ title: Hetzner Reference
 description: Configuration options, locations, API endpoints, and the hcloud stack (CCM, CSI, ingress) for Ankra-managed Hetzner clusters.
 ---
 
+import { CliVersion } from "/snippets/cli-version.jsx";
+
 Reference material for [Hetzner clusters](/guides/hetzner-clusters): every configuration parameter, datacenter location, and the details of the infrastructure Ankra provisions.
 
 ---
 
 ## Cluster Configuration Options
 
+The fields of `POST /api/v1/clusters/hetzner`. The portal's create form sets most of them; see [Create a Cluster](/guides/create-a-cluster).
+
+<CliVersion since="0.31.0" command="cluster hetzner bastion allowed-ips" />
+
 | Parameter | Default | Description |
 |-----------|---------|-------------|
 | `name` | *required* | Unique cluster name |
+| `description` | | Free text shown with the cluster |
+| `environment` | `development` | What the cluster runs: `production`, `staging`, `development`, `testing`, `local`, or a name of your own. The portal asks for it as **What will this cluster run?** |
+| `criticality` | *the environment's own level* | How important the cluster is: `production`, `staging`, `development` or `disposable` |
 | `credential_id` | *required* | Hetzner API credential ID |
 | `ssh_key_credential_ids` | *required* | Array of SSH key credential IDs |
 | `ssh_key_credential_id` | | Single SSH key credential ID (backward compatible, use `ssh_key_credential_ids` for multiple) |
@@ -19,6 +28,7 @@ Reference material for [Hetzner clusters](/guides/hetzner-clusters): every confi
 | `network_ip_range` | `10.0.0.0/16` | Private network IP range |
 | `subnet_range` | `10.0.1.0/24` | Subnet range within the network |
 | `bastion_server_type` | *see below* | Server type for the bastion host |
+| `bastion_allowed_ips` | *any address* | IPv4 addresses or CIDRs allowed to reach the bastion over SSH, at most 64. IPv6 and `0.0.0.0/0` are refused; leave it out to keep SSH open to any address (key-only). Ankra's own egress is always allowed. Change it later with `ankra cluster hetzner bastion allowed-ips` |
 | `control_plane_count` | `1` | Number of control plane nodes |
 | `control_plane_server_type` | *see below* | Server type for control planes |
 | `worker_count` | `1` | Number of worker nodes (legacy, use `node_groups` instead) |
@@ -27,10 +37,20 @@ Reference material for [Hetzner clusters](/guides/hetzner-clusters): every confi
 | `distribution` | `kubeadm` | Kubernetes distribution (`kubeadm` or `k3s`) |
 | `kubernetes_version` | *stable* | Version for the chosen distribution: a plain upstream tag such as `v1.36.4` for `kubeadm`, a k3s build such as `v1.35.7+k3s1` for `k3s` (a bare patch resolves to its newest `+k3sN` build). A `+k3sN` build with `kubeadm` is refused. Omit it to install the version catalogue's stable version for the distribution |
 | `k3s_disabled_components` | | k3s only. Packaged components the k3s install leaves out (`k3s --disable`), on top of what the provider's k3s shape already disables: any of `coredns`, `servicelb`, `traefik`, `local-storage`, `metrics-server`, `runtimes`, for example `["traefik"]` on a cluster that brings its own ingress. A list on a `kubeadm` cluster is refused with a `400` (`k3s_disabled_components is only supported for the k3s distribution.`); an entry outside those six or an entry listed twice is a `422` validation error pointing at the entry |
+| `cni` | `cilium` (kubeadm), `flannel` (k3s) | CNI plugin: `flannel`, `calico` or `cilium`. Follows the distribution when omitted; kubeadm clusters always use `cilium` |
+| `cni_features` | *all off* | CNI feature toggles, fixed at creation. See [Choices fixed at create time](/guides/operate-ankra-managed-clusters#choices-fixed-at-create-time) |
+| `etcd_topology` | `stacked` | kubeadm only. `stacked` or `external` (dedicated etcd servers) |
+| `etcd_node_count` | `3` | kubeadm `external` topology only (3 or 5) |
+| `etcd_server_type` | *see below* | kubeadm `external` topology only. Server type for the etcd nodes |
+| `external_cloud_provider` | `true` | Install the Hetzner cloud controller manager and CSI driver (the hcloud stack) and wire the nodes for them. The networking stack's load balancer is created by the cloud controller manager, so `include_networking` needs it |
 | `include_networking` | `true` | Deploy the networking stack: Traefik, cert-manager and a `letsencrypt-prod` Let's Encrypt ClusterIssuer |
+| `gateway_api` | `false` | Also serve the Kubernetes Gateway API from the networking stack's Traefik. Needs `include_networking`. See [Gateway API](/guides/gateway-api) |
 | `include_dns` | `true` | Give the cluster a delegated subdomain on `ankra.cc` with external-dns wired |
-| `gitops_credential_name` | | GitHub credential name for GitOps integration |
-| `gitops_repository` | | GitHub repository for GitOps (e.g., `org/repo`) |
+| `gitops_provider` | `github` | Git provider of the GitOps repository: `github` or `bitbucket_cloud` |
+| `gitops_credential_name` | | Name of the Git credential for GitOps integration |
+| `gitops_repository` | | GitOps repository, for example `my-org/my-repo` |
+| `gitops_workspace` | | Bitbucket Cloud only. The workspace that holds the repository |
+| `gitops_repo_slug` | | Bitbucket Cloud only. The repository slug |
 | `gitops_branch` | `master` | Branch for GitOps pushes |
 
 A server type you leave out is chosen from what the location can provision now: the cheapest available x86 type with at least 2 vCPU and 4 GB of memory for the bastion and workers, and at least 4 vCPU and 8 GB for the control plane and dedicated etcd nodes. Out-of-stock and deprecated types are skipped, and the response's `server_types` object (`bastion`, `control_plane`, `worker`, `etcd`) names the type each provisioned role got. If the location has no such type, the create is refused with the list of types it does offer. A server type you name is checked against the location, and refused with the available types of at least that size when the location cannot provision it. The `cx` line is often unavailable, so check `ankra cluster hetzner server-types --credential-id <id> --location <location>` and name types from its `AVAILABLE=yes` rows, for example `cpx12` for the bastion and `cpx22` for the control plane and workers.
@@ -111,7 +131,7 @@ A Hetzner cluster provisions the following infrastructure:
 | **Control Plane(s)** | Kubernetes control plane nodes (private IPs only) |
 | **Worker(s)** | Kubernetes worker nodes organised in [node groups](/guides/operate-ankra-managed-clusters#node-groups), each with independent instance types, labels, and taints |
 | **SSH Keys** | Deployed to all servers for access (multiple keys supported) |
-| **External Cloud Provider** | k3s is configured with `cloud-provider=external` for Hetzner CCM compatibility |
+| **External Cloud Provider** | The kubelet runs with `cloud-provider=external` so the Hetzner CCM initialises each node, on kubeadm and k3s |
 
 ```mermaid
 flowchart TB
@@ -166,7 +186,7 @@ You do not need to manually set up the CCM or CSI driver - they are provisioned 
 
 ### External Cloud Provider
 
-Hetzner clusters are provisioned with `--kubelet-arg=cloud-provider=external` and `--disable-cloud-controller`. This configures k3s to delegate node initialization to the Hetzner Cloud Controller Manager.
+With `external_cloud_provider` on (the default), every node's kubelet runs with `cloud-provider=external` and its provider ID, so node initialisation is left to the Hetzner Cloud Controller Manager. This holds for both distributions. On a k3s cluster the servers also run with `--disable-cloud-controller` and the k3s service load balancer off, so the Hetzner CCM is the only cloud controller.
 
 When nodes first join the cluster, they carry a `node.cloudprovider.kubernetes.io/uninitialized` taint that prevents workload scheduling. The CCM removes this taint after initializing each node with its Hetzner provider ID, zone labels, and instance metadata. The Ankra Agent tolerates this taint so it can schedule immediately and begin managing the cluster before the CCM is fully running.
 
@@ -179,7 +199,8 @@ The [Hetzner Cloud Controller Manager](https://github.com/hetznercloud/hcloud-cl
 - **Node metadata** - automatic zone, region, and instance type labels on nodes
 - **Load Balancers** - Kubernetes `LoadBalancer` services backed by Hetzner Cloud Load Balancers
 - **Node lifecycle** - automatic removal of deleted nodes from the cluster
-- **Route management** - pod network routes via Hetzner Cloud Networks
+
+Route management is off (`HCLOUD_NETWORK_ROUTES_ENABLED: "false"` below), so the CCM creates no pod routes in the Hetzner Cloud Network.
 
 The CCM is deployed in the `hcloud` namespace with 3 replicas and a PodDisruptionBudget. It reads the Hetzner API token from the `hcloud-token` secret that Ankra creates automatically.
 
@@ -216,7 +237,7 @@ podDisruptionBudget:
   minAvailable: 1
 ```
 
-To customize the CCM configuration after creation, edit the `hcloud-cloud-controller-manager` addon in the `hcloud` stack via the Stack Builder.
+To customise the CCM configuration after creation, edit the `hcloud-cloud-controller-manager` add-on in the `hcloud` Stack, under **Infrastructure → Clusters → &lt;your cluster&gt; → Stacks**.
 
 <Note>
 The CCM creates Hetzner Cloud Load Balancers when you create Kubernetes `Service` resources of type `LoadBalancer`. Terminating the cluster deletes them, together with any Load Balancer attached to the cluster's network - see [Hetzner specifics](/guides/hetzner-clusters#hetzner-specifics).

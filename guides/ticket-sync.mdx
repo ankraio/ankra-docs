@@ -1,7 +1,9 @@
 ---
 title: Sync Board Tickets to Jira, Linear, or a Webhook
-description: Add a sync connection so AI board tickets are mirrored into your own tracker - where every provider value comes from, what gets synced, and how to verify deliveries.
+description: Mirror Ankra AI tickets into Jira, Linear or a webhook with a sync connection from the CLI - where each value comes from, what syncs, and how to verify it.
 ---
+
+import { CliVersion } from "/snippets/cli-version.jsx";
 
 A **sync connection** mirrors [AI board](/platform/ai-board) tickets outbound. Each ticket that matches the connection's filters gets an issue created once in your tracker, and its timeline events follow as comments on that issue. Three providers are available: **Jira**, **Linear**, and a generic **webhook**.
 
@@ -11,8 +13,9 @@ This is a different system from [webhook destinations](/guides/webhooks), which 
 
 ## Prerequisites
 
-- You are an organisation **admin**. Members can see the connection list, but only admins can add, edit, enable, or delete one.
-- The AI board is available in your organisation (**AI** → **Board** in the sidebar).
+- You are an organisation **admin**. Members can see the connection list, but only admins can add, change, switch or delete one.
+- Tickets are turned on for your organisation: **Ankra AI → Work** is in the menu.
+- The [Ankra CLI](/integrations/ankra-cli), logged in to the organisation. The portal has no page for sync connections: you create and manage them with `ankra tickets sync`.
 - The destination is reachable from the public internet.
 
 <Warning>
@@ -23,21 +26,21 @@ Ankra dials sync destinations from its own infrastructure and refuses any addres
 
 A new connection picks up your organisation's **live** tickets plus anything that changes afterwards. The closed backlog stays out, so enabling Jira sync does not file a thousand finished tickets into a fresh project. Closed tickets only sync if they change again after the connection was created.
 
-Three filters narrow it further, all set in the same dialog:
+Three filters narrow it further, each a flag on the connection:
 
-| Filter | Options | Default |
-|--------|---------|---------|
-| **Kinds** | Incident, Insight, Gap, Automation, Request, Chore | none checked, which means every kind |
-| **Minimum priority** | Low and above (every ticket), Medium and above, High and above, Urgent only | Low and above |
-| **Timeline events** | Relay timeline events as comments, or create the external issue only | Relay timeline events as comments |
+| Filter | Flag | Values | Default |
+|--------|------|--------|---------|
+| **Kinds** | `--kind`, repeatable | `incident`, `insight`, `gap`, `automation`, `request`, `chore` | None, which means every kind |
+| **Minimum priority** | `--min-priority` | `low` (every ticket), `medium`, `high`, `urgent` | `low` |
+| **Timeline events** | `--event-scope` | `all` relays timeline events as comments; `anchor_only` creates the external issue only | `all` |
 
 <Warning>
-**Create the external issue only** (`anchor_only`) is not a pause. The timeline cursor moves to the tail as tickets change, so events skipped while the connection is in this mode are skipped permanently. Switching back to relaying comments later resumes from that point and never backfills what was missed.
+`--event-scope anchor_only` is not a pause. The timeline cursor moves to the tail as tickets change, so events skipped while the connection is in this mode are skipped permanently. Switching back to relaying comments later resumes from that point and never backfills what was missed.
 </Warning>
 
 ## Step 1: Collect your provider's details
 
-Gather these before you open the dialog. It has no draft state, so a value you have to go and look up means starting the form again.
+Gather these first. In step 2 you pass them as flags, and the secret on stdin.
 
 <Tabs>
   <Tab title="Jira">
@@ -78,7 +81,7 @@ Gather these before you open the dialog. It has no draft state, so a value you h
   </Tab>
 
   <Tab title="Linear">
-    You need one value: an API key. Ankra reads your teams from it, so there is no team id to look up.
+    You need an API key, and the id of the team issues go to. Ankra lists the teams the key reaches, so you do not have to look the id up in Linear.
 
     <Steps>
       <Step title="Personal API key">
@@ -89,19 +92,18 @@ Gather these before you open the dialog. It has no draft state, so a value you h
         </Tip>
       </Step>
       <Step title="Team">
-        Paste the API key into the dialog, choose **Load teams**, and pick your team from the list by name. Ankra asks Linear which teams that key can reach and stores the team's id for you.
+        Save the key to a file, then ask Ankra which teams it reaches:
 
-        When you edit an existing Linear connection, the list loads on its own from the key Ankra already holds - there is nothing to paste again.
+        ```bash
+        cat linear-key.txt | ankra tickets sync destinations --provider linear --secret-stdin
+        ```
 
-        Two things to expect from the list:
-
-        - It shows only the teams the key can see. If a team is missing, the key was created by someone without access to it.
-        - Ankra remembers the team's name to label the connection, but delivers against its id. Renaming the team in Linear leaves the old name on the row until you pick it again.
+        Ankra uses the key for this one lookup and does not store it. Copy the id of your team. The list shows only the teams the key can see: if a team is missing, the key was created by someone without access to it. For a connection that already exists, `--connection <connection-id>` uses the key Ankra holds instead.
       </Step>
     </Steps>
 
     <Accordion title="Finding the team id yourself">
-      The picker is the supported path in the interface. If you are creating the connection through the API instead, or the picker cannot reach Linear, `config.team_id` takes the team's **UUID** - not the short team key you see in the interface (`ENG`, `OPS`). Linear does not show the UUID in its settings screens, so query the API for it:
+      If `ankra tickets sync destinations` cannot reach Linear, `--team-id` takes the team's **UUID** - not the short team key you see in the interface (`ENG`, `OPS`). Linear does not show the UUID in its settings screens, so query the API for it:
 
       ```bash
       curl -s https://api.linear.app/graphql \
@@ -124,7 +126,7 @@ Gather these before you open the dialog. It has no draft state, so a value you h
       }
       ```
 
-      Take the `id` of the team whose `key` or `name` you want. In the dialog, **Enter a team ID instead** swaps the picker for a plain text field that accepts it.
+      Take the `id` of the team whose `key` or `name` you want, and pass it as `--team-id`.
 
       <Tip>
       Linear personal API keys go in the `Authorization` header **without** a `Bearer` prefix. If the command above returns an authentication error, check you have not added one.
@@ -154,56 +156,60 @@ Gather these before you open the dialog. It has no draft state, so a value you h
 
 ## Step 2: Add the connection
 
-<Steps>
-  <Step title="Open the ticket sync settings">
-    Go to **AI** → **Settings** → **Connections** and find the **Ticket sync** card.
-  </Step>
-  <Step title="Choose Add connection">
-    The **Add sync connection** dialog opens on a provider picker with the three options. Pick one and the form for that provider appears.
+<CliVersion since="0.77.0" />
 
-    You can change your mind with **Back**, which returns to the picker. Re-picking keeps the name and filters you have typed, and clears the destination and credential fields, because those belong to the provider you just left.
-  </Step>
-  <Step title="Name the connection">
-    A label for your own use, up to 200 characters, unique within the organisation. Saving a name that is already taken returns `A sync connection with this name already exists.`
-  </Step>
-  <Step title="Fill in the destination and credential">
-    These are the values from step 1.
+The secret is never an argument: pipe it on stdin with `--secret-stdin`, or leave the flag off in a terminal and the CLI asks for it with the input hidden. Ankra stores it in its secret store and never returns it.
 
-    | Provider | Destination fields | Credential fields |
-    |----------|--------------------|-------------------|
-    | **Jira** | Jira base URL, Project key, Issue type (optional) | Account email, API token |
-    | **Linear** | Team, picked from the list your API key can reach | API key |
-    | **Webhook** | Endpoint URL | Signing secret (optional) |
+<Tabs>
+  <Tab title="Jira">
+    ```bash
+    cat jira-token.txt | ankra tickets sync connections create --name jira --provider jira \
+      --base-url https://my-team.atlassian.net --project-key OPS --email ops@example.com \
+      --kind incident --min-priority high --secret-stdin
+    ```
 
-    For Linear, fill the **API key** first: the **Team** picker needs it to ask Linear which teams the key reaches. **Enter a team ID instead** falls back to a plain text field if you already know the id, or if the picker cannot reach Linear.
-  </Step>
-  <Step title="Set the sync filters">
-    Tick the ticket **kinds** to sync, or leave them all unticked to sync every kind. Then set the **Minimum priority** and whether **Timeline events** are relayed as comments.
-  </Step>
-  <Step title="Decide whether it starts enabled">
-    **Start enabled** is on by default, so live tickets begin syncing as soon as the connection is created. Turn it off if you want to review the settings, or brief the team, before anything lands in the tracker.
-  </Step>
-  <Step title="Create connection">
-    Ankra validates the fields, stores the credential in Vault, and adds the connection to the list. The credential is never written to the database and is never returned by the API afterwards.
-  </Step>
-</Steps>
+    Leave out `--issue-type` to create `Task` issues.
+  </Tab>
+  <Tab title="Linear">
+    ```bash
+    cat linear-key.txt | ankra tickets sync connections create --name linear --provider linear \
+      --team-id <team-id> --secret-stdin
+    ```
+  </Tab>
+  <Tab title="Webhook">
+    ```bash
+    cat signing-secret.txt | ankra tickets sync connections create --name tickets-webhook --provider webhook \
+      --url https://example.com/ankra-tickets --secret-stdin
+    ```
+
+    `--unsigned` creates the connection with no signing secret. Your endpoint then cannot tell that deliveries came from Ankra.
+  </Tab>
+</Tabs>
+
+The name is for your own use, up to 200 characters, and unique within the organisation. A connection starts enabled, so live tickets begin syncing as soon as it is created. Add `--disabled` to review it, or brief the team, before anything lands in the tracker.
+
+**You should see** the connection printed with its **Provider**, **Target**, **State** and **Credential**. `held by the platform (never shown)` means Ankra holds the secret.
 
 ## Verify it works
 
-The connection row carries a status dot with four states, and it deliberately does not go green until something has actually been delivered:
+```bash
+ankra tickets sync connections list
+ankra tickets sync connections get <connection-id>
+```
 
-| Dot | Meaning |
+| **State** | Meaning |
 |-----|---------|
-| Grey, "Sync disabled" | The connection is switched off |
-| Pale, "No deliveries yet" | Enabled, but nothing has been delivered yet. A wrong credential looks exactly like this until the first ticket fires |
-| Green, "Deliveries healthy" | The last delivery succeeded, and the row shows when |
-| Red, "Deliveries are failing" | The last delivery failed. The error text from the provider is printed under the row |
+| `disabled` | The connection is switched off |
+| `enabled` | Switched on, and the last delivery did not fail. Until **Last synced** shows a time, nothing has been delivered: a wrong credential looks exactly like this until the first ticket syncs |
+| `failing` | The last delivery failed. **Last error** carries the provider's error text |
 
-To confirm the wiring end to end, change something on a live board ticket that matches the filters - move its status, or leave a comment. The sync loop runs roughly every 30 seconds, so within about a minute the row should show a **Synced** timestamp and the issue should exist in your tracker.
+To confirm the wiring end to end, change something on a live ticket that matches the filters - move its status, or leave a comment. The sync loop runs every 30 seconds, so within about a minute **Last synced** shows a time and the issue exists in your tracker.
 
 <Note>
 A large first batch drains over several passes rather than all at once: deliveries are throttled to stay under tracker rate limits, and each ticket relays up to 20 timeline events per pass. A busy board that has just been connected takes a few minutes to catch up.
 </Note>
+
+From an MCP client, `list_ticket_sync_connections` lists the connections.
 
 ## What lands in Jira and Linear
 
@@ -321,11 +327,18 @@ def is_from_ankra(raw_body: bytes, signature_header: str, secret: str) -> bool:
 
 ## Manage a connection
 
-- **Disable** - the switch on the row stops deliveries without losing the configuration or the cursor. Re-enabling resumes from where it stopped, and anything that changed in the meantime is delivered then.
-- **Edit** - the pencil opens the same dialog with the provider locked, since a connection cannot change provider. Create a second connection instead.
-- **Rotate a credential** - open **Edit**, fill in the credential fields, and save. Leaving every credential field blank keeps the stored one; filling them in replaces it wholesale. A partly filled credential is refused, because the replacement is all or nothing.
-- **Retry a failing connection** - saving a failing connection again clears its failure state and retries immediately, rather than waiting out the normal cadence.
-- **Delete** - the bin removes the connection and its stored credential.
+`ankra tickets sync connections update <connection-id>` changes only what you pass:
+
+- **Switch it off or on** - `--disable` stops deliveries without losing the configuration or the cursor. `--enable` resumes from where it stopped, and anything that changed in the meantime is delivered then.
+- **Change the target or filters** - `--project-key`, `--team-id`, `--url`, `--kind`, `--min-priority`, `--event-scope` and the other flags of `create`. A connection cannot change provider: create a second connection instead.
+- **Rotate the credential** - `--rotate-secret` with `--secret-stdin`, or a hidden prompt, replaces the stored secret. For Jira, pass `--email` with it.
+
+  ```bash
+  cat new-key.txt | ankra tickets sync connections update <connection-id> --rotate-secret --secret-stdin
+  ```
+
+- **Retry a failing connection** - an update that changes the settings or rotates the credential clears the failure and retries at once, rather than waiting for the next pass. Renaming, switching or filtering alone does not.
+- **Delete** - `ankra tickets sync connections delete <connection-id>` removes the connection and its stored credential. It asks first; `--yes` skips the question.
 
 <Warning>
 Deleting a connection stops the sync and cannot be undone. External issues that were already created are left exactly as they are in Jira or Linear - Ankra does not close or delete them. Adding the connection back later starts a fresh cursor and files new issues for the tickets that are live at that moment.
@@ -337,16 +350,15 @@ Deleting a connection stops the sync and cannot be undone. External issues that 
 |--------------|---------------|
 | `Only organisation admins can manage ticket sync connections.` | Your role can read the list but not change it. Ask an organisation admin. |
 | `A sync connection with this name already exists.` | Names are unique per organisation. Pick a different one. |
-| **No credential** badge on the row | The connection has no stored credential and its provider needs one, so it cannot deliver. Open **Edit** and add it. |
-| Row stays on "No deliveries yet" | Nothing has matched the filters yet, or nothing has changed. Check the kinds and the minimum priority, then touch a live ticket that qualifies. |
+| **Credential** reads `not held` | The connection has no stored credential and its provider needs one, so it cannot deliver. Add it with `--rotate-secret`. |
+| **Last synced** stays empty | No ticket has matched the filters, or none has changed since the connection was created. Check the kinds and the minimum priority, then touch a live ticket that qualifies. |
 | `Jira API error 401` | The account email and API token do not match, or the token was revoked. Regenerate the token and rotate it. |
 | `Jira API error 403` | The account authenticates but lacks a project permission. Check Browse Projects, Create Issues, Add Comments, and Edit Issues on that project. |
 | `Jira API error 400` with an `issuetype` message | The issue type name does not exist in that project's scheme. Use the exact name Jira shows, or clear the field to fall back to `Task`. |
-| `Linear API GraphQL errors` mentioning the team | The stored team is not one this key can see. Open **Edit**, choose **Load teams**, and pick the team again with the current key. |
+| `Linear API GraphQL errors` mentioning the team | The stored team is not one this key can see. Run `ankra tickets sync destinations --provider linear --connection <connection-id>` and set a team it lists with `--team-id`. |
 | `Linear API error 400` or `401` | The API key is wrong or was revoked. Note that Linear personal keys carry no `Bearer` prefix. |
-| `The linear provider rejected this credential.` when loading teams | Linear refused the key itself. Check it was pasted whole, starts with `lin_api_`, and has not been revoked. |
-| **Load teams** is greyed out | The API key field is still empty. The picker has nothing to ask Linear with until it is filled. |
-| **Load teams** returns no teams | The key authenticated but reaches no team - it was created by a Linear user without team access. Create the key from an account that is a member of the target team. |
+| `The linear provider rejected this credential.` from `ankra tickets sync destinations` | Linear refused the key itself. Check it was pasted whole, starts with `lin_api_`, and has not been revoked. |
+| `The credential reaches no destinations.` | The key authenticated but reaches no team - it was created by a Linear user without team access. Create the key from an account that is a member of the target team. |
 | `webhook delivery returned status <code>` | Your endpoint answered with a status of 300 or above, which Ankra treats as a failed delivery. It is retried on the next pass. |
 | `ticket sync destination <address> is not publicly routable` | The destination resolves to a private, loopback, or link-local address. Expose it on the public internet, or use a provider that is. |
 | `webhook delivery failed: ... timeout` | Your endpoint did not answer within the 30 second budget. Acknowledge fast and process asynchronously. |
@@ -357,6 +369,6 @@ Failures are retried automatically on the next pass. A failing connection does n
 
 - [AI Board](/platform/ai-board) - ticket kinds, statuses, priorities, and the plan approval flow
 - [Work the AI board with your own agent](/guides/board-own-agent) - act on tickets over MCP, the way back in that sync does not provide
-- [AI Connections](/platform/ai-connections) - the rest of the Connections settings page
+- [AI Connections](/platform/ai-connections) - the Slack, Teams and code host connections on **Gateway connections**
 - [Webhooks](/guides/webhooks) - alert and platform event destinations, a separate system from ticket sync
 - [Roles and Access](/guides/roles-and-access) - who counts as an organisation admin

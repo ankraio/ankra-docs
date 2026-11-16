@@ -1,7 +1,8 @@
 ---
 title: Compliance Management
-description: Ankra's built-in compliance layer - continuous control monitoring, governed exceptions, and the evidence export that backs them in an audit.
+description: Ankra's built-in compliance layer - continuous control monitoring, framework evidence, governed exceptions, and the exports that back them in an audit.
 ---
+import { CliVersion } from "/snippets/cli-version.jsx";
 
 Ankra has a compliance management layer built into the platform. It continuously measures your clusters against recognised benchmarks, governs the exceptions you grant against them, and exports the result as evidence.
 
@@ -13,30 +14,101 @@ This page covers the compliance layer as a management system. The interface mech
 
 ## Continuous control monitoring
 
-The **Compliance** view scores every managed cluster against four benchmark specifications and lays them out as a matrix, so you can read one cluster down or one framework across.
+Ankra reads four benchmark specifications from every managed cluster that runs the scanner.
 
-| Framework | What it checks |
+| Benchmark | What it checks |
 |-----------|----------------|
-| CIS Kubernetes Benchmark | Control plane, kubelet, etcd and workload configuration against the CIS baseline, on a cluster that turned on the security baseline's CIS inputs (off by default, see [Security baseline](/guides/cluster-security#security-baseline)) |
+| CIS Kubernetes Benchmark | Control plane, kubelet, etcd and workload configuration against the CIS baseline, on a cluster that turned on the security baseline's CIS inputs (off by default, see [Security baseline](/guides/cluster-security#the-security-baseline)) |
 | NSA/CISA Kubernetes Hardening Guidance | The NSA and CISA hardening recommendations, on a cluster that turned on the same inputs |
 | Pod Security Standards - Baseline | Pod-level posture against the PSS baseline profile |
 | Pod Security Standards - Restricted | Pod-level posture against the stricter PSS restricted profile |
 
-Each cell carries pass and fail counts and a pass rate, graded into three tiers:
+For each cluster and benchmark Ankra keeps the pass count, the fail count and the failed checks, with the configuration-audit failures beside them. The portal has no page for the benchmark results. Read them with the CLI, or from an MCP client with `get_security_compliance_overview` (the whole fleet) and `get_compliance_reports` (one cluster):
 
-| Tier | Meaning |
-|------|---------|
-| **Compliant** | No failed checks |
-| **Attention** | Failures present, but the pass rate is 85% or above |
-| **Poor** | Pass rate below 85% |
+<CliVersion since="0.74.0" />
 
-Configuration-audit findings are rolled up alongside the benchmarks, and a fleet scorecard summarises coverage and the failing-check count across the estate.
+```bash
+# Every cluster: one row per benchmark with Pass, Fail, Failed checks and Config audit failures
+ankra security compliance
+
+# One cluster, with the failing controls
+ankra security benchmarks --cluster my-cluster
+```
 
 <Note>
-A cluster without the scanner installed is reported explicitly as **not reporting**, with the reason, rather than being counted as passing. That distinction is deliberate: to an assessor an unscanned cluster is a coverage gap, and a system that quietly scored it as clean would be worse than useless.
+A cluster the scanner does not run on, or whose agent could not be reached, reads `not_available` with the reason, never as passing, and the summary line counts it as without compliance data. To an assessor an unscanned cluster is a coverage gap, so it is shown as one. In the portal, **Security → Coverage** shows which clusters have a current scan and which need a fresh report.
 </Note>
 
-Scanning runs inside your cluster through [Trivy Operator](/guides/cluster-security) and only findings metadata reaches the platform. Ankra is the aggregation, grading and retention layer, not the scanner.
+Scanning runs inside your cluster through [Trivy Operator](/guides/cluster-security) and only findings metadata reaches the platform. Ankra is the aggregation and retention layer, not the scanner.
+
+---
+
+## Framework evidence
+
+Ankra maps what it observes to control frameworks and records the result every day. Open **Security → Evidence** (`/next/security?tab=evidence`). The **Frameworks** table lists each framework with three counts: **Needs review**, **Needs your evidence** and **Passed**.
+
+| Framework | Version | Key |
+|-----------|---------|-----|
+| ISO 27001 | ISO/IEC 27001:2022 | `iso27001` |
+| SOC 2 | AICPA TSC 2017 (2022 revision) | `soc2` |
+| NIST CSF | NIST CSF 2.0 | `nist_csf` |
+| GDPR | Regulation (EU) 2016/679 | `gdpr` |
+| HIPAA | 45 CFR Part 164, Subpart C | `hipaa` |
+
+HIPAA collects no evidence: its row opens a mapping guide in place of a report.
+
+**Turn a framework on.** A framework records nothing until someone with `security.manage` turns it on. Click **Enable ISO 27001 evidence** (the button names the framework), then **Enable evidence collection** in the dialog. A member without the permission reads "A security manager can enable collection." The CLI twin is `ankra security compliance frameworks enable <framework-key>`. From then on Ankra records one snapshot a day, and the **Evidence period** list offers **Current observations** and every month with a recorded snapshot.
+
+**Read a control.** Each control has a status:
+
+| Status | Meaning |
+|--------|---------|
+| **Automated checks passed** | Every automated check behind the control passed |
+| **Needs review** | Some of the control's automated checks passed and some failed |
+| **Evidence gap** | None of the control's automated checks passed |
+| **Owner evidence needed** | The control has no automated check; an owner attaches the policy, review, agreement or test in your audit system |
+| **Not recorded** | Nothing was recorded for the period |
+
+The automated checks behind the controls are these. Each control in a framework report names the checks it uses.
+
+| Check | What it measures |
+|-------|------------------|
+| Critical vulnerabilities remediated | Open critical findings |
+| Known-exploited vulnerabilities remediated | Open findings listed in CISA KEV |
+| Exploited-vulnerability deadlines met | KEV findings past their due date |
+| Severe findings triaged within 30 days | Critical and high findings older than 30 days with no disposition |
+| Vulnerability scanning covers every cluster | Clusters with no scan |
+| Vulnerability scans are current | How old each cluster's scan is |
+| Exploit intelligence feed is current | Whether the CISA KEV sync is less than 7 days old |
+| Security baseline enforced | Whether the organisation's [security baseline](/guides/cluster-security#the-security-baseline) is enabled for new clusters |
+| Secrets encryption initialised | Whether [SOPS](/guides/sops) encryption is initialised for the organisation |
+| Multi-factor authentication required | Whether the organisation requires multi-factor authentication for every member |
+| Every member enrolled in multi-factor | Active members without multi-factor enrolled |
+| Audit trail actively recording | Whether the [audit log](/guides/audit-log) recorded an event in the last 30 days |
+| Verified backup vault available | Whether at least one [backup vault](/concepts/backup-vaults) is verified and ready |
+| Configuration managed from Git | Whether every live cluster is connected to a [GitOps repository](/concepts/gitops) |
+| Runtime anomaly monitoring | Clusters a runtime detection source reported from in the last 7 days |
+| No dormant API tokens | Active API tokens unused for 90 days |
+
+**Export it.** Click **Export evidence**, pick the **Export framework** and the **Export period**, then download:
+
+| Download | File | For |
+|----------|------|-----|
+| **Generic JSON** → **Download JSON** | `ankra-security-evidence.json` | A versioned evidence envelope for your archive, webhook relay or audit workflow |
+| **Vanta** → **Download PDF** | `ankra-security-evidence.pdf` | A PDF to upload to the matching Vanta document yourself. Ankra is not connected to Vanta and records no receipt |
+| **Wazuh** → **Download NDJSON** | `ankra-security.ndjson` | Flat NDJSON observations for a JSON log collector |
+
+The export holds the selected framework period and the current page of the SBOM image inventory, with its search filters. The screen states what it holds: "Observed metadata only, not raw logs or credentials." A download records no delivery.
+
+**Send it to a destination.** To have Ankra deliver the evidence and record each send, open **Connect a destination**, choose a **Destination type** (**Signed webhook** or **Wazuh relay**), give it a **Name** and an **HTTPS endpoint**, and click **Connect destination**. The webhook signing secret or relay bearer token is stored in the platform's secret store and never shown again. Each delivery reads **Queued**, **Retrying**, **Accepted by the receiver**, **Failed** or **Stopped after retries**. Connecting destinations and sending evidence needs `security.manage`. A Vanta document as a destination is closed beta; the PDF download works without it.
+
+```bash
+ankra security evidence destinations list
+ankra security evidence deliveries send --destination <destination-id> --framework iso27001 --month 2026-10
+ankra security evidence deliveries list
+```
+
+The evidence export is not the [compliance report](#the-compliance-report) below. The evidence export carries one framework's controls and the image inventory; the compliance report carries posture, findings, dispositions, the audit summary and the attestation for a date window.
 
 ---
 
@@ -53,7 +125,9 @@ Findings carry two distinct dispositions:
 
 Accepting risk requires a reason, an actor recorded in the audit trail, and a **review deadline of at most one year**. You can also have the acceptance expire automatically the moment a fix becomes available, so an exception granted because nothing could be done ends as soon as something can.
 
-This is the behaviour a risk register is supposed to have. The register cannot silently accumulate permanent exceptions, because the platform will not accept one without an expiry.
+This is the behaviour a risk register is supposed to have. The register cannot silently accumulate permanent exceptions, because the platform will not accept one without an expiry. An accepted risk with no deadline is refused with "Accepted risk requires a review deadline", and one further out than a year with "Accepted risk review deadline cannot exceed one year".
+
+The register is **Security → Accepted risks** (`/next/security?tab=decisions`): who accepted each risk, why, and when the decision comes back. Each entry is marked **Accepted risk** or **Acknowledged**, and a member with `security.manage` can **Extend**, **Revoke**, **Reopen for fixing** or keep it (**Keep accepted**, **Keep acknowledged**).
 
 ---
 
@@ -83,13 +157,13 @@ Three permissions separate looking from triaging from accepting risk, so the per
 | `security.triage` | Acknowledge findings |
 | `security.manage` | Accept risk, and create, edit or revoke policies |
 
-All three can be attached to [custom roles](/guides/roles-and-access). Enforcement is server-side, and every disposition change is written to the append-only audit trail in the same transaction as the change itself, so the record cannot drift from the action.
+All three can be attached to [custom roles](/guides/roles-and-access). Enforcement is server-side, and every disposition change is written to the audit trail in the same transaction as the change itself, so the record cannot drift from the action.
 
 ---
 
 ## The compliance report
 
-The report is the export that carries the state above out of the platform in one document. Generate it from **Organisation** &rarr; **Security**, or pull it on a schedule:
+The report is the export that carries the state above out of the platform in one document. The portal has no button for it: download it with the API or the CLI, or pull it on a schedule:
 
 ```bash
 curl -sS \
@@ -121,13 +195,13 @@ If you run a management system to ISO/IEC 27001 or an equivalent framework, the 
 
 | Your ISMS needs | What Ankra supplies |
 |-----------------|---------------------|
-| Technical controls that are monitored, not assumed | Continuous benchmark scoring per cluster, with tiers and coverage |
+| Technical controls that are monitored, not assumed | Benchmark results per cluster from every scan, and which clusters are scanned |
 | A risk register with owners and review dates | Accepted-risk dispositions with actor, reason and mandatory expiry |
 | Evidence that controls operated over a period | Daily posture snapshots plus the audit trail for the same window |
 | Governed exceptions rather than silent suppression | Policy lifecycle states, review prompts, and no hard deletion |
 | Segregation of duties | Read, triage and manage permissions on custom roles |
-| Records that cannot be altered after the fact | Append-only audit written in the same transaction as the change |
-| Change management (ISO/IEC 27001:2022 8.32) | A [standard-change catalogue](/security/change-management): routine changes are recorded as pre-approved with their reason, security upgrades name the advisories they fix, and everything else is a normal change approved through your own process |
+| Records that cannot be altered after the fact | An audit trail written in the same transaction as the change, which nobody in your organisation can edit or delete; it is not hash-chained, so for tamper evidence [export](/security/audit-export) it on a schedule into write-once storage you control |
+| Change management (ISO/IEC 27001:2022 8.32) | A [standard-change catalogue](/security/change-management): routine changes are recorded as pre-approved with their reason, security upgrades name the advisories they fix, and everything else is recorded as a normal change, whose approval is your own process (Ankra records the change, it does not check the approval) |
 | Management review inputs | Scheduled [security reports](/guides/security-reports) and the compliance report |
 
 What remains yours: the scope statement, the risk assessment methodology, the Statement of Applicability, policy documents, internal audit, and management review. Ankra evidences a set of technical controls well; it is not the management system itself.
@@ -138,10 +212,10 @@ What remains yours: the scope statement, the risk assessment methodology, the St
 
 <Steps>
   <Step title="Establish coverage">
-    Show which clusters are managed and which are reporting. Non-reporting clusters are visible in the compliance view and the attestation section. Coverage gaps are the first thing an assessor tests.
+    Show which clusters are managed and which are reporting. Non-reporting clusters are visible in **Security → Coverage**, in `ankra security compliance` and in the attestation section. Coverage gaps are the first thing an assessor tests.
   </Step>
   <Step title="Show the controls are configured">
-    Point at the attestation flags and the benchmark matrix. This demonstrates control design.
+    Point at the attestation flags, the benchmark results and the framework report in **Security → Evidence**. This demonstrates control design.
   </Step>
   <Step title="Show they operated across the period">
     Attach posture snapshots over the audit window and the [audit export](/security/audit-export) for the same window. Configuration proves design; the trail proves operation.
@@ -156,7 +230,7 @@ What remains yours: the scope statement, the risk assessment methodology, the St
 ## Limits worth stating up front
 
 - **Ankra evidences the clusters it manages.** Clusters outside Ankra are outside this evidence, and an assessor will ask about them.
-- **Benchmark results come from the scanner.** Ankra ingests, grades and retains Trivy Operator's output. The authority for a check is the benchmark specification, and a cluster without the scanner produces no result.
+- **Benchmark results come from the scanner.** Ankra ingests and retains Trivy Operator's output; it does not grade it. The authority for a check is the benchmark specification, and a cluster without the scanner produces no result.
 - **Benchmarks are not your whole control set.** CIS, NSA/CISA and PSS cover Kubernetes configuration. They say nothing about your application controls, your suppliers, or your people.
 - **Nothing here certifies your environment.** The platform produces evidence; your assessor draws the conclusion.
 

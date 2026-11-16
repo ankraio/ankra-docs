@@ -1,0 +1,242 @@
+---
+title: Run a restore drill
+sidebarTitle: Run a restore drill
+description: Protect a Stack, take a restore point, restore it in place and clone it with its data to another cluster, and check the data is back each time.
+---
+
+import { CliVersion } from "/snippets/cli-version.jsx";
+
+A backup you have never restored is a hope, not a plan. This tutorial runs the whole loop on a small throwaway Stack, so nothing you care about is at risk: you write a known file to a volume, protect the Stack, take a restore point, break the data, restore it in place, then clone the Stack with its data to a second cluster. After each restore you read the file back and see that it is the one you saved.
+
+You end up knowing every step of a restore on your own clusters, with the evidence of a passing drill. It takes about 30 minutes. [Backups and restore points](/guides/backups) is the reference for every option used here.
+
+## Before you start
+
+- **A backup vault that reads Ready** on **Infrastructure → Backups and storage**. See [Backups and restore points](/guides/backups#let-ankra-create-the-bucket).
+- **Two clusters connected to Ankra** and online: `my-cluster`, where the drill runs, and `drill-target`, where the clone goes. Each needs a default StorageClass. A cluster whose menu shows **Set up backups** instead of **Backups** does not have backups turned on; see [Not enabled yet?](/guides/backups#not-enabled-yet).
+- **Permissions**: `backups.manage` to protect the Stack and `backups.operate` to take and restore restore points (organisation admins hold both), and a role that may create and deploy Stacks. See [Permissions](/guides/backups#permissions).
+- **The `ankra` CLI**, signed in, to read and write the test file.
+
+<CliVersion since="0.62.0" />
+
+## 1. Create the drill Stack
+
+The Stack holds a namespace, a 1 GiB volume and a small pod that mounts it.
+
+<Steps>
+  <Step title="Start the draft">
+    Open **Infrastructure → Clusters → &lt;your cluster&gt;**, then **Stacks** under **Technical details**. Click **Create a stack**, keep **Compose a stack**, enter `drill` as the **Stack name**, and click **Start the draft**.
+  </Step>
+  <Step title="Add the three manifests">
+    Click **Add → Manifest** three times, with these **Resource name** and **Manifest source** values, clicking **Add to draft** after each:
+
+    `drill-namespace`:
+
+    ```yaml
+    apiVersion: v1
+    kind: Namespace
+    metadata:
+      name: drill
+    ```
+
+    `drill-data`:
+
+    ```yaml
+    apiVersion: v1
+    kind: PersistentVolumeClaim
+    metadata:
+      name: data
+      namespace: drill
+    spec:
+      accessModes: ["ReadWriteOnce"]
+      resources:
+        requests:
+          storage: 1Gi
+    ```
+
+    `drill-app`:
+
+    ```yaml
+    apiVersion: apps/v1
+    kind: Deployment
+    metadata:
+      name: drill-app
+      namespace: drill
+    spec:
+      replicas: 1
+      strategy:
+        type: Recreate
+      selector:
+        matchLabels:
+          app: drill-app
+      template:
+        metadata:
+          labels:
+            app: drill-app
+        spec:
+          containers:
+            - name: app
+              image: busybox:1.36
+              command: ["sh", "-c", "sleep infinity"]
+              volumeMounts:
+                - name: data
+                  mountPath: /data
+          volumes:
+            - name: data
+              persistentVolumeClaim:
+                claimName: data
+    ```
+  </Step>
+  <Step title="Order and deploy">
+    Select `drill-data`, open **Parents** and tick `drill-namespace` under **Depends on**. Select `drill-app` and tick `drill-data`. Click **Review changes**, then **Create and deploy stack**.
+
+    The editor reads "Deployment accepted. Follow the operation for its outcome."
+  </Step>
+  <Step title="Write the proof">
+    Find the pod, then write a known line to the volume:
+
+    ```bash
+    ankra cluster get pods -n drill --cluster my-cluster
+    ankra cluster exec <drill-app-pod> -n drill --cluster my-cluster -- sh -c 'echo saved-before-the-drill > /data/proof.txt'
+    ankra cluster exec <drill-app-pod> -n drill --cluster my-cluster -- cat /data/proof.txt
+    ```
+
+    The last command prints `saved-before-the-drill`.
+  </Step>
+</Steps>
+
+## 2. Protect the Stack
+
+<Steps>
+  <Step title="Open the Stack's backups">
+    Open **Infrastructure → Clusters → &lt;your cluster&gt; → Backups**. In the **Protection** table, the `drill` row reads **Unprotected**. Click `drill`.
+
+    The page is now *drill backups*, with **Backup policy** and **Restore points**.
+  </Step>
+  <Step title="Configure protection">
+    Click **Configure protection**. Choose your **Backup vault**, keep `daily` as the **Schedule**, and enter `drill/data` under **Persistent volumes to include**. Volumes not listed there are not backed up. Type `drill` into **Type drill to confirm** and click **Save policy**.
+
+    The page reads **Backup policy saved**, and **Backup policy** names your vault and `drill/data`.
+  </Step>
+</Steps>
+
+## 3. Take a restore point
+
+<Steps>
+  <Step title="Take it">
+    Click **Take restore point**, enter `drill` as the **Note (optional)**, type `drill` to confirm and click **Take restore point**.
+
+    The page reads "Taking a restore point of drill. It shows in Restore points below when it is ready." The new row under **Restore points** reads **Being taken**, then **Complete**.
+  </Step>
+  <Step title="Read what it carries">
+    Click the restore point. **Selected restore point** lists what it carries: the `data` volume must be there. Read **Left out of this restore point**: anything listed there is not in the copy, with the reason.
+  </Step>
+</Steps>
+
+From the CLI, the same restore point:
+
+```bash
+ankra cluster select my-cluster
+ankra cluster stacks restore-points list drill
+```
+
+## 4. Break the data
+
+Overwrite the proof, as a bad deploy or a mistaken command would:
+
+```bash
+ankra cluster exec <drill-app-pod> -n drill --cluster my-cluster -- sh -c 'echo broken > /data/proof.txt'
+ankra cluster exec <drill-app-pod> -n drill --cluster my-cluster -- cat /data/proof.txt
+```
+
+It prints `broken`.
+
+## 5. Restore in place
+
+<Warning>
+A restore in place removes the Stack's current volumes before it writes the restore point's, so anything written since the restore point was taken is gone from the cluster: here, the line `broken`. Before it removes anything, Ankra takes a safety copy of the current data as a new restore point, and refuses the restore if it cannot.
+</Warning>
+
+<Steps>
+  <Step title="Restore">
+    Click the **Complete** restore point, then **Restore in place**. Type `drill` into **Type drill to confirm** and click **Replace the data**.
+
+    The page reads "Restoring drill. The stack's apps stop while their data is replaced, then start again." The progress reads **Running**, then **Finished**.
+  </Step>
+  <Step title="Check the data is back">
+    The pod was replaced, so look up its new name, then read the file:
+
+    ```bash
+    ankra cluster get pods -n drill --cluster my-cluster
+    ankra cluster exec <drill-app-pod> -n drill --cluster my-cluster -- cat /data/proof.txt
+    ```
+
+    It prints `saved-before-the-drill`. The restore worked.
+  </Step>
+</Steps>
+
+## 6. Clone the Stack with its data
+
+The second half of the drill is the disaster case: the data comes back on another cluster.
+
+<Steps>
+  <Step title="Clone with data">
+    On the *drill backups* page, click **Clone with data**. Choose `drill-target` as the **Target cluster**, choose **Take a new restore point now** as the **Data source**, type `drill` to confirm and click **Clone with data**. Do not choose **Use the newest complete restore point** here: the newest one is the safety copy the restore took, which holds the line `broken`.
+
+    The progress shows **Draft created on drill-target** ("Not deployed yet"), then **Copying the data** until it reads **Finished**, then **Deploy the draft**: "Ready: open the draft and deploy it". The source Stack keeps running and is not changed.
+  </Step>
+  <Step title="Deploy the copy">
+    Open **Infrastructure → Clusters** and the cluster `drill-target`, then **Stacks** under **Technical details**, and open `drill`. Click **Review changes**, then **Create and deploy stack**.
+  </Step>
+  <Step title="Check the data on the copy">
+    ```bash
+    ankra cluster get pods -n drill --cluster drill-target
+    ankra cluster exec <drill-app-pod> -n drill --cluster drill-target -- cat /data/proof.txt
+    ```
+
+    It prints `saved-before-the-drill`: the data reached the other cluster.
+  </Step>
+</Steps>
+
+From the CLI, the clone is `ankra cluster stacks clone drill --to drill-target --with-data`; see [Clone Stacks](/guides/clone-stack).
+
+## Verify
+
+You have now seen the same line come back twice: in place on `my-cluster`, and on `drill-target`. To keep the evidence, list the restore points and the runs that moved the data:
+
+```bash
+ankra cluster select my-cluster
+ankra cluster stacks restore-points list drill
+ankra runs list --cluster my-cluster
+```
+
+## Clean up
+
+1. On *drill backups*, click **Stop future backups**, type `drill` and click **Stop backups**. Restore points already taken stay in the vault until you delete them.
+2. Delete the drill Stack on both clusters: open it in the stack editor and choose **Delete stack** from **More**, or from the CLI:
+
+   ```bash
+   ankra cluster select my-cluster
+   ankra cluster stacks delete drill
+   ankra cluster select drill-target
+   ankra cluster stacks delete drill
+   ```
+
+## What can go wrong
+
+| What you see | What to do |
+| --- | --- |
+| The cluster menu shows **Set up backups** | Backups are not turned on for the organisation. See [Not enabled yet?](/guides/backups#not-enabled-yet). |
+| **Clone with data** is not on the page | No other cluster can receive the copy, or your role cannot run backups. Connect a second cluster, or ask for `backups.operate`. |
+| `This organisation has no ready backup vault to write a restore point to.` | Add a vault and wait for **Ready**. See [Backups and restore points](/guides/backups). |
+| `This selection covers none of the stack's data, so the restore point would carry nothing.` | **Persistent volumes to include** does not name `drill/data`. Fix it in **Configure protection**. |
+| `This stack's data has changed since the restore point was taken` | The Stack's data assets differ from the restore point. Take a fresh restore point, or restore with `ankra cluster stacks restore-points restore drill <id> --force` when the change is expected. |
+| `This cluster is not online, so its data cannot be restored right now.` | Bring the cluster back online, then retry. |
+| `Restoring this restore point in place is not supported yet` | The restore point carries something other than volumes captured by Velero, such as a CloudNativePG or Percona database, which Ankra cannot restore in place. Run the drill with a volume, as here. |
+| The restore or copy reads **Failed** | Open the run with `ankra runs get <run-id>` for the failing step. See [Follow a run](/guides/backups#follow-a-run). |
+
+## Next steps
+
+- [Backups and restore points](/guides/backups) - schedules, retention, what each restore point carries.
+- [Protect persistent data](/guides/protect-persistent-data) - before you rename or remove a manifest that owns a volume.
+- [Clone Stacks](/guides/clone-stack) - copy whole clusters' Stacks, with or without data.

@@ -31,6 +31,34 @@ In short:
 
 An application is a GitHub repository Ankra builds and deploys. Registering one opens a setup pull request with a Dockerfile (when the repository has none), Kubernetes manifests and a CI definition. After you merge it, every successful build of the tracked branch rolls out to the clusters the application runs on. [Applications](/concepts/applications) explains the model in full.
 
+You can do this from the portal or from your checkout with the CLI. Both register the same application and lead to the same running deployment.
+
+### Ship from the portal
+
+Before you start, you need a role that may create applications, and the Ankra app on GitHub installed with access to the repository. Without the role the form says "Your role does not permit creating applications."
+
+<Steps>
+  <Step title="Pick the repository">
+    Go to **Applications** and select **New application**. The page asks **What are you shipping?**. Choose the **Repository connection**, use **Find a repository** to pick the repository, and check the **Application name** and **Branch**.
+
+    Check: if no connection exists yet, the page reads **Connect GitHub first.** Select **Connect GitHub**, install the Ankra app on GitHub and choose its repositories; GitHub brings you back to the form.
+  </Step>
+  <Step title="Connect and prepare">
+    Select **Connect and prepare**. Nothing deploys yet.
+
+    Check: the button reads **Application connected** and the application opens on **Environments**, at the **Go live** steps.
+  </Step>
+  <Step title="Follow Go live">
+    **Go live** walks through five steps and marks where you are: **Connect your code**, **Prepare the setup**, **Build a version**, **Choose where it runs** and **Go live**. The page moves on by itself.
+
+    - At **Prepare the setup**, Ankra opens the setup pull request and checks it. When it reads **Merge the setup to continue.**, look the pull request over and merge it in your repository.
+    - At **Build a version**, the first build runs. If nothing started it, the page reads **Build your first version.**
+    - At **Choose where it runs**, the page reads "Your code is built. Choose where it runs and who can reach it." Pick the place and confirm. Nothing deploys until you confirm.
+
+    Check: the last step names your application, reads "... is going live.", and shows what its containers report as they start.
+  </Step>
+</Steps>
+
 ### Ship from your checkout
 
 One command takes a local checkout to a running deployment. Run it in a checkout whose `origin` remote is the GitHub repository, with a cluster selected (`ankra cluster select`) or named with `--cluster`:
@@ -45,7 +73,7 @@ ankra application ship .
 
 1. **Register.** If your organisation has no application for this repository yet, `ship` registers one, with the same flags as `ankra application add`. The GitHub credential and the branch are detected when you do not pass `--credential` and `--branch`.
 2. **Wait for setup.** Ankra analyses the repository and opens the setup pull request. `ship` prints its URL.
-3. **Wait for you to merge the setup pull request**, when the application builds with the GitHub Actions workflow Ankra generated. This is the one step that needs a person. An application built by Ankra Pipelines (the default for new applications) or by your own workflow skips it.
+3. **Stop at the setup pull request**, the one step that needs a person. With Ankra Pipelines (the default for new applications) the pull request adds `.ankra/pipeline.yaml`, so nothing builds the tracked branch of a new repository until you merge it: `ship` follows the pull request's own run, then stops with the state `waiting_for_setup_pull_request` and exit code 9, or with `setup_pull_request_blocked`, the findings and exit code 8 when a gate blocks that run. Merge the pull request and run `ship` again, and it continues from there. With the GitHub Actions workflow Ankra generated, `ship` waits for the merge instead. An application built by your own workflow skips this step.
 4. **Wait for the build** of the tracked branch: the Ankra pipeline run for the branch's head commit until its `publish` stage has pushed the image, or the GitHub Actions workflow run. A push to the branch during the wait moves `ship` on to the new head commit.
 5. **Deploy** to the cluster, in a namespace derived from the application name unless you pass `--namespace`.
 6. **Wait until the workload is running**, then print the public URL when the application has one, once the address answers.
@@ -66,11 +94,11 @@ An application whose setup runs a PostgreSQL database on the cluster needs the C
 
 If nothing starts a pipeline run for the head commit within a minute - nothing was pushed since the application was registered - `ship` asks Ankra for the run a push to the tracked branch would have started, for the branch's current head. That run publishes the image, so `ankra application ship .` reaches a running URL without a push. Starting that run needs permission to deploy applications (`applications.deploy`).
 
-A run that skips `publish` for any other reason stops `ship` instead of deploying without an image. Push a commit to the tracked branch and run `ship` again, or pass `--ankra-build` to build the first image on [Ankra platform builders](/concepts/applications#building-on-ankras-builders), which Ankra enables per organisation.
+A run that skips `publish` for any other reason stops `ship` instead of deploying without an image. Push a commit to the tracked branch and run `ship` again, or pass `--ankra-build` to build the first image on [Ankra platform builders](/concepts/applications#building-on-ankras-builders), which are on for every organisation unless Ankra has turned them off for it.
 
 ### How a merge redeploys
 
-Push to deploy is on for every new application from the moment it is registered. Once the application has been deployed once - by `ship` or by `ankra application deploy` - every successful build of the tracked branch rolls out to every cluster it is installed on, with no approval step. A successful build is whichever of these the application uses:
+Push to deploy is on for every new application from the moment it is registered. Once the application has been deployed once - from the portal's **Choose where it runs** step, by `ship` or by `ankra application deploy` - every successful build of the tracked branch rolls out to every cluster it is installed on, with no approval step, except an environment whose **Deploy on every push** is off or that follows other branches (see below). A successful build is whichever of these the application uses:
 
 - an Ankra pipeline run whose `publish` stage re-tagged the image as `sha-<7>` in your registry,
 - a completed, successful run of the generated GitHub Actions workflow or of your own workflow,
@@ -89,7 +117,7 @@ ankra application auto-deploy set <application-id> --enabled=false
 ankra application auto-deploy set <application-id> --enabled
 ```
 
-In the portal the same switch is the application's **Settings** → **Push to deploy**. Once the application runs in more than one environment, that section lists each one under **What follows pushes** with its own switch, so you can let staging follow every merge while production waits for an explicit deploy. Changing the switch needs permission to deploy applications; reading it does not. Each environment can also follow its own branches - production `main`, staging `release/*`, development `develop` - see [Environments and branch rules](/guides/application-environments).
+In the portal the same switch is the **Deploy on every push** card under **Applications → your application → Settings → Deploys**. Its badge reads **On** or **Off**, and **Turn off deploy on every push** or **Turn on deploy on every push** changes it after a review. The card applies to the environment chosen in the application's header, so you can let staging follow every merge while production waits for an explicit deploy. Changing the switch needs permission to deploy applications (`applications.deploy`); reading it does not. The card also shows **Latest build Ankra saw**. Each environment can also follow its own branches - production `main`, staging `release/*`, development `develop` - see [Environments and branch rules](/guides/application-environments).
 
 <Note>
 Applications registered before push to deploy became the default keep the setting they had, which is off unless someone turned it on. Run `ankra application auto-deploy get` to check.
@@ -101,7 +129,7 @@ The setup pull request decides what builds the application, and that choice also
 
 | Builder | What it is | What it publishes |
 |---|---|---|
-| **Ankra Pipelines** (default for new applications) | `.ankra/pipeline.yaml`, run as Jobs in the cluster your organisation runs CI on. Needs that cluster set up first - see [Before your first run](/guides/ankra-pipelines#before-your-first-run) | A pull request run builds and scans the head commit and pushes it by digest to a staging repository. A push to the tracked branch also runs `publish`, which re-tags the approved digest as `sha-<7>` in the application's registry |
+| **Ankra Pipelines** (default for new applications) | `.ankra/pipeline.yaml`, run as Jobs in the cluster your organisation runs CI on. Needs that cluster set up first - see [Before your first run](/guides/ankra-pipelines#before-your-first-run). A build that cluster cannot run goes to Ankra platform builders unless your organisation has turned that off - see [Application CI/CD](/guides/cicd-pipeline) | A pull request run builds and scans the head commit and pushes it by digest to a staging repository. A push to the tracked branch also runs `publish`, which re-tags the approved digest as `sha-<7>` in the application's registry |
 | **Generated GitHub Actions workflow** | `.github/workflows/build-and-publish.yml`, for a repository that must keep building on GitHub. See [Application CI/CD](/guides/cicd-pipeline) | A pull request builds and scans the image but pushes nothing. A push to the tracked branch pushes `sha-<7>` and a tag named after the branch |
 | **Your own workflow** | A workflow you wrote that pushes the image the application deploys | Whatever tags your workflow pushes |
 | **Ankra platform builders** | Builds a commit on Ankra's infrastructure, on request: `ankra application build start <application-id> --commit <full-sha>`, or `ship --ankra-build` | `sha-<7>` for the commit you asked for |
@@ -110,14 +138,14 @@ For previews this means:
 
 - A **pull request preview** of a pipeline-built application deploys the digest the pipeline built for that pull request's head. Nothing else is needed.
 - A **pull request preview** of any other application needs an image tagged `sha-<7>` of the head commit, `pr-<number>` or the branch name in the application's registry. The generated workflow never pushes one for a pull request, so those previews only work when your own CI pushes such a tag.
-- A **branch demo** deploys a tag that already exists. With the generated workflow or the generated pipeline, only the tracked branch gets one; for any other branch, build its head on platform builders or pick an existing tag.
+- A **branch preview** deploys a tag that already exists. With the generated workflow or the generated pipeline, only the tracked branch gets one; for any other branch, build its head on platform builders or pass an existing tag with `ankra application demo deploy --image-tag`.
 
 ### Preview a change before merge
 
 Two features deploy a throwaway copy of a change to your organisation's staging cluster before it merges:
 
 - [PR preview environments](/guides/pr-preview-environments) deploy every pull request automatically, post a status comment with the link, redeploy on each push and tear the copy down when the pull request closes.
-- [Branch demos](/guides/branch-demos) launch a copy of any branch by hand, with its own environment variables, an optional throwaway Postgres and a teardown timer.
+- [Branch previews](/guides/branch-demos) start a copy of any branch by hand, for a lifetime you choose, from the application's preview defaults.
 
 ---
 
@@ -127,7 +155,7 @@ Keep the CI you have. Your pipeline builds and pushes an image with a tag that n
 
 Before you start:
 
-- **Connect a GitOps repository to the cluster** under the cluster's **Settings** → **GitOps**. It must be on [GitHub](/integrations/github#connecting-github) or [Bitbucket Cloud](/integrations/bitbucket-cloud#connecting-a-repository-to-a-cluster): Ankra does not sync cluster configuration from GitLab. Your application code and CI can live anywhere.
+- **Connect a GitOps repository to the cluster** under **Infrastructure → Clusters → your cluster → Settings → GitOps**. It must be on [GitHub](/integrations/github#connect-a-repository-to-a-cluster) or [Bitbucket Cloud](/integrations/bitbucket-cloud#connecting-a-repository-to-a-cluster): Ankra does not sync cluster configuration from GitLab. Your application code and CI can live anywhere.
 - **Deploy the application once as a manifest in a Stack.** Ankra writes it to `clusters/<cluster-name>-<short-id>/stacks/<stack-name>/manifests/<manifest-name>.yaml` in the GitOps repository. That is the file your CI edits.
 - **Give CI a token that can push to the GitOps repository**, and nothing more. On GitHub, a fine-grained personal access token with **Contents** read and write on that one repository.
 - **Let the cluster pull the image.** For a private registry, add an image pull secret to the Stack (encrypt it with [SOPS](/guides/sops)) and reference it from the Deployment.
@@ -225,7 +253,7 @@ Both examples below build on every push to `main`, tag the image with the commit
   </Tab>
 </Tabs>
 
-After the commit lands, Ankra picks it up on the connected branch and applies it; the cluster's **GitOps** page shows the sync, and **Sync** there pulls it at once. Once CI has edited the file, its contents in Git no longer match what Ankra last wrote, so Ankra keeps the Git version from then on and later edits from the portal do not overwrite your tag - see [Hand-maintaining a file](/concepts/gitops#hand-maintaining-a-file).
+After the commit lands, Ankra picks it up on the connected branch and applies it; the cluster's **Settings → GitOps** page shows the sync, and **Sync now** there checks the repository at once. Once CI has edited the file, its contents in Git no longer match what Ankra last wrote, so Ankra keeps the Git version from then on and later edits from the portal do not overwrite your tag - see [Hand-maintaining a file](/concepts/gitops#hand-maintaining-a-file).
 
 To roll back, revert the commit in the GitOps repository.
 

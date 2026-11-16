@@ -3,23 +3,35 @@ title: OVH Reference
 description: Configuration options, regions, instance flavors, and API endpoints for Ankra-managed OVH clusters.
 ---
 
+import { CliVersion } from "/snippets/cli-version.jsx";
+
 Reference material for [OVH clusters](/guides/ovh-clusters).
 
 ---
 
 ## Cluster Configuration Options
 
+The fields of `POST /api/v1/clusters/ovh`. The portal's create form sets most of them; see [Create a Cluster](/guides/create-a-cluster).
+
+<CliVersion since="0.74.0" command="cluster ovh gateway-model" />
+
 | Parameter | Default | Description |
 |-----------|---------|-------------|
 | `name` | *required* | Unique cluster name |
+| `description` | | Free text shown with the cluster |
+| `environment` | `development` | What the cluster runs: `production`, `staging`, `development`, `testing`, `local`, or a name of your own. The portal asks for it as **What will this cluster run?** |
+| `criticality` | *the environment's own level* | How important the cluster is: `production`, `staging`, `development` or `disposable` |
 | `credential_id` | *required* | OVH API credential ID |
 | `ssh_key_credential_id` | *required* | SSH key credential ID |
 | `region` | *required* | OVH Cloud region |
+| `availability_zones` | | 3-AZ regions only. The zone pool the cluster's instances are spread across; more than one zone needs at least 3 control planes. See [Availability Zones](/guides/ovh-clusters#availability-zones) |
+| `gateway_model` | `s` | Size of the OVHcloud managed gateway all node egress goes through: `s`, `m`, `l`, `xl`, `2xl` or `3xl`. The portal asks for it as **Internet gateway size**; change it later with `ankra cluster ovh gateway-model`. See [Internet gateway size](/guides/ovh-clusters#internet-gateway-size) |
 | `network_vlan_id` | `0` | VLAN ID for the private network |
 | `subnet_cidr` | `10.0.1.0/24` | Subnet CIDR range |
 | `dhcp_start` | `10.0.1.100` | DHCP allocation range start |
 | `dhcp_end` | `10.0.1.200` | DHCP allocation range end |
-| `gateway_flavor_id` | `c3-4` | Instance flavor for the SSH bastion (the field name predates the bastion rename) |
+| `gateway_flavor_id` | `c3-4` | Instance flavor for the SSH bastion (the field name predates the bastion rename). The portal calls it **Gateway** |
+| `bastion_allowed_ips` | *any address* | IPv4 addresses or CIDRs allowed to reach the bastion over SSH, at most 64. IPv6 and `0.0.0.0/0` are refused; leave it out to keep SSH open to any address (key-only). Ankra's own egress is always allowed. Change it later with `ankra cluster ovh bastion allowed-ips` |
 | `control_plane_count` | `1` | Number of control plane nodes |
 | `control_plane_flavor_id` | `b3-16` | Instance flavor for control planes |
 | `worker_count` | `1` | Number of worker nodes (legacy, use `node_groups` instead) |
@@ -28,6 +40,21 @@ Reference material for [OVH clusters](/guides/ovh-clusters).
 | `distribution` | `kubeadm` | Kubernetes distribution (`kubeadm` or `k3s`) |
 | `kubernetes_version` | *latest* | Kubernetes version (optional) |
 | `k3s_disabled_components` | | k3s only. Packaged components the k3s install leaves out (`k3s --disable`), on top of what the provider's k3s shape already disables: any of `coredns`, `servicelb`, `traefik`, `local-storage`, `metrics-server`, `runtimes`, for example `["traefik"]` on a cluster that brings its own ingress. A list on a `kubeadm` cluster is refused with a `400` (`k3s_disabled_components is only supported for the k3s distribution.`); an entry outside those six or an entry listed twice is a `422` validation error pointing at the entry |
+| `cni` | `cilium` (kubeadm), `flannel` (k3s) | CNI plugin: `flannel`, `calico` or `cilium`. Follows the distribution when omitted; kubeadm clusters always use `cilium` |
+| `cni_features` | *all off* | CNI feature toggles, fixed at creation. See [Choices fixed at create time](/guides/operate-ankra-managed-clusters#choices-fixed-at-create-time) |
+| `etcd_topology` | `stacked` | kubeadm only. `stacked` or `external` (dedicated etcd instances) |
+| `etcd_node_count` | `3` | kubeadm `external` topology only (3 or 5) |
+| `etcd_flavor_id` | `b3-16` | kubeadm `external` topology only. Instance flavor for the etcd nodes |
+| `external_cloud_provider` | `true` | Install the OpenStack cloud controller manager and Cinder CSI driver and wire the nodes for them |
+| `include_networking` | `true` | Deploy the networking stack: Traefik, cert-manager and a `letsencrypt-prod` Let's Encrypt ClusterIssuer |
+| `gateway_api` | `false` | Also serve the Kubernetes Gateway API from the networking stack's Traefik. Needs `include_networking`. See [Gateway API](/guides/gateway-api) |
+| `include_dns` | `true` | Give the cluster a delegated subdomain on `ankra.cc` with external-dns wired |
+| `gitops_provider` | `github` | Git provider of the GitOps repository: `github` or `bitbucket_cloud` |
+| `gitops_credential_name` | | Name of the Git credential for GitOps integration |
+| `gitops_repository` | | GitOps repository, for example `my-org/my-repo` |
+| `gitops_workspace` | | Bitbucket Cloud only. The workspace that holds the repository |
+| `gitops_repo_slug` | | Bitbucket Cloud only. The repository slug |
+| `gitops_branch` | `master` | Branch for GitOps pushes |
 
 ### OVH Cloud Regions
 
@@ -50,15 +77,17 @@ The regions enabled on each OVH project differ. A region that is not enabled on 
 
 ### OVH Instance Flavors
 
-| Flavor | vCPUs | RAM | Description |
-|--------|-------|-----|-------------|
-| `b2-7` | 2 | 7 GB | Suitable for the bastion |
-| `b2-15` | 4 | 15 GB | General purpose, good for control planes and workers |
-| `b2-30` | 8 | 30 GB | Higher performance workloads |
-| `b2-60` | 16 | 60 GB | Memory-intensive workloads |
+The defaults come from the current b3/c3 generation:
+
+| Flavor | vCPUs | RAM | Used by default for |
+|--------|-------|-----|---------------------|
+| `c3-4` | 2 | 4 GB | The bastion (`gateway_flavor_id`) |
+| `b3-16` | 4 | 16 GB | Control planes, workers and dedicated etcd nodes |
+
+Other sizes of the same lines include `b3-8`, `b3-32` and `b3-64` (general purpose), `c3-8` and `c3-16` (CPU-optimised) and `r3-16`, `r3-32` and `r3-64` (RAM-optimised). Older projects may still offer the b2/c2/r2 generation.
 
 <Note>
-Available flavors vary by region. Check the [OVH Cloud catalog](https://www.ovhcloud.com/en/public-cloud/prices/) for your region's offerings.
+Available flavors vary by region. The portal's create form lists what the chosen region offers, with prices, under **Exact server type**. Check the [OVH Cloud catalog](https://www.ovhcloud.com/en/public-cloud/prices/) for the full list.
 </Note>
 
 ---
