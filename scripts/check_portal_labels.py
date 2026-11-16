@@ -59,6 +59,7 @@ reported so it can be removed: a warning, an error under --strict.
     python3 scripts/check_portal_labels.py --self-test
 """
 
+import datetime
 import html
 import json
 import os
@@ -73,6 +74,9 @@ SKIPPED_DIRECTORIES = {"node_modules", ".git", ".claude", ".vale", ".mr-worktree
 GENERATED_DIRECTORY = os.path.join("reference", "cli")
 GENERATED_PAGES = {"changelog.mdx", os.path.join("integrations", "ankra-cli-changelog.mdx")}
 REGENERATE = "python3 scripts/gen_portal_inventory.py --frontend-repo <ankra-frontend checkout> (git fetch it first)"
+# The inventory is a copy, so it ages. Past this many days the run says so: a label the portal gained since
+# the copy was taken fails here although the page is right.
+INVENTORY_WARN_AFTER_DAYS = 14
 
 FENCE = re.compile(r"^\s*```")
 BOLD = re.compile(r"\*\*(?!\s)([^*\n]+?)\*\*")
@@ -111,6 +115,15 @@ class Inventory:
 
     def where(self):
         return f"{self.repository} {self.commit[:12]} of {self.date[:10]}"
+
+    def age_days(self, today=None):
+        """Whole days since the commit the inventory was read from, or None when its date cannot be read."""
+        try:
+            read = datetime.date.fromisoformat(self.date[:10])
+        except (TypeError, ValueError):
+            return None
+        today = today or datetime.datetime.now(datetime.timezone.utc).date()
+        return (today - read).days
 
     def has_label(self, label):
         label = normalize(label)
@@ -404,6 +417,10 @@ def self_test():
         ("a.mdx", "label", "Danger Zone"), ("a.mdx", "route", "/next/organisation/clusters"), ("a.mdx", "route", "/next/nowhere"),
         ("a.mdx", "label", "Developer settings"),
     ], findings
+    assert inventory.age_days(datetime.date(2026, 11, 16)) == 0
+    assert inventory.age_days(datetime.date(2026, 12, 1)) == 15
+    assert Inventory({"commit_date": "?", "routes": [], "labels": []}).age_days() is None
+    assert Inventory({"routes": [], "labels": []}).age_days() is None
     print("portal labels self-test: ok")
 
 
@@ -443,10 +460,23 @@ def main(argv):
         f"scripts/portal-inventory.json ({inventory.where()}: {len(inventory.labels)} labels, {inventory.route_count} routes); "
         f"{len(findings)} findings, {len(findings) - len(remaining)} allowlisted, {len(remaining) - len(new)} baselined, {len(new)} new"
     )
+    age = inventory.age_days()
+    aged = age is not None and age > INVENTORY_WARN_AFTER_DAYS
+    if aged:
+        print(
+            annotate(
+                "warning",
+                "scripts/portal-inventory.json",
+                None,
+                f"the portal inventory was read {age} days ago ({inventory.where()}). A label or route the portal gained "
+                f"since then fails this check although the page is right. Regenerate it: {REGENERATE}",
+            ),
+            file=sys.stderr,
+        )
     if new:
         print(
             f"{len(new)} menu label(s) or address(es) the portal does not have, checked against scripts/portal-inventory.json, "
-            f"read from {inventory.where()}. Fix the page to what the portal shows. If the label or route is newer than "
+            f"read from {inventory.where()}{f', {age} days ago' if aged else ''}. Fix the page to what the portal shows. If the label or route is newer than "
             f"that commit, regenerate the inventory: {REGENERATE}. A label of another product (GitHub, Cloudflare, ...) or a "
             "name that is data goes in scripts/portal-labels-allowlist.json with a reason:",
             file=sys.stderr,
