@@ -1,82 +1,108 @@
 ---
 title: Publishing Applications as Add-ons
-description: Snapshot an application's manifests as a versioned add-on your organisation can install onto any cluster.
+description: Snapshot an application's manifests as a versioned add-on your organisation can install onto any cluster, then install, compare and withdraw its versions.
 ---
 
+import { CliVersion } from "/snippets/cli-version.jsx";
+
 <Note>
-Publishing an application to the add-on catalog snapshots its committed manifests and its deploy options as one immutable version. The add-on installs independently of the application afterwards - it keeps working even if the source application is later deleted.
+Publishing an application to your organisation's add-on catalogue snapshots its committed manifests and its deploy options as one immutable version. The add-on installs independently of the application afterwards, and keeps working even if the source application is later deleted.
 </Note>
 
 ## What publishing does
 
-An application in Ankra is a repository Ankra generates Kubernetes manifests for. Publishing turns the current state of those manifests into a catalog entry your organisation can install onto any of its clusters, without going back to the application.
+An application in Ankra is a repository Ankra generates Kubernetes manifests for. Publishing turns the current state of those manifests into a catalogue entry your organisation can install onto any of its clusters, without going back to the application.
 
 A publish captures three things at that moment:
 
 - the committed manifests under the application's `manifests/` directory, plus its [`.ankra/ankra.yaml`](/reference/application-descriptor) descriptor
 - the **deploy options** the application declares, which become the add-on's install-time inputs
-- the metadata shown in the catalog: display name, description, category
+- the metadata shown in the catalogue: display name, description, category
 
-Everything is a snapshot. Later changes to the application only reach the catalog through another publish, and published versions are immutable - a version number, once used, cannot be reused.
+Everything is a snapshot. Later changes to the application only reach the catalogue through another publish, and published versions are immutable: a version number, once used, cannot be reused.
 
 <Info>
-This is different from [publishing an add-on to the Ankra Catalog](/platform/addon-publishing). That proposes a curation manifest to the *global* catalog every organisation sees, through a reviewed pull request. Publishing an application stays inside your organisation and takes effect immediately.
+This is different from [publishing an add-on to the Ankra catalogue](/platform/addon-publishing). That proposes a curation manifest to the *global* catalogue every organisation sees, through a reviewed pull request. Publishing an application stays inside your organisation and takes effect immediately.
 </Info>
 
-## Before you publish
+## Publish with the CLI
 
-Ankra checks whether the application is publishable at all and shows the result as the first step of the publish flow. Each check reports one of:
+The portal has no action for publishing an application or installing the result; the CLI does both.
 
-| Status | Meaning |
-| --- | --- |
-| **ok** | Nothing to do. |
-| **warning** | Publishing works, but something is worth knowing first. |
-| **blocked** | Publishing cannot proceed until this is resolved. |
-| **unknown** | The check could not be evaluated. |
+<CliVersion since="0.13.0" />
 
-A **blocked** check stops the flow. A **warning** does not - it is a judgement call you are allowed to make, and it is repeated on the confirmation step so it is not lost along the way.
+<Steps>
+  <Step title="Check that the application can publish">
+    ```bash
+    ankra application publish-readiness <application-id>
+    ```
 
-Where Ankra can resolve a check itself - most often a missing image registry declaration - the step offers **Fix automatically** rather than instructions. Checks that need an application admin say so instead.
+    Each check reports `ok`, `warning` (publishing works, but something is worth knowing first), `blocked` (publishing cannot proceed until it is resolved) or `unknown` (the check could not be evaluated). Resolve every `blocked` check before you continue.
+  </Step>
+  <Step title="Publish a version">
+    ```bash
+    ankra application publish-addon <application-id> \
+      --version 1.2.0 --display-name "Website" --category web --changelog "TLS defaults"
+    ```
 
-## Publishing
+    Leave out `--version` to take the version from the application's descriptor. A version already published is refused. The first publish creates the add-on; later publishes add versions to it.
+  </Step>
+  <Step title="Find the add-on's id">
+    ```bash
+    ankra application published-addon <application-id>
+    ```
 
-1. Open the application and select **Publish to catalog**.
-2. **Readiness** - resolve anything blocked, then continue.
-3. **Details** - the version, display name, description, category, and a changelog.
-   - Leave the version blank to bump the patch automatically. The field suggests the next one.
-   - A version that is already published is refused here, before anything is snapshotted.
-   - The changelog is shown against the version in the add-on's history. It is optional.
-4. **Review** - what changed in the most recent published version, so you can see the shape of a typical change before adding another.
-5. **Confirm** - a recap, any carried warnings, and what the snapshot means.
-
-The first publish creates the add-on. Later publishes add versions to it.
+    The `manifest-addon` commands below take this add-on id, not the application id.
+  </Step>
+</Steps>
 
 ## Version history
 
-The add-on's detail page lists every published version, newest first, with its changelog, who published it, and how many files and options it carries.
+`ankra application manifest-addon get <addon-id>` shows the add-on's catalogue entry, its published versions and what it declares.
 
-**Compare** on any version shows what changed against the version published before it:
+`ankra application manifest-addon diff <addon-id> --to 1.4.0` shows what changed in a version against the one published before it (`--from` picks another, `--path` narrows it to named manifests):
 
-- **files** added, removed or modified, with the before and after contents side by side
+- **files** added, removed or modified
 - **options** added, removed or modified
 
-A changed option is worth attention: options are the add-on's install-time input contract, so changing one is a breaking change for anyone who already installed the add-on. A version that starts or stops referencing an environment `Secret` is called out for the same reason.
+A changed option is worth attention: options are the add-on's install-time input contract, so changing one is a breaking change for anyone who already installed the add-on.
 
 <Note>
-There is no rollback and no "current version" control. An installation pins the version it was installed at, so there is nothing to roll back *to* - installing an earlier version explicitly is the equivalent, and existing installations are unaffected by later publishes.
+There is no rollback and no "current version" control. An installation pins the version it was installed at, so there is nothing to roll back *to*: installing an earlier version explicitly is the equivalent, and existing installations are unaffected by later publishes.
 </Note>
 
 ## Installing a published add-on
 
-Published applications appear in **Add-ons** alongside Helm add-ons. Installing one asks for a cluster, a namespace, and values for whichever deploy options the version declares, then deploys that snapshot.
+```bash
+ankra application manifest-addon install <addon-id> --cluster-id <cluster-id> \
+  --namespace commerce --version 1.4.0 --input replicas=3
+```
 
-Because the snapshot is self-contained, the add-on installs even when the source application has been deleted. The catalog says so on the entry, and no new versions can be published once the source is gone.
+`--namespace` and `--version` default from the add-on's own descriptor (the newest version when you leave `--version` out), and each `--input key=value` answers a deploy option the version declares. To find manifest add-ons alongside Helm add-ons in the [add-on catalogue](/platform/addon-catalog):
 
-## Unpublishing
+<CliVersion since="0.74.0" command="helm addon-catalog list" />
 
-**Unpublish** hides the add-on from the catalog without touching anything already installed. Existing installations keep running and keep reconciling; the entry simply stops being installable. Publishing a new version makes it visible again.
+```bash
+ankra helm addon-catalog list --types manifest_addon
+```
 
-Deleting the add-on outright is a separate, destructive action: it tears down the installations that came from it.
+Because the snapshot is self-contained, the add-on installs even when the source application has been deleted, and no new versions can be published once the source is gone.
+
+## Unpublishing and deleting
+
+<Warning>
+`delete` undeploys the workloads installed from the add-on on every cluster, not only the catalogue entry. It cannot be undone.
+</Warning>
+
+```bash
+# Withdraw the entry: nobody can install it again, installations keep running
+ankra application manifest-addon unpublish <addon-id>
+
+# Delete the add-on and undeploy every installation of it
+ankra application manifest-addon delete <addon-id>
+```
+
+Both ask for confirmation; `--yes` skips it.
 
 ## Limits
 

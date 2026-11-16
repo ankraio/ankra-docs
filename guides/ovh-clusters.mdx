@@ -9,39 +9,43 @@ Choose OVHcloud when you want Kubernetes on Public Cloud instances in a project 
 
 ## Before you start
 
-- **OVHcloud API credentials** - application key, application secret, consumer key and Public Cloud project ID - stored as an [OVH credential](/platform/credentials/ovh).
+- A **payment method** on the organisation. Without one, the create is refused with "Add a payment method to create this cluster." See [Credit and payment method](/platform/billing#credit-and-payment-method).
+- **OVHcloud API credentials** - application key, application secret, consumer key and Public Cloud project ID - stored as an [OVH credential](/platform/credentials/ovh): **Integrations & alerts → Credentials → Add credential → OVHcloud**, or **Add a credential** inside the create form.
 - An **SSH key credential** - your own public key, or one Ankra generates. See [SSH Key Credentials](/platform/credentials/ssh-key).
 - Room in your project's quotas for the instances, a network and the SSH keys, and the target region enabled on the project. Check them in the [OVHcloud Control Panel](https://www.ovh.com/manager/); OVHcloud support raises quotas.
 
 ## Create the cluster
 
 <Tabs>
-  <Tab title="Dashboard">
+  <Tab title="Portal">
+    Follow [Create a Cluster](/guides/create-a-cluster) with these OVHcloud choices:
+
     <Steps>
-      <Step title="Open the create dialog">
-        Go to **Clusters**, click **Create cluster** and pick **OVHcloud** under **Ankra Managed**.
+      <Step title="Choose OVHcloud">
+        Go to **Infrastructure → Clusters**, click **Add a cluster**, pick **OVHcloud**, then **Ankra managed** under **Who runs Kubernetes on OVHcloud?** (**Provider managed** creates an [OVHcloud MKS](/guides/ovh-mks-clusters) cluster).
+
+        The form **Add an OVHcloud cluster** opens.
       </Step>
-      <Step title="Credential & Region">
-        Pick the OVH credential and the SSH key (or add either inline), and the region, for example Gravelines, Strasbourg, Beauharnois, Warsaw, London or Frankfurt.
+      <Step title="Where it runs">
+        Choose the **OVHcloud credential**, the **SSH key** and the **Region**. Then pick the **Internet gateway size**: every node reaches the internet through one OVHcloud managed gateway, and its size sets the bandwidth all nodes share. **S · 200 Mbps** is the default; see [Internet gateway size](#internet-gateway-size).
+
+        The sizes the region offers load below.
       </Step>
-      <Step title="Network & Compute">
-        Keep or change the subnet CIDR, then pick the bastion flavor, the control plane count and flavor, and the worker flavor and count, with optional autoscaling bounds and a cloud-init document for the workers. The wizard shows each flavor's vCPUs, RAM, disk and hourly price. Add more node groups once the cluster is running.
+      <Step title="Control plane and gateway">
+        Pick **Single node** or **High availability** and the **Control plane size**. The **Gateway** row is the bastion instance, the only instance with a public IP; expand it to change its flavour. Each size field lists the region's flavours under **Exact server type**. The form starts with `b3-16` for the control plane and workers.
       </Step>
-      <Step title="Kubernetes">
-        Keep **kubeadm** (the default, with Cilium) or pick **k3s**, and optionally the version. See [Choices fixed at create time](/guides/operate-ankra-managed-clusters#choices-fixed-at-create-time) for the CNI and etcd options.
+      <Step title="Worker nodes">
+        The form creates one node group; add more once the cluster is running. Under **Placement, labels and taints**, **Pin to availability zone** places the group in one zone of a 3-AZ region. To spread the whole cluster across zones, create it with the CLI or API; see [Availability Zones](#availability-zones).
       </Step>
-      <Step title="GitOps">
-        Optionally connect a Git repository; Ankra commits the cluster's stacks to it. Two checkboxes are on by default:
-        - **Include Networking Stack** - Traefik, cert-manager and a Let's Encrypt ClusterIssuer, with Traefik behind an OVHcloud load balancer. To serve Gateway and HTTPRoute resources from the same Traefik as well, see [Gateway API](/guides/gateway-api).
-        - **Include Public DNS** - a delegated subdomain on `ankra.cc` with external-dns wired, so an ingress hostname under it gets its DNS record and TLS certificate automatically.
-      </Step>
-      <Step title="Details">
-        Name the cluster, set its environment, and click **Create cluster**. A progress view follows the network, bastion, control plane and worker instances, Kubernetes installation and Ankra Agent.
+      <Step title="Review and create">
+        Click **Review cluster**, check the settings and the cost, then click **Create cluster**. The progress page follows the stages to **&lt;cluster name&gt; is ready**.
       </Step>
     </Steps>
+
+    The form sets no cloud-init user data for the workers. Use the CLI or API for that; see [Node Group Cloud-init User Data](/guides/node-group-user-data).
   </Tab>
   <Tab title="CLI">
-    <CliVersion since="0.9.0" />
+    <CliVersion since="0.61.0" />
 
     ```bash
     ankra credentials ovh create --name my-ovh-cred --project-id <project-id>   # prompts for the keys
@@ -63,7 +67,9 @@ Choose OVHcloud when you want Kubernetes on Public Cloud instances in a project 
 
     <CliVersion since="0.21.0" command="cluster ovh create" note="Older releases send their own b2-7 and b2-15 flavors for the flags you leave out, so pass all three there." />
 
-    Leave a flavor flag out and the platform's default applies, as in the API tab: `c3-4` for the gateway and `b3-16` for the control plane and workers. `--distribution k3s`, `--etcd-topology external`, `--include-networking=false`, `--gateway-api` ([Gateway API](/guides/gateway-api)) and the `--gitops-*` flags cover the other choices.
+    Leave a flavor flag out and the platform's default applies, as in the API tab: `c3-4` for the gateway and `b3-16` for the control plane and workers. `--distribution k3s`, `--etcd-topology external`, `--include-networking=false`, `--gateway-api` ([Gateway API](/guides/gateway-api)), `--bastion-allowed-ips` and the `--gitops-*` flags cover the other choices.
+
+    `ankra cluster ovh create` has no flag for the internet gateway size, so the cluster gets the default `s`. Change it afterwards with `ankra cluster ovh gateway-model`; see [Internet gateway size](#internet-gateway-size).
   </Tab>
   <Tab title="API">
     ```bash
@@ -80,18 +86,19 @@ Choose OVHcloud when you want Kubernetes on Public Cloud instances in a project 
         "node_groups": [
           {"name": "default", "instance_type": "b3-16", "count": 2}
         ],
+        "gateway_model": "s",
         "include_networking": true,
         "include_dns": true
       }'
     ```
 
-    Omitted, the bastion flavor (`gateway_flavor_id`) defaults to `c3-4` and the control plane and worker flavors to `b3-16`. Every field, the region list and the flavors are in the [OVH Reference](/reference/ovh).
+    `gateway_model` is the internet gateway size (`s`, `m`, `l`, `xl`, `2xl` or `3xl`, default `s`). Omitted, the bastion flavor (`gateway_flavor_id`) defaults to `c3-4` and the control plane and worker flavors to `b3-16`. Every field, the region list and the flavors are in the [OVH Reference](/reference/ovh).
   </Tab>
 </Tabs>
 
 ## Verify
 
-1. The cluster moves from **Provisioning** to **Online** in the clusters list once the Ankra Agent has connected.
+1. In **Infrastructure → Clusters**, the cluster's status moves from **In progress** to **Online** once the Ankra Agent has connected.
 2. Point `kubectl` at it through Ankra (this needs a [Cluster Access](/guides/cluster-access) grant) and check the nodes:
 
    <CliVersion since="0.3.0" command="cluster kubeconfig add" />
@@ -113,15 +120,48 @@ Choose OVHcloud when you want Kubernetes on Public Cloud instances in a project 
 
 Because no workload traffic depends on the bastion, workloads keep running while it is unavailable, but Ankra cannot provision, scale, upgrade or reconcile the cluster until it is back, and the dashboard can show the cluster as degraded meanwhile. The [OVH Reference](/reference/ovh#architecture) has the diagram.
 
+## Internet gateway size
+
+Every node reaches the internet through the cluster's OVHcloud managed gateway: to pull container images, to keep the Ankra agent connected, and for any outside service your applications call. Its size sets the bandwidth all nodes share. A larger size costs more in your OVHcloud account.
+
+| Size | Bandwidth shown in the portal |
+|---|---|
+| `s` (default) | 200 Mbps |
+| `m` | 500 Mbps |
+| `l` | 2 Gbps |
+| `xl` | 4 Gbps |
+| `2xl` | 8 Gbps |
+| `3xl` | The largest size |
+
+Pick it at create time as **Internet gateway size**, or as `gateway_model` in the API. To change it on a running cluster:
+
+<Tabs>
+  <Tab title="Portal">
+    Go to **Infrastructure → Clusters → &lt;your cluster&gt; → Settings → Network**. Under **Internet gateway**, click **Change gateway size**, pick the size and click **Change gateway size** again. OVHcloud changes the gateway's bandwidth in place; the gateway is not recreated.
+  </Tab>
+  <Tab title="CLI">
+    <CliVersion since="0.74.0" command="cluster ovh gateway-model" />
+
+    ```bash
+    ankra cluster ovh gateway-model my-cluster --model m
+    ```
+
+    The command asks for confirmation, because resizing the gateway can interrupt the cluster's outbound internet access; `--yes` skips the question.
+  </Tab>
+</Tabs>
+
 ## OVHcloud specifics
+
+<CliVersion since="0.31.0" command="cluster ovh bastion allowed-ips" />
 
 - **Flavor changes go one way.** A node group moves to a larger flavor only; each node is powered off, resized and powered on, with brief downtime for its workloads. For smaller nodes, create a new group and delete the old one.
 - **Labels and taints at add time.** `ankra cluster node-group add` also takes `--labels` and `--taints`, so a group can be created with them in one step.
-- **First-boot scripts.** A node group can carry a cloud-init document, applied at first boot on every instance the group ever creates, including replacements - see [Node Group Cloud-init User Data](/guides/node-group-user-data).
+- **First-boot scripts.** A node group can carry a cloud-init document, applied at first boot on every instance the group ever creates, including replacements. The portal has no field for it; set it with the CLI or API - see [Node Group Cloud-init User Data](/guides/node-group-user-data).
 - **Restart** is a soft reboot through the OVHcloud API, falling back to a hard reboot when the guest OS does not respond. An instance that is `SHUTOFF` is started instead. `ankra cluster ovh nodes list` shows each node's live `provider_status` and `provider_power_state`, which helps spot a crashed or powered-off instance first.
+- **SSH allowlist.** At create time, **Addresses allowed to reach the gateway** under **Advanced configuration** (or `--bastion-allowed-ips`) limits SSH to the bastion to the IPv4 addresses or ranges you list; empty allows any address. On a running cluster, replace the list with `ankra cluster ovh bastion allowed-ips my-cluster 203.0.113.7 198.51.100.0/24`, or remove it with `--clear`.
 - **Access.** `ankra cluster ovh access-info <cluster>` prints the bastion and control plane IPs with ready-to-paste `ssh -J` and Kubernetes API port-forward commands.
 - **Stop.** A stop releases the node instances, the bastion and the managed network gateway. The private network is kept and reused on the next start, and the Cinder volumes are kept and billed while the cluster is stopped.
-- **Terminate** deletes the instances, networks and SSH keys; the dialog and `ankra cluster deprovision` list the Cinder volumes the teardown deletes.
+- **Terminate** deletes the instances, networks and SSH keys; **Settings → Terminate or remove** and `ankra cluster deprovision` list the Cinder volumes the teardown deletes.
 
 ### Availability Zones
 
