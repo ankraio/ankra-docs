@@ -5,46 +5,44 @@ description: Stop a cluster Ankra provisioned to stop paying for its compute, st
 
 import { CliVersion } from "/snippets/cli-version.jsx";
 
-A development or test cluster that runs all night and all weekend costs money while nobody uses it. You can stop it to release its compute, start it again when you need it, and let power schedules do both on a timetable - for example stop at 19:00 on weekdays and start again at 07:00.
+A development or test cluster that runs all night and all weekend costs money while nobody uses it. You can stop it to release its compute, start it again when you need it, and let power schedules do both on a timetable, for example stop at 19:00 on weekdays and start again at 07:00.
 
-Stop, start and power schedules are available for clusters Ankra provisions on Hetzner, OVHcloud, UpCloud, DigitalOcean, Scaleway, AWS EC2, Proxmox VE and HPE Morpheus. Plain imported clusters cannot be stopped. Managed Kubernetes clusters that support it have their own stop and start at the provider, without schedules - see [Managed Kubernetes](/guides/managed-kubernetes#stopping-and-starting).
+Stop, start and power schedules are available for clusters Ankra provisions on Hetzner, OVHcloud, UpCloud, DigitalOcean, Scaleway, AWS EC2, Ankra Cloud, Proxmox VE and HPE Morpheus. A cluster you connected to Ankra cannot be stopped from Ankra: the page says "This cluster was connected to Ankra, so Ankra does not own its servers. Stop and start it where it runs." Managed Kubernetes clusters that support it stop and start at the provider, without schedules; see [Managed Kubernetes](/guides/managed-kubernetes#stopping-and-starting).
 
----
+## Before you start
+
+- Stopping and starting needs `clusters.operate` on the cluster (Operator, Admin or Owner). Without it the page says "Your role cannot stop or start this cluster. That needs the clusters.operate permission."
+- Adding, changing and removing schedules needs `clusters.write` (Member, Operator, Admin or Owner). Without it the page says "Your role can see these schedules but cannot change them."
+- Starting creates servers, so the organisation's billing must allow it. Otherwise the start is refused: "The organisation's billing does not allow starting servers right now. Check the plan and payment method, then try again." See [Billing](/platform/billing).
+
+See [Roles and access](/guides/roles-and-access).
 
 ## Stop and start a cluster
 
-**Stop cluster** and **Start cluster** are in the **Danger Zone** of the cluster's **Settings** → **General**, and in the cluster's **⋯** menu on the clusters list and the cluster overview. Stop is offered while the cluster is running and Start while it is stopped. Both open a dialog where you type the cluster name to confirm.
-
-### What a stop does
-
-It depends on the provider:
-
-| Provider | Default stop | What survives |
-|----------|--------------|---------------|
-| Hetzner, OVHcloud, UpCloud, DigitalOcean, Proxmox VE, HPE Morpheus | Captures the cluster's state, then terminates the virtual machines | The state snapshot, cloud block volumes, and everything Ankra holds (cluster record, credentials, stacks, configuration history) |
-| Scaleway, AWS EC2 | Powers the servers off and keeps them with their volumes | Everything on the servers; retained storage, gateways and addresses keep billing |
-
-**The state snapshot.** On the terminating providers Ankra first captures an encrypted etcd snapshot, for k3s and kubeadm clusters, and stores it in your [backup vault](/concepts/backup-vaults), or in an Ankra-managed default vault when you have registered none. The virtual machines are terminated only once the snapshot is stored. The capture runs as a **Cluster State Snapshot** operation; if it fails, the cluster stays running and nothing is torn down.
-
-**Preserve cluster state (recommended)** is ticked in the dialog. Untick it (CLI `--preserve-state=false`) to tear down without a snapshot: Secrets, ConfigMaps, custom resources and the bindings between claims and volumes are then lost, and only what Ankra deploys from its own configuration comes back. A forced stop (CLI `--force`) never captures.
-
-**Pause instead of tearing down.** On k3s clusters on Hetzner, UpCloud and DigitalOcean, choose **Pause** instead of **Tear down (default)** (CLI `--mode pause`). The servers are powered off and kept with their disks, so etcd, local data and node identities survive, and a start powers them back on. The trade-off is cost: these providers bill a powered-off server in full, so a pause saves no compute cost. Pause takes no snapshot and cannot be combined with `--force`.
-
-A stop never deletes the cloud block volumes behind PersistentVolumes, forced or not; they keep billing while the cluster is stopped. Only terminating the cluster deletes them - see [Persistent volumes](/platform/cluster-settings#persistent-volumes).
-
-### What a start does
-
-**Start cluster** re-provisions the saved topology: **Everything** (control plane and workers) or **Control plane only**. Ankra creates fresh virtual machines with new IPs and installs Kubernetes. When a snapshot was captured, **Restore the cluster state captured at stop** is ticked: the first control plane resets etcd from it, so your Secrets, ConfigMaps, custom resources and persistent volume claims come back, and StatefulSets reattach their existing cloud disks. A kubeadm control plane also gets its certificate authorities back, so existing tokens and kubeconfigs stay valid. Untick it (CLI `--restore-state=false`) to start a fresh cluster.
-
-Stacks and add-ons configured in Ankra are reconciled either way. The snapshot is kept for as long as the cluster stays stopped. Once the cluster runs again, a restored snapshot is kept for 7 more days. One that was never restored is kept for 90 days from its capture, or for as long as it is the cluster's newest such snapshot from before its last start, its last power outage or the last time Ankra saw one of its control planes stop responding, whichever is longer. The [scheduled snapshots](/guides/kubernetes-upgrades#set-the-retention-window) Ankra takes while the cluster runs follow their own retention window, 7 days unless you set another for the cluster.
-
-On Scaleway and AWS EC2, and after a pause, a start powers the existing servers back on - see [AWS clusters](/guides/aws-clusters#stopping-and-starting-a-cluster).
-
-### From the CLI
-
-Stop and start are per-provider commands:
+Go to **Clusters → &lt;your cluster&gt; → Settings → Stop, start and schedules** (`/next/clusters/<cluster-id>/settings/power`). **Stop or start now** shows the cluster's **State** and **Provider**, and offers **Stop cluster** while the cluster runs and **Start cluster** while it is stopped.
 
 <CliVersion since="0.18.0" />
+
+<Tabs>
+<Tab title="Portal">
+
+<Steps>
+  <Step title="Stop the cluster">
+    Click **Stop cluster**. On providers that capture the cluster state, leave **Keep cluster state (recommended)** ticked. Type the cluster's name and click **Stop &lt;cluster name&gt;**.
+
+    **Check:** the page reports the stop with a **Follow the stop** link to its operation, and the state reads stopped once it finishes.
+  </Step>
+  <Step title="Start the cluster">
+    Click **Start cluster**. Where the provider offers it, choose under **What to start**: **Everything** (the control plane and the worker nodes) or **Only the control plane** (workloads cannot run until worker nodes are added). Click **Start cluster**.
+
+    **Check:** the page says Ankra is starting the cluster, with a **Follow the start** link. "Starting takes about 6 minutes, and stopping is offered again once it is running."
+  </Step>
+</Steps>
+
+</Tab>
+<Tab title="CLI">
+
+Stop and start are per-provider commands:
 
 ```bash
 ankra cluster hetzner stop my-cluster                      # capture state, then tear down
@@ -53,62 +51,86 @@ ankra cluster hetzner start my-cluster                     # restore the capture
 ankra cluster hetzner start my-cluster --scope control_plane
 ```
 
-The same commands exist under `ovh`, `upcloud`, `digitalocean`, `scaleway`, `aws`, `proxmox` and `morpheus`. See the [CLI reference](/reference/cli/cluster).
+The same commands exist under `ovh`, `upcloud`, `digitalocean`, `scaleway`, `aws`, `ankracloud`, `proxmox` and `morpheus`. See the [CLI reference](/reference/cli/cluster).
 
----
+</Tab>
+</Tabs>
+
+### What a stop does
+
+It depends on the provider:
+
+| Provider | Stop | What survives |
+|----------|------|---------------|
+| Hetzner, OVHcloud, UpCloud, DigitalOcean, Proxmox VE, HPE Morpheus | Captures the cluster's state, then deletes the servers, networks and SSH keys | The state snapshot, the cloud block volumes, and everything Ankra holds (cluster record, credentials, stacks, configuration history) |
+| Scaleway, AWS EC2, Ankra Cloud | Powers the servers off and keeps their disks | Everything on the servers; disks and other retained resources keep billing |
+
+**The state snapshot.** On the providers that delete servers, Ankra first captures an encrypted etcd snapshot and stores it in your organisation's oldest ready [backup vault](/concepts/backup-vaults), or in an Ankra-managed default vault when you have none. The servers are deleted only once the snapshot is stored. The capture runs as a **Cluster State Snapshot** operation; if it fails, the cluster stays running and nothing is torn down.
+
+Untick **Keep cluster state (recommended)** (CLI `--preserve-state=false`) to tear down without a snapshot: Secrets, ConfigMaps, custom resources and the bindings between claims and volumes are then lost, and only what Ankra deploys from its own configuration comes back. A forced stop (CLI `--force`) never captures. When the cluster is not reachable, the box cannot be ticked and the dialog says data kept only on the servers' disks is lost.
+
+**Pause instead of tearing down.** On k3s clusters on Hetzner, UpCloud and DigitalOcean, `ankra cluster hetzner stop my-cluster --mode pause` (or the `upcloud` or `digitalocean` command) powers the servers off and keeps them with their disks, so etcd, local data and node identities survive, and a start powers them back on. These providers bill a powered-off server in full, so a pause saves no compute cost. Pause takes no snapshot and cannot be combined with `--force`. The portal has no pause choice; use the CLI.
+
+A stop never deletes the cloud block volumes behind PersistentVolumes, forced or not; they keep billing while the cluster is stopped. Only deleting the cluster removes them; see [Terminate or remove](/platform/cluster-settings#terminate-or-remove).
+
+### What a start does
+
+On the providers that delete servers, a start creates fresh servers with new IP addresses and installs Kubernetes. When a snapshot was captured, the first control plane resets etcd from it, so your Secrets, ConfigMaps, custom resources and persistent volume claims come back, and StatefulSets reattach their existing cloud disks. A kubeadm control plane also gets its certificate authorities back, so existing tokens and kubeconfigs stay valid. To start a fresh cluster instead, use `ankra cluster hetzner start my-cluster --restore-state=false` (or the command for your provider); the portal always restores a captured snapshot.
+
+Stacks and add-ons configured in Ankra are reconciled either way. The snapshot is kept for as long as the cluster stays stopped. Once the cluster runs again, a restored snapshot is kept for 7 more days, and one that was never restored for 90 days from its capture. The [scheduled snapshots](/guides/kubernetes-upgrades#set-the-retention-window) Ankra takes while the cluster runs follow their own retention window.
+
+On Scaleway, AWS EC2 and Ankra Cloud, and after a pause, a start powers the existing servers back on; see [AWS clusters](/guides/aws-clusters#stopping-and-starting).
 
 ## Schedule stops and starts
 
+The **Schedules** section on the same page lists the cluster's schedules. A cluster holds at most 20.
+
 ### Park a cluster overnight
 
-The **Power schedules** card on **Settings** → **General** has a **Park overnight** button. Choose the days (**Weekdays (Mon-Fri)** or **Every day**), the **Stop at** and **Start at** times (19:00 and 07:00 by default), the timezone and what happens **When stopping**, then **Create schedules**. It creates one stop schedule and one start schedule.
-
-### Add a schedule
-
 <Steps>
-  <Step title="Open the dialog">
-    On the **Power schedules** card, click **Add schedule**.
+  <Step title="Open Park overnight">
+    Under **Schedules**, click **Park overnight**.
   </Step>
-  <Step title="Choose the action">
-    Pick **Stop** or **Start**. Each schedule does one thing; create a pair to stop and start the cluster.
+  <Step title="Choose the days and times">
+    Choose **Days** (**Monday to Friday** or **Every day**), **Stop at** and **Start at** (19:00 and 07:00 by default) and the **Timezone** (your browser's by default).
   </Step>
-  <Step title="Choose what a stop does">
-    For a stop, pick under **When stopping**:
-    - **Delete resources** - deletes the cloud instances, as a manual stop does. On the providers that capture state, keep **Preserve cluster state (recommended)** ticked so the next start restores it.
-    - **Scale down to 0** - deletes only the worker servers and creates new ones at the next start. The control plane and etcd, cloud volumes and addresses are kept and keep billing. Data on the workers' own disks is lost at every stop, so if the cluster has volumes that keep data there (local-path, hostPath, local PVs) you must tick the acknowledgement.
-    - **Pause** - k3s on Hetzner, UpCloud and DigitalOcean only. Powers the servers off and keeps them; they keep billing.
-  </Step>
-  <Step title="Choose when">
-    Under **Schedule type**, choose **One-off** and set **Run at**, or **Repeated** and pick a **Cadence**: **Every day**, **Weekdays (Mon-Fri)**, **Weekends (Sat-Sun)** with a **Time**, or **Custom cron** with a 5-field cron expression. Repeated schedules run in the **Timezone** you pick, which defaults to your browser's.
-  </Step>
-  <Step title="Save">
-    Leave **Schedule enabled** on and click **Add schedule**. The card shows the next run.
+  <Step title="Add the pair">
+    Click **Add both schedules**.
+
+    **Check:** the table lists **Stop the cluster** and **Start the cluster**, each with its **Next time**.
   </Step>
 </Steps>
 
-A cluster can hold up to 20 schedules. A one-off schedule disables itself after it fires and stays in the list as a record. A repeated schedule re-arms for its next occurrence. For a custom cron, `0 19 * * 1-5` in `Europe/Stockholm` fires at 19:00 Stockholm time, Monday to Friday.
+If the stop schedule is added and the start schedule is not, the dialog says so; click **Add the start schedule** to add only the missing one.
 
-Ankra AI (a card you confirm in chat included), an MCP client or a service-account token can schedule or switch on a **Scale down to 0** stop only on a cluster a person has confirmed is not production: someone chose its **Environment** (when creating the cluster, or later on its **Overview** page) and neither that label nor the cluster's criticality says production; otherwise the write is refused and says why. Schedules you create yourself in the portal, or with the CLI or API on your own token, are not checked.
+### Add a schedule
 
-### Read the schedule list
+<Tabs>
+<Tab title="Portal">
 
-Each row shows the action, its next run, when it last fired and the outcome of the last run, with a toggle, **Edit** and **Delete**:
+<Steps>
+  <Step title="Open the dialog">
+    Under **Schedules**, click **Add a schedule**.
+  </Step>
+  <Step title="Choose the action">
+    Under **What should happen**, pick **Stop** or **Start**. Each schedule does one thing; add a pair to stop and start the cluster.
+  </Step>
+  <Step title="Choose when">
+    Under **When**, choose **On the same days every week** and set **Days** (**Every day**, **Monday to Friday** or **Saturday and Sunday**), **Time of day** and **Timezone**. To use a cron expression instead, open **Use a cron line instead** and enter a five-field **Cron line**, such as `0 19 * * 1-5`; it replaces the days and time.
 
-| Outcome | Meaning |
-|---------|---------|
-| `completed` | The action ran |
-| `skipped` | The action was not needed, for example the cluster was already stopped; the reason is shown |
-| `deferred` | The cluster was busy or the action failed transiently; the schedule is retrying |
-| `failed` | The action did not succeed within the retry window |
+    Or choose **Once, at a date and time** and set **Date and time**.
+  </Step>
+  <Step title="Save">
+    Click **Add schedule**.
 
-### How schedules run
+    **Check:** the new row shows the schedule under **When** and its next run under **Next time**.
+  </Step>
+</Steps>
 
-- A scheduled stop behaves like **Stop cluster**, with the mode and state choice the schedule carries.
-- A stop is skipped if the cluster is already stopped or being deprovisioned. A start fires only when the cluster is stopped.
-- If the cluster is busy or the action fails transiently, the schedule retries every 5 minutes for up to 24 hours, then records `failed`. A repeated schedule still fires at its next occurrence.
-- Turning off the toggle keeps the schedule but it never fires; turning it on again arms it for its next occurrence. Disabling or editing a schedule always wins over a retry in flight.
+A stop schedule added in the portal stops the cluster the way **Stop cluster** does. To schedule a stop that only removes the worker servers (`scale_to_zero`), use the CLI.
 
-### Manage schedules from the CLI
+</Tab>
+<Tab title="CLI">
 
 `ankra cluster power-schedules` works on the active cluster (`ankra cluster select`):
 
@@ -119,17 +141,67 @@ ankra cluster power-schedules create --action start --cron '0 7 * * 1-5' --timez
 
 # One-off stop that only removes the workers
 ankra cluster power-schedules create --action stop --at 2026-01-02T19:00:00Z --stop-mode scale_to_zero
+```
 
+`--stop-mode scale_to_zero` deletes only the worker servers at every stop and creates new ones at the next start. The control plane, etcd, cloud volumes and addresses are kept and keep billing. Data on the workers' own disks is lost at every stop, so a cluster with volumes that keep data there (local-path, hostPath, local PVs) needs `--accept-node-local-data-loss` when you are not answering the prompt.
+
+</Tab>
+</Tabs>
+
+Ankra AI, an MCP client or a service-account token can schedule or switch on a `scale_to_zero` stop only on a cluster a person has confirmed is not production; otherwise the write is refused and says why. A person confirms this under **Settings → General** with **Confirm it is &lt;purpose&gt;** or **Change what it's used for**; see [Cluster settings](/platform/cluster-settings#general). Schedules you create yourself in the portal, or with the CLI or API on your own token, are not checked.
+
+### Change, pause or remove a schedule
+
+Each row shows the action, **When**, **Next time** and **Last time** with the last outcome (**Ran**, **Skipped** or **Failed**). The row's options menu offers:
+
+- **Change…** opens **Change the schedule**. Change the fields and click **Save schedule**. A stop schedule keeps its stop mode.
+- **Pause** keeps the schedule but it never fires; **Resume** arms it for its next occurrence. A paused schedule reads **Paused** under **Next time**.
+- **Remove…** asks "Remove this schedule?"; click **Remove**.
+
+<Tabs>
+<Tab title="Portal">
+
+Use the row's options menu as above.
+
+</Tab>
+<Tab title="CLI">
+
+```bash
 ankra cluster power-schedules list
 ankra cluster power-schedules update <schedule-id> --action stop --cron '0 20 * * 1-5' --timezone Europe/Stockholm --enabled=false
 ankra cluster power-schedules delete <schedule-id>
 ```
 
-`update` replaces the schedule's action, timing and enabled flag, so restate them; omitting `--stop-mode` or `--preserve-state` keeps the current choice. A `scale_to_zero` stop on a cluster with node-local volumes needs `--accept-node-local-data-loss` when you are not answering the prompt. See the [CLI reference](/reference/cli/cluster).
+`update` replaces the schedule's action, timing and enabled flag, so restate them; omitting `--stop-mode` or `--preserve-state` keeps the current choice.
 
----
+</Tab>
+</Tabs>
+
+### How schedules run
+
+- A scheduled stop behaves like **Stop cluster**, with the mode and state choice the schedule carries.
+- A stop is skipped if the cluster is already stopped or being deprovisioned. A start fires only when the cluster is stopped.
+- If the cluster is busy or the action fails transiently, the schedule retries every 5 minutes for up to 24 hours, then records a failure. A repeated schedule still fires at its next occurrence.
+- A one-off schedule disarms itself after it fires and stays in the list as a record. A repeated schedule re-arms for its next occurrence.
+- Pausing or changing a schedule always wins over a retry in flight.
+
+## Verify
+
+1. Open **Settings → Stop, start and schedules**. After a stop, **Start cluster** is offered; after a start, **Stop cluster** is offered.
+2. Open **Operations** on the cluster. A stop on a provider that captures state shows a **Cluster State Snapshot** run.
+3. After a scheduled run, the schedule's **Last time** shows when it ran and its outcome.
+
+## What can go wrong
+
+| Message | What to do |
+|---|---|
+| "Ankra could not check whether an operation is running on this cluster" | Click **Try again**. Stopping and starting are offered once that check succeeds. |
+| "Stopping is offered again once it finishes." | An operation is running on the cluster. Follow it with **Follow the operation**, then stop the cluster. |
+| "A cluster can have at most 20 schedules. Remove one to add another." | Remove a schedule you no longer need. |
+| "The schedule was not added" | Read the reason in the alert, correct the time, timezone or cron line, and save again. |
+| A schedule's last outcome reads **Failed** | The action did not succeed within 24 hours of retries. Open **Operations** for the reason; the schedule fires again at its next occurrence. |
 
 ## Next steps
 
 - [Cloud Cost](/platform/cloud-cost) - see what your clusters cost and what parking them saves.
-- [Cluster Settings](/platform/cluster-settings) - the rest of the cluster's lifecycle, including terminating it.
+- [Cluster Settings](/platform/cluster-settings) - every settings page of a cluster, including deleting it.

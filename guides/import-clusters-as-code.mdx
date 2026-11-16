@@ -1,0 +1,132 @@
+---
+title: Import several clusters as code
+sidebarTitle: Import clusters as code
+description: Keep one ImportCluster file per cluster in a repository, validate every change in CI, apply on merge, and keep the files and the clusters in step.
+---
+
+import { CliVersion } from "/snippets/cli-version.jsx";
+
+When you bring several clusters you already run into Ankra, describe each one in its own ImportCluster file and let a CI job apply them. You end up with one repository that says what every cluster runs, a check on every change, and an apply on every merge. Allow an hour for the first two clusters.
+
+This guide uses `ankra cluster apply` from CI. Two other routes exist, and a cluster should use only one of them:
+
+- **A GitOps repository connected to the cluster.** Ankra then reads the cluster's definition from that repository on every sync, and you edit the files in the cluster's directory instead of applying them. See [GitOps](/concepts/gitops).
+- **Terraform.** The `ankra_cluster` resource registers a cluster you operate and keeps its Stacks in Terraform. See [Ankra Terraform Provider](/integrations/terraform).
+
+## Before you start
+
+- **A service token** for the CI job, with a role that may add and change clusters, stored as the CI secret `ANKRA_API_TOKEN`. See [Service Tokens](/guides/service-tokens).
+- **A payment method** on the organisation, because the first apply of a file creates the cluster. See [Billing](/platform/billing#credit-and-payment-method).
+- **Helm and a kubeconfig for each new cluster**, on the machine where you install its agent.
+- **A default StorageClass on each cluster** if its Stacks hold volumes. See [Set up storage on a cluster you connect](/guides/storage-on-your-own-cluster).
+- **The Ankra CLI**:
+
+<CliVersion since="0.74.0" />
+
+## Steps
+
+<Steps>
+  <Step title="Write one file per cluster">
+    Keep one file per cluster, named after it, such as `clusters/staging.yaml` and `clusters/production.yaml`. `metadata.name` is the cluster's name in Ankra, so it must differ between files. `metadata.environment` says what the cluster is for. Put each file's values and manifests next to it: `from_file` paths resolve against the directory the file is in. Every field is in the [ImportCluster YAML Schema](/reference/importcluster).
+
+    ```yaml
+    apiVersion: v1
+    kind: ImportCluster
+    metadata:
+      name: staging
+      environment: staging
+    spec:
+      stacks:
+        - name: logging
+          manifests:
+            - name: logging-namespace
+              from_file: manifests/logging-namespace.yaml
+          addons:
+            - name: fluent-bit
+              chart_name: fluent-bit
+              chart_version: 0.49.1
+              registry_name: fluent
+              registry_url: https://fluent.github.io/helm-charts
+              namespace: logging
+              parents:
+                - kind: manifest
+                  name: logging-namespace
+              configuration:
+                from_file: values/fluent-bit.yaml
+    ```
+
+    For a cluster that is already in Ankra, start from its current definition with `ankra cluster export --cluster <cluster-name> -f clusters/<cluster-name>.yaml`. The export carries no manifest bodies and no add-on values, so give each manifest and add-on its content before you apply the file.
+
+    **Check:** `ankra cluster apply -f clusters/staging.yaml --dry-run` prints `Validation succeeded for "clusters/staging.yaml"; no changes applied (--dry-run).`
+  </Step>
+  <Step title="Validate every change in CI">
+    On every pull request, run the server-side check for each file. It runs every rule an apply enforces without touching a cluster: duplicate names, parents, cycles, charts and versions that exist, plaintext secrets and field rules.
+
+    ```bash
+    set -e
+    for file in clusters/*.yaml; do
+      ankra cluster validate -f "$file" --strict-secrets
+    done
+    ```
+
+    `--strict-secrets` turns a plaintext secret into an error instead of a warning. Once a cluster exists, add `--cluster <cluster-name>` to validate against its live resources too.
+
+    **Check:** the job fails on a file with a mistake and passes on the others.
+  </Step>
+  <Step title="Apply a new cluster once from your terminal">
+    The first apply of a file creates the cluster. Run it yourself, with `--wait`, so you get the agent install command:
+
+    ```bash
+    ankra cluster apply -f clusters/staging.yaml --wait
+    ```
+
+    The CLI prints `Cluster 'staging' imported!` and, under `To install the Ankra agent, run:`, a `helm upgrade --install` command. Run that command with your kubeconfig pointing at the new cluster.
+
+    <Warning>
+    The install command carries the cluster's agent token. Run the first apply from your terminal, not from CI, so the token never lands in a CI log, and do not commit the command.
+    </Warning>
+
+    **Check:** the cluster's status in **Clusters** turns online within about a minute, and `ankra cluster operations list --cluster staging` shows its Stacks deploying.
+  </Step>
+  <Step title="Apply from CI on merge">
+    On every merge to the default branch, apply each file:
+
+    ```bash
+    set -e
+    for file in clusters/*.yaml; do
+      ankra cluster apply -f "$file" --wait
+    done
+    ```
+
+    For an existing cluster the CLI prints `Cluster '<name>' configuration applied.` `--wait` covers the configuration write only: add-on and manifest deploys run afterwards. Follow them with `ankra cluster operations list --cluster <cluster-name>`.
+
+    To run this job on Ankra Pipelines, see [Ankra Pipelines](/guides/ankra-pipelines).
+
+    **Check:** the job's log shows `configuration applied` for each cluster, and each cluster's operations list shows the deploys finishing.
+  </Step>
+</Steps>
+
+## Keep the files and the clusters in step
+
+The files are the only route of change for the Stacks they declare. An apply replaces each Stack the file names with what the file says.
+
+- **A member removed from a file is not removed silently.** An apply whose file no longer lists an add-on, manifest or application of its Stacks is refused and changes nothing. The CLI prints: `If these should go, apply again with --confirm-removal <kind>/<name>, or with --prune when the file is the complete, current definition of its stacks. Otherwise add them to the file.`
+- **A member someone added in the portal shows up the same way.** It is not in the file, so the next apply from CI is refused and names it. Add it to the file, or confirm its removal.
+- **Renaming a manifest deletes its resources.** A manifest's name is its identity; see the warning under [`spec.stacks[].manifests[]`](/reference/importcluster#spec-stacks-manifests) before you rename one that owns a namespace or volumes.
+
+<Warning>
+`--prune` removes every member the file no longer lists, with the resources they own. Use it in CI only when each file is the complete, current definition of its Stacks.
+</Warning>
+
+## What can go wrong
+
+- **`For a new cluster, the agent install command is only shown when you use --wait.`** The apply ran without `--wait`. Create the install command in the portal under **Clusters → &lt;your cluster&gt; → Settings → Upgrades and maintenance → Agent install command**, or apply again with `--wait`.
+- **`Import failed with the following issues:`** The CLI lists each resource and the field the platform refused. Fix the file and apply again; `ankra cluster validate` catches the same errors before a merge.
+- **An apply is refused for members the file does not list.** See [Keep the files and the clusters in step](#keep-the-files-and-the-clusters-in-step).
+- **`metadata.environment` did not change an existing cluster.** A file sets the environment only where nobody has chosen one. The CLI prints the `ankra cluster update` command that changes it.
+
+## Where to go next
+
+- [Bring an existing cluster under Ankra](/guides/adopt-an-existing-cluster) for storage, GitOps, kubectl access and backups on each cluster.
+- [ImportCluster YAML Schema](/reference/importcluster) for every field.
+- [Backups and Restore Points](/guides/backups) to protect the stateful Stacks your files declare.

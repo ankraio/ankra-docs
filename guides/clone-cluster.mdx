@@ -1,143 +1,256 @@
 ---
 title: Clone a Cluster
-description: Duplicate a cluster with the CLI or the portal, onto an import cluster or a different cloud provider.
+description: Copy a cluster's stacks, with or without their data, to another cluster, another organisation, a cluster you connect or a new cloud cluster.
 ---
 
 import { CliVersion } from "/snippets/cli-version.jsx";
 
-<Note>
-Clone stack configurations from existing clusters or remote repositories. Perfect for replicating production setups to staging or dev environments.
-</Note>
+Cloning copies stacks from one cluster to another: some of them, or all of them to clone the whole cluster. The copy can go to a cluster already in Ankra (in this organisation or another one you belong to), to a Kubernetes cluster you connect, or to a new cluster Ankra builds on a cloud provider. By default only the configuration is copied; you can also carry each stack's data through a restore point.
 
----
+This page covers the portal's **Clone your setup** page and the `ankra cluster clone` command for cluster files. For cloning a single stack from the CLI with every flag, see [Clone Stacks Between Clusters](/guides/clone-stack).
 
-## Prerequisites
+## Before you start
 
-- [Ankra CLI](/integrations/ankra-cli) installed and configured
-- A cluster configuration file (YAML)
+| You need | For | Where to get it |
+|---|---|---|
+| `clusters.read` and `stacks.read` on the source cluster | Any clone | Every built-in role. See [Roles and access](/guides/roles-and-access). |
+| `stacks.write` on the destination cluster | Copying stacks to an existing cluster | Member, Operator, Admin or Owner |
+| `stacks.write` on the source cluster | Copying every stack to a cluster you connect, as one whole-cluster clone | Member, Operator, Admin or Owner |
+| `clusters.create` | **Connect your own cluster** with only some stacks, and **New cloud cluster** | Admin or Owner |
+| `backups.operate` and a ready backup vault | **Copy data with the stacks** | Member, Operator, Admin or Owner. See [Backup vaults](/concepts/backup-vaults). |
+| Membership of the destination organisation | Copying to another organisation | An invitation from that organisation |
 
----
+The portal hides the destinations your role cannot use. A destination cluster where you lack `stacks.write` shows: "Your role needs stacks.write on this cluster. Choose another destination or ask an administrator for access."
 
-## Clone from a Local File
+<Warning>
+A clone never carries secret values. Every value a stack encrypts is removed, and the stack waits on the destination until you enter it again. See [Stacks that need your input](#stacks-that-need-your-input).
+</Warning>
 
-Copy stacks from an existing cluster configuration:
+## Clone stacks
 
-<CliVersion since="0.1.122" />
+<CliVersion since="0.18.0" />
+
+<Tabs>
+<Tab title="Portal">
+
+<Steps>
+  <Step title="Open the clone page">
+    Go to **Clusters → &lt;your cluster&gt;** and click **Clone cluster** at the top of the cluster's overview. To start from the stack list instead, open **Stacks** and click **Clone stacks**.
+
+    The **Clone your setup** page opens (`/next/clusters/<cluster-id>/clone`) with three steps: **Stacks**, **Destination** and **Review**. The **Your copy** panel beside them summarises the selection as you go.
+  </Step>
+  <Step title="Choose the stacks">
+    Under **What would you like to copy?**, tick the stacks to copy. Live stacks and saved drafts are both listed. Use the search field to find a stack by name or description, **Select all** to take every stack, or **Clear selection** to start again. A stack marked **Encrypted values need reconfiguration** holds secret values that will not be copied.
+
+    Selecting every stack is what clones the whole cluster. Click **Choose destination**.
+
+    **Check:** the **Your copy** panel shows the number of stacks under **Selection**.
+  </Step>
+  <Step title="Choose where the copy goes">
+    Under **Where should the copy go?**, pick one destination:
+
+    - **Existing cluster** - choose the **Organisation** and the **Destination cluster**. Ankra checks your access and the stack names, then says "You can create stacks on this cluster." and whether any selected names are already in use.
+    - **Connect your own cluster** - enter a **New cluster name** (3 to 62 letters, numbers, dashes or underscores) and an optional **Description**. Unless you copy every stack as a whole-cluster clone, also answer **What will this cluster run?**. Ankra creates the cluster record; no servers are created.
+    - **New cloud cluster** - Ankra keeps your selection while you choose a provider and size the new cluster.
+
+    Click **Review copy**.
+
+    **Check:** the **To** line of **Your copy** names the destination.
+  </Step>
+  <Step title="Review the copy">
+    Under **How should the copy start?**, check **From**, **To** and **Stacks**, then choose under **After copying**:
+
+    - **Save drafts for review** - the copies are drafts. Adjust names, secrets and environment settings, then deploy them yourself.
+    - **Deploy when ready** - Ankra requests the deployment after copying. Stacks with missing secrets stay drafts, and data restores finish first.
+
+    With a single stack selected you can set **Stack name on destination**; leave it empty to keep the source name. **Configuration options → Include add-on configuration** copies Helm values along with chart versions and manifests; untick it to copy chart versions and manifests only.
+
+    To carry data as well, see [Copy data with the stacks](#copy-data-with-the-stacks) before you continue.
+  </Step>
+  <Step title="Start the copy">
+    The button names what happens next:
+
+    - **Clone 1 stack** or **Clone 3 stacks** for an existing cluster.
+    - **Create cluster and clone** for a cluster you connect.
+    - **Configure the new cluster** for a new cloud cluster. The **Add a cluster** page opens with the notice "You are setting up a destination for 3 selected stacks. No stacks are copied until you confirm." Choose the provider and settings as in that provider's guide (for example [Hetzner Clusters](/guides/hetzner-clusters)), and check **Stacks to clone** on the **Review** step before you click **Create cluster**.
+
+    Keep the page open while the copy runs. **Check:** the **Clone results** page counts the stack drafts copied, for example **3 / 3 stack drafts copied**, and gives each stack a status.
+  </Step>
+  <Step title="Finish on the destination">
+    For a cluster you connect, click **Connect the cluster**. It opens the new cluster's **Settings → Agent** page, where you install the Ankra agent; see [Import a cluster](/guides/import-cluster). The results page says: "Connect your Kubernetes cluster to this new Ankra record before deploying. No servers were created."
+
+    For a destination in another organisation, click **Switch organisation and review**.
+
+    Otherwise click **Review stack** on any stack, or **Review destination stacks**.
+
+    **Check:** the destination's **Stacks** page lists the copies.
+  </Step>
+</Steps>
+
+</Tab>
+<Tab title="CLI">
+
+The CLI copies one stack at a time to a cluster that is already in Ankra. The copy is a draft unless you add `--deploy`.
+
+```bash
+ankra cluster select my-source-cluster
+ankra cluster stacks clone monitoring --to my-target-cluster
+```
+
+Repeat the command for each stack. Every flag, including `--name`, `--include-config` and the data flags, is on [Clone Stacks Between Clusters](/guides/clone-stack) and in the [CLI reference](/reference/cli/cluster#ankra-cluster-stacks-clone).
+
+The CLI has no command that clones a whole cluster onto a new cluster. Use the portal.
+
+</Tab>
+<Tab title="MCP">
+
+The `clone_stack` tool (`mcp:write`) copies one stack within a cluster or across clusters, the same request as `ankra cluster stacks clone`. See [MCP tools](/platform/mcp-tools).
+
+</Tab>
+</Tabs>
+
+### Stack statuses on the results page
+
+| Status | Meaning |
+|---|---|
+| **Draft ready** | The copy is saved as a draft on the destination. |
+| **Deployment requested** | Ankra asked the destination to deploy the copy. |
+| **Data copy requested** | A data run carries the stack's data; its progress shows under the stack. |
+| **Needs input** | Secret values were removed. The stack lists the add-ons or manifests and the paths to fill in. |
+| **Deployment needs attention** | The copy exists but the deployment request failed. The reason shows under the stack. |
+| **Not cloned** | The copy failed. A **Retry** button appears when another attempt can succeed. |
+| **Check destination** | The response was interrupted. The copy may already exist, so check the destination before trying again. |
+
+## Copy data with the stacks
+
+By default a clone copies configuration only. Persistent volumes and database contents stay on the source unless you add them. The **Data** section appears on the **Review** step when you hold `backups.operate` and the destination is in the same organisation. Data copies stay within one organisation.
+
+1. Tick **Copy data with the stacks**.
+2. Choose the **Restore point**:
+   - **Take a fresh restore point** - Ankra takes a new restore point on the source. Choose the **Backup vault**, or leave **Use stack policy or the only ready vault**. Tick **Protect the source for future backups** to add a backup policy to a source stack that has none.
+   - **Use the latest complete restore point** - copies all data recorded in each stack's latest complete restore point.
+3. With a fresh restore point you can open **Choose databases and volumes**, tick **Choose which data to carry**, and set **Include databases** and **Persistent volume claims** (one `namespace/name` per line). These choices replace the stack's stored backup selection; without them each stack keeps its own.
+
+Each stack's data moves in a separate run after the copy, and the results page shows its progress under the stack. With **Deploy when ready**, a stack deploys once its restore has finished.
+
+<Warning>
+A data copy needs an unused stack name on the destination: it cannot add a suffix. Rename the stack, select fewer stacks or choose a new cluster when the review lists **Stack names already in use**. A clone with data also reads the live source, so it is not a disaster recovery path; for that, [protect the stack and restore a restore point](/guides/backups).
+</Warning>
+
+## What a whole-cluster clone carries and skips
+
+When you copy every stack to a cluster you connect or to a new cloud cluster, the clone also copies the source cluster's **cluster variables**, so stack content keeps resolving its `${{ ankra.* }}` tokens. A variable the destination already defines keeps the destination's value.
+
+These stacks are never copied, and the **Copy notes** on the results page name them:
+
+- The backup stack, `ankra-backup`. It belongs to the source cluster's own vault credential and backup prefix. Protect the new cluster to give it one.
+- On a new cloud cluster, the stacks the provider's provisioning installs itself: every cloud controller stack (`hcloud`, `openstack`, `upcloud-cloud-provider`, `digitalocean-cloud-provider`, `scaleway-cloud-provider`, `ankracloud-cloud-provider`, `aws-cloud-provider`), plus `networking` and `external-dns` when the new cluster installs them, and `cilium` on kubeadm clusters. The new cluster gets the provider's own versions.
+
+A new cloud cluster copies the stacks while it is created on Hetzner, OVHcloud, UpCloud, DigitalOcean, Scaleway, AWS EC2, Ankra Cloud, Proxmox VE and HPE Morpheus. On any other provider the review says "After creation, review the selected stacks before copying." and you confirm the copy on the clone page once the cluster exists.
+
+Cluster-scoped connections are not cloned. When the source has one, the copy notes say so and you set it up again on the new cluster before deploying the stacks that need it:
+
+| On the source | Copy note |
+|---|---|
+| A deployed SOPS key | "The source cluster has a SOPS key deployed; keys are not cloned - deploy one on the new cluster before deploying stacks with encrypted values." |
+| Registry pull secrets | "The source cluster's registry pull secrets are not cloned; recreate them on the new cluster." |
+| A Git repository connection | "The source cluster's Git repository connection is not cloned; connect the new cluster to a repository to keep GitOps sync." |
+| A Prometheus metrics connection | "The source cluster's Prometheus metrics connection is not cloned; reconnect metrics on the new cluster." |
+| A log source connection | "The source cluster's log source connection is not cloned; reconnect logs on the new cluster." |
+
+Stacks whose values name the old provider (a storage class, a load balancer annotation, a node selector) still copy, so review each draft before deploying.
+
+## Stacks that need your input
+
+A clone removes every value a stack member seals with `encrypted_paths` and writes the `ENCRYPTED_VALUE_REMOVED` placeholder in its place. A stack holding that placeholder cannot come up healthy, so it is not deployed, even with **Deploy when ready**. Its status is **Needs input**, and the results page lists each add-on or manifest with "Add the secret values on the destination." and the paths to fill in.
+
+Click **Review stack**, enter each value again, then deploy the stack. To keep secrets in Git without plaintext, see [SOPS](/guides/sops).
+
+## Verify
+
+1. Open **Clusters → &lt;destination cluster&gt; → Stacks**. Every stack you selected is listed, under its own name or with a suffix where the name was already in use.
+2. On the **Clone results** page, no stack reads **Not cloned**, **Check destination** or **Needs input**.
+3. For a data copy, the run under the stack on the results page reads **succeeded**.
+
+## What can go wrong
+
+| Message | What to do |
+|---|---|
+| "Your role needs stacks.write on this cluster. Choose another destination or ask an administrator for access." | Choose a cluster where you can create stacks, or ask an Admin for a role that has `stacks.write` there. |
+| "Your role needs clusters.create to create a destination for selected stacks." | Only Admins and Owners create clusters. Select every stack for a whole-cluster clone, or ask an Admin. |
+| "No other clusters are available in this organisation. Choose a new cluster above." | Pick **Connect your own cluster** or **New cloud cluster**, or choose another **Organisation**. |
+| "Data copies need unused stack names. Rename this stack, select fewer stacks, or choose a new cluster." | A data copy cannot add a suffix. Rename the stack or pick another destination. |
+| "The response was interrupted. Check the destination before trying again; the copy may already exist." | Open the destination's stacks before you copy again, so you do not create a second copy. |
+| "Remaining stacks were not attempted. Review the destination before starting another copy." | One stack was refused or its result is unknown, so the copy stopped. Review the destination, then copy the remaining stacks. |
+| "Check the copy before starting again" | You reloaded the page after starting a copy. Click **Review destination** to see what completed. |
+
+## Copy stacks between cluster files
+
+`ankra cluster clone` merges the stacks of one ImportCluster YAML file into another on your machine. It does not contact Ankra; apply the result with `ankra cluster apply`.
 
 ```bash
 ankra cluster clone existing-cluster.yaml new-cluster.yaml
 ```
 
----
-
-## Clone from GitHub
-
-Pull configurations directly from a repository:
+The source can be a URL:
 
 ```bash
-ankra cluster clone https://github.com/user/repo/raw/main/cluster.yaml my-cluster.yaml
+ankra cluster clone https://github.com/my-org/my-repo/raw/main/cluster.yaml new-cluster.yaml
 ```
 
----
-
-## Clone Options
+Without flags, the command merges stacks and skips any whose name already exists in the target file.
 
 | Flag | Description |
 |------|-------------|
-| `--clean` | Replace all stacks in target (clean copy) |
-| `--force` | Override conflicts during merge |
-| `--copy-missing` | Copy missing files even from skipped stacks |
-| `--stack` | Clone only specific stacks by name (repeatable) |
-
-**Examples:**
+| `--clean` | Replace all stacks in the new cluster |
+| `--force` | Force merge even when names conflict |
+| `--copy-missing` | Copy missing files even for skipped stacks |
+| `--stack` | Clone only specific stacks by name (can be used multiple times) |
 
 ```bash
-# Clean copy - replace all stacks in target
+# Replace every stack in the target file
 ankra cluster clone source.yaml target.yaml --clean
 
-# Force merge - override conflicts
+# Merge, overriding name conflicts
 ankra cluster clone source.yaml target.yaml --force
 
-# Clone only specific stacks
+# Copy only two stacks
 ankra cluster clone source.yaml target.yaml --stack "monitoring" --stack "networking"
-
-# Complete replacement with all files
-ankra cluster clone source.yaml target.yaml --clean --force --copy-missing
 ```
 
----
-
-## Example Workflow
+To start from an example:
 
 <Steps>
-  <Step title="Clone from GitHub">
+  <Step title="Copy the example's stacks into your file">
     ```bash
-    ankra cluster clone https://github.com/ankraio/ankra-gitops-examples/raw/main/clusters/monitoring-stack/cluster.yaml ./my-cluster.yaml
+    ankra cluster clone https://github.com/ankraio/ankra-gitops-examples/raw/master/clusters/monitoring-stack/cluster.yaml ./my-cluster.yaml
     ```
+    **Check:** `my-cluster.yaml` now lists the example's stacks.
   </Step>
-  <Step title="Apply the Configuration">
+  <Step title="Adjust the values">
+    Edit `my-cluster.yaml` for your environment: resource limits, domains and replicas.
+  </Step>
+  <Step title="Apply the file">
     ```bash
     ankra cluster apply -f my-cluster.yaml
     ```
-  </Step>
-  <Step title="Customize Values">
-    Edit the YAML file or use the UI to adjust values for your environment (resource limits, domains, replicas).
+    **Check:** the cluster's **Stacks** page lists the new stacks.
   </Step>
 </Steps>
 
----
-
-## Clone via UI
-
-You can clone stacks directly in the Ankra UI:
-
-**Clone a single stack:**
-1. Navigate to **Stacks** in your cluster
-2. Click the menu on any stack card
-3. Select **Clone to Cluster**
-4. Choose a target cluster and click **Clone Stack**
-
-**Clone multiple stacks at once:**
-1. Navigate to **Stacks** in your cluster
-2. Click the **Clone Stacks** button next to the search bar (or click a stack card's avatar to start selecting)
-3. Select the stacks you want to clone - a floating action bar shows the count
-4. Click **Clone to Cluster**, choose a target cluster, and confirm
-5. All selected stacks are cloned as drafts to the target cluster
-
-<Tip>
-For a full guide on multi-stack cloning, see [Clone Stacks Between Clusters](/guides/clone-stack#clone-multiple-stacks-at-once).
-</Tip>
-
-### Clone a whole cluster
-
-**Clone Cluster** in a cluster's menu copies every stack of that cluster onto a new one and, with **Deploy after cloning** left on, deploys them there straight away. The dialog asks where the clone should run:
-
-- **Import an existing cluster** - Ankra creates an import cluster and prints the command that connects it. Pick this when the clone should land on Kubernetes you already run.
-- **Build on a cloud provider** - Ankra provisions a new cluster on Hetzner, OVHcloud, UpCloud, DigitalOcean, Scaleway, Proxmox VE or HPE Morpheus and copies the stacks onto it. Choose the provider and click **Continue**; the provider's create page opens with a *Cloning from* notice, where you pick the credential, region, node sizes and the usual create options. **Create Cluster** there builds the cluster and clones the stacks in one request. This is the path for moving a workload between clouds.
-
-A cloud-provider clone skips the stacks the provider's own provisioning installs - the cloud controller (`hcloud`, `openstack`, `upcloud-cloud-provider`, `digitalocean-cloud-provider`, `scaleway-cloud-provider`), `networking`, `external-dns` and, on kubeadm targets, `cilium`. The new cluster gets the target provider's versions of those; the result lists them under `stacks_skipped` with a warning naming each one. Stacks whose values pin the old provider (a storage class, a load-balancer annotation, a node selector) still clone, so review each draft before deploying.
-
-<Tip>
-The same request is available to automation: `POST /org/clusters/imported/{cluster_id}/clone` with `target_provider` and a `target` object carrying that provider's create body (the fields of `POST /org/clusters/{provider}`), and `deploy_after_clone: true` to deploy the clones. The response carries `target_provider`, `stacks_skipped`, `stacks_deployed` and `stacks_held` alongside the cloned and failed stacks; each cloned stack reports its `needs_input`.
-</Tip>
-
-### Stacks that need your input
-
-A clone never carries secrets: every value a member's `encrypted_paths` seal is replaced by the `ENCRYPTED_VALUE_REMOVED` placeholder on the target. A stack that still holds that placeholder cannot come up healthy, so the clone does not deploy it. It is kept as a draft and marked **Needs input** in the stack list, with the members and values to re-enter listed on the chip and in the clone result. Open the draft: the builder shows the same list as a banner, each entry opens the add-on or manifest that holds the field, and once every placeholder is replaced the banner disappears and **Create Stack** deploys it. Everything else deploys on its own; addons that had no stored configuration deploy with chart defaults and are named in the warnings.
-
-### What a cluster clone carries
-
-Beyond the stacks, a cluster clone also copies the source cluster's **cluster variables**, so stack content keeps resolving its `${{ ankra.* }}` tokens. Everything else that is cluster-scoped cannot be cloned and is named in the result's warnings instead: a deployed **SOPS key**, **registry pull secrets**, the **Git repository connection**, and **Prometheus or log source** connections. Reconnect those on the new cluster before deploying stacks that need them.
-
----
-
-## Next Steps
+## Next steps
 
 <CardGroup cols={2}>
-  <Card title="Ankra CLI Reference" icon="terminal" href="/integrations/ankra-cli">
-    Full CLI command reference.
+  <Card title="Clone Stacks Between Clusters" icon="copy" href="/guides/clone-stack">
+    Every flag of `ankra cluster stacks clone`, including data clones.
   </Card>
-  <Card title="GitOps Examples" icon="github" href="https://github.com/ankraio/ankra-gitops-examples">
-    Example cluster configurations to clone.
+  <Card title="Backups" icon="database" href="/guides/backups">
+    Protect stacks and restore them from a restore point.
+  </Card>
+  <Card title="Ankra CLI" icon="terminal" href="/integrations/ankra-cli">
+    Install and configure the CLI.
+  </Card>
+  <Card title="GitOps examples" icon="github" href="https://github.com/ankraio/ankra-gitops-examples">
+    Example cluster files to copy from.
   </Card>
 </CardGroup>

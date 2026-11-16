@@ -1,46 +1,56 @@
 ---
 title: Cluster Settings
-description: Change how Ankra manages one cluster after it is running - its agent, GitOps repository, data sources, access, audit trail, and moving, disconnecting or deleting it.
+description: What each of a cluster's settings pages changes, who may change it and the CLI command that does the same.
 ---
 
 import { CliVersion } from "/snippets/cli-version.jsx";
 
-Once a cluster is running you still need to keep its agent current, connect its repository and data sources, decide who can reach it, and eventually stop, move or delete it. Cluster Settings is where you do that for one cluster. Open the cluster and choose **Settings** in the cluster sidebar. The sections below follow its tabs: **General**, **GitOps**, **Kubernetes**, **Variables**, **Integrations**, **AI Context**, **Access** and **Audit**.
+A cluster's settings are one page each. Open **Clusters → &lt;your cluster&gt; → Settings** (`/next/clusters/<cluster-id>/settings`): the menu switches to the settings pages, with **Terminate or remove** at the bottom under **Danger zone**. Each page below gives its address, what it changes, the permission it needs and the CLI equivalent.
 
-Node groups, control planes and the bastion are not in Settings: see [Nodes](/platform/cluster-nodes).
+Some cluster pages are not settings and sit in the cluster's own menu: **Kubectl access** (who may reach the cluster with kubectl, see [Cluster access](/guides/cluster-access) and [Kubeconfig](/guides/kubeconfig)), **Audit log** (who changed what on this cluster, see [Audit log](/guides/audit-log)) and the nodes (see [Manage Nodes and Node Groups](/platform/cluster-nodes)).
 
----
+## At a glance
+
+<CliVersion since="0.66.0" />
+
+| Page | Address | What it changes | Permission to change | CLI |
+|---|---|---|---|---|
+| [General](#general) | `settings` | What the cluster is used for, its label and its project | `clusters.write`; `projects.manage` for the project | See [General](#general) |
+| [Agent](#agent) | `settings/agent` | Agent upgrades for this cluster | `clusters.write`; `agents.manage` to upgrade now | `ankra cluster agent` |
+| [Stop, start and schedules](#stop-start-and-schedules) | `settings/power` | Stopping, starting and power schedules | `clusters.operate`; `clusters.write` for schedules | `ankra cluster <provider> stop`, `ankra cluster power-schedules` |
+| [Upgrades and maintenance](#upgrades-and-maintenance) | `settings/maintenance` | Kubernetes version, agent install command, full sync, archive, deployment engine | `clusters.operate` to upgrade; `agents.manage` for the install command; `clusters.write` for the rest | `ankra cluster upgrade`, `ankra cluster reconcile` |
+| [GitOps](#gitops) | `settings/gitops` | The cluster's Git repository, syncs and conflicts | `clusters.write` | `ankra cluster gitops` |
+| [Kubernetes sync](#kubernetes-sync) | `settings/kubernetes-sync` | Ankra's copy of the cluster's resources | `clusters.write` | None |
+| [Network](#network) | `settings/network` | Internet gateway and the Gateway API | `clusters.write` | `ankra cluster gateway-api` |
+| [SSH access](#ssh-access) | `settings/ssh` | SSH keys on the cluster's servers | `clusters.write` | `ankra cluster ssh-keys` |
+| [Ankra AI](#ankra-ai) | `settings/ai` | Insights, alert fixes and the code Ankra AI reads | `clusters.write`; `ai.manage` for alert fixes | None |
+| [Logs and data](#logs-and-data) | `settings/logs` | Hosted logs and the data policy | `clusters.write` | None |
+| [Integrations](#integrations) | `settings/integrations` | Metrics, log store, log viewer, vulnerability scanning, cost estimates | `clusters.write`; also `stacks.write` and `stacks.delete` to save a source | None |
+| [Variables](#variables) | `settings/variables` | Cluster variables | `variables.write` | `ankra cluster variables` |
+| [Credentials](#credentials) | `settings/credentials` | Nothing; lists the credentials the cluster uses | None | `ankra credentials` |
+| [Terminate or remove](#terminate-or-remove) | `settings/terminate` | Deletes, disconnects or removes the cluster | `clusters.delete` | `ankra cluster deprovision` |
+
+Built-in roles: `clusters.write` and `variables.write` are held by Member, Operator, Admin and Owner; `clusters.operate` by Operator, Admin and Owner; `clusters.delete`, `agents.manage`, `ai.manage` and `projects.manage` by Admin and Owner. Every page tells you when your role cannot change it, for example "Your role cannot sync this cluster. That needs the clusters.write permission." See [Roles and access](/guides/roles-and-access).
 
 ## General
 
-### Cluster Health
+`/next/clusters/<cluster-id>/settings`
 
-The **Cluster Health** card shows whether the agent is **Online** or **Offline**, when it was last seen, and its version. When a newer agent is available, **Upgrade to &lt;version&gt;** upgrades it now. Next to it, **Kubernetes Watch** shows whether Ankra's copy of the cluster's resources is **Synced**, **Syncing**, **Stale** or in **Error**; **View Details** opens the per-resource breakdown on the [Kubernetes](#kubernetes) tab. For what the agent does, see [Cluster Agent](/concepts/cluster-agent).
+**Name and use** shows the cluster's **Name**, **Description**, **Used for** and, where it differs, its **Label**. The name and description are set when the cluster is created or imported, and are not changed here.
 
-### Agent Settings
+- **Change what it's used for** opens a dialog with **Used for**: **Production**, **Staging**, **Development** or **Disposable**. Under **Change its label** you can set a **Label**, which Cost budgets and Security use to group clusters. Click **Review change**, then **Save**. Insight grading, notifications and AI remediation follow what a cluster is used for.
+- **Confirm it is &lt;purpose&gt;** appears when nobody has chosen the value yet. Confirming records that you chose it; from then on Ankra suggests stopping the cluster at night only if it is not production and is quiet at night.
+- **Project** shows the project the cluster is in and moves it to another one. It needs `projects.manage` and appears only when the organisation has projects; see [Set up projects](/guides/set-up-projects).
 
-Whether Ankra upgrades this cluster's agent for you depends on two switches, and both must allow it:
+The portal cannot move a cluster to another organisation. Use `ankra cluster move`:
 
-- **Auto-upgrade Agents** in **Organisation Settings** → **General**. It is on by default for organisations created since 7 September 2026; older organisations turn it on there. While it is off, no cluster in the organisation is upgraded automatically.
-- **Disable Auto-upgrade** on this card. Off by default; turn it on to keep this one cluster at its current agent version while the rest of the organisation upgrades.
+<CliVersion since="0.73.0" command="cluster move" />
 
-### Maintenance
+```bash
+ankra cluster move my-cluster --organisation <organisation-id-or-slug>
+```
 
-- **Generate command** creates a fresh agent installation command. Run it on the cluster to reinstall the agent, or to reconnect it when the agent is offline.
-- **Sync All Resources** triggers a full reconciliation: Ankra re-applies the cluster's stacks, add-ons and manifests. Use it after a network outage or after changes made outside Ankra.
-
-### What this cluster is for
-
-Sets how loudly the cluster reports. The scan finds the same issues either way; the level decides how large a problem must be before it opens a ticket and reaches Slack:
-
-| Level | Behaviour |
-|-------|-----------|
-| **Production** | Reports everything the scan finds |
-| **Staging** | Needs a moderately wider blast radius before an issue is treated as critical |
-| **Development** | Only issues affecting a substantial share of the cluster are critical |
-| **Disposable** | Effectively silent; for demo and throwaway clusters |
-
-The environment picker on the cluster overview sets the same value. When the organisation has proactive AI Insights on, an **AI Insights** card here turns them off or on for this cluster - see [AI Insights](/platform/ai-insights).
+You must be an administrator of both organisations. See the [CLI reference](/reference/cli/cluster#ankra-cluster-move) for what moves with the cluster and what is detached.
 
 ### Rename the cluster
 
@@ -50,113 +60,174 @@ A cluster can be renamed in place with `ankra cluster rename <cluster> <new-name
 
 Stops and starts the cluster on a timetable, on the providers that support stop and start. See [Stop, Start and Power Schedules](/platform/cluster-power-schedules).
 
-### Kubernetes Version
+## Agent
 
-Shown for clusters Ankra provisions and for managed Kubernetes. Pick a newer version and confirm. On a cluster Ankra provisioned, Ankra upgrades one node at a time, control plane first, draining each node while respecting PodDisruptionBudgets, and takes an etcd snapshot before the control plane moves; on managed Kubernetes the provider runs the rollout. Downgrades are not supported. **Auto upgrade patch versions** keeps the cluster on the newest patch release of its current minor version; minor versions are never upgraded automatically. See [Upgrade Kubernetes on a Cluster](/guides/kubernetes-upgrades) for clusters Ankra provisioned and [managed Kubernetes](/guides/managed-kubernetes#kubernetes-upgrades) for the rest.
+`/next/clusters/<cluster-id>/settings/agent`
 
-### Archive
+Shows the agent's **Connection**, **Version** (with **Upgrade agent** when a newer one is available), **Last check-in** and **Automatic upgrades**.
 
-**Archive this cluster** parks a cluster that is expected to be offline without disconnecting it: it sends no offline notifications, triggers no offline alerts, and is ignored by fleet health. Unarchive it to resume monitoring.
+- **Turn automatic upgrades off** keeps this cluster's agent on its version until someone upgrades it by hand; **Turn automatic upgrades on** lets the platform roll new versions to it. The organisation setting **Upgrade cluster agents automatically** (`/next/organisation/pipelines`) must also be on.
+- **Upgrade agent** upgrades it now. It needs `agents.manage`.
+- **Create an agent install command** links to the command on [Upgrades and maintenance](#upgrades-and-maintenance).
 
----
+When no agent has registered yet, the page says so: on a cluster you imported, the agent registers once its install command has run. See [Cluster agent](/concepts/cluster-agent).
+
+```bash
+ankra cluster agent status
+ankra cluster agent upgrade
+ankra cluster agent auto-upgrade disable
+```
+
+## Stop, start and schedules
+
+`/next/clusters/<cluster-id>/settings/power`
+
+**Stop or start now** stops the cluster's servers or starts them again, and **Schedules** does it on a timetable. Only clusters Ankra built or runs at a cloud provider can be stopped. See [Stop, Start and Power Schedules](/platform/cluster-power-schedules).
+
+## Upgrades and maintenance
+
+`/next/clusters/<cluster-id>/settings/maintenance`
+
+| Section | What it does | Permission |
+|---|---|---|
+| **Kubernetes version** | Choose **Version to upgrade to**, read **Before you upgrade**, then **Review upgrade**. See [Upgrade Kubernetes on a Cluster](/guides/kubernetes-upgrades). | `clusters.operate` |
+| **Agent install command** | **Create install command** makes a new agent token and the command that installs the agent again or reconnects it. Commands created before it stop working. | `agents.manage` |
+| **Sync all resources** | Applies every stack, add-on and resource Ankra has recorded for the cluster again. Resources that already match stay as they are. | `clusters.write` |
+| **Archive** | **Archive cluster** stops offline notifications and alerts for a cluster you expect to be offline and leaves it out of fleet health. The cluster stays connected. **Unarchive cluster** reverses it. | `clusters.write` |
+| **Deployment engine** | On a cluster that deploys with ArgoCD, makes Ankra's own engine the default for new stacks and add-ons ("This cannot be switched back to ArgoCD."), and **Move add-ons off ArgoCD** moves the existing ones. See [Deployment engines](/concepts/deployment-engines). | `clusters.write` |
+
+The portal has no switch for automatic patch upgrades of Kubernetes; the API has one.
+
+```bash
+ankra cluster upgrade my-cluster <version>
+ankra cluster reconcile my-cluster
+```
 
 ## GitOps
 
-Connect the cluster to a Git repository so its stacks are stored as code: choose a GitHub or [Bitbucket Cloud](/integrations/bitbucket-cloud) credential, then a repository and branch, or create a new repository from the tab. The **Webhook** status shows whether pushes reach Ankra (**Active**, **Pending**, **Failed** or **Not Configured**), with **Retry** when it failed. See [GitOps](/concepts/gitops).
+`/next/clusters/<cluster-id>/settings/gitops`
 
----
+- **Repository** - the Git repository that holds the cluster's definition. **Connect a repository** or **Change repository**.
+- **Sync** - whether the cluster matches its repository. Ankra syncs when the branch changes; **Sync now** checks right away.
+- **Merge conflicts** - resources changed both in Git and in Ankra since the last sync. Ankra does not sync them until you choose which version to keep.
+- **Sync history** - every sync between the cluster and its repository.
+- **Needs you** appears when GitOps is not working, for example "Install the Ankra GitHub App", with what to do.
 
-## Kubernetes
+See [GitOps](/concepts/gitops).
 
-A table of every Kubernetes resource type Ankra syncs from the cluster, with its status, count, last sync and errors, refreshed every 10 seconds. Search by resource type or status. **Full Sync** re-reads every resource from the cluster, which is what to run when the console shows something that no longer matches the cluster.
+```bash
+ankra cluster gitops status
+ankra cluster gitops conflicts list
+```
 
----
+## Kubernetes sync
 
-## Variables
+`/next/clusters/<cluster-id>/settings/kubernetes-sync`
 
-Values that every stack on this cluster can reference. See [Variables](/concepts/variables).
+Ankra keeps a copy of the cluster's Kubernetes resources so its pages load quickly. **Sync status** says whether that copy is up to date, and **Resource types** lists each type Ankra copies. **Run a full sync…** reads every resource from the cluster again and removes resources from the copy that no longer exist; nothing on the cluster changes. The cluster must be connected.
 
----
+## Network
+
+`/next/clusters/<cluster-id>/settings/network`
+
+- On a cluster Ankra builds on UpCloud or OVHcloud, choose the internet gateway and change its size (**Change NAT gateway plan**, **Change load balancer plan** or **Change gateway size**). A gateway change can cut the cluster's internet access for several minutes, and the dialog says so.
+- On a cluster Ankra built on a cloud provider, **Turn the Gateway API on**. See [Gateway API](/guides/gateway-api).
+
+Other clusters have nothing to set here.
+
+```bash
+ankra cluster gateway-api status
+ankra cluster gateway-api enable
+```
+
+## SSH access
+
+`/next/clusters/<cluster-id>/settings/ssh`
+
+**Connect with SSH** lists the cluster's servers and the commands to **Open a shell on the control plane** and **Reach the Kubernetes API on your computer**. **SSH keys** lists the keys on the servers and changes them. Where SSH is not offered, the page says "SSH access is not offered for this kind of cluster".
+
+```bash
+ankra cluster ssh-keys get my-cluster
+```
+
+## Ankra AI
+
+`/next/clusters/<cluster-id>/settings/ai`
+
+| Section | What it does | Permission |
+|---|---|---|
+| **Ankra AI insights** | **Turn Ankra AI insights off** or **on**: whether Ankra AI watches this cluster for problems. See [AI insights](/platform/ai-insights). | `clusters.write` |
+| **Alert fixes** | **Let Ankra AI fix alerts on this cluster?** What it may do on its own, and who approves the rest, is set for the whole organisation. | `ai.manage` |
+| **Code for Ankra AI** | **Add a repository** (GitHub connection, **Repository**, **Branch**, **Why it matters here**). When Ankra AI looks into a problem here it sees this list with your notes, and can read and search the code. The same list feeds [AI code review](/platform/ai-code-review). | `clusters.write` |
+
+## Logs and data
+
+`/next/clusters/<cluster-id>/settings/logs`
+
+- **Ankra hosted logs** - whether this cluster sends the log lines of its running containers to Ankra, who can read them and who can change the setting. See [Hosted logs](/guides/hosted-logs).
+- **Data policy** - the data policy managed services on this cluster follow.
+
+To connect a log store you already run (Grafana Loki, Elasticsearch or OpenSearch), use [Integrations](#integrations).
 
 ## Integrations
 
-Connects the cluster's data sources: **Metrics** (your own Prometheus, see [Prometheus Integration](/integrations/prometheus)), **External Log Viewer**, **Cloud Cost**, **Trivy Operator**, and **Log Source** (see [Log Sources](/integrations/log-sources)). Built-in metrics need none of them - see [Cluster Metrics](/platform/cluster-metrics). SOPS encryption is configured for the whole organisation, not per cluster; see [SOPS Encryption](/guides/sops).
+`/next/clusters/<cluster-id>/settings/integrations`
 
----
+- **Your metrics and logs** - **Metrics** (your own Prometheus, see [Prometheus](/integrations/prometheus)), **Log store** (**Connect a log store**, see [Log sources](/integrations/log-sources)) and **External log viewer**. Each connection can be tested and disconnected.
+- **Security and cost reporting** - **Vulnerability scanning** and **Cloud cost estimates**.
 
-## AI Context
+Built-in metrics need none of these; see [Cluster metrics](/platform/cluster-metrics). SOPS encryption is set for the whole organisation, not per cluster; see [SOPS](/guides/sops).
 
-Tag repositories that matter to this cluster, each with a short note on why, so Ankra's AI reads them when it works on the cluster. The same tags feed [AI code review](/platform/ai-code-review#what-the-review-reads-beyond-the-diff).
+## Variables
 
----
+`/next/clusters/<cluster-id>/settings/variables`
 
-## Access
-
-- **Access grants** give organisation members access to this cluster, cluster-wide or to one namespace, enforced by Kubernetes RBAC within about a minute. See [Cluster Access](/guides/cluster-access).
-- **Generate kubeconfig** gives you a kubeconfig that reaches the cluster through the Ankra gateway. See [Kubeconfig](/guides/kubeconfig).
-- **SSH Access** manages the SSH keys installed on the nodes of clusters Ankra provisions, and shows the commands to reach them through the jump host.
-
----
-
-## Audit
-
-The **Audit** tab lists every manual action performed on this cluster: lifecycle (create, import, start, stop, upgrade, terminate), scaling and node group changes, node restarts, stack changes, and Helm upgrades and rollbacks. Each entry shows who did it, what it touched, when, and the structured details; when an edit produced a commit in the cluster's GitOps repository, the entry links to it. A change that qualifies as a [pre-approved standard change](/security/change-management) shows **Pre-approved SC-01** (or the matching ID) beside its action; hover over it to see why it qualified.
-
-**View in organisation audit log** opens the organisation [Audit Log](/guides/audit-log) filtered to this cluster. **Export CSV** and **Export JSON** download this cluster's entries, honouring the search on screen. The tab needs the audit read permission, held by owners and admins by default and grantable to [custom roles](/guides/roles-and-access). Entries cannot be edited or deleted.
-
----
-
-## Danger Zone
-
-The **Danger Zone** card at the bottom of **General** holds the actions that cannot be undone. Which ones appear depends on the kind of cluster.
-
-### Move to another organisation
-
-Imported clusters only. **Move cluster** moves the cluster into another organisation; you must be an admin of both. It keeps its agent, executions, stacks, resources, findings, DNS records and variables. Access grants, role assignments, kube tokens, notification routes, group memberships, links to this organisation's registries and credentials, AI context repositories and the GitOps connection are detached; recreate them in the destination. Billing, the audit trail and support tickets stay with the old organisation.
-
-The move is refused while operations are running, while the cluster is in a cluster mesh or has DNS zones bound to the organisation, and when the destination already has a cluster with that name. The dialog gives the reason. The CLI equivalent is `ankra cluster move <cluster> --organisation <id|slug|name>`.
-
-### Stop cluster
-
-**Stop cluster** and **Start cluster** release and restore the compute of a cluster Ankra provisioned. What a stop keeps depends on the provider; see [Stop and start a cluster](/platform/cluster-power-schedules#stop-and-start-a-cluster). The CLI commands for each provider are in [Operate an Ankra Managed Cluster](/guides/operate-ankra-managed-clusters#stop-and-start).
-
-### Switch the deployment engine
-
-On a cluster still deploying with ArgoCD, **Switch default deployment engine** and **Decommission ArgoCD** move it to the native engine. See [Decommissioning ArgoCD](/concepts/deployment-engines#decommissioning-argocd).
-
-### Disconnect Cluster
-
-Imported clusters only. **Disconnect** removes the cluster from Ankra; running workloads and installed components stay, GitOps sync stops, and the agent is not removed from the cluster, so uninstall it yourself. To bring the cluster back, import it again. A managed Kubernetes cluster offers **Disconnect from Ankra**, which leaves the provider cluster running, and a separate action that deletes it at the provider - see [Managed Kubernetes](/guides/managed-kubernetes#deleting).
-
-### Terminate cluster
-
-For clusters Ankra provisioned, **Terminate** destroys the cloud infrastructure and removes the cluster from Ankra. It cannot be undone. First clean up provider resources that Ankra does not track. For a cluster already terminated whose record remains, **Delete Cluster** removes the record.
-
-From CLI 0.72.0, `ankra cluster deprovision` (and `ankra cluster managed delete`) warns on stderr before the teardown when the cluster is the organisation's pipeline cluster, because pipelines stop running on it when it goes, or its AI staging cluster, because AI workspaces and pull request previews stop running on it, and names the command that chooses another: `ankra org ci-settings set --cluster <name>` or `ankra org ai-environment set --staging-cluster <name>`. It warns and does not ask, so scripts and `-o json` keep working, and a settings read that fails says nothing rather than hold the deprovision up. The settings keep pointing at the deleted cluster until you choose another.
-
-#### Persistent volumes
-
-On Hetzner, OVHcloud, UpCloud, DigitalOcean, Scaleway and AWS EC2, terminating a cluster also deletes the cloud volumes its CSI driver created for `PersistentVolumeClaim`s, and the data on them. Ankra does this only once you accept it:
-
-- **Dashboard.** The **Terminate** and **Delete cluster** dialogs list the volumes by claim and size, and the delete button stays disabled until you tick *I understand that these volumes and their data are deleted*.
-- **CLI.** `ankra cluster deprovision` names the volumes and asks. In a script, pass `--accept-volume-data-loss`; `--yes` never stands in for it, and without it the command stops with exit code 2.
-- **API.** The delete needs `?accept_volume_data_loss=true` and answers `409` naming the volumes without it.
-- **Ankra's AI.** The `delete_cluster` tool names the volumes and asks you first.
-
-`--force` tolerates unreachable infrastructure but never replaces the acknowledgement. When Ankra cannot list a cluster's volumes it asks anyway. A cluster whose `retention_policy` is `retain` (the default on AWS EC2 and Scaleway) keeps its volumes, which keep billing in your cloud account until you delete them.
-
-<CliVersion since="0.19.0" />
+Values the stacks on this cluster can refer to, such as a domain name or a replica count. Reading them needs `variables.read`; adding, changing and deleting them needs `variables.write`. See [Variables](/concepts/variables).
 
 ```bash
-ankra cluster deprovision <cluster>                            # names the volumes and asks
-ankra cluster deprovision <cluster> --accept-volume-data-loss  # for scripts
+ankra cluster variables list
+ankra cluster variables set domain example.com
 ```
 
----
+## Credentials
+
+`/next/clusters/<cluster-id>/settings/credentials`
+
+**Credentials this cluster uses** lists the credentials the cluster's definition names: the Git repository it syncs with, its metrics and log sources and the registries its add-ons install from. Open one to check, rotate or replace it. See [Credentials](/platform/credentials).
+
+## Terminate or remove
+
+`/next/clusters/<cluster-id>/settings/terminate`
+
+What the page offers depends on the cluster. Every action asks you to type the cluster's name, and needs `clusters.delete`: "Your role cannot do this. That needs the clusters.delete permission."
+
+| Cluster | Action | What happens |
+|---|---|---|
+| Built by Ankra | **Terminate cluster** | Deletes every server, network and SSH key the cluster has at its provider and removes the cluster from Ankra. Its workloads and the data on its servers are lost. |
+| Built by Ankra | **Force terminate cluster** | Deletes the cluster at its provider and removes its records even when normal cleanup cannot finish. Offered only when a forced removal applies. |
+| Managed Kubernetes | **Disconnect cluster** (under **Disconnect from Ankra**) | Removes the cluster from Ankra. It keeps running at the provider, and the provider keeps charging for it. |
+| Managed Kubernetes | **Delete at &lt;provider&gt;** | The provider deletes the control plane and node pools, then Ankra removes the cluster. Its workloads and their data are lost. |
+| Imported | **Disconnect cluster** | Ankra stops managing the cluster and removes it from Ankra. The cluster and everything running on it are not deleted. |
+| Sandbox | **Remove sandbox** | Removes the sandbox and all its demo data. |
+
+<Warning>
+Terminating cannot be undone. When the cluster's persistent volumes will be deleted, the dialog lists them under **Persistent volumes** and asks you to type `DELETE VOLUME DATA` as well as the cluster's name. Volumes kept by the provider's retention policy keep billing at the provider after the cluster is gone.
+</Warning>
+
+To keep the cluster but stop paying for its servers, stop it instead on [Stop, start and schedules](#stop-start-and-schedules).
+
+<CliVersion since="0.19.0" command="cluster deprovision --accept-volume-data-loss" />
+
+```bash
+ankra cluster deprovision my-cluster                            # names the volumes and asks
+ankra cluster deprovision my-cluster --accept-volume-data-loss  # for scripts
+```
+
+In a script, `--yes` never stands in for `--accept-volume-data-loss`; without it the command stops. See [Operate an Ankra Managed Cluster](/guides/operate-ankra-managed-clusters#terminate-a-cluster) and, for managed Kubernetes, [Managed Kubernetes](/guides/managed-kubernetes).
 
 ## Next steps
 
 - [Stop, Start and Power Schedules](/platform/cluster-power-schedules) - park a cluster when nobody uses it.
-- [Nodes](/platform/cluster-nodes) - scale node groups and the control plane.
-- [Operate an Ankra Managed Cluster](/guides/operate-ankra-managed-clusters) - node groups, upgrades, stop, start and terminate for clusters Ankra provisioned.
+- [Manage Nodes and Node Groups](/platform/cluster-nodes) - scale node groups and the control plane.
+- [Operate an Ankra Managed Cluster](/guides/operate-ankra-managed-clusters) - the CLI for clusters Ankra provisioned.
 - [Organisation Settings](/platform/organisation-settings) - settings that apply to every cluster.

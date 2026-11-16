@@ -1,0 +1,124 @@
+---
+title: Set up storage on a cluster you connect
+sidebarTitle: Storage on a cluster you connect
+description: Check that a cluster you connected has a default StorageClass, mark one as the default, and know what node-local volumes mean before add-ons and services rely on them.
+---
+
+import { CliVersion } from "/snippets/cli-version.jsx";
+
+A cluster Ankra creates with a provider has a storage driver and a default StorageClass from the start. A cluster you connect gets neither: Ankra installs no storage driver on it, so its storage is what you brought. Anything that asks for a volume without naming a StorageClass then depends on the cluster having a default one, and on a cluster with none, that volume never binds.
+
+At the end of this guide the cluster has exactly one default StorageClass, and you know whether its volumes live on a node's own disk. It takes about ten minutes when a storage driver is already installed.
+
+## What asks for a default StorageClass
+
+| What | What it uses | Without a default |
+|------|--------------|-------------------|
+| [Managed services](/guides/set-up-a-managed-service) | Every service keeps its data on persistent volumes from the cluster's default StorageClass | The service's volumes have no class to be provisioned from |
+| [Ankra Pipelines](/guides/ankra-pipelines) caches and workspaces | The cluster's pipeline storage class (`ankra cluster agent ci set --storage-class`), and the default when that is empty | A step's caches live only as long as its pod, and the step reports `cache_volume_fallback`: **Caches ran without a volume** |
+| Add-ons whose chart creates a PersistentVolumeClaim without a `storageClassName` | The default StorageClass | The claim stays unbound |
+
+Kubernetes gives a claim that names no class the cluster's default StorageClass. When the cluster has none, the claim's `storageClassName` stays unset until a default exists; see [Default StorageClass](https://kubernetes.io/docs/concepts/storage/storage-classes/#default-storageclass) in the Kubernetes documentation.
+
+## Before you start
+
+- **The cluster is connected and its agent is online.** See [Import a cluster](/guides/import-cluster).
+- **A storage driver for your infrastructure is installed in the cluster**, such as your cloud's CSI driver, or a storage system you run yourself. Ankra does not install one on a cluster you connect. You can install the driver's chart as an add-on in a [Stack](/concepts/stacks) so Ankra deploys and tracks it.
+- **The Ankra CLI, logged in to the right organisation.** Creating a StorageClass needs `kubernetes.write` on the cluster.
+
+<CliVersion since="0.73.0" />
+
+## Set the default
+
+<Steps>
+  <Step title="See what the cluster has">
+    <Tabs>
+      <Tab title="Portal">
+        Open **Clusters → &lt;your cluster&gt; → Kubernetes → Storage Classes** (`/next/clusters/<cluster-id>/kubernetes/storage/storage-classes`). The list shows each class with its **Provisioner**, **Reclaim policy** and **Volume binding**. **CSI Drivers**, in the same **Storage** group, shows the drivers installed.
+
+        The list has no column for the default class. Use the CLI to see which class carries the default annotation.
+      </Tab>
+      <Tab title="CLI">
+        ```bash
+        ankra cluster get storageclasses --cluster my-cluster
+        ankra cluster get storageclasses --cluster my-cluster -o yaml
+        ankra cluster get resources CSIDriver --cluster my-cluster
+        ```
+
+        The table lists each class with its provisioner, reclaim policy and binding mode. In the YAML, the default class carries the annotation `storageclass.kubernetes.io/is-default-class: "true"`.
+      </Tab>
+    </Tabs>
+
+    **Check:** you know whether the cluster has no class, classes but no default, one default, or more than one. With exactly one default, go to the last step.
+  </Step>
+  <Step title="Create a class if the cluster has none">
+    Name the CSI driver that cuts the volumes with `--provisioner`, and pass its own settings with `--parameter`. The driver's documentation names both.
+
+    ```bash
+    ankra cluster storage-classes create fast --provisioner <csi-driver-name> \
+      --reclaim-policy Retain --allow-volume-expansion --default --cluster my-cluster
+    ```
+
+    `--default` marks the new class as the cluster's default. Without `--reclaim-policy`, a class uses `Delete`, which destroys a volume's data when its claim is deleted. See [`ankra cluster storage-classes create`](/reference/cli/cluster#ankra-cluster-storage-classes-create) for every flag; `--dry-run` shows what would be created.
+
+    **Check:** `ankra cluster get storageclasses --cluster my-cluster` lists the class with the provisioner you named.
+  </Step>
+  <Step title="Or mark an existing class as the default">
+    The default is one annotation on the StorageClass. Save this patch as `default-class.yaml`:
+
+    ```yaml
+    metadata:
+      annotations:
+        storageclass.kubernetes.io/is-default-class: "true"
+    ```
+
+    Apply it to the class you want as the default, with the CLI or with your own Kubernetes tooling:
+
+    ```bash
+    ankra cluster patch storageclass <class-name> --patch-file default-class.yaml --cluster my-cluster
+    ```
+
+    If another class is already the default, set its annotation to `"false"` the same way, so the cluster keeps one default. Kubernetes allows several, and then gives a claim with no class the most recently created default; see [Change the default StorageClass](https://kubernetes.io/docs/tasks/administer-cluster/change-default-storage-class/).
+
+    <Warning>
+    The default decides where every new claim that names no class is provisioned. Volumes already provisioned keep their class.
+    </Warning>
+
+    To keep the class in Git, declare the StorageClass with its annotation as a manifest in one of the cluster's Stacks instead; see [ImportCluster YAML Schema](/reference/importcluster#spec-stacks-manifests).
+
+    **Check:** the YAML from the first step shows the annotation with `"true"` on exactly one class.
+  </Step>
+  <Step title="Verify claims bind">
+    ```bash
+    ankra cluster get resources PersistentVolumeClaim -A --cluster my-cluster
+    ```
+
+    A claim created without a class while the cluster had no default now carries the default class's name, because Kubernetes assigns the new default to it. A class with **Volume binding** `WaitForFirstConsumer` provisions a volume only once a pod uses the claim, so a claim with no pod yet stays Pending; see [Volume binding mode](https://kubernetes.io/docs/concepts/storage/storage-classes/#volume-binding-mode).
+
+    **Check:** the claims your add-ons and services created read **Bound**.
+  </Step>
+</Steps>
+
+Ankra AI can create a StorageClass for you, but it never marks one as the default or moves the default: it refuses and names the routes on this page instead.
+
+## Node-local volumes on one node and on many
+
+Some provisioners keep each volume as a directory or a logical volume on the disk of the node the pod ran on. Ankra treats these as node-local: `rancher.io/local-path`, `openebs.io/local`, `local.csi.openebs.io`, `topolvm.io`, `hostpath.csi.k8s.io`, `kubernetes.io/no-provisioner` and similar. Check the **Provisioner** of your default class against them.
+
+- **On a single-node cluster**, every volume lives on that one node's disk. Losing the node or its disk loses the data. That suits a trial or a development cluster.
+- **On a cluster with several nodes**, a volume stays on the node where its pod first ran, and the pod can only be scheduled on that node again. Draining, replacing or losing that node takes the data with it, and the pod waits for a node that no longer exists. See [local volumes](https://kubernetes.io/docs/concepts/storage/volumes/#local) in the Kubernetes documentation.
+
+For data you cannot lose on a multi-node cluster, use a class whose driver keeps volumes off the node, such as your cloud's block storage or a replicated storage system. Before you change a Stack that owns stateful data, read [Protect Persistent Data Before Changing a Stack](/guides/protect-persistent-data).
+
+## What can go wrong
+
+- **A claim stays Pending.** Read why with `ankra cluster get events --for persistentvolumeclaim/<claim-name> -n <namespace> --cluster my-cluster`. With no default class, the claim names no class and nothing provisions it: set a default as above.
+- **A claim named a class that does not exist.** It stays Pending until a class of that name exists. Create the class with that name, or change the claim.
+- **Pipeline steps report `cache_volume_fallback`.** The pipeline cluster has no usable class for caches. Give it a default StorageClass, or name a class with `ankra cluster agent ci set --storage-class <class-name>`. Runs from forks and tags never share caches, whatever the storage.
+- **Two classes are marked default.** New claims get the most recently created one. Set the annotation to `"false"` on the class you do not want.
+
+## Where to go next
+
+- [Set up a managed service](/guides/set-up-a-managed-service) on the cluster now that it has a default StorageClass.
+- [Ankra Pipelines](/guides/ankra-pipelines) for the pipeline storage class and caches.
+- [Backups](/guides/backups) to protect the stateful Stacks on the cluster.
