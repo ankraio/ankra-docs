@@ -199,11 +199,11 @@ Three limits apply today:
 
 - **SOPS-encrypted files are not covered.** Their committed bytes are ciphertext that cannot be reproduced from the render, so Ankra keys them on the embedded content fingerprint instead, and re-encrypts the file whenever its stored values change. A hand edit to an encrypted file sealed under the cluster's `.sops.yaml` is imported like any other Git change and then re-sealed by Ankra's next write - the values survive, the ciphertext does not, so expect one re-seal commit after rotating a sealed Secret by hand (see [Rotating by API](/integrations/prometheus#rotating-by-api) and [SOPS](/guides/sops)).
 - **`.sops.yaml` in the cluster directory has its own rule.** Ankra rewrites the creation rules it generates there on every export, but it no longer replaces the file: rules you add by hand are kept, and kept above Ankra's own. See [Merging the SOPS configuration file](#merging-the-sops-configuration-file) below.
-- **The portal and the MCP tools cannot decide a preserved file yet.** While a file is preserved, a change made to it in Ankra does not reach Git, and the cluster reads **Diverged** for as long as the two versions differ. The portal and the GitOps status name those files but cannot show both versions or decide them; `ankra cluster gitops preserved` (CLI v0.59.0 or later) and the API do both. No MCP tool decides one. See [Diverged files](#diverged-files) below.
+- **The portal and the MCP tools cannot decide a preserved file.** While a file is preserved, a change made to it in Ankra does not reach Git, and the cluster reads **Diverged** for as long as the two versions differ. The portal shows the **Diverged** status but neither lists the files nor shows both versions; `ankra cluster gitops status` lists them, and `ankra cluster gitops preserved` (CLI v0.59.0 or later) and the API show and decide them. No MCP tool decides one. See [Diverged files](#diverged-files) below.
 
 ### Diverged files
 
-A file you edited in Git stays yours: no later platform write replaces it. When a later change in Ankra would change that file - an edit through the portal, the CLI, the API, Ankra AI or an MCP client, or a change Ankra makes to the cluster itself - Ankra keeps your bytes, records the file as **preserved** with both versions, and the cluster's GitOps status reads `diverged` instead of `synced`, with the files in `preserved_paths`. The portal shows **Diverged: Git Edits Kept** and lists them.
+A file you edited in Git stays yours: no later platform write replaces it. When a later change in Ankra would change that file - an edit through the portal, the CLI, the API, Ankra AI or an MCP client, or a change Ankra makes to the cluster itself - Ankra keeps your bytes, records the file as **preserved** with both versions, and the cluster's GitOps status reads `diverged` instead of `synced`, with the files in `preserved_paths`. The cluster's **Settings → GitOps** page shows the status **Diverged**.
 
 - **Nothing is paused.** Unlike a [conflict](#when-git-and-the-platform-both-change), a preserved file does not hold the sync. Commits to it and to every other file keep being applied, including a new stack or manifest you register in a preserved cluster file. Only Ankra's own change to that file waits.
 - **Only a difference in substance counts.** YAML and JSON are compared as decoded documents, so comments, key order and quoting alone never make a cluster diverged. Your file is still kept byte for byte.
@@ -339,7 +339,7 @@ On every sync Ankra compares three things: the head of the branch, the state sto
 | Both, on different resources | Merges them, applying the Git side and committing the platform side |
 | Both, on the same resource | Records a conflict and waits for you |
 
-A conflict pins the cluster's sync. Nothing further is applied from Git and nothing further is pushed to it until every conflicting resource has a decision. For each one you choose **Git** (the committed version wins and the platform change is dropped) or **Cluster** (the platform version wins and is committed over the Git version). Resolve conflicts from the GitOps section of the cluster settings, one resource at a time or all at once, or with the `list_gitops_conflicts`, `get_gitops_conflict_diff` and `resolve_gitops_conflict` [MCP tools](/platform/mcp-tools). Sync resumes on its own once the last conflict is decided.
+A conflict pins the cluster's sync. Nothing further is applied from Git and nothing further is pushed to it until every conflicting resource has a decision. For each one you choose **Git** (the committed version wins and the platform change is dropped) or **Cluster** (the platform version wins and is committed over the Git version). In the portal, conflicts are listed under **Merge conflicts** on the cluster's **Settings → GitOps** page, with when each was found and the version kept. Each row's menu offers **Compare the two versions…**, **Keep the Git version…** and **Keep the cluster version…**, and **Resolve all…** decides every open conflict at once; a Secret's contents are not shown in the comparison. You can also resolve them with the `list_gitops_conflicts`, `get_gitops_conflict_diff` and `resolve_gitops_conflict` [MCP tools](/platform/mcp-tools). Sync resumes on its own once the last conflict is decided.
 
 From a terminal, list the open conflicts and record which side each one keeps:
 
@@ -365,21 +365,28 @@ You do not need a repository at all. With the [native engine](/concepts/deployme
 
 ---
 
-## Monitoring Sync Status
+## Watching Sync in the Portal
 
-Track the status of your GitOps syncs in the cluster settings.
+Everything about a cluster's repository is on **Infrastructure → Clusters → &lt;your cluster&gt; → Settings → GitOps** (`/next/clusters/<cluster-id>/settings/gitops`). The page has a section for each part of the sync:
 
-### Sync Status Banner
+- **Repository**: the repository, branch and credential the cluster syncs with. Without one, the section reads **No repository connected** and offers **Connect a repository**; with one, **Change repository** points the cluster somewhere else.
+- **Sync**: whether the cluster matches its repository. Ankra syncs by itself when the branch changes, and **Sync now** checks the repository right away. The section shows the **Status**, when the cluster **Last synced**, the **Last commit applied**, and, while one is pending, the **Commit waiting to be applied** and the **Tries so far**.
+- **Merge conflicts**: resources changed both in Git and in Ankra since the last sync, described in [When Git and the Platform Both Change](#when-git-and-the-platform-both-change).
+- **Sync history**: every sync, newest first, with what started it, the commit and the result.
+- **Cluster definition**: what Ankra writes to the repository for this cluster, its Stacks and the manifests, add-ons and applications in each, with **Open the files in the repository** for the files themselves.
 
-Navigate to your cluster → **Settings** → **GitOps** to see the current sync status:
+When syncs keep failing, a **Needs you** section at the top names the reason and what to do about it, for example that the connection to the repository has expired, or that the key to decrypt the repository's secrets is missing.
 
-| Status | Description |
-|--------|-------------|
-| **Synced** | All configurations are up-to-date with the repository |
-| **Diverged: Git Edits Kept** | The last sync succeeded, but Ankra kept one or more files you edited in Git instead of writing its own, different version over them. Nothing is paused. See [Diverged files](#diverged-files) |
-| **Syncing** | A sync is currently in progress |
-| **Error** | The last sync failed. Check error details below |
-| **Not Configured** | GitOps is not yet connected to a repository |
+### Sync status
+
+| Status | What it means |
+|--------|---------------|
+| **In sync** | The last sync succeeded. The cluster matches its repository. |
+| **Syncing now** | A sync is running. Its progress is shown beside the status, and **Sync now** waits until it ends. |
+| **Waiting to sync** | A sync has been asked for and has not started. |
+| **Last sync failed** | The last sync did not complete. The section shows **The last sync failed** with the reason, and **Sync history** has the step that failed. |
+| **Not synced yet** | A repository is connected and no sync has run. |
+| **Diverged** | The last sync succeeded, but Ankra kept one or more files you edited in Git instead of writing its own, different version over them. Nothing is paused. See [Diverged files](#diverged-files). |
 
 ### Applied Commit and Git Head
 
@@ -390,60 +397,13 @@ Navigate to your cluster → **Settings** → **GitOps** to see the current sync
 
 The applied commit moves on a sync or a push, and also without one: when Git's head moves but leaves the cluster's directory unchanged - a commit for another cluster in the same repository, for example - Ankra moves the applied commit to that head without running or recording a sync, so the last sync time can read days old on a current cluster. The same commit on both pointers means the cluster was in step with Git at that read; a different head is a commit Ankra has not applied yet.
 
-### Sync Progress
+### Sync now
 
-During a sync, you'll see the progress through these phases:
+Ankra picks up a push through the repository's webhook, and checks the repository on its own as well. **Sync now** checks it straight away: use it when a webhook delivery failed, or when you want a fix you just pushed applied without waiting. It needs permission to change the cluster's GitOps settings; a role without it sees the status but no button.
 
-1. **Fetching** - Pulling latest changes from Git
-2. **Validating** - Checking YAML syntax and configuration
-3. **Applying** - Deploying changes to the cluster
-4. **Completed** - Sync finished successfully
+### Sync history
 
-### Manual Sync
-
-Click **Sync Now** to trigger an immediate sync from your Git repository. Use this when:
-
-- You want to apply changes without waiting for automatic detection
-- Webhook delivery failed
-- You need to force a refresh
-
----
-
-## Sync History
-
-View a complete history of all GitOps syncs for your cluster.
-
-### Accessing Sync History
-
-1. Go to your cluster → **Settings** → **GitOps**
-2. Scroll down to the **Sync History** table
-
-### History Table Features
-
-The sync history table shows:
-
-| Column | Description |
-|--------|-------------|
-| **Status** | Success, Failed, or Running badge |
-| **Source** | How the sync was triggered (webhook or manual) |
-| **Commit** | The Git commit SHA with a link to view in GitHub |
-| **Started** | When the sync began (relative timestamp) |
-| **Triggered By** | Who or what initiated the sync |
-
-**Table Features:**
-- **Pagination**: Navigate through history (10 entries per page)
-- **Sorting**: Click column headers to sort by any field
-- **Commit Links**: Click the SHA to view the commit in GitHub
-
-### Sync Metadata
-
-Each sync entry includes detailed metadata:
-
-- **Last Commit SHA**: The exact commit that was synced
-- **Sync Source**: `webhook` (automatic) or `manual`
-- **Timestamp**: When the sync occurred
-- **Retry Count**: Number of retry attempts (if any)
-- **IAC Files Link**: Direct link to view the configuration files in your repository
+Each row in **Sync history** says what started the sync (**A push to the repository**, **Someone asked for a sync**, **Ankra's regular check**, or **A change made in Ankra**), the commit, and the result. Opening a row shows the steps of that sync with the result and duration of each, and names the step that failed.
 
 ---
 
@@ -495,14 +455,11 @@ A sync that would remove a large share of the cluster at once is held: nothing i
 
 A commit that removes only one stack, or only one member, always applies. Anything you are already removing through Ankra does not count.
 
-If the removal is intended, remove those stacks or members through Ankra: in the portal, or with `ankra cluster stacks delete` and `ankra cluster manifests delete`. The next sync then applies the rest of the same commit, without a new push; click **Sync Now** to run it straight away. If the removal is a mistake, such as a YAML slip or a merge conflict resolved the wrong way, restore them in the cluster file and push.
+If the removal is intended, remove those stacks or members through Ankra: in the portal, or with `ankra cluster stacks delete` and `ankra cluster manifests delete`. The next sync then applies the rest of the same commit, without a new push; **Sync now** runs it straight away. If the removal is a mistake, such as a YAML slip or a merge conflict resolved the wrong way, restore them in the cluster file and push.
 
 ### Retrying Failed Syncs
 
-1. Fix the issues in your Git repository
-2. Commit and push the changes
-3. Click **Sync Now** or wait for automatic detection
-4. Monitor the new sync in the history table
+A failed sync is retried by fixing the cause in the repository and pushing the fix. The push starts a new sync; **Sync now** starts one without waiting, and the new attempt appears at the top of **Sync history**.
 
 A [held large removal](#large-removals-are-held) you meant to make needs no change in Git: remove those stacks or members through Ankra, and the next sync applies the same commit.
 
@@ -529,7 +486,7 @@ If Ankra isn't syncing as expected:
 | A cluster reads **Diverged** and nobody changed anything in Ankra | Something changed Ankra's side of a file you edited in Git. `ankra cluster gitops status` lists the preserved files, each with when it was detected and whether it has a decision. `ankra cluster gitops preserved show <path>` (CLI v0.59.0 or later) prints where Git's and Ankra's versions differ, key by key, even when the content is withheld, and a `Sync cluster state from Ankra` or `ankra-platform[bot]` commit near the time it was detected, when that change wrote other files too, shows what else it changed. Decide the file with `ankra cluster gitops preserved resolve <path>` and `--keep git` or `--keep ankra` (the API does the same, see [Diverged files](#diverged-files)), and report it to support if the same file comes back after a `git` import |
 
 <Tip>
-Use the Ankra WebUI to see sync status and any errors. The Operations page shows deployment history and helps identify issues.
+The cluster's **Settings → GitOps** page shows the sync status and the reason for a failure. **Operations**, under the cluster's **Technical details**, shows what each deployment did.
 </Tip>
 
 ---
