@@ -1,99 +1,135 @@
 ---
 title: Stack Profile Demos
-description: Run a stack profile on your staging cluster as a throwaway, time-limited deployment - no cluster of your own required, and it tears itself down
+description: Run a stack profile on your staging cluster as a throwaway, time-limited deployment from the CLI, check what it installs, and stop it.
 ---
 
-<Note>
-A stack profile demo installs a profile's add-ons and manifests into their own isolated namespace on your organisation's staging cluster, and stops itself when the timer runs out. Use it to see what a profile actually deploys before you instantiate it onto a real cluster, to check a new version against the old one, or to hand a colleague something running instead of a YAML file.
-</Note>
+import { CliVersion } from "/snippets/cli-version.jsx";
 
-This is the profile-side twin of [branch demos](/guides/branch-demos). A branch demo runs an application's build; a profile demo runs the stack itself, with no application in front of it.
+A stack profile demo installs a profile's add-ons and manifests into their own isolated namespace on your organisation's staging cluster, and stops itself when its lifetime runs out. Use it to see what a profile actually deploys before you use it on a real cluster, to check a new version against the old one, or to give a managed service package a running demo to read its connection from.
+
+This is the profile-side twin of [previews](/guides/branch-demos). A preview runs an application's build; a profile demo runs the stack itself, with no application in front of it.
+
+The portal has no page for stack profile demos. Use `ankra stack-profiles demo` or the [API](#api).
 
 ---
 
-## Prerequisites
+## Before you start
+
+- **The organisation has a staging cluster, and its agent is online.** Every demo lands there. Someone who manages Ankra AI sets it under **Ankra AI → AI workspaces**, in **Staging cluster**, or with `ankra org ai-environment set --staging-cluster <cluster>`. See [AI Workspaces](/platform/ai-workspaces).
+- **You can read the stack profile.** Your own profiles, profiles shared with your organisation, and public profiles can all be demoed. The demo runs on your staging cluster, so demoing someone else's public profile uses none of their resources.
+- **Your role holds `stacks.deploy`.** A demo is a real deployment through the resource engine, and launching or stopping one needs that permission.
+- **The Ankra CLI is installed and signed in.** See [Ankra CLI](/integrations/ankra-cli).
+
+---
+
+## Launch and follow a demo
+
+<CliVersion since="0.13.0" />
 
 <Steps>
-  <Step title="Set the organisation's staging cluster">
-    An admin sets it under **AI** → **Settings** → **Workspaces**. Every demo lands there. Without it, the Demos tab explains that and offers nothing to launch.
+  <Step title="Launch the demo">
+    Give the profile's name or id. Without flags, the demo runs the profile's current version with its default values, for the organisation's default lifetime:
+
+    ```bash
+    ankra stack-profiles demo launch my-profile
+    ```
+
+    Pin a version with `--version`, set the lifetime with `--ttl-hours`, and bind parameters with `--set name=value`. For a secret parameter, use `--set-env name=ENV_VAR` or `--set-file name=path`, which keep the value out of your shell history:
+
+    ```bash
+    ankra stack-profiles demo launch my-profile --version 2 --ttl-hours 4 --set replicas=1
+    ```
+
+    Ankra creates the namespace, applies its quota, and deploys the profile into it with every member forced into that one namespace. The command prints the response as JSON, with the demo's `workspace_id`, its `namespace` and the `version` it runs. The commands below take the workspace id.
   </Step>
-  <Step title="Have a stack profile you can read">
-    Your own profiles, profiles shared with your organisation, and public profiles can all be demoed. The demo runs on your staging cluster, so demoing someone else's public profile costs them nothing.
+  <Step title="Check that it is listed">
+    ```bash
+    ankra stack-profiles demo list my-profile
+    ```
+
+    The demo appears under `demos`, beside your lifetime policy and the staging cluster.
   </Step>
-  <Step title="Hold the stacks deploy permission">
-    A demo is a real deployment through the resource engine. Without the permission the Demos tab is read-only and says so.
+  <Step title="Watch it come up">
+    ```bash
+    ankra stack-profiles demo detail my-profile <workspace-id>
+    ```
+
+    The detail is read from the staging cluster each time you run it. Its `inspection` holds the `steps` (namespace created, guardrails applied, stack deployed), the `resources` the profile installed, and the namespace's Kubernetes `events`. A profile demo deploys no workload of its own, so there is no image or routing step to wait on: the stack operation completing is its readiness. If a chart fails to install, the failure text is the stack's own, not a generic demo failure.
+  </Step>
+  <Step title="Read its logs">
+    ```bash
+    ankra stack-profiles demo logs my-profile <workspace-id>
+    ```
+
+    Until the demo has a pod, this says `The demo has no pod yet, so there are no logs to read.`
   </Step>
 </Steps>
 
----
-
-## Launch a demo
-
-Open the profile and go to the **Demos** tab, then choose **Launch demo**.
-
-The dialog asks for two things:
-
-- **Parameters** - whatever the profile's current version declares. Required inputs are marked; secret parameters bind to an organisation secret slot rather than a typed value, so the plaintext never travels through the browser and is resolved from Ankra's secret store only at deploy time.
-- **Lifetime** - how long the demo lives, defaulted to your organisation's demo TTL and capped by your role.
-
-Ankra then creates the namespace, applies its quota, and instantiates the profile into it with every member forced into that one namespace.
-
 ### One demo per profile
 
-A profile has at most one live demo per organisation. Its namespace is derived from the organisation and profile ids - `ankra-demo-sp-<org>-<profile>` - so launching again **replaces** the running demo rather than adding a second copy. That is also why renaming a profile never strands a demo.
+A profile has at most one live demo per organisation. Its namespace is derived from the organisation and profile ids, `ankra-demo-sp-<org>-<profile>` with the first eight hexadecimal characters of each, so launching again **replaces** the running demo rather than adding a second copy. That is also why renaming a profile never strands a demo.
 
-Relaunch to pick up a new profile version or changed parameter values.
+Launch again to pick up a new profile version or changed parameter values.
+
+### Lifetime
+
+Without `--ttl-hours`, a demo lives for the organisation's demo lifetime, 24 hours unless someone changed it (`ankra org ai-environment set --demo-ttl-hours`). Your role sets the longest lifetime you may ask for; a longer one is refused with `Your role allows demos of at most <n> hours.`
 
 ### Capacity
 
 The demo namespace carries a hard `ResourceQuota` at the full-stack tier, because a profile installs a whole stack rather than one workload:
 
-| | Pods | CPU limit | Memory limit |
-|---|---|---|---|
-| Stack profile demo | 20 | 8 | 16 Gi |
+| | Pods | CPU request | CPU limit | Memory request | Memory limit |
+|---|---|---|---|---|---|
+| Stack profile demo | 20 | 4 | 8 | 8 Gi | 16 Gi |
 
 ---
 
-## Watch it come up
+## Stop a demo
 
-The demo list shows the status and what the stack is doing - *waiting to instantiate*, *installing add-ons*, *stack deployed*. Open **Details** for the live picture, read from the staging cluster on every poll:
+```bash
+ankra stack-profiles demo stop my-profile <workspace-id>
+```
 
-- **Progress** - namespace created, guardrails applied, stack instantiated. A profile demo deploys no workload of its own, so there is no image or routing step to wait on: the stack operation completing *is* readiness.
-- **What the profile installed** - every Deployment, Service, Ingress, ReplicaSet and Pod in the namespace, with the live manifest behind each one.
-- **Events** - the Kubernetes events for the namespace, newest first.
-- **Logs** - a bounded tail from any pod in the namespace, fetched on demand.
+Stopping uninstalls the stack and deletes the namespace. Because Helm uninstall jobs have to drain before the namespace can go, a stop is asynchronous: the demo is marked as stopping and Ankra's cleanup finishes the teardown. Every demo also stops on its own at the end of its lifetime, whether or not anyone remembers it.
 
-If a chart fails to install, the failure text is the stack's own - "no matching PVC storage class" rather than "the demo failed".
-
----
-
-## Stopping
-
-**Stop** uninstalls the stack and deletes the namespace. Because Helm uninstall jobs have to drain before the namespace can go, a stop is asynchronous: the demo is marked *stopping* and the reaper finishes the teardown. Every demo also stops on its own at the end of its lifetime, whether or not anyone remembers it.
+Run `ankra stack-profiles demo list my-profile` again: once the teardown has finished, the demo is no longer listed.
 
 ---
 
-## Application demos and profile demos
+## Where else profile demos are used
 
-An application's demo settings can designate a stack profile, in which case every demo of that application deploys **its own replica** of the profile alongside the app (see [Branch Demos](/guides/branch-demos#full-stack-demos)). That replica and a profile demo are the same stack seen from two sides, so each list links to the other:
+- **Previews built from a profile.** An application's preview settings can name a stack profile (**Choose a profile**), so every preview of that application starts its own copy of the profile beside the app: see [Set what every preview starts with](/guides/branch-demos#set-what-every-preview-starts-with). When you only want to look at the stack, a profile demo is cheaper than a whole preview.
+- **Publishing a managed service.** When you publish a managed service package over a stack profile, Ankra can fill the package's connection from a running demo of that profile and try it there before you publish: see [Publish a managed service](/guides/publish-a-managed-service).
 
-- The application's **Previews** section names the profile its demos replicate and lists that profile's own live demos, each linking straight to its details.
-- The profile's **Demos** tab lists the applications designating it.
+---
 
-When you only want to look at the stack, launching the profile demo is cheaper than launching a whole application demo for it.
+## What can go wrong
+
+| Message | Cause | Remedy |
+|---------|-------|--------|
+| `No staging cluster is configured for this organisation.` | No staging cluster is set | Ask someone who manages Ankra AI to choose one under **Ankra AI → AI workspaces** |
+| `The staging cluster's agent is offline, so the demo cannot be deployed right now.` | The staging cluster's agent is not connected | Bring the agent back online, then launch again |
+| `You do not have permission to launch stack profile demos.` | Your role lacks `stacks.deploy` | Ask an administrator for a role that holds it |
+| `Your role allows demos of at most <n> hours.` | `--ttl-hours` is above your role's maximum | Ask for a shorter lifetime |
+| `'ttl_hours' must be at least 1.` | `--ttl-hours` is 0 or negative | Give at least 1 hour, or leave the flag out |
 
 ---
 
 ## API
 
-All endpoints sit under the profile and require authentication; the mutations require a CSRF header for browser-originated requests. Bearer-PAT twins live under `/api/v1/org/stack-profiles/...` for the CLI.
+All endpoints sit under the profile and require authentication; the mutations require a CSRF header for browser-originated requests. Bearer-token twins live under `/api/v1/org/stack-profiles/...` for the CLI.
 
 | Method | Path | Purpose |
 |--------|------|---------|
-| `GET` | `/org/stack-profiles/{profile_id}/demos` | The profile's live demos, your TTL policy, the staging cluster, the current version's parameters, and the applications designating this profile |
+| `GET` | `/org/stack-profiles/{profile_id}/demos` | The profile's live demos, your lifetime policy, the staging cluster, the current version's parameters, and the applications whose previews use this profile |
 | `POST` | `/org/stack-profiles/{profile_id}/demos` | Launch a demo (`version`, `parameters`, `ttl_hours`) |
 | `GET` | `/org/stack-profiles/{profile_id}/demos/{workspace_id}/detail` | The demo plus the live inspection of its namespace |
 | `GET` | `/org/stack-profiles/{profile_id}/demos/{workspace_id}/logs` | A bounded log tail (`pod`, `container`, `tail_lines`) |
+| `GET` | `/org/stack-profiles/{profile_id}/demos/{workspace_id}/connection-proposal` | The connection a managed service package built from the profile could declare, read off the running demo |
+| `GET` | `/org/stack-profiles/{profile_id}/demos/{workspace_id}/collisions` | Which objects of the running demo would collide with a second service set up from the same package |
+| `POST` | `/org/stack-profiles/{profile_id}/demos/{workspace_id}/connection-probes` | Try a proposed connection against the running demo; answers `202` with the probe to read back |
+| `GET` | `/org/stack-profiles/{profile_id}/demos/{workspace_id}/connection-probes/{probe_id}` | Read back one connection probe |
 | `DELETE` | `/org/stack-profiles/{profile_id}/demos/{workspace_id}` | Stop the demo |
 
-See [Stack Profiles](/concepts/stack-profiles) for authoring and versioning, and [Branch Demos](/guides/branch-demos) for the application lane.
+See [Stack Profiles](/concepts/stack-profiles) for authoring and versioning, and [Preview a branch](/guides/branch-demos) for the application lane.
