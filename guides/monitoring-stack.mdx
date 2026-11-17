@@ -35,7 +35,7 @@ The stack editor opens and reads **No resources yet**.
     Click **Add → Helm add-on**, search **Find a chart** for `kube-prometheus-stack` and pick the Prometheus Community chart. In **Configure**, choose the newest release in **Pinned chart version**, keep `kube-prometheus-stack` as the **Add-on name**, and enter `monitoring` as the **Namespace**.
   </Step>
   <Step title="Set the values">
-    Paste this into **Values**. The Grafana password and the Slack URL are placeholders: you seal and set them in Step 5.
+    Paste this into **Values**. The Slack URL is a placeholder: you seal it and set the real one in Step 5. `change-me` is the password Grafana starts with, and you change it in Grafana itself under [Verify](#verify).
 
     ```yaml
     prometheus:
@@ -202,7 +202,7 @@ Alloy reads the logs of every pod through the Kubernetes API and sends them to L
     Click **Review changes**, read the **Draft change log**, then click **Create and deploy stack**. The editor reads "Deployment accepted. Follow the operation for its outcome." Follow it in **Deployments** in the editor, or the cluster's **Operations**.
   </Step>
   <Step title="Seal the two secret keys">
-    Mark `adminPassword` and `slack_api_url` as encrypted. Ankra seals them with your organisation's key whenever it writes the Stack to Git, and the cluster decrypts them when it deploys.
+    Mark `adminPassword` and `slack_api_url` as encrypted. The command seals both values, as Ankra stores them, with your organisation's key. From then on Ankra seals them whenever it writes the Stack to Git, and the cluster decrypts them when it deploys. It works once the add-on is on the cluster, which is why it comes after the first deploy: before that it answers that the add-on was not found.
 
     <CliVersion since="0.20.0" />
 
@@ -212,10 +212,12 @@ Alloy reads the logs of every pod through the Kubernetes API and sends them to L
       --stack observability --cluster my-cluster
     ```
   </Step>
-  <Step title="Set the real values">
-    In the stack editor, click **Start a draft**, select `kube-prometheus-stack`, and replace the two placeholders in **Values** with your Grafana password and your Slack webhook URL. Click **Review changes**, then **Deploy reviewed changes**.
+  <Step title="Set the Slack webhook">
+    In the stack editor, click **Start a draft**, select `kube-prometheus-stack`, and replace the value of `slack_api_url` in **Values** with your Slack webhook URL. Click **Review changes**, then **Deploy reviewed changes**.
 
-    The values are sealed when the Stack is written to Git, so your repository holds `ENC[...]` for both keys. Until that write, Ankra stores the values as you typed them, in plain text.
+    The URL is sealed when the Stack is written to Git, so your repository holds `ENC[...]` for it. Until that write, Ankra stores it as you typed it, in plain text. A cluster with no GitOps repository has no such write: run the command from the previous step once more, and the URL is sealed in Ankra too. Running it on values that are already sealed does no harm.
+
+    Leave `adminPassword` as it is. Grafana keeps its admin password in its own database, on its volume, from the first time it starts, so a new `adminPassword` in the values is ignored: Grafana goes on accepting the old one.
   </Step>
 </Steps>
 
@@ -234,7 +236,9 @@ Alloy reads the logs of every pod through the Kubernetes API and sends them to L
    kubectl port-forward svc/kube-prometheus-stack-grafana 3000:80 -n monitoring
    ```
 
-   Open `http://localhost:3000` and sign in as `admin` with the password you set. To reach it without a port-forward, give Grafana an Ingress in its values, or put it behind a [Cloudflare Tunnel](/guides/cloudflare-tunnel).
+   Open `http://localhost:3000` and sign in as `admin` with the password `change-me`. Change it straight away, under your profile in Grafana. Do not set it with a command run through `ankra cluster exec`: the command line, password included, is kept in your organisation's [audit log](/guides/audit-log). If Grafana's volume is ever replaced, Grafana starts with `change-me` again.
+
+   To reach it without a port-forward, give Grafana an Ingress in its values, or put it behind a [Cloudflare Tunnel](/guides/cloudflare-tunnel).
 3. In **Explore**, pick **Prometheus** and run:
 
    ```promql
@@ -389,12 +393,14 @@ Each rule goes under `additionalPrometheusRulesMap` in `kube-prometheus-stack`'s
     1. Check the Alloy pod and its logs:
        ```bash
        ankra cluster get pods -n monitoring --name alloy --cluster my-cluster
-       ankra cluster logs -l app.kubernetes.io/name=alloy -n monitoring --tail 50 --follow=false --cluster my-cluster
+       ankra cluster logs -l app.kubernetes.io/name=alloy -c alloy -n monitoring --tail 50 --follow=false --cluster my-cluster
        ```
-    2. Check Loki answers, from the Alloy pod (take its name from the first command):
+    2. Check Loki answers, from the Loki gateway pod. The Alloy image has no `wget` or `curl`:
        ```bash
-       ankra cluster exec <alloy-pod> -n monitoring --cluster my-cluster -- wget -qO- http://loki-gateway.monitoring.svc.cluster.local/ready
+       ankra cluster get pods -n monitoring --name loki-gateway --cluster my-cluster
+       ankra cluster exec <loki-gateway-pod> -n monitoring --cluster my-cluster -- wget -qO- http://loki.monitoring.svc.cluster.local:3100/ready
        ```
+       It prints `ready`.
   </Accordion>
   <Accordion title="Grafana cannot reach Loki">
     1. Check the Loki data source URL matches the gateway service:
@@ -405,9 +411,17 @@ Each rule goes under `additionalPrometheusRulesMap` in `kube-prometheus-stack`'s
   </Accordion>
   <Accordion title="A pod stays Pending">
     A volume could not be created, usually because the cluster has no default StorageClass. Check with `ankra cluster get storageclasses --cluster my-cluster`, then make one the default or set `storageClassName` in the values.
+
+    A pod also stays `Pending` when it asks for more memory than any node has free. A `loki-chunks-cache-0` pod means `chunksCache` is still on in Loki's values: see [Step 3](#step-3-add-loki).
   </Accordion>
   <Accordion title="The deployment fails">
     Open the cluster's **Operations** for the failing step. A downgrade or a missing chart version is refused before anything is applied; see [Create and change a stack](/guides/create-and-change-a-stack#what-can-go-wrong).
+
+    When one add-on fails during the first deploy, the add-ons that depend on it are cancelled and are not installed. Correct the values of the one that failed and deploy the draft. If the cancelled ones are still not installed after that, install each with its own chart version:
+
+    ```bash
+    ankra cluster addons upgrade alloy --chart-version <its-chart-version> --cluster my-cluster
+    ```
   </Accordion>
   <Accordion title="Memory use is high">
     - **Prometheus:** shorten retention, scrape less often, drop metrics you do not use.
