@@ -9,10 +9,10 @@ its top, and nothing in CI caught that (ankra-jn451h): `mint broken-links` check
 that the page exists, never the anchor. This check renders each heading's id the
 way the site does and fails a link whose anchor matches none.
 
-The rules were read off the rendered site on 2026-11-17: every heading and
-Update label of 23 fetched pages, 1,262 ids, matched both ways, and a second
-reader matched 661 headings with special characters on 65 pages and 308 Update
-labels. One example of each rule is in the self-test:
+The rules were read off the rendered site on 2026-11-17. Every heading and
+Update label of 23 fetched pages, 1,262 ids, matched both ways. A second reader
+matched 661 headings with special characters on 65 pages and 308 Update labels.
+One example of each rule is in the self-test:
 
   - letters are lowercased; whitespace and . become -
   - ' becomes ’
@@ -29,10 +29,11 @@ labels. One example of each rule is in the self-test:
 An <Update label> renders an id by the same rules (the changelog's 2026-11-14 and
 2026-11-14-2), and an explicit id="..." on an HTML element is one. A component
 prop such as <YouTube id="..."> is not. <Step> and <Card> titles render no id.
-<Accordion> and <Tab> titles render ids by rules of their own (an Accordion drops
-the apostrophe, turns _ and / into -, and numbers repeats from -1; a Tab keeps ,
-and / percent-encoded in the id). This check does not model those: a link whose
-anchor spells such a title, letters and digits only, is not judged.
+<Accordion> and <Tab> titles render ids by rules of their own. An Accordion drops
+the apostrophe, turns _ into -, drops or hyphenates / (the one live case cannot
+tell) and numbers repeats from -1. A Tab keeps , and / percent-encoded in the id.
+This check does not model those: a link whose anchor spells such a title,
+letters and digits only, or that spelling with a number after it, is not judged.
 
 What is read: every .mdx, outside the frontmatter and code fences (and, for
 links, outside inline code); links written [text](/page#anchor), [text](#anchor)
