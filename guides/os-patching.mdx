@@ -7,9 +7,13 @@ import { CliVersion } from "/snippets/cli-version.jsx";
 
 Ankra-managed nodes install operating system security updates through unattended upgrades. A few packages - systemd, udev, netplan, the container runtime and the packet filter - restart networking when they upgrade, and installing them on every node at once takes the cluster's agents offline. **Rolling OS patching** installs updates one host at a time instead, each drained and returned to service before the next.
 
-Once you enable a cluster's patch policy, those network-restarting packages are held back from unattended upgrades on the hosts the lane patches, and their security fixes reach the cluster only through rolling runs. A manual run on a cluster whose policy is off leaves the unattended-upgrade settings as it finds them.
+On a host whose OS updates are [automatic](#automatic-or-advisory), a rolling run holds those network-restarting packages back from unattended upgrades, and their security fixes reach that host only through rolling runs. A run leaves the unattended-upgrade settings of an advisory host as it finds them, and making a host advisory removes the hold, so unattended upgrades install those packages again.
 
 This guide covers reading where a cluster stands, a dry run, a rolling run, and the per-cluster policy that lets Ankra run it on its own inside a maintenance window.
+
+<Warning>
+**Some clusters are patched automatically by default.** A cluster a person confirmed is not production, with no OS updates mode chosen, becomes automatic 14 days after the organisation is notified: from then on Ankra drains, patches and, where an update needs it, reboots its nodes in the maintenance window without anyone asking. Production clusters, and clusters whose purpose nobody confirmed, stay advisory. See [When nobody chose a mode](#when-nobody-chose-a-mode) and [Choose a mode](#choose-a-mode).
+</Warning>
 
 ## Before you start
 
@@ -32,7 +36,7 @@ curl -fsS -H "Authorization: Bearer $ANKRA_API_TOKEN" \
 ```
 </CodeGroup>
 
-The answer carries the cluster's policy, with when the window next opens and whether it is open now, the newest run host by host, the last dry run, and the **security lag** verdict: whether held-back security updates have been pending longer than the policy's `security_lag_days`. A cluster nobody configured reads the default policy, marked as not stored.
+The answer carries the cluster's policy, with when the window next opens and whether it is open now, the newest run host by host, the last dry run, and the **security lag** verdict: whether held-back security updates have been pending longer than the policy's `security_lag_days`. A cluster nobody configured reads the default policy, marked as not stored. The policy also carries the cluster's OS updates `mode` (`automatic` or `advisory`), why it has it in `mode_source` (`chosen`, `environment` or `notice_period`) and in a sentence in `mode_reason`, any node group overrides in `node_group_modes`, and, once the organisation has been told that the cluster becomes automatic, the moment it does in `automatic_from`.
 
 Over MCP and in chat the same read is `get_os_patch_status`.
 
@@ -51,7 +55,7 @@ curl -fsS -X POST -H "Authorization: Bearer $ANKRA_API_TOKEN" \
 
 The dry run connects to every host and changes nothing. For each host it reports the security and held-back updates pending, whether a reboot is required, how old the package lists are, and whether the host carries stateful workloads. It also gives the order a run would take and the hosts it would skip, with why. When the hosts do not all answer within the call, it returns the operation id, and the status read shows the result once it is in.
 
-The tool is `plan_os_patches`.
+The tool is `plan_os_patches`. Ankra also takes this dry run on its own once a day, see [The daily dry run](#the-daily-dry-run).
 
 ## 3. Run a rolling patch
 
@@ -98,16 +102,18 @@ ankra cluster hetzner os-patches policy get <cluster>
 ```bash cURL
 curl -fsS -X PATCH -H "Authorization: Bearer $ANKRA_API_TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"enabled": true, "window_days": ["tue", "wed"], "window_start_hour_utc": 3, "window_duration_hours": 3, "cadence_days": 7}' \
+  -d '{"mode": "automatic", "window_days": ["tue", "wed"], "window_start_hour_utc": 3, "window_duration_hours": 3, "cadence_days": 7}' \
   "https://platform.ankra.app/api/v1/clusters/hetzner/<cluster-id>/os-patches/policy"
 ```
 </CodeGroup>
 
-On the CLI, `--disable` turns the policy off, `--security-lag-days` sets the lag threshold, and `--include-stateful-nodes` or `--exclude-stateful-nodes` set what runs may drain.
+On the CLI, `--enable` chooses the `automatic` mode and `--disable` chooses `advisory` (see [Choose a mode](#choose-a-mode)), `--security-lag-days` sets the lag threshold, and `--include-stateful-nodes` or `--exclude-stateful-nodes` set what runs may drain.
 
 | Field | Default | Bounds |
 |---|---|---|
-| `enabled` | `false` | Lets Ankra start a run on its own inside the window, at most once per `cadence_days` |
+| `mode` | None chosen, so the environment decides: see [When nobody chose a mode](#when-nobody-chose-a-mode) | `automatic`, `advisory`, or `default` to clear the choice. Applies to the control planes, the bastion and every node group without an override |
+| `node_group_modes` | No overrides | An object of node group name to `automatic`, `advisory`, or `inherit` to follow the cluster again. A group it does not name keeps its override |
+| `enabled` | Follows `mode` | The older spelling of `mode`: `true` chooses `automatic` and `false` chooses `advisory`. Sent together with `mode`, both must name the same mode, or the change is refused. In an answer it is `true` when the cluster's own hosts are automatic |
 | `window_days` | `mon`, `tue`, `wed`, `thu` | At least one of `mon` to `sun`; full English day names are accepted |
 | `window_start_hour_utc` | `2` | 0 to 23, in UTC |
 | `window_duration_hours` | `4` | 1 to 12. A window that runs past midnight belongs to the day it opened on |
@@ -115,9 +121,80 @@ On the CLI, `--disable` turns the policy off, `--security-lag-days` sets the lag
 | `include_stateful_nodes` | `false` | Whether runs drain nodes with single-replica stateful workloads |
 | `security_lag_days` | `14` | 1 to 90. How long held-back security updates may stay pending before the cluster reports a security lag |
 
-A cluster nobody configured is not patched automatically, because patching drains and can reboot every node. Until the status shows a run Ankra started on its own, start runs by hand as in step 3. The default window has no Friday or weekend starts, so a run that goes wrong meets a working day. A person can always run a patch by hand.
+Whether a cluster nobody configured is patched automatically depends on what it is used for, see [When nobody chose a mode](#when-nobody-chose-a-mode); a production cluster is not, because patching drains and can reboot every node. Until the status shows a run Ankra started on its own, start runs by hand as in step 3. The default window has no Friday or weekend starts, so a run that goes wrong meets a working day. A person can always run a patch by hand, whatever the mode.
 
 A value of the wrong type is refused with `422`, and a value out of bounds with `409`, naming the field. The tool is `set_os_patch_policy`, also confirmed before it applies.
+
+### Automatic or advisory
+
+Each host's OS updates are automatic or advisory:
+
+- **Automatic.** Ankra starts the rolling run of step 3 on its own, inside the maintenance window and at most once per `cadence_days`: one node at a time, drained first, stopping at the first failure. Nothing patches every node at once.
+- **Advisory.** Nothing patches the host on its own. The [daily dry run](#the-daily-dry-run) still reports what is pending, and a person starts the run.
+
+The control planes and the bastion follow the cluster's mode. A node group can override it ([Per node group](#per-node-group)), so one node group of a production cluster can be automatic while the rest stay advisory. A run Ankra starts in the window patches the automatic hosts only and lists the advisory ones as left out. A run a person starts, as in step 3, patches every host it can, whatever its mode.
+
+### When nobody chose a mode
+
+With no mode chosen, a cluster follows what it is used for. It defaults to `automatic` only when a person confirmed it is not production, which means all three of these hold:
+
+- **A person set it.** They named the cluster's environment when they created it; used **Change what it’s used for** or **Confirm it is &lt;purpose&gt;** under **Infrastructure → Clusters → &lt;your cluster&gt; → Settings → General**; ran `ankra cluster update` with their own CLI login or API token; or confirmed the card when Ankra's AI offered to change it in chat.
+- **Its label does not name production.** A label that starts with `production`, `prod` or `live`, such as `Production`, `prod-eu` or `live 2`, names production whoever set it. An empty label counts as production too.
+- **What it is used for is Staging, Development or Disposable**, not Production.
+
+Every other cluster defaults to `advisory`: every cluster labelled or used for production, and every cluster whose purpose nobody confirmed. That includes a cluster created without naming its environment, which carries the label `development` without anyone having chosen it, and a cluster whose label was last changed over MCP, by a service account or by Ankra's AI with no person confirming it. When you are not sure which side a cluster is on, read `mode_source` and `mode_reason` in the status (step 1).
+
+Only the label, who set it and what the cluster is used for count, not the traffic it serves. A cluster that serves production but that a person labelled `eu-west` and left at **Development** under **Used for** defaults to `automatic`. Set **Used for** to **Production**, or choose `advisory`, to keep such a cluster from being patched on its own.
+
+A policy switched off with `--disable` or `"enabled": false` before OS updates modes existed is not a chosen mode: such a cluster reads `mode_source` `environment` or `notice_period`, and follows what it is used for. Choose `advisory` again to keep it advisory. A policy switched on before then counts as a chosen `automatic`.
+
+### The notice before automatic updates begin
+
+A cluster whose default is `automatic` stays advisory until 14 days after its organisation is told. Ankra sends the notice once per cluster, when the cluster first qualifies, as a `warning` notification of kind `os_updates_automatic_scheduled` titled "Automatic OS updates start on &lt;date&gt; for &lt;cluster&gt;", where the date is 14 days after the notice. It says why the cluster defaults to automatic, its maintenance window and cadence, how the rolling run drains nodes one at a time and reboots them only when an update needs it, that nodes carrying single-replica stateful workloads are skipped unless you include them, and how to keep its OS updates advisory. Until that date nothing changes. From it, Ankra starts the cluster's runs in its maintenance window like any automatic cluster's.
+
+The notice goes through the organisation's notification routes like any other warning: a rule for **Every kind** delivers it, and so does the home channel when no rule matches. To send it somewhere of its own, see [Notification routing](/guides/notification-routing#automatic-os-updates-notice).
+
+If the cluster is relabelled production, or its label is changed by anything other than a person, while nobody has chosen a mode, the notice is withdrawn and the cluster is advisory again. A later return to confirmed non-production sends a new notice, with a new 14 days.
+
+To keep a cluster advisory, choose `advisory` before the date in the notice. Choosing it later works too, and applies at once.
+
+### Choose a mode
+
+A chosen mode applies at once, with no notice, and what the cluster is used for no longer changes it. Choosing one needs `clusters.write`, and there are three ways:
+
+- **Ankra's AI and MCP.** `set_os_patch_policy` takes `mode` (`automatic`, `advisory` or `default`) and `node_group_modes`. In chat, ask for example "Keep OS updates on my-cluster advisory"; Ankra's AI asks you to confirm before it applies the change.
+- **The API.** Send `mode` to `PATCH /api/v1/clusters/{provider}/{cluster_id}/os-patches/policy`, as in the example below.
+- **The CLI.** `ankra cluster hetzner os-patches policy set <cluster> --disable` chooses `advisory`, and `--enable` chooses `automatic`. `--disable` does not switch the lane off: the control planes, the bastion and every node group without an override become advisory, a node group set to `automatic` stays automatic, the daily dry run goes on, and a person can still start a run. The CLI has no flag for `default` or for node groups; use the API or Ankra's AI for those.
+
+The portal has no OS updates setting.
+
+```bash cURL
+curl -fsS -X PATCH -H "Authorization: Bearer $ANKRA_API_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"mode": "advisory"}' \
+  "https://platform.ankra.app/api/v1/clusters/hetzner/<cluster-id>/os-patches/policy"
+```
+
+`default` clears the choice, so what the cluster is used for decides again. On a cluster that was already sent the notice, its date still holds: once it has passed, the cluster is automatic again at once.
+
+Making hosts advisory removes the update hold from them in the same change. While a run or a node OS policy operation is in flight, that change is refused with `409` naming the operation: wait for it to finish, or cancel it with `ankra cluster operations cancel <operation-id>`, then change the mode.
+
+### Per node group
+
+`node_group_modes` gives a node group's workers a mode of their own. Name each group as the cluster's node groups are named; a worker in no node group belongs to the group `default`. `inherit` removes a group's override so it follows the cluster again, and a group the change does not name keeps its override:
+
+```bash cURL
+curl -fsS -X PATCH -H "Authorization: Bearer $ANKRA_API_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"node_group_modes": {"batch": "automatic", "database": "advisory"}}' \
+  "https://platform.ankra.app/api/v1/clusters/hetzner/<cluster-id>/os-patches/policy"
+```
+
+A name that is not one of the cluster's node groups is refused with `409`, which lists the groups it has. `inherit` accepts any name, so the override of a node group that no longer exists can still be cleared. The control planes and the bastion always follow the cluster.
+
+### The daily dry run
+
+Ankra takes the dry run of step 2 on its own, about once a day, on every running cluster it built on the providers above, whatever its mode, so the status read's last dry run and its security-lag verdict stay about a day old at most. It changes nothing on the hosts, never queues ahead of a dry run a person starts, and is listed with the cluster's operations (`ankra cluster operations list` and the cluster's **Operations** page) as started by the platform, not by a person. Ankra leaves a cluster for later while it is not running, while a dry run or another operation that changes its nodes is in flight, and while none of its nodes is up. When a daily dry run fails, the cluster shows one warning, which stands until a later dry run succeeds, and the next daily attempt waits a week rather than a day.
 
 ## Troubleshooting
 
@@ -125,6 +202,8 @@ A value of the wrong type is refused with `422`, and a value out of bounds with 
 |---|---|
 | `409` naming the window | The maintenance window is closed. Wait for it, or send `"outside_window": true`. |
 | `409` naming a running operation | A run is already in flight. Follow that operation instead of starting another. |
+| `409` saying the policy was not changed because an operation is in progress | The change would make hosts advisory while a run or a node OS policy operation is in flight. Wait for it to finish, or cancel it, then change the mode again. |
+| `409` naming a node group | `node_group_modes` names a group the cluster does not have. The message lists the groups it has. |
 | `409` on an imported cluster, or one of another provider than the path names | Rolling OS patching is for clusters Ankra built on the providers above. Use the cluster's own provider in the path. |
 | `404` | The cluster is not in the token's organisation. |
 | `403` naming a permission | The token's role lacks `clusters.operate` or `clusters.write` on that cluster. |
@@ -135,4 +214,5 @@ A value of the wrong type is refused with `422`, and a value out of bounds with 
 
 - [Operate Ankra-managed clusters](/guides/operate-ankra-managed-clusters) - node groups, restarts, the bastion and upgrades.
 - [Change Management](/security/change-management) - operating system patching inside the patch window.
+- [Notification routing](/guides/notification-routing#automatic-os-updates-notice) - where the notice before automatic OS updates goes.
 - [MCP Tools](/platform/mcp-tools)
