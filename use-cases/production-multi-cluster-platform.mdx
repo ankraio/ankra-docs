@@ -102,7 +102,7 @@ Nothing here is specific to one cloud. The example creates the clusters on UpClo
 - A domain you control, for example `example.com`, and a DNS credential Ankra can publish records with (`ankra org dns credentials create` stores an external-dns webhook credential for any provider - see [serving a zone in your own DNS account](/concepts/applications#serving-a-zone-in-your-own-dns-account-from-every-cluster); a domain held in Avura follows [the Avura route](/guides/avura-domains) instead).
 - A Microsoft 365 (Entra ID) tenant for staff sign-in. Any OpenID Connect provider Kratos supports works the same way.
 - A Microsoft Teams or Slack webhook for the on-call channel.
-- The charts come from registries Ankra already ships in its [catalogue](/platform/addon-catalog) for every organisation: `prometheus-community`, `grafana`, `opensearch-k8s-operator`, `fluent`, `oauth2-proxy`, `cloudnative-pg`, `harbor` and `oneuptime`. The one exception is Ory's chart repository for Kratos and Hydra, connected once:
+- The charts come from registries Ankra already ships in its [catalogue](/platform/addon-catalog) for every organisation: `prometheus-community`, `grafana-community`, `opensearch-k8s-operator`, `fluent`, `oauth2-proxy`, `cloudnative-pg`, `harbor` and `oneuptime`. The one exception is Ory's chart repository for Kratos and Hydra, connected once:
 
 ```bash
 ankra helm registries create --name ory --url https://k8s.ory.sh/helm/charts
@@ -656,8 +656,8 @@ One Prometheus holds every cluster's series. The hub scrapes itself; the spokes 
           - name: tempo
             chart_name: tempo
             chart_version: 2.0.0
-            registry_name: grafana
-            registry_url: https://grafana.github.io/helm-charts
+            registry_name: grafana-community
+            registry_url: https://grafana-community.github.io/helm-charts
             namespace: tempo
             parents:
               - kind: addon
@@ -669,8 +669,8 @@ One Prometheus holds every cluster's series. The hub scrapes itself; the spokes 
           - name: grafana
             chart_name: grafana
             chart_version: 10.5.15
-            registry_name: grafana
-            registry_url: https://grafana.github.io/helm-charts
+            registry_name: grafana-community
+            registry_url: https://grafana-community.github.io/helm-charts
             namespace: grafana
             parents:
               - kind: addon
@@ -1067,7 +1067,7 @@ The OpenSearch operator runs a three-node cluster with Dashboards. Fluent Bit on
         index_pattern: "infrastructure-*"
     ```
 
-    The spokes get the same block with their own index pattern once Step 8 has them shipping. [Log Sources](/integrations/log-sources) has the field mappings OpenSearch needs.
+    Ankra reads a log source through that cluster's own agent, so a spoke cannot use this address inside the infrastructure cluster: the hub exposes only `/_bulk` to the spokes. Once Step 8 has them shipping, search the spokes' indices (`production-*`, `development-*`) in OpenSearch Dashboards on the hub. [Log Sources](/integrations/log-sources) has the field mappings OpenSearch needs.
   </Step>
 </Steps>
 
@@ -1899,6 +1899,8 @@ The spokes carry no Grafana, no Alertmanager, no rules and no queryable Promethe
   <Step title="Application databases on the spokes">
     Every stateful application stack on a spoke follows one shape: a CloudNativePG cluster with three instances spread across workers, the retain storage class, and an owner role per database. This is what makes Step 9 work, because the backup data plane captures CloudNativePG clusters by name.
 
+    So far only the hub has the two things this manifest needs. Before it, add to each spoke's cluster file the `storage` stack from Step 3 (the `block-storage-retain` StorageClass) and the `cloudnative-pg` operator add-on from Step 6's `sso-gateway` stack, with the same chart version, and let both come up before the database's stack. Without them the spoke has no `postgresql.cnpg.io` CRD and its claims have no class.
+
     ```yaml
     # stacks/shop/manifests/shop-postgres.yaml
     apiVersion: postgresql.cnpg.io/v1
@@ -1954,12 +1956,6 @@ A vault is where restore points land; a stack's backup policy is what puts them 
       --schedule "0 1 * * *" \
       --retention daily=7,weekly=4,monthly=6 \
       --include-pvc shop/uploads \
-      --backup-now --wait
-
-    ankra cluster stacks protect identity \
-      --vault production-backups \
-      --schedule "10 1 * * *" \
-      --retention daily=7,weekly=4,monthly=6 \
       --backup-now --wait
     ```
 
@@ -2021,7 +2017,7 @@ Most of this is already in place from Step 1. What remains is turning it on wher
     ankra security overview
     ```
 
-    Kyverno is not part of the baseline; it is the opt-in `ankra-policy-engine` profile for image-signature verification and policies of your own. [Cluster Security](/guides/cluster-security#security-baseline) describes what runs where.
+    Kyverno is not part of the baseline; it is the opt-in `ankra-policy-engine` profile for image-signature verification and policies of your own. [Cluster Security](/guides/cluster-security#the-security-baseline) describes what runs where.
   </Step>
   <Step title="Kubernetes access through the gateway, time-boxed">
     Nobody gets a static kubeconfig. Access to a cluster's API goes through the Ankra kube gateway, per person, per role, with an expiry and a reason:
@@ -2095,8 +2091,8 @@ Run through this once at the end, and again after any change to the hub.
 
     Exactly `https://staff-login.example.com/`, trailing slash included. Then in a browser, from `https://metrics.example.com/`: the Microsoft 365 sign-in, and Grafana with your address in the top right. Start a sign-in from a tool, never from `staff-login` itself.
   </Step>
-  <Step title="Logs are searchable from Ankra">
-    Open the production cluster's **Logs** and search `cluster:production`. Rows appear with `kubernetes.namespace_name` and `app.*` fields. In OpenSearch Dashboards the same query runs against `production-*`.
+  <Step title="Logs are searchable on the hub">
+    In OpenSearch Dashboards on the infrastructure cluster, search `cluster:production` against `production-*`. Rows appear with `kubernetes.namespace_name` and `app.*` fields.
   </Step>
   <Step title="Backups are on and recent">
     ```bash
