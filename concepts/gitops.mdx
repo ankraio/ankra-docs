@@ -219,7 +219,15 @@ ankra cluster gitops preserved show clusters/prod/prod.yaml --cluster prod
 ankra cluster gitops preserved resolve clusters/prod/prod.yaml --keep git --cluster prod
 ```
 
-`list` prints each preserved file with when it was detected, its decision, whether its content is withheld and why, and how many differences the platform found. `show <path>` prints those differences key by key, read from Git's version to Ankra's: `added` (only Ankra's version has it), `removed` (only Git's has it), `changed` (both have it, with different values) or `reordered` (both list the same members in another order). It shows Git's and Ankra's value where the platform shows them and `(masked)` where it does not: seeing values needs `kubernetes.secrets_reveal` on the cluster, and some files show no values to anyone. The platform lists at most 50 differences per file and always gives the total. Name a file by its full repository path, as `list` prints it.
+`list` prints each preserved file with when it was detected, its decision, whether its content is withheld and why, and how many differences the platform found. `show <path>` prints those differences key by key, read from Git's version to Ankra's: `added` (only Ankra's version has it), `removed` (only Git's has it), `changed` (both have it, with different values) or `reordered` (both list the same members in another order). It shows Git's and Ankra's value where the platform shows them and `(masked)` where it does not: seeing values needs `kubernetes.secrets_reveal` on the cluster, and some files show no values to anyone. The default preview lists at most 50 differences per file and always gives the total. Name a file by its full repository path, as `list` prints it.
+
+On a platform and CLI release that serve complete differences, add `--all` to read every recorded change:
+
+```bash
+ankra cluster gitops preserved show clusters/prod/prod.yaml --all --cluster prod
+```
+
+The CLI reads bounded pages and returns a result only when every page belongs to the same file versions, examination rules and reveal permission. `--all -o json|yaml` contains complete structural metadata, without either file's contents. Masked values stay masked. A changed snapshot, an old examination or metadata too large to record produces an error with no partial result; it does not mean the file has no differences. An older platform without the page route also refuses complete inspection.
 
 `resolve <path>` records the decision, and the next sync runs it; `resolve` triggers that sync. `--keep` is required, because the decision names the version the next sync writes:
 
@@ -228,6 +236,8 @@ ankra cluster gitops preserved resolve clusters/prod/prod.yaml --keep git --clus
 | `--keep git` | `git` | Imports Git's version into Ankra: wherever your file differs from Ankra's version, yours replaces it, and the cluster changes to match, except that a stack Ankra declares and your file leaves out stays (the rule below). It runs only once every preserved file on the cluster has a decision. The file stays yours, so a later change to it in Ankra is preserved again. |
 | `--keep ankra` (or `--keep cluster`) | `cluster` | Writes Ankra's version over your file in Git, without your comments or layout, and the file is Ankra's to write again. Refused for a SOPS-encrypted file, which would put plaintext over ciphertext. |
 | `--withdraw` | `none` | Withdraws a decision that has not run yet. Nothing changes in Git or on the cluster. |
+
+When a preview is truncated, the updated CLI first reads the complete differences and checks that they match the preview's content digests and Git commit. If that read is incomplete, unavailable or changed, it sends no decision, including with `--yes`.
 
 Before it asks, `resolve` prints the platform's key-by-key difference: each stack or add-on only one version declares on one line, and each value that changes. When keeping Git's version would drop `encrypted_paths` entries that Ankra's version declares, it warns that, if Git holds those values SOPS-encrypted, Ankra would stop decrypting them and deploy the ciphertext as the value. `--yes` skips the question, and without a terminal to ask on (a script, CI) it is required. `resolve` reads both digests from the listing itself, so you never type one and the decision covers exactly the two versions it showed you. Deciding needs `clusters.write` on the cluster. `-o json` prints the platform's answer.
 
@@ -241,6 +251,9 @@ curl -H "Authorization: Bearer $ANKRA_TOKEN" \
 Each entry carries the `path`, Git's version as `head_content` (read at `head_commit_sha`), Ankra's version as `render_content`, the digest of each as `head_content_hash` and `render_content_hash`, when the difference was first seen as `detected_at`, and any `resolution_choice` already made. A file that may hold a secret is listed with `content_redacted` and no content; its digests are still exact.
 
 Each entry also carries `structural_diff`, even when its content is withheld: the key path of every key or list member where the two versions differ, each marked `added`, `removed`, `changed` or `reordered` from Git's version to Ankra's. A value is shown only where Ankra's checks find nothing sensitive in it, and only to a caller holding `kubernetes.secrets_reveal` on the cluster; where a side holds a value that is not shown, the change reads `value_masked: true`, and a key name that may itself be a secret reads `<masked>`.
+
+For complete metadata, read `GET /api/v1/org/clusters/{cluster_id}/gitops/preserved-paths/diff` with the repository `path` query parameter, `limit` from 1 to 200 (default 100), and the returned `next_cursor` for subsequent pages. Each page reports `changes`, `total`, `offset`, `has_more`, both content hashes, `head_commit_sha` and `structural_diff_values`. Continue until `has_more` is false, and discard all collected pages on any error. A `409` means the snapshot changed or complete metadata is not available under the current rules; start again after the next examination. The same cluster access and per-page secret reveal checks apply. No page contains either file's contents.
+
 
 ```sh
 curl -X POST -H "Authorization: Bearer $ANKRA_TOKEN" -H "Content-Type: application/json" \
