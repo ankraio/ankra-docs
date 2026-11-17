@@ -16,8 +16,13 @@ Three of these stop a run before anything is dispatched. The fourth lets the run
 
 - **A connected repository.** The repository reaches Ankra through the [Ankra GitHub App](/integrations/github), GitLab or [Bitbucket Cloud](/integrations/bitbucket-cloud), so Ankra receives its webhooks. A Bitbucket Cloud repository starts pull request runs only once its credential grants Bitbucket's `pullrequest` scope - see [Granting the pull request permission](/integrations/bitbucket-cloud#granting-the-pull-request-permission). An [Application](/concepts/applications) connects its repository to Ankra Pipelines by itself; a repository with no application connects with one command (step 1).
 - **A cluster that runs pipelines.** Ankra picks the cluster for each run in this order: the cluster the repository overrides it to, a member of the organisation's CI pool, the organisation's pipeline cluster (`ci_cluster_id`), the staging cluster the organisation nominated for AI work, then a cluster a person confirmed as non-production. With none of them, a provider event records `no_ci_cluster` and nothing runs.
-- **Pipeline-step workers on that cluster.** The cluster's agent runs pipeline steps only when its `ci_worker_count` is above `0`. An agent at `0` does not advertise the pipeline job names, so Ankra refuses a step for that cluster before it is dispatched (step 2).
-- **An approved definition.** A pipeline's protected sections (its `secrets`, `credentials`, `permissions`, network tier, placement, resources, timeout, caches, `services` and a stage's `with:`) carry no authority until a member with `pipelines.manage` approves the definition on the default branch. Until then a run executes with **none** of them, and the check run and the pull request comment say: "No administrator has approved any authority for this repository yet, so this run executes with none." (step 5).
+- **Pipeline-step workers on that cluster.** The cluster's agent runs pipeline steps only when its `ci_worker_count` is above `0`. An agent at `0` does not advertise the pipeline job names, so Ankra refuses a step for that cluster before it is dispatched (step 2). A playground starts at `2`. So does a new cluster of the organisation's own when all three of these hold:
+  - A person chose its environment when creating it, for example in the portal, or with `--environment` from their own CLI login or API token.
+  - Neither the environment nor the criticality is production. With `--environment`, a name of your own counts as production unless you also pass `--criticality`.
+  - No other cluster of the organisation's own has a pipeline worker count above `0` when the new cluster is set up. Playgrounds do not count. Stopped clusters do.
+
+  Otherwise a new cluster starts at `0`. That includes a cluster created without naming its environment, and one created over MCP or by a service account, because nobody confirmed what those are for (rule 5 in [Where pipelines run](/pipelines/where-pipelines-run)). Confirming what a cluster is for later does not add workers. Neither does naming the environment in a file for `ankra cluster apply`, which sets it after the import. Add them with `ankra cluster agent ci set` (step 2).
+- **An approved definition.** A pipeline's protected sections (its `secrets`, `credentials`, `permissions`, network tier, placement, resources, timeout, caches, `services`, a stage's `with:`, a `kind: deploy` stage's `environment` and `deploy` block, `publish.promote_from` and a `kind: environment` stage's `test_environment`) carry no authority until a member with `pipelines.manage` approves the definition on the default branch. Until then a run executes with **none** of them, and the check run and the pull request comment say: "No administrator has approved any authority for this repository yet, so this run executes with none." (step 5).
 - **For check runs, `checks:write`.** Without it the GitHub App cannot create a check run, and the run's status goes into a comment on the pull request instead. The comment names the missing permission.
 - **Permissions.** Connecting a repository, storing a definition and approving it need `pipelines.manage`. Running, cancelling and re-running need `pipelines.operate`. Changing the organisation's CI settings needs an organisation owner or admin: the **Builds and clusters** page tells everyone else "Your role in &lt;organisation&gt; can look at these settings but not change them. Owners and admins can."
 
@@ -548,7 +553,7 @@ These stage kinds execute: `checkout`, `run`, `build`, `scan`, `gate`, `publish`
 | `scan` | Trivy, Semgrep and Checkov, one step per tool, from pinned images |
 | `gate`, `publish` | Settled by Ankra: `gate` judges the run's findings, `publish` re-tags the digest the gate judged |
 | `deploy` | Releases the run's signed release bundle to host targets outside Kubernetes (see [`ankra targets`](/reference/cli/targets)); it does not deploy to a Kubernetes cluster |
-| `environment` | A test environment per matrix leg, inspected with `ankra pipeline environments` |
+| `environment` | A [test environment](/pipelines/test-environments) per matrix leg, inspected with `ankra pipeline environments` |
 | `preview`, `verify`, `agent`, `approval`, `webhook`, `automation`, `ankra`, `external` | Skipped as `kind_unavailable`. An `approval` stage does **not** hold a run for a human: it is skipped and everything after it runs |
 
 Not available on any surface:
@@ -565,9 +570,9 @@ Not available on any surface:
 
 When a run's largest step fits no node of its CI cluster, or a step of the organisation's pipelines failed on that cluster in the last seven days because it had no room (never scheduled, or killed at its memory limit), Ankra moves the run to a **CI playground**: a short-lived Ankra Cloud cluster it builds for the organisation's pipelines. Every run that needs one shares the organisation's one playground and queues for room on it like on any CI cluster.
 
-- **What it costs.** A run whose largest step fits Ankra Cloud's trial plan goes to the organisation's free trial playground, one already running or a new one for an account with no card that still has a trial; a trial is left to its own expiry. Otherwise an account with a card gets the smallest plan whose node fits the largest step, billed by the minute, and grows by one plan when a step still cannot be scheduled. When Ankra Cloud refuses the playground, such as an account with no card and no trial left, the run stays on its own cluster.
+- **What it costs.** A run whose largest step fits Ankra Cloud's trial plan goes to the organisation's free trial playground, one already running or a new one for an account that cannot pay but still has a trial; a trial is left to its own expiry. Otherwise, when the organisation's Ankra Cloud account can pay, it gets a billed playground at the smallest plan whose node fits the largest step, billed at that plan's price for as long as it exists and never more in a month than the plan's monthly price, and grows by one plan when a step still cannot be scheduled. When Ankra Cloud refuses the playground, such as an account with no card and no trial left, the run stays on its own cluster.
 - **When it goes away.** A billed playground is torn down once no run has used it for `ci_playground_idle_minutes` (default 5, 0 to 1440).
-- **Turning it off.** `ci_auto_playground` is on by default. Set it to `false` with `PUT /api/v1/org/ci-settings` to keep every run on the cluster it resolved to. The portal and the CLI have no field for either setting.
+- **Turning it off.** `ci_auto_playground` is on by default. Turn it off with `ankra org ci-settings set --auto-playground=false` (CLI 0.78.0 or later), or set it to `false` with `PUT /api/v1/org/ci-settings`, to keep every run on the cluster it resolved to. `--playground-idle-minutes` sets the idle time the same way. The portal has no field for either setting.
 
 ## Test results
 
@@ -655,8 +660,8 @@ Every pipeline runs under the organisation's CI settings. Every member can read 
 | `ci_artifact_retention_days` | `30` | **How long to keep pipeline results** | How long step logs and artifacts are kept (1 to 365). |
 | `ci_cache_retention_days` | `14` | **How long to keep pipeline results** | How long a cache nothing restored is kept (1 to 365). |
 | `ci_run_retention_days` | `90` | **How long to keep pipeline results** | How long a concluded run and its steps are kept (7 to 365). An hourly sweep never removes a live run, a repository's newest concluded run, or a run whose artifacts the vault still holds. |
-| `ci_auto_playground` | `true` | | Whether a run that does not fit moves to a [CI playground](#when-a-run-does-not-fit-the-ci-playground). API only. |
-| `ci_playground_idle_minutes` | `5` | | How long a billed CI playground stays up after its last run (0 to 1440). API only. |
+| `ci_auto_playground` | `true` | | Whether a run that does not fit moves to a [CI playground](#when-a-run-does-not-fit-the-ci-playground). No portal field: `--auto-playground` from CLI 0.78.0, or the API. |
+| `ci_playground_idle_minutes` | `5` | | How long a billed CI playground stays up after its last run (0 to 1440). No portal field: `--playground-idle-minutes` from CLI 0.78.0, or the API. |
 
 ```bash
 ankra org ci-settings get
@@ -673,7 +678,7 @@ Two organisation limits and one property of the cluster decide how much pipeline
 |-------|--------|---------|-------|-----------|
 | `ci_max_parallel_runs` | Runs of the organisation in flight at once | `16` | 1 to 64 | **Runs at the same time**, or `ankra org ci-settings set --max-parallel-runs N` |
 | `ci_max_parallel_steps` | Steps of **one run** in flight at once | `8` | 1 to 256 | **Steps at the same time, in one run**, or `ankra org ci-settings set --max-parallel-steps N` |
-| `ci_worker_count` | CI slots: steps the cluster's agent runs at once, across every run on that cluster | `0` (pipelines off) | 0 to 128 (0 to 32 on older agents) | `ankra cluster agent ci set --workers N --cluster <name>` |
+| `ci_worker_count` | CI slots: steps the cluster's agent runs at once, across every run on that cluster | `0` (pipelines off). `2` on a playground, and on a new non-production cluster when the conditions in [Before your first run](#before-your-first-run) hold | 0 to 128 (0 to 32 on older agents) | `ankra cluster agent ci set --workers N --cluster <name>` |
 
 The run limit caps throughput: every run past it waits as `queued`. The step limit only shapes how wide one run fans out, so raising it never drains a queue of other runs.
 
@@ -777,6 +782,9 @@ Anyone who can push can change what a pipeline *does*: add stages, rewrite scrip
 - The `services` block - each sidecar's image, environment and ports.
 - A `gate` stage's approval roles and required stages, an `approval` stage's roles and minimum approvals, an `agent` stage in `agent` mode and its tool profile, a `webhook` stage's URL, an `external` stage's provider and workflow.
 - The `environments` block - data policy, verification, rollout and gate per environment.
+- A `kind: deploy` stage's `environment` and its `deploy` block - which `publish` stage's image rolls out, as which release, to which of the environment's targets.
+- A `publish` stage's `publish.promote_from` - whether a merge may publish the image its pull request run already tested, without building it again.
+- A `kind: environment` stage's `test_environment` block - the clusters a run builds, which your organisation pays for, and what runs on them.
 
 A stage the default-branch definition does not have gets no authority at all: adding a stage is free, adding a privileged stage is impossible.
 
