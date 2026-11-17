@@ -2,33 +2,45 @@
 """Every link to a heading on a docs page names an id the live site renders.
 
 Mintlify gives a heading an id by rewriting its text, and the rewrite keeps more
-than a Markdown slug does: `## Ankra's build cluster` renders as
-<h2 id="ankra’s-build-cluster">, the straight apostrophe turned into the
-typographic one and kept, so a link written #ankras-build-cluster opens the page
-at its top. Nothing in CI caught that (ankra-jn451h): `mint broken-links` checks
+than a Markdown slug does. `## Ankra's build cluster` renders as
+<h2 id="ankra’s-build-cluster">: the straight apostrophe becomes the typographic
+one and stays. A link written #ankras-build-cluster therefore opens the page at
+its top, and nothing in CI caught that (ankra-jn451h): `mint broken-links` checks
 that the page exists, never the anchor. This check renders each heading's id the
 way the site does and fails a link whose anchor matches none.
 
-The rules, read off the rendered site on 2026-11-17 (every heading of 19 pages,
-769 headings, matched; the self-test holds one example of each):
+The rules were read off the rendered site on 2026-11-17: every heading and
+Update label of 23 fetched pages, 1,262 ids, matched both ways, and a second
+reader matched 661 headings with special characters on 65 pages and 308 Update
+labels. One example of each rule is in the self-test:
 
-  lowercase; ' becomes ’; " becomes “ after a space or an opening bracket and ”
-  anywhere else, the start of the heading included; whitespace and . become -;
-  backticks, *, and , : ; ? ! ( ) [ ] are dropped; everything else stays (& € $
-  / | @ _ and the non-breaking hyphen among them); runs of - collapse and a
-  leading or trailing - goes; a second identical id on the page gets -2, a
-  third -3. A link in a heading counts by its text. An <Accordion title>, a
-  <Tab title> and an <Update label> render an id too, and an explicit id="..."
-  is one. <Step> and <Card> titles render none.
+  - letters are lowercased; whitespace and . become -
+  - ' becomes ’
+  - " becomes “ after a space or an opening bracket, ” anywhere else (the start
+    of the heading included)
+  - backticks and , : ; ? ! ( ) [ ] are dropped
+  - everything else stays: & € $ / | @ _ and the non-breaking hyphen among them
+  - runs of - collapse; a leading or trailing - goes
+  - a second identical id on the page gets -2, a third -3
+  - a heading written in backticks keeps its text
+  - assumed, not read (no heading on master has one): * is dropped, and a link in
+    a heading counts by its text
 
-What is read: every .mdx, outside code fences (and, for links, outside inline
-code); links written
-[text](/page#anchor), [text](#anchor) or href="/page#anchor". The anchor is
-percent-decoded and HTML-unescaped before the comparison (the site's own table
-of contents writes #clusters-%26-kubernetes for "Clusters & Kubernetes"). A page
-that does not exist is mint broken-links' finding, not this check's; an exact
-redirect in docs.json is followed; a link to a page that is not an .mdx (the
-generated API reference) is not judged.
+An <Update label> renders an id by the same rules (the changelog's 2026-11-14 and
+2026-11-14-2), and an explicit id="..." on an HTML element is one. A component
+prop such as <YouTube id="..."> is not. <Step> and <Card> titles render no id.
+<Accordion> and <Tab> titles render ids by rules of their own (an Accordion drops
+the apostrophe, turns _ and / into -, and numbers repeats from -1; a Tab keeps ,
+and / percent-encoded in the id). This check does not model those: a link whose
+anchor spells such a title, letters and digits only, is not judged.
+
+What is read: every .mdx, outside the frontmatter and code fences (and, for
+links, outside inline code); links written [text](/page#anchor), [text](#anchor)
+or href="/page#anchor". The anchor is percent-decoded and HTML-unescaped before
+the comparison (the site's own table of contents writes #clusters-%26-kubernetes
+for "Clusters & Kubernetes"). A page that does not exist here is mint
+broken-links' finding, not this check's, and a link to a page that is not an
+.mdx (the generated API reference) is not judged.
 
 scripts/anchors-baseline.json holds the anchors that were already dead when the
 check was introduced (2026-11-17), keyed on page and link target, never the
@@ -52,7 +64,6 @@ from urllib.parse import unquote
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 BASELINE_PATH = os.path.join(ROOT, "scripts", "anchors-baseline.json")
-DOCS_JSON_PATH = os.path.join(ROOT, "docs.json")
 SKIPPED_DIRECTORIES = {"node_modules", ".git", ".claude", ".vale", ".mr-worktrees"}
 
 FENCE = re.compile(r"^\s*```")
@@ -61,9 +72,10 @@ HEADING = re.compile(r"^\s*#{1,6}\s+(.*?)\s*$")
 LINK_TEXT = re.compile(r"\[([^\]]*)\]\([^)]*\)")
 MARKDOWN_LINK = re.compile(r"\]\(\s*<?([^)\s>]+)>?(?:\s+\"[^\"]*\")?\s*\)")
 HREF = re.compile(r"\bhref=\"([^\"]+)\"")
-EXPLICIT_ID = re.compile(r"\bid=\"([^\"]+)\"")
-TITLED = re.compile(r"<(?:Accordion|Tab)\b[^>]*?\btitle=\"([^\"]*)\"")
+# An HTML element's id. A component's prop (<YouTube id="...">) is read by the component, never rendered as an id.
+ELEMENT_ID = re.compile(r"<[a-z][\w-]*\b[^>]*\bid=\"([^\"]+)\"")
 UPDATE_LABEL = re.compile(r"<Update\b[^>]*?\blabel=\"([^\"]*)\"")
+OTHER_TITLE = re.compile(r"<(?:Accordion|Tab)\b[^>]*?\btitle=\"([^\"]*)\"")
 DROPPED = set("`*,:;?!()[]")
 RULES = (
     "a heading's id is its text lowercased, ' as ’ and \" as “ or ”, spaces and . as -, "
@@ -75,7 +87,7 @@ RULES = (
 
 
 def rendered_id(text):
-    """The id Mintlify renders for a heading, an Accordion title or an Update label."""
+    """The id Mintlify renders for a heading or an Update label."""
     text = html.unescape(LINK_TEXT.sub(r"\1", text)).strip()
     out = []
     for index, char in enumerate(text):
@@ -93,42 +105,54 @@ def rendered_id(text):
     return re.sub(r"-+", "-", "".join(out)).strip("-")
 
 
+def letters(text):
+    """A title or anchor reduced to its letters and digits, for the ids this check does not model."""
+    return re.sub(r"[^a-z0-9]", "", html.unescape(LINK_TEXT.sub(r"\1", text)).lower())
+
+
 def prose_lines(text):
-    """(line number, line) for every line outside code fences."""
+    """(line number, line) for every line outside the frontmatter and code fences."""
+    lines = text.split("\n")
+    start = 0
+    if lines and lines[0].strip() == "---":  # the frontmatter: a YAML comment in it is not a heading
+        for index in range(1, len(lines)):
+            if lines[index].strip() == "---":
+                start = index + 1
+                break
     in_fence = False
-    for number, line in enumerate(text.split("\n"), start=1):
+    for index in range(start, len(lines)):
+        line = lines[index]
         if FENCE.match(line):
             in_fence = not in_fence
             continue
         if in_fence:
             continue
-        yield number, line
+        yield index + 1, line
 
 
-def page_ids(text):
-    """Every id the page renders: headings, Accordion and Tab titles and Update labels,
-    numbered as the site numbers repeats, plus explicit id attributes."""
-    ids = set()
-    seen = {}
+class PageIds:
+    """What the page renders: `exact`, the ids this check models (headings and Update labels numbered as
+    the site numbers repeats, element ids), and `unmodelled`, the Accordion and Tab titles by their letters."""
 
-    def add(candidate):
-        if not candidate:
-            return
-        count = seen.get(candidate, 0) + 1
-        seen[candidate] = count
-        ids.add(candidate if count == 1 else f"{candidate}-{count}")
-
-    for _, line in prose_lines(text):
-        heading = HEADING.match(line)
-        if heading:
-            add(rendered_id(heading.group(1)))
-        for match in TITLED.finditer(line):
-            add(rendered_id(match.group(1)))
-        for match in UPDATE_LABEL.finditer(line):
-            add(rendered_id(match.group(1)))
-        for match in EXPLICIT_ID.finditer(line):
-            ids.add(html.unescape(match.group(1)))
-    return ids
+    def __init__(self, text):
+        self.exact = set()
+        self.unmodelled = set()
+        seen = {}
+        for _, line in prose_lines(text):
+            heading = HEADING.match(line)
+            candidates = [heading.group(1)] if heading else []
+            candidates += UPDATE_LABEL.findall(line)
+            for candidate in candidates:
+                rendered = rendered_id(candidate)
+                if not rendered:
+                    continue
+                count = seen.get(rendered, 0) + 1
+                seen[rendered] = count
+                self.exact.add(rendered if count == 1 else f"{rendered}-{count}")
+            for match in ELEMENT_ID.finditer(line):
+                self.exact.add(html.unescape(match.group(1)))
+            for title in OTHER_TITLE.findall(line):
+                self.unmodelled.add(letters(title))
 
 
 # ---------------------------------------------------------------- links
@@ -146,27 +170,13 @@ def links(text):
     return [(number, target) for number, target in found if "#" in target and "://" not in target and not target.startswith("mailto:")]
 
 
-def load_redirects():
-    """Exact docs.json redirects, source to destination; a wildcard pattern is left out."""
-    if not os.path.exists(DOCS_JSON_PATH):
-        return {}
-    with open(DOCS_JSON_PATH, encoding="utf-8") as handle:
-        redirects = json.load(handle).get("redirects", [])
-    return {
-        entry["source"]: entry["destination"]
-        for entry in redirects
-        if ":" not in entry["source"] and "*" not in entry["source"]
-    }
-
-
-def resolve(page, target, pages, redirects):
+def resolve(page, target, pages):
     """(the page the target names as a path in `pages`, or None when it is not one to judge; the anchor)."""
     path, _, fragment = target.partition("#")
+    # CommonMark decodes an entity in a link destination, so &amp; in the source is &.
     anchor = html.unescape(unquote(fragment))
     if not path:
         return page, anchor
-    path = path.rstrip("/") or "/"
-    path = redirects.get(path, path).split("#")[0]
     if not path.startswith("/"):
         return None, anchor
     stem = path.strip("/")
@@ -176,7 +186,7 @@ def resolve(page, target, pages, redirects):
     return None, anchor
 
 
-def evaluate(pages, redirects):
+def evaluate(pages):
     """pages: {relative path: text}. Returns (links checked, links not judged, findings), a
     finding being {"page", "target", "line", "anchor", "on", "nearest"}."""
     ids = {}
@@ -185,16 +195,21 @@ def evaluate(pages, redirects):
     findings = []
     for page in sorted(pages):
         for line, target in links(pages[page]):
-            resolved, anchor = resolve(page, target, pages, redirects)
+            resolved, anchor = resolve(page, target, pages)
             if resolved is None:
                 unjudged += 1
                 continue
-            checked += 1
             if resolved not in ids:
-                ids[resolved] = page_ids(pages[resolved])
-            if anchor in ids[resolved]:
+                ids[resolved] = PageIds(pages[resolved])
+            if anchor in ids[resolved].exact:
+                checked += 1
                 continue
-            nearest = difflib.get_close_matches(anchor, sorted(ids[resolved]), n=1, cutoff=0.6)
+            plain = letters(anchor)
+            if plain in ids[resolved].unmodelled or re.sub(r"\d+$", "", plain) in ids[resolved].unmodelled:
+                unjudged += 1  # an Accordion or Tab title, or a numbered repeat of one
+                continue
+            checked += 1
+            nearest = difflib.get_close_matches(anchor, sorted(ids[resolved].exact), n=1, cutoff=0.6)
             findings.append(
                 {
                     "page": page,
@@ -290,42 +305,57 @@ def self_test():
         "Every application now gets its own registry robot account - on Ankra's registry":
             "every-application-now-gets-its-own-registry-robot-account-on-ankra’s-registry",
         "[`spec.log_source`](/reference/importcluster) and `spec.git_repository`": "spec-log_source-and-spec-git_repository",
-        "**Bold** heading": "bold-heading",
         "`spec.git_repository`": "spec-git_repository",
         "`spec.stacks[].backup`": "spec-stacks-backup",
         "Follow the imports: `affected:`": "follow-the-imports-affected",
+        "Make \"done\" mean evidence": "make-“done”-mean-evidence",
+        "**Bold** heading": "bold-heading",
     }
     for text, expected in cases.items():
         assert rendered_id(text) == expected, (text, rendered_id(text), expected)
     page = "\n".join(
         [
+            "---",
+            "title: A page",
+            "# a YAML comment, not a heading",
+            "---",
             "## AI & Automation",
             "## AI & Automation",
-            '<Accordion title="Is it safe to leave a cluster half upgraded?">',
+            '<Accordion title="Keep Loki\'s logs in object storage">',
             "text",
             "</Accordion>",
-            '<Tab title="Portal">',
+            '<Tab title="CI/CD">',
             '<Step title="Not an id">',
             '<Update label="2026-11-14" description="x">',
             '<Update label="2026-11-14">',
             "```markdown",
             "## Not a heading",
             "```",
-            "## `spec.log_source`",
             "A line with `## not a heading either` in code.",
-            '<a id="the-other-half-of-the-change" />',
+            "## `spec.log_source`",
+            '<span id="the-other-half-of-the-change" />',
+            '<YouTube id="HzImi_lkMmw" title="Not an id" />',
         ]
     )
-    assert page_ids(page) == {
-        "ai-&-automation", "ai-&-automation-2", "is-it-safe-to-leave-a-cluster-half-upgraded", "portal",
-        "2026-11-14", "2026-11-14-2", "spec-log_source", "the-other-half-of-the-change",
-    }, page_ids(page)
+    ids = PageIds(page)
+    assert ids.exact == {
+        "ai-&-automation", "ai-&-automation-2", "2026-11-14", "2026-11-14-2", "spec-log_source", "the-other-half-of-the-change",
+    }, ids.exact
+    assert ids.unmodelled == {"keeplokislogsinobjectstorage", "cicd"}, ids.unmodelled
     pages = {
         "pipelines/where-pipelines-run.mdx": "\n".join(
             [
                 "## Your own cluster",
                 "See [the build cluster](#ankras-build-cluster), [right](#ankra%E2%80%99s-build-cluster) and [raw](#ankra’s-build-cluster).",
                 "## Ankra's build cluster",
+                '<Accordion title="Keep Loki\'s logs in object storage">',
+                "[the live Accordion id](#keep-lokis-logs-in-object-storage) and [the heading spelling](#keep-loki’s-logs-in-object-storage)",
+                "</Accordion>",
+                '<Accordion title="Full pipeline.yaml">',
+                '<Accordion title="Full pipeline.yaml">',
+                "[the second one, as the site numbers it](#full-pipeline-yaml-1)",
+                '<Tab title="GitLab CI, Bitbucket or CircleCI">',
+                "[the Tab, as the site encodes it](#gitlab-ci%2C-bitbucket-or-circleci)",
             ]
         ),
         "guides/a.mdx": "\n".join(
@@ -344,8 +374,8 @@ def self_test():
         "platform/mcp-tools.mdx": "## Clusters & Kubernetes\n",
         "index.mdx": "## Start\n",
     }
-    checked, unjudged, findings = evaluate(pages, {"/old/where": "/pipelines/where-pipelines-run"})
-    assert (checked, unjudged) == (11, 3), (checked, unjudged)
+    checked, unjudged, findings = evaluate(pages)
+    assert (checked, unjudged) == (10, 8), (checked, unjudged)
     assert [(f["page"], f["line"], f["target"], f["nearest"]) for f in findings] == [
         ("guides/a.mdx", 1, "/pipelines/where-pipelines-run#ankras-build-cluster", "ankra’s-build-cluster"),
         ("guides/a.mdx", 3, "/pipelines/where-pipelines-run#nope", None),
@@ -369,7 +399,7 @@ def main(argv):
     for page in docs_pages():
         with open(os.path.join(ROOT, page), encoding="utf-8") as handle:
             pages[page] = handle.read()
-    checked, unjudged, findings = evaluate(pages, load_redirects())
+    checked, unjudged, findings = evaluate(pages)
     if "--update" in argv:
         write_baseline(findings)
         print(f"wrote {len({key(f) for f in findings})} entries to scripts/anchors-baseline.json")
@@ -378,10 +408,10 @@ def main(argv):
     baselined = {key(entry) for entry in baseline}
     failing = {key(finding) for finding in findings}
     new = [finding for finding in findings if key(finding) not in baselined]
-    stale = [entry for entry in baseline if key(entry) not in baselined - (baselined - failing)]
+    stale = [entry for entry in baseline if key(entry) not in failing]
     print(
         f"anchors: {checked} links to headings on {len(pages)} pages checked against the ids the site renders; "
-        f"{unjudged} not judged (a page that is missing or not an .mdx is mint broken-links' job); "
+        f"{unjudged} not judged (a page that is missing or not an .mdx is mint broken-links' job; an Accordion or Tab title has rules of its own); "
         f"{len(findings)} findings, {len(findings) - len(new)} baselined, {len(new)} new"
     )
     if new:
