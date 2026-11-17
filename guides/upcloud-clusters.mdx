@@ -9,39 +9,45 @@ Choose UpCloud when you want Kubernetes on UpCloud servers in an account you own
 
 ## Before you start
 
-- An **UpCloud API token** with permission to manage servers, networking, storage and Kubernetes, stored as an [UpCloud credential](/platform/credentials/upcloud).
+- A **payment method** on the organisation. Without one, the create is refused with "Add a payment method to create this cluster." See [Credit and payment method](/platform/billing#credit-and-payment-method).
+- An **UpCloud API token** with permission to manage servers, networking, storage and Kubernetes, stored as an [UpCloud credential](/platform/credentials/upcloud): **Integrations & alerts → Credentials → Add credential → UpCloud**, or **Add a credential** inside the create form.
 - An **SSH key credential** - your own public key, or one Ankra generates. See [SSH Key Credentials](/platform/credentials/ssh-key).
 - Room in your account's limits for the servers, networks, routers and IP addresses. Check them in the [UpCloud Control Panel](https://hub.upcloud.com/); UpCloud support raises them.
 
 ## Create the cluster
 
 <Tabs>
-  <Tab title="Dashboard">
+  <Tab title="Portal">
+    Follow [Create a Cluster](/guides/create-a-cluster) with these UpCloud choices:
+
     <Steps>
-      <Step title="Open the create dialog">
-        Go to **Clusters**, click **Create cluster** and pick **UpCloud** under **Ankra Managed**.
+      <Step title="Choose UpCloud">
+        Go to **Infrastructure → Clusters**, click **Add a cluster**, pick **UpCloud**, then **Ankra managed** under **Who runs Kubernetes on UpCloud?** (**Provider managed** creates an [UpCloud UKS](/guides/uks-clusters) cluster).
+
+        The form **Add an UpCloud cluster** opens.
       </Step>
-      <Step title="Credential & Zone">
-        Pick the UpCloud credential and the SSH key (or add either inline), and the zone, for example Helsinki, Frankfurt, Chicago or Amsterdam.
+      <Step title="Where it runs">
+        Choose the **UpCloud credential**, the **SSH key** and the **Zone**. Then pick the two network plans, read live from your UpCloud account; see [NAT gateway and load balancer plans](#nat-gateway-and-load-balancer-plans):
+
+        - **NAT gateway (outbound internet)** - the gateway every node reaches the internet through. Choose it now: changing it later cuts the cluster's internet access for several minutes.
+        - **Ingress load balancer (incoming traffic)** - the load balancer in front of the ingress Ankra installs. It starts on `development` (one node), or `production-small` (two nodes) when the cluster runs **Production**. It is offered only with **Install the networking stack**.
       </Step>
-      <Step title="Network & Compute">
-        Keep or change the private network range, then pick the bastion plan, the control plane count and plan, and the worker plan and count, with optional autoscaling bounds. The wizard shows each plan's vCPUs, RAM and monthly price. Add more node groups once the cluster is running.
+      <Step title="Control plane and servers">
+        Pick **Single node** or **High availability**, the **Control plane size**, and the **Management server** size. Each size field lists the zone's plans under **Exact server type**. The form starts with `PREMIUM-4xCPU-8GB` for the control plane and workers.
       </Step>
-      <Step title="Kubernetes">
-        Keep **kubeadm** (the default, with Cilium) or pick **k3s**, and optionally the version. See [Choices fixed at create time](/guides/operate-ankra-managed-clusters#choices-fixed-at-create-time) for the CNI and etcd options.
+      <Step title="Worker nodes">
+        The form creates one node group; add more once the cluster is running. Under **Placement, labels and taints**, **Pin to availability zone** keeps the group in one zone of a multi-zone pool.
       </Step>
-      <Step title="GitOps">
-        Optionally connect a Git repository; Ankra commits the cluster's stacks to it. Two checkboxes are on by default:
-        - **Include Networking Stack** - Traefik, cert-manager and a Let's Encrypt ClusterIssuer, with Traefik behind an UpCloud load balancer. To serve Gateway and HTTPRoute resources from the same Traefik as well, see [Gateway API](/guides/gateway-api).
-        - **Include Public DNS** - a delegated subdomain on `ankra.cc` with external-dns wired, so an ingress hostname under it gets its DNS record and TLS certificate automatically.
+      <Step title="Zones (optional)">
+        Under **Advanced configuration → UpCloud zone placement**, tick **Spread nodes across zones** and choose at least three zones, including the one you picked above. This switches the form to **kubeadm** and three control plane nodes. For a single-zone cluster that may grow later, tick **Enable WireGuard mesh so zones can be added later** instead. See [Multi-zone clusters](#multi-zone-clusters).
       </Step>
-      <Step title="Details">
-        Name the cluster, set its environment, and click **Create cluster**. A progress view follows the router, network, gateway, bastion, servers, Kubernetes installation and Ankra Agent.
+      <Step title="Review and create">
+        Click **Review cluster**, check the settings and the cost, then click **Create cluster**. The progress page follows the stages to **&lt;cluster name&gt; is ready**.
       </Step>
     </Steps>
   </Tab>
   <Tab title="CLI">
-    <CliVersion since="0.9.0" />
+    <CliVersion since="0.61.0" />
 
     ```bash
     ankra credentials upcloud create --name my-upcloud-token   # prompts for the token
@@ -53,12 +59,14 @@ Choose UpCloud when you want Kubernetes on UpCloud servers in an account you own
       --ssh-key-credential-id <ssh-key-credential-id> \
       --zone fi-hel1 \
       --control-plane-count 1 \
-      --control-plane-plan 2xCPU-4GB \
+      --control-plane-plan PREMIUM-4xCPU-8GB \
       --worker-count 2 \
-      --worker-plan 4xCPU-8GB
+      --worker-plan PREMIUM-4xCPU-8GB
     ```
 
-    Left unset, `--network-ip-range` is picked from ranges free in your account. `--distribution k3s`, `--etcd-topology external`, `--include-networking=false`, `--gateway-api` ([Gateway API](/guides/gateway-api)) and the `--gitops-*` flags cover the other choices; `--zones` and `--network-mode` are for [multi-zone clusters](#multi-zone-clusters).
+    Left unset, `--network-ip-range` is a `10.x.y.0/24` Ankra picks for the cluster, different for each cluster. `--distribution k3s`, `--etcd-topology external`, `--include-networking=false`, `--gateway-api` ([Gateway API](/guides/gateway-api)), `--bastion-allowed-ips` and the `--gitops-*` flags cover the other choices; `--zones` and `--network-mode` are for [multi-zone clusters](#multi-zone-clusters).
+
+    `ankra cluster upcloud create` has no flags for the NAT gateway or load balancer plan, so the cluster gets the defaults: `standard` for the NAT gateway, and `development` for the load balancer (`production-small` for a production cluster). Change them afterwards; see [NAT gateway and load balancer plans](#nat-gateway-and-load-balancer-plans).
   </Tab>
   <Tab title="API">
     ```bash
@@ -71,22 +79,24 @@ Choose UpCloud when you want Kubernetes on UpCloud servers in an account you own
         "ssh_key_credential_id": "<ssh-key-credential-id>",
         "zone": "fi-hel1",
         "control_plane_count": 1,
-        "control_plane_plan": "2xCPU-4GB",
+        "control_plane_plan": "PREMIUM-4xCPU-8GB",
         "node_groups": [
-          {"name": "default", "instance_type": "4xCPU-8GB", "count": 2}
+          {"name": "default", "instance_type": "PREMIUM-4xCPU-8GB", "count": 2}
         ],
+        "gateway_plan": "standard",
+        "load_balancer_plan": "development",
         "include_networking": true,
         "include_dns": true
       }'
     ```
 
-    Every field, the zone list and the plans are in the [UpCloud Reference](/reference/upcloud).
+    `gateway_plan` and `load_balancer_plan` are optional. Left out, the NAT gateway gets `standard`, and the load balancer gets `production-small` for a cluster whose criticality is `production` and `development` otherwise. Every field, the zone list and the plans are in the [UpCloud Reference](/reference/upcloud).
   </Tab>
 </Tabs>
 
 ## Verify
 
-1. The cluster moves from **Provisioning** to **Online** in the clusters list once the Ankra Agent has connected.
+1. In **Infrastructure → Clusters**, the cluster's status moves from **In progress** to **Online** once the Ankra Agent has connected.
 2. Point `kubectl` at it through Ankra (this needs a [Cluster Access](/guides/cluster-access) grant) and check the nodes:
 
    <CliVersion since="0.3.0" command="cluster kubeconfig add" />
@@ -108,9 +118,54 @@ Choose UpCloud when you want Kubernetes on UpCloud servers in an account you own
 
 On a multi-zone cluster, every additional zone gets its own router, private network and NAT gateway, and the nodes are joined by a WireGuard mesh. The [UpCloud Reference](/reference/upcloud#architecture) has the diagram.
 
+## NAT gateway and load balancer plans
+
+Two UpCloud resources in front of the cluster are billed to your account by plan:
+
+- **The NAT gateway** carries all outbound traffic: image pulls, the Ankra agent's connection, and any outside service your applications call. A plan that runs on two or more servers keeps egress up while UpCloud replaces one. Without a choice, a new cluster gets `standard`, the cheapest two-server plan.
+- **The ingress load balancer** carries incoming traffic to the ingress Ankra installs with the networking stack. `development` runs one load balancer node; the `production-*` plans run two. Without a choice, a production cluster gets `production-small` and every other cluster `development`.
+
+List the plans your account can create, read live from UpCloud:
+
+<CliVersion since="0.74.0" command="cluster upcloud gateway-plans" />
+
+```bash
+ankra cluster upcloud gateway-plans --credential-id <upcloud-credential-id>
+ankra cluster upcloud load-balancer-plans --credential-id <upcloud-credential-id>
+```
+
+Change a plan on a running cluster:
+
+<Tabs>
+  <Tab title="Portal">
+    Go to **Infrastructure → Clusters → &lt;your cluster&gt; → Settings → Network**. Under **Internet gateway and load balancer**:
+
+    - **Change NAT gateway plan** - pick the plan, tick "I understand this cluster will have no outbound internet access for several minutes." and click **Change NAT gateway plan**.
+    - **Change load balancer plan** - pick the plan and click **Change load balancer plan**. UpCloud moves the existing load balancer onto the new plan in place.
+
+    On a stopped cluster, the NAT gateway takes the new plan at the next start.
+  </Tab>
+  <Tab title="CLI">
+    ```bash
+    ankra cluster upcloud gateway-plan my-cluster --plan standard
+    ankra cluster upcloud load-balancer-plan get my-cluster
+    ankra cluster upcloud load-balancer-plan set my-cluster --plan production-small
+    ```
+
+    `gateway-plan` asks for confirmation; `--yes` skips the question.
+  </Tab>
+</Tabs>
+
+<Warning>
+Changing the NAT gateway plan rebuilds the gateway, so the cluster has no outbound internet access for several minutes: nodes cannot pull images and applications cannot reach outside services until it is back. Choose a quiet time.
+</Warning>
+
 ## UpCloud specifics
 
+<CliVersion since="0.31.0" command="cluster upcloud bastion allowed-ips" />
+
 - **Plan changes go one way.** A node group moves to a larger plan only; each node is powered off, resized and powered on, with brief downtime for its workloads. For smaller nodes, create a new group and delete the old one.
+- **SSH allowlist.** At create time, **Addresses allowed to reach the management server** under **Advanced configuration** (or `--bastion-allowed-ips`) limits SSH to the bastion to the IPv4 addresses or ranges you list; empty allows any address. On a running cluster, replace the list with `ankra cluster upcloud bastion allowed-ips my-cluster 203.0.113.7 198.51.100.0/24`, or remove it with `--clear`.
 - **Stop.** A stop releases the node servers, the bastion and the NAT gateway, and keeps the networking definition and SSH keys. The CSI storage volumes are kept and billed while the cluster is stopped.
 - **Terminate** deletes the servers, networks, routers, gateways and SSH keys. The storage volumes Ankra deletes, once you accept it, are exactly the ones it recorded for this cluster - never other disks in the account.
 
@@ -140,9 +195,9 @@ ankra cluster upcloud create \
   --zone fi-hel1 \
   --zones fi-hel1,fi-hel2,se-sto1 \
   --control-plane-count 3 \
-  --control-plane-plan 2xCPU-4GB \
+  --control-plane-plan PREMIUM-4xCPU-8GB \
   --worker-count 3 \
-  --worker-plan 4xCPU-8GB
+  --worker-plan PREMIUM-4xCPU-8GB
 ```
 
 ```bash cURL
@@ -156,9 +211,9 @@ curl -X POST https://platform.ankra.app/api/v1/clusters/upcloud \
     "zone": "fi-hel1",
     "zones": ["fi-hel1", "fi-hel2", "se-sto1"],
     "control_plane_count": 3,
-    "control_plane_plan": "2xCPU-4GB",
+    "control_plane_plan": "PREMIUM-4xCPU-8GB",
     "worker_count": 3,
-    "worker_plan": "4xCPU-8GB",
+    "worker_plan": "PREMIUM-4xCPU-8GB",
     "distribution": "kubeadm"
   }'
 ```
@@ -198,7 +253,7 @@ Pin the group that runs zonal storage: an UpCloud volume cannot attach from anot
 ```bash
 ankra cluster node-group add <cluster> \
   --name database-sto \
-  --instance-type 4xCPU-8GB \
+  --instance-type PREMIUM-4xCPU-8GB \
   --count 1 \
   --zone se-sto1
 ```
@@ -221,7 +276,7 @@ my-cluster-cp-1  Ready    172.30.0.2    ...   # fi-hel2
 my-cluster-cp-2  Ready    172.30.0.3    ...   # se-sto1
 ```
 
-Each zone in the pool also takes its own consecutive `/24` from the cluster's private range: with the default range, `fi-hel1` gets `10.166.78.0/24`, `fi-hel2` `10.166.79.0/24`, and so on. Pick `network_ip_range` with room for every zone you expect to add.
+Each zone in the pool also takes its own consecutive `/24` from the cluster's private range. A range Ankra picks for you differs from cluster to cluster, so pick `network_ip_range` yourself, with room for every zone you expect to add.
 
 #### `LoadBalancer` Services on a meshed cluster
 

@@ -76,8 +76,8 @@ flowchart LR
         PRSave --> BranchCache
     end
 
-    MainCache -->|restore fallback| PRRun[Pull request run<br/>starts warm from main]
-    BranchCache -->|restore first| PRRun
+    MainCache -->|restore first| PRRun[Pull request run<br/>starts warm from main]
+    BranchCache -->|restore second| PRRun
     BranchCache -.-x|never| MainRun[Run on main]
     MainCache --> MainRun
 
@@ -85,10 +85,10 @@ flowchart LR
 ```
 
 - **A run on the default branch** restores only what default-branch runs saved.
-- **Any other run** (a feature branch, a pull request, a manual run of another ref) looks in its own scope first and then falls back to the default branch's. A new pull request starts warm from `main`.
+- **Any other run** (a feature branch, a pull request, a merge train car, a manual run of another ref) looks in the default branch's scope first and then in its own, for the exact key and for each `restore_keys` prefix. A key `main` holds is restored from `main`'s entry, so a new pull request starts warm from `main`. A key only the branch scope holds, such as the key of a pull request that changed its lock file, is still restored from the branch's entry. The branch scope is one pool every branch shares, so reading `main` first stops an old branch entry from shadowing `main`'s fresh one under the same key.
 - **Nothing a branch saves ever reaches a default-branch run.** A less-trusted ref cannot plant a poisoned dependency in what your release build restores.
 - **A restricted fork run and a tag run get no shared cache at all.** Every declared path starts empty, and the step records `caches are not shared with fork runs` or `caches are not shared with tag runs`.
-- **Scopes are per repository and cluster.** One repository never restores another's cache.
+- **Scopes are per repository.** One repository never restores another's cache. A cache archive is not tied to a cluster, so a run restores it on whichever cluster it runs. On an older agent, a cache volume is per cluster as well.
 
 `cache` is a [protected section](/pipelines/how-it-works#logic-is-open-authority-is-closed). A pull request can rewrite its scripts, but it cannot change which earlier output is restored into the workspace until the change reaches the default branch and an administrator approves it.
 
@@ -216,7 +216,7 @@ Each key's `restore_keys` is its own prefix (`pnpm-`, `go-`, and so on). In a mo
 
 Every step records one result for all its caches, and one entry per cache. `ankra pipeline get` shows the result in the **CACHE** column, and the portal's run timeline shows it as a chip on the step.
 
-<CliVersion since="0.15.0" />
+<CliVersion since="0.74.0" />
 
 ```bash
 ankra pipeline get <run-id>                    # CACHE column per step
@@ -234,6 +234,24 @@ ankra pipeline get <run-id> --step test        # one row per cache: outcome, byt
 
 A failed restore never fails the step. The step starts cold and logs a line starting `[ankra] cache` that says why: the key could not be computed (`key_unresolvable`), the archive did not download or unpack, or the restore pod was not scheduled or timed out.
 
+## See what is cached
+
+These two views list the cache **volumes** a repository keeps between runs, the kind an [older agent](#limits-and-retention) uses. Cache archives in the vault are not listed in them; to see what one run restored and saved, use `ankra pipeline get <run-id> --step <step>` above.
+
+<Tabs>
+  <Tab title="Portal">
+    Open **Applications → &lt;your application&gt; → Pipelines → Cache**. It lists the cache volumes the repository's pipeline stages keep from one run to the next.
+  </Tab>
+  <Tab title="CLI">
+    ```bash
+    ankra pipeline caches --application my-app
+    ankra pipeline caches --repository <repository-id> -o json
+    ```
+
+    Each row is a cache volume a stage declared: its key, where it is mounted, its size, the cluster the volume lives on, and when it lapses under the organisation's cache retention, most recently used first. Default-branch and other-branch caches are listed apart, because they never share a volume. It needs `pipelines.read`.
+  </Tab>
+</Tabs>
+
 ## Limits and retention
 
 | Limit | Value |
@@ -243,7 +261,7 @@ A failed restore never fails the step. The step starts cold and logs a line star
 | Retention | An entry nothing restored for `ci_cache_retention_days` (default 14, 1 to 365) is removed |
 | Largest declared cache | `max_cache_size` on the organisation's pipeline policy, when an administrator sets one |
 
-**On an older agent.** Caches are stored as archives in the vault on clusters whose agent supports it. On an older agent, `fallback: volume` (the default) gives each path one 5Gi volume shared by runs of the same trust scope on that cluster, and `fallback: none` gives the step an empty directory. Prefer `none` for a cache that is only an optimisation: a shared volume attaches to one node at a time, so two overlapping runs could wait on each other. Upgrade the agent (`ankra cluster agent upgrade`) to get archives.
+**On an older agent.** Caches are stored as archives in the vault on clusters whose agent supports it. On an older agent, `fallback: volume` (the default) gives each path one 5Gi volume shared by runs of the same trust scope on that cluster. The two scopes never read each other's volume there, so a pull request does not start warm from `main`. `fallback: none` gives the step an empty directory. Prefer `none` for a cache that is only an optimisation: a shared volume attaches to one node at a time, so two overlapping runs could wait on each other. Upgrade the agent (`ankra cluster agent upgrade`) to get archives.
 
 ## Image builds cache their layers for you
 

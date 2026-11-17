@@ -1,118 +1,251 @@
 ---
-title: Nodes
-description: Every machine behind a cluster - what the provider runs and what Kubernetes reports - with node groups, the control plane and the bastion, and the controls for each
+title: Manage Nodes and Node Groups
+sidebarTitle: Nodes
+description: Add and resize node groups, change the control plane, restart a machine, resize the bastion, and cordon or drain a node.
 ---
 
-<Note>
-The Nodes section answers "what machines is this cluster made of, and what can I do to each of them?" - the infrastructure view. **Kubernetes → Nodes** stays the view of the node *objects* Kubernetes keeps; the two link to each other.
-</Note>
+import { CliVersion } from "/snippets/cli-version.jsx";
 
-## Accessing the section
+A cluster's capacity comes from its node groups (node pools on managed Kubernetes), its control plane and, on clusters Ankra builds, a bastion. Two pages in the portal hold them:
 
-Open a cluster and click **Nodes** in the sidebar, directly above **Kubernetes**. The section has up to four tabs, depending on what Ankra manages for the cluster:
+- **Kubernetes → Nodes** lists every node Kubernetes reports, grouped by node group, with readiness, capacity and scheduling. Cordon and drain start here.
+- **Node management** changes the infrastructure: node groups, the control plane and the provider machines. Open it with **Manage nodes and groups** on the Nodes page.
 
-| Cluster | Tabs |
+## Before you start
+
+| Task | Permission on the cluster | Built-in roles that have it |
+|---|---|---|
+| Read nodes and node groups | `clusters.read` | Every role |
+| Add a node group; change its count, autoscaling, instance type, labels or taints; change the control plane; resize the bastion | `clusters.write` | Member, Operator, Admin, Owner |
+| Change the node count of a managed Kubernetes node pool | `clusters.operate` | Operator, Admin, Owner |
+| Restart a machine; stop or start the cluster | `clusters.operate` | Operator, Admin, Owner |
+| Delete a node group on a cluster Ankra builds | `clusters.delete` | Admin, Owner |
+| Delete a managed Kubernetes node pool | `clusters.write` | Member, Operator, Admin, Owner |
+| Cordon or uncordon a node | `kubernetes.write` | Operator, Admin, Owner |
+| Drain a node | `kubernetes.write` and `kube_access.use` | Operator, Admin, Owner |
+
+The portal says what is missing next to the control, for example "Editing infrastructure requires clusters.write for this cluster." or "Draining this node requires kubernetes.write and kube_access.use for this cluster." See [Roles and access](/guides/roles-and-access).
+
+On a cluster you imported, Ankra does not run the machines. Node management reads "Infrastructure is managed outside Ankra." and you can still cordon and drain nodes.
+
+## Find the nodes
+
+Go to **Infrastructure → Clusters → &lt;your cluster&gt; → Kubernetes → Nodes** (`/next/clusters/<cluster-id>/kubernetes/nodes`). The tiles at the top read **Ready**, **vCPU**, **Memory** and **Node groups** (or **Node pools**). Below them each node group lists its nodes; a node that cannot take new pods carries **Cordoned**. A provider machine that has not registered with Kubernetes yet reads **Not joined**.
+
+Click **Manage nodes and groups** to open **Node management** (`/next/clusters/<cluster-id>/node-groups`). It has three sections: **Node groups** (or **Node pools**), **Control plane** and **Provider machines**. Managed Kubernetes clusters show the node pools only; the provider runs their control plane.
+
+Every change on Node management follows the same pattern: fill in the form, click **Review change**, check the **Review infrastructure change** dialog, then click **Confirm change**. The page then says "Request accepted. Follow Operations, then verify the actual infrastructure and affected workloads." Follow the change under **Operations** with **View Operations**.
+
+## Add a node group
+
+<CliVersion since="0.16.0" />
+
+<Tabs>
+<Tab title="Portal">
+
+<Steps>
+  <Step title="Open the form">
+    On **Node management**, click **Add node group** (**Add node pool** on managed Kubernetes).
+  </Step>
+  <Step title="Describe the group">
+    Enter a **Group name** (lowercase letters, numbers and hyphens; it cannot be changed later), choose the **Instance type** and set the **Node count** (0 to 100). Tick **Enable autoscaling** to give a **Minimum nodes** and **Maximum nodes** instead. Add **Labels** (one `key=value` per line) and **Taints** (one `key=value:effect` per line, with `NoSchedule`, `PreferNoSchedule` or `NoExecute`) if workloads should be placed on this group.
+  </Step>
+  <Step title="Confirm">
+    Click **Review change**, then **Confirm change**.
+
+    **Check:** the group appears under **Node groups** with "nodes requested", and its nodes appear on **Kubernetes → Nodes** once they join.
+  </Step>
+</Steps>
+
+</Tab>
+<Tab title="CLI">
+
+```bash
+ankra cluster node-group add my-cluster \
+  --name workers-large \
+  --instance-type <instance-type> \
+  --count 2 \
+  --labels "workload=batch"
+```
+
+On managed Kubernetes use `ankra cluster managed node-pool add`. See [Operate an Ankra Managed Cluster](/guides/operate-ankra-managed-clusters#node-groups) and the [CLI reference](/reference/cli/cluster#ankra-cluster-node-group-add).
+
+</Tab>
+</Tabs>
+
+## Change a node group
+
+<Tabs>
+<Tab title="Portal">
+
+<Steps>
+  <Step title="Open the group">
+    On **Node management**, click **Inspect and edit** on the group. **Current settings** shows the instance type, the requested and observed node counts, **Fixed size** or the autoscaling range, labels and taints.
+  </Step>
+  <Step title="Pick what to change">
+    Choose a tab:
+
+    - **Node count** - a fixed size from 0 to 100 (from 1 on managed Kubernetes). Turn autoscaling off first: "Disable autoscaling before changing the fixed count."
+    - **Autoscaling** - tick **Enable autoscaling** and set **Minimum nodes** and **Maximum nodes**. See [Cluster autoscaling](/guides/cluster-autoscaling).
+    - **Instance type** - move the group to another size.
+    - **Labels** and **Taints** - the saved set replaces the group's set. An empty set removes them all.
+    - **Pool settings** - on managed Kubernetes providers that support it: **Autohealing** and **Upgrade policy**.
+    - **Delete** - type the group's name to confirm.
+  </Step>
+  <Step title="Confirm">
+    Click **Review change**, read the risk note under the form, then click **Confirm change**.
+
+    **Check:** under **Operations** the change runs to completion, and **Current settings** shows the new values after **Refresh**.
+  </Step>
+</Steps>
+
+On managed Kubernetes the pool's instance type, labels and taints cannot be changed in place: "Add a replacement pool when those settings must change."
+
+</Tab>
+<Tab title="CLI">
+
+```bash
+ankra cluster node-group scale my-cluster workers 3
+ankra cluster node-group autoscaling set my-cluster workers --enabled --min 1 --max 5
+ankra cluster node-group upgrade my-cluster workers <instance-type>
+ankra cluster node-group labels my-cluster workers --labels "workload=batch"
+ankra cluster node-group taints my-cluster workers --taints "dedicated=batch:NoSchedule"
+ankra cluster node-group delete my-cluster workers
+```
+
+`scale`, `upgrade` and `delete` take `--force-drain` to remove a node even when a PodDisruptionBudget refuses its drain. `ankra cluster node-group remove-node` removes one named node from a group; the portal has no control for it.
+
+</Tab>
+</Tabs>
+
+<Warning>
+Lowering the count or deleting a group removes nodes and can interrupt workloads. Changing the instance type may restart or replace machines and may not be reversible. Drain the nodes first or check their workloads on **Kubernetes → Nodes**.
+</Warning>
+
+## Change the control plane
+
+On **Node management**, click **Inspect control-plane settings**. The page shows the number of control plane nodes and their instance type, and offers:
+
+- **Change control-plane count** - choose the number under **Control-plane nodes**. When a change is not possible right now, the page gives the reason.
+- **Resize control plane** - choose a new **Instance type**. When the cluster has a single controller that can be resized while running, the dialog is **Resize the only control plane**: "The Kubernetes API is unavailable for a few minutes while the control plane restarts." Confirm with **Resize with API downtime**.
+
+Which changes run live, rolling or with the cluster stopped depends on the provider and the controller count. [Operate an Ankra Managed Cluster](/guides/operate-ankra-managed-clusters#control-plane) covers each mode and the CLI equivalents.
+
+## Restart a machine or resize the bastion
+
+<Tabs>
+<Tab title="Portal">
+
+<Steps>
+  <Step title="Open the machine">
+    On **Node management**, under **Provider machines**, click **Inspect machine**. **Machine details** shows the role, node group, instance type, provider status, power state and addresses.
+  </Step>
+  <Step title="Choose the action">
+    Under **What do you want to change?**:
+
+    - **Restart machine** restarts the server at the provider. It does not drain its workloads first. Type the machine's name to confirm. HPE Morpheus clusters have no restart.
+    - **Resize bastion or gateway** appears on the bastion (and the public gateway on Scaleway). Choose the new size.
+  </Step>
+  <Step title="Confirm">
+    Click **Review change**, then **Confirm change**.
+
+    **Check:** **Inspect machine operations** lists the request; once it finishes, **Machine details** shows the new power state or instance type.
+  </Step>
+</Steps>
+
+</Tab>
+<Tab title="CLI">
+
+The provider is part of the command (`hetzner`, `ovh`, `upcloud`, `digitalocean`, `scaleway`, `aws`, `ankracloud`, `proxmox`, `morpheus`):
+
+```bash
+ankra cluster hetzner nodes list my-cluster
+ankra cluster hetzner nodes restart my-cluster <node-id>
+ankra cluster hetzner bastion resize my-cluster <instance-type>
+```
+
+</Tab>
+</Tabs>
+
+## Cordon and drain a node
+
+Cordoning stops new pods from being scheduled on a node; its current pods keep running. Draining cordons the node and evicts its pods within their disruption budgets, which is what prepares a node for shutdown.
+
+<Tabs>
+<Tab title="Portal">
+
+<Steps>
+  <Step title="Open the node">
+    On **Kubernetes → Nodes**, click the node.
+  </Step>
+  <Step title="Cordon or drain">
+    Under **Scheduling**, click **Review cordon** and confirm with **Cordon node**. To drain, click **Review node drain** instead.
+
+    **Check:** after a cordon the node carries **Cordoned**.
+  </Step>
+  <Step title="Review the drain">
+    The **Drain** page reads the live node and lists **Pods on this node** and **Matching disruption budgets**. Accept each risk it lists, click **Review drain confirmation**, type the node's name, then click **Start drain**.
+
+    **Check:** the receipt reads **Drain in progress** with **Remaining evictable pods**, and its title names the final state when the drain ends. **Cancel drain** stops it and keeps the node cordoned; **Resume drain** continues one that stopped.
+  </Step>
+  <Step title="Return the node to service">
+    When the work on the node is done, open **Review node scheduling and uncordon when ready**, click **Review uncordon** and confirm with **Uncordon node**.
+  </Step>
+</Steps>
+
+To cordon or uncordon several nodes, tick them on **Kubernetes → Nodes** and click **Review cordon** or **Review uncordon** (at most 20 nodes per review).
+
+</Tab>
+<Tab title="CLI">
+
+```bash
+ankra cluster select my-cluster
+ankra cluster drain worker-3 --dry-run
+ankra cluster drain worker-3
+```
+
+`--dry-run` prints the plan without changing anything; `--grace-period` sets the seconds each pod gets to shut down.
+
+</Tab>
+</Tabs>
+
+## Stop and start the cluster
+
+Stopping deletes or powers off the cluster's servers, depending on the provider, and starting brings them back. Both are on **Settings → Stop, start and schedules**; see [Power schedules](/platform/cluster-power-schedules).
+
+## What the portal does not do
+
+| Task | Where it works |
 |---|---|
-| Provisioned by Ankra on a cloud account (Hetzner, OVHcloud, UpCloud, DigitalOcean, Scaleway, AWS EC2, Proxmox VE, HPE Morpheus) | Overview · Node groups · Control plane · Bastion & VMs |
-| Managed Kubernetes (EKS, AKS, GKE, DOKS, UKS, OVH MKS, Kapsule) | Overview · Node pools |
-| Imported, or a playground | Overview |
+| Diagnose the bastion over SSH | `ankra cluster <provider> bastion diagnose my-cluster` |
+| Read a node's cloud-init log or run a node diagnosis | `ankra cluster <provider> nodes cloud-init-log` and `ankra cluster <provider> nodes diagnose` |
+| Resize a playground | `ankra cluster playground resize my-cluster --size <size>`, with sizes from `ankra cluster playground plans` |
+| Standalone VMs on the cluster's network | The API only: `/api/v1/clusters/{provider}/{cluster_id}/vms` |
+| The most nodes the cloud account still has room for | The API only: `/api/v1/clusters/{provider}/{cluster_id}/quotas` |
 
-Node management used to live under **Settings → Nodes**; that tab is gone and its address now opens the **Node groups** tab, so older links keep working.
+## What can go wrong
 
----
+| Message | What to do |
+|---|---|
+| "Disable autoscaling before changing the fixed count." | Open **Autoscaling**, untick **Enable autoscaling**, confirm, then set **Node count**. |
+| "An external autoscaler owns this pool. Its settings cannot be changed here." | Change the pool where its autoscaler is configured. |
+| "The group changed since you started editing." | Click **Reload data and reset edits**, then make the change again on the current settings. |
+| "The request outcome is unknown. Check current infrastructure and Operations before trying again." | Check **Operations** before you send the change a second time. |
+| "Cordon alone does not prepare a node for shutdown." | Drain the node before you restart, resize or remove it. |
 
-## Overview
+## Related
 
-### Stat tiles
-
-**Machines** counts every server Ankra runs for the cluster by role - control plane, workers, bastion. **Kubernetes ready** is ready over total nodes as the kubelets report them, with the cordoned count beside it. **vCPU** and **Memory** sum node capacity; **GPUs** counts what device plugins advertise. **Run rate** is the projected monthly cost from the cluster's cost read, with how many nodes it covers.
-
-A figure the platform cannot read says so - *No nodes reporting*, *Not priced* - rather than showing zero. A cluster whose agent is offline is not an empty cluster.
-
-### The Machines table
-
-One row per machine, joining what the cloud provider knows about the VM with what Kubernetes knows about the node. The join is by name (Ankra names the VM and the kubelet the same), with the private address as the fallback.
-
-- **Machine** - name and role.
-- **Group** - the node group the machine scales in.
-- **Instance** - the instance type, with vCPU, memory, disk and list price from the provider's live catalog, and a **GPU** chip when the node carries GPU feature-discovery labels (`1 × NVIDIA H100 80GB HBM3`).
-- **Kubernetes** - `Ready`, `Cordoned` or `Not ready` from the node object, with the kubelet version. A VM without a node object reads **Not joined** (a worker that has not registered yet) or **Not a node** (the bastion). Neither is rendered as a failure: a machine Kubernetes has never seen is not a machine Kubernetes reports as broken.
-- **VM** - the provider's state and power state.
-- **Location** and **Addresses** - private and public.
-
-The **⋯** menu on a row holds what applies to that machine:
-
-- **Cordon** / **Uncordon** and **Drain** - on any machine with a node object. Drain cordons the node and evicts its pods, with progress shown until it completes; pods without a controller are not recreated.
-- **Restart VM** - reboots the server at the provider (an operation you can follow under **Operations**). Workloads on the node are briefly unavailable.
-- **Resize bastion** - on the bastion row.
-- **Open in Kubernetes** - the node's page under **Kubernetes → Nodes**, with capacity, conditions, pods, GPU telemetry and the manifest.
-- **Machine details** - the provider record, resource definition and reconciler data.
-
-On an imported cluster the table shows the Kubernetes side only - Ankra does not provision those machines - and cordon, uncordon and drain still apply.
-
----
-
-## Node groups
-
-Each card is one node group: instance type, count, autoscaling bounds, labels and taints, with the same controls the settings tab offered - scale, switch autoscaling on or off and set its range, move to an equal-or-larger instance type, edit labels and taints, delete the group. **Add node group** opens the size picker with live availability and prices. On UpCloud the picker reads the cluster's own plan catalog, so GPU plans appear with their accelerator fit (`1x L40S`) and the price of the cluster's zone; discontinued plans stay selectable but are labelled **Legacy**.
-
-On UpCloud a node group's plan is changed in place only within its plan family: STARTER, DEV, PREMIUM, GPU, or the unprefixed general-purpose plans such as `4xCPU-8GB`. Moving a group to a plan from another family replaces each node instead - it is drained, deleted and re-provisioned with the new plan, and its workloads run elsewhere until the replacement joins - and the resize says so in its result. The control plane cannot be replaced that way, so a cross-family change there is refused with the alternative named.
-
-### Max out
-
-Under each group that is not autoscaled, **Max out** sizes the group to the most your cloud account still has room for. Ankra reads the account's quota through the cluster's credential and takes the tightest of three bounds:
-
-- remaining **servers** in the account,
-- remaining **vCPUs** divided by the instance type's vCPUs,
-- remaining **memory** divided by the instance type's memory,
-
-capped at the 100-node group limit. The control names the bound and the added cost at list price before you confirm, and the scale itself is an operation you can follow. The answer has three states and all three are shown: a known maximum, **at max** when the quota is spent, and **unavailable** when the provider does not expose its limits or the instance type's specs are not known - it never offers 100 on a guess.
-
-For an autoscaled group the autoscaler owns the count; raise its maximum on the card instead.
-
-The same report is available on the API as `GET /org/clusters/{provider}/{cluster_id}/quotas` (and under `/api/v1`), alongside the credential-scoped `GET /org/credentials/{provider}/{credential_id}/quotas`.
-
----
-
-## Control plane
-
-The controller count (1 or 3, and 1, 3 or 5 on Proxmox VE - etcd needs an odd number of voting members) and the controllers' instance type, each with what a change involves for the running cluster (offline, rolling, or live with API downtime) or why it is refused right now.
-
-Growing the count happens **live**: the new controllers provision and join the running cluster without downtime, and a cluster that reaches three controllers can change its instance type live as well, one controller at a time. Reducing the count is applied **offline** - stop the cluster (the stop preserves its state and the start restores it, see [Stop cluster](/platform/cluster-settings#stop-cluster)), apply the change, then start it.
-
-The instance type of a single controller on a running Hetzner cluster can be changed in place: the Kubernetes API is down for a few minutes while the server reboots on the new type, workloads on the workers keep running, and the review dialog asks you to accept the downtime with **Resize with API downtime**. On other providers a single controller is resized offline: stop the cluster, change the type, then start it. See [Change the control plane instance type](/guides/operate-ankra-managed-clusters#change-the-control-plane-instance-type) for the three modes and the CLI and API equivalents.
-
----
-
-## Bastion & VMs
-
-The bastion is the one machine with a public address: every SSH hop into the cluster and the private network's egress go through it. The tab shows its name, instance type, addresses, location, VM state, and the health verdict the scheduler last recorded, with:
-
-- **Diagnose over SSH** - runs the bastion diagnosis and shows the report inline.
-- **Restart VM** and **Resize** - the same controls as the machines table.
-
-### Standalone VMs
-
-A standalone VM is a machine on the cluster's network that is not a Kubernetes node - a database host, a build box, a jump host of your own. Ankra provisions it the way it provisions the bastion: on the cluster's private network, with the cluster's SSH keys, and it is reachable the moment it is reported **up**. It is never joined to Kubernetes, never made a gateway, and - unlike the nodes and the bastion - it **keeps running when the cluster is stopped**, because it carries your own state.
-
-**Add VM** takes a name (lowercase letters, digits and hyphens), a size from the provider's live catalog with its price, a location (the bastion's unless you change it), and whether the machine gets a **public address**. Without one it is private-network only: reach it over the bastion, exactly like a node (`ssh -J` with the material under **Settings → Access**). With one it has its own address and key-only SSH. The provider-side server is named `<cluster>-vm-<name>`.
-
-Each VM row shows its size, addresses and state, and its menu offers **Restart VM**, **Resize** (powered off, moved to the new size, started again - the disk is kept) and **Remove** (deletes the server and its disk; there is no undo). The machines table on the overview lists VMs too, with the role **VM** and the Kubernetes column reading *Not a node*.
-
-Standalone VMs are available on Hetzner, UpCloud, DigitalOcean, OVH and Proxmox clusters. Addressing follows each provider's rules: on DigitalOcean a cluster without a NAT gateway gives a private VM a public address anyway, because a private droplet there would have no path to the internet; on OVH a private VM routes out through the gateway exactly like a node; on Proxmox every VM lives on the cluster's SDN fabric and its private address is its address. On other providers the tab says so rather than offering a control that does nothing.
-
-The bastion and every standalone VM are metered into the cluster's cost. The run rate on the overview includes them, and the breakdown shows them as **Bastion & VMs** - a row that belongs to the whole cluster, so it lands under *unallocated* rather than in any namespace.
-
-On the API: `GET`/`POST /org/clusters/{provider}/{cluster_id}/vms`, `DELETE .../vms/{vm_id}`, `PUT .../vms/{vm_id}/instance-type`, and the same under `/api/v1` with `?wait=false` for asynchronous writes.
-
----
-
-## Playground size
-
-On a playground the overview carries the **Playground size** card. A paid playground picks a new size from the list; the card names the direction and the monthly difference before anything changes - *Upgrade to Medium: +€2.85/mo* - and the button reads **Upgrade** or **Downgrade**. The resize changes the namespace quota and the price, billed pro-rata across the change, and touches nothing you deployed. The free trial has one fixed size; its card offers **Upgrade to a paid size**, which orders a second, paid playground at the size you pick.
-
----
-
-## CLI
-
-`ankra cluster get nodes` lists the Kubernetes nodes and `ankra cluster describe node <name>` describes one. The CLI commands for node groups, the control plane, restarts and the bastion are on [Operate an Ankra Managed Cluster](/guides/operate-ankra-managed-clusters).
+<CardGroup cols={2}>
+  <Card title="Operate an Ankra Managed Cluster" icon="server" href="/guides/operate-ankra-managed-clusters">
+    The CLI for node groups, the control plane, restarts and the bastion.
+  </Card>
+  <Card title="Node details" icon="microchip" href="/platform/kubernetes-nodes">
+    One node's conditions, capacity, pods and metrics.
+  </Card>
+  <Card title="Cluster autoscaling" icon="arrows-up-down" href="/guides/cluster-autoscaling">
+    Let Ankra size a node group between limits.
+  </Card>
+  <Card title="Cluster settings" icon="gear" href="/platform/cluster-settings">
+    Every settings page of a cluster.
+  </Card>
+</CardGroup>

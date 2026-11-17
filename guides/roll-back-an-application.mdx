@@ -1,0 +1,121 @@
+---
+title: Roll back an application
+description: Put an earlier published version of an application back on one environment from the portal or the CLI, check it, and know what a rollback leaves as it is.
+---
+
+import { CliVersion } from "/snippets/cli-version.jsx";
+
+A release went out and something is wrong. A rollback puts an image tag the application published earlier back on one environment, in a few minutes, without building anything. It moves only the application's image. Data, secrets and stack changes stay as they are, so read [What a rollback does not undo](#what-a-rollback-does-not-undo) before you rely on it.
+
+## Before you start
+
+- **Permission to deploy the application** (`applications.deploy`). Without it, History says "Undoing a release needs permission to deploy." and the CLI refuses with "You do not have permission to roll back deploys of this application." A scoped token must carry that scope.
+- **An earlier published version.** A rollback puts back a tag that is still in the application's registry. It never builds one.
+- **An environment on one cluster.** The portal puts a version back on one cluster at a time; for an environment on several clusters, use the CLI once per cluster.
+- **For the CLI:** the Ankra CLI, logged in to the right organisation.
+
+## 1. Find the last good version
+
+<Tabs>
+  <Tab title="Portal">
+    Go to **Applications → your application → History**. History lists the changes to the application: what changed, where, who did it and how it ended. It opens on the last 7 days; for an older release, change **Last 7 days** to a longer range or **Any time**. Find the release before the one that went wrong, and note its version.
+
+    Check: the release lines you can undo carry a **Roll back to** button naming the version, or **Undo this release**.
+  </Tab>
+  <Tab title="CLI">
+    <CliVersion since="0.74.0" />
+
+    Read the application's timeline, newest first, then ask what the deployment on the cluster could go back to. Without `--to`, `rollback` changes nothing: it prints the tag the deployment runs, the newest build, the tags still in the registry, and what a rollback does not undo.
+
+    ```bash
+    ankra application timeline my-app --limit 20
+    ankra application rollback my-app --cluster my-cluster
+    ```
+
+    Check: the tag you want is in the list of tags it could go back to.
+  </Tab>
+</Tabs>
+
+## 2. Roll back
+
+<Tabs>
+  <Tab title="Portal">
+    On the release line in **History**, select **Roll back to** (or **Undo this release**). When a release did not go live, the environment's card on the application's **Overview** offers the same step as **Put** *version* **back**.
+
+    The dialog asks **Put** *version* **back on** *environment*? and says which version runs now and which one Ankra puts back. Open **What does not come back** to read the list, then confirm with **Put** *version* **back**.
+
+    Where the environment deploys on every push, Ankra also pauses its automatic updates, so the next build does not deploy over the version you put back. The dialog says so: "Automatic updates for ... pause, so it stays on ... until you resume them."
+
+    Check: the confirmation reads "Automatic updates are paused for ..., so it stays on ... until you resume them." If it reads "Its automatic updates could not be paused, so the next build will deploy over ...", select **Pause automatic updates**.
+  </Tab>
+  <Tab title="CLI">
+    Name the tag with `--to`. The command shows the same picture, asks, then puts that tag back. There is no "previous" default: a rollback never starts without `--to`.
+
+    ```bash
+    ankra application rollback my-app --cluster my-cluster --to sha-1a2b3c4
+    ```
+
+    Ankra confirms the tag is in the application's registry first, and holds the rollback until a newer build is observed, so push to deploy does not undo it. Add `--yes` to skip the question in a script, and `-o json` for the record.
+
+    Exit codes: `0` when the rollback was recorded or the deployment already runs the tag, `8` when the deployment cannot be rolled back (the reason is printed), `4` when you decline.
+
+    Check: the command exits `0`.
+  </Tab>
+</Tabs>
+
+## 3. Verify
+
+- **Portal:** **Applications → &lt;your application&gt; → Environments**, under **What’s live**, shows the version the environment runs.
+- **CLI:** list the rollbacks recorded for the deployment, newest first, and read what it runs now:
+
+  ```bash
+  ankra application rollbacks my-app --cluster my-cluster
+  ankra application rollback my-app --cluster my-cluster
+  ```
+
+Then open the application's address and check that the problem is gone.
+
+## What a rollback does not undo
+
+A rollback moves the image and nothing else. Ankra lists what stays exactly as it is, in the portal dialog under **What does not come back** and in the CLI's answer:
+
+- Database schema changes the newer version applied. An older image may not be able to read a migrated database.
+- Data written since the newer version was deployed.
+- The database itself, its storage, and any volume this application uses. Rolling the image back does not restore them.
+- Secret and environment values changed since the newer version was deployed.
+- Changes made to the stack itself: resource limits, replicas, ingress hosts, added components.
+- Anything the newer version changed in a system outside this cluster.
+
+<Warning>
+If the bad release ran a database migration, putting the old image back can leave it unable to read its own data. Restore the database from a backup taken before the release (**Applications → your application → Data → Backups**), or fix forward with a new release.
+</Warning>
+
+## Release the hold
+
+A rolled-back environment stays on the version you put back until you let it move on.
+
+- **Portal:** after a rollback that paused automatic updates, select **Resume automatic updates**. The page reads "Automatic updates are on again: the next build deploys as usual." You can also turn the switch back on under **Applications → your application → Settings → Deploys → Deploy on every push**.
+- **CLI:** a rollback from the CLI holds until Ankra observes a newer build of the tracked branch. Push the fix and the next build deploys as usual. To turn push to deploy back on after the portal paused it:
+
+  ```bash
+  ankra application auto-deploy get my-app
+  ankra application auto-deploy set my-app --enabled
+  ```
+
+## What can go wrong
+
+| Message | What it means |
+|---|---|
+| "That image tag is not in this application's registry, so there is nothing to roll back to. Pick one of the tags this application has published." | The tag was never published, or the registry no longer holds it. Pick a tag from the list `rollback` prints without `--to`. |
+| "Ankra could not reach this application's registry to confirm that image tag exists, so the rollback was not started. Try again in a moment." | Nothing changed. Run the command again. |
+| "This application is not deployed to that cluster, so there is nothing to roll back." | Check the cluster name: `--cluster` takes the cluster the deployment runs on. |
+| "That image tag is already the one running, so there is nothing to roll back." | The deployment already runs that tag. |
+| "Ankra cannot tell which workload on that cluster runs this application's image, so it cannot roll it back. Deploy the application again, then retry." | Deploy the application once from the portal or with `ankra application deploy`, then roll back. |
+| "There is no earlier published version to put back on ..." | The portal found no older tag in the registry for that environment. |
+| "Undo puts a version back on one cluster at a time, and ... runs on ..." | The environment runs on several clusters. Use `ankra application rollback` with `--cluster` for each one. |
+
+## Related
+
+- [Ship your app](/guides/deliver-your-app): how a merge redeploys, and push to deploy
+- [Environments and branch rules](/guides/application-environments): which build each environment deploys
+- [The application page](/platform/application-page): every view of an application

@@ -1,245 +1,168 @@
 ---
 title: Alerts
-description: Monitor your clusters and resources with customizable alert rules
+description: "Add alert rules that watch your clusters and what runs on them, choose who is told when one fires, and follow each firing in Ankra."
 ---
 
-<Note>
-Ankra Alerts help you stay informed about your cluster health, resource issues, and operational events with configurable notifications.
-</Note>
+import { CliVersion } from "/snippets/cli-version.jsx";
 
-## What are Alerts?
+An alert rule says what Ankra watches for, how serious it is, and who is told when it fires. Ankra checks each rule about once a minute. When its conditions match, the alert fires, tells the destinations you chose, and shows up in Ankra as a notification and under **Ankra AI → Watching**. [Notification routes](/guides/notification-routing) can send it to more places.
 
-Alerts in Ankra let you define rules that automatically monitor your infrastructure and notify you when specific conditions are met. You can:
-
-- **Monitor Cluster Health:** Get notified when clusters go offline or agents disconnect
-- **Track Resource Status:** Watch for issues with GitOps repositories, add-ons, manifests, and stacks
-- **Configure Conditions:** Set up multiple conditions with AND/OR logic for precise alerting
-- **Receive Notifications:** Send alerts to any webhook-enabled service (Slack, Teams, PagerDuty, etc.)
-
-### How Alerts Work
-
-<Frame>
 ```mermaid
 flowchart LR
-    A[Resource State Change] --> B[Condition Evaluation]
-    B --> C{Conditions Met?}
-    C -->|Yes| D[Alert Triggered]
-    C -->|No| E[No Action]
-    D --> F[Webhook Notifications]
-    D --> G[AI Incident Created]
-    F --> H[Slack / Teams / PagerDuty]
+    A[Alert rule] --> B{Conditions match?}
+    B -->|No| A
+    B -->|Yes, for the wait time| C[Alert fires]
+    C --> D[The rule's destinations]
+    C --> E[Notification routes]
+    C --> F[Notification and Watching in Ankra]
+    C --> G[Quiet time: no repeat until it ends]
 ```
-</Frame>
 
----
+A worked example, from a Slack channel to a rule that watches manifest deployments, is in [Alert in Slack when a manifest fails to deploy](/guides/webhook-integrations).
 
-## Automatic AI Analysis
+## Before you start
 
-Every time an alert triggers, Ankra automatically starts an AI-powered analysis to help you understand what went wrong.
+- **A role that manages alerts** to add, change, switch or delete rules in the portal. A role that can only read alerts sees **Your role can look at alert rules but not change them. Someone who manages alerts can.** See [Roles and access](/guides/roles-and-access).
+- **A destination** for the alert to tell, such as a Slack channel or a webhook. Add one under **Integrations & alerts → Notification destinations**, see [Webhooks](/guides/webhooks). Without one, notification routes decide who is told.
 
-<Frame>
-```mermaid
-flowchart LR
-    A[Alert Triggers] --> B[AI Analysis Resource Created]
-    B --> C[Analysis Job Scheduled]
-    C --> D[Data Collection]
-    D --> E[AI Analysis]
-    E --> F[AI Incident Ready]
+## Add an alert rule
+
+<Tabs>
+  <Tab title="Portal">
+    1. Open **Integrations & alerts → Alert rules** (`/next/organisation/alert-rules`) and click **Add alert rule**.
+    2. In **Add an alert rule**, enter a **Name** (up to 100 characters) and, if you like, a **Description**, which is shown with the alert when it fires.
+    3. Under **Watch**, choose **Clusters** (whether a cluster is online, its GitOps sync, metrics and CVEs) or **What runs on clusters** (add-ons, manifests, Stacks and GitOps repositories, and the jobs that deploy them).
+    4. For **What runs on clusters**, tick the **Kinds to watch** (none ticked watches every kind) and, if you like, enter **Name contains** to watch only resources whose name contains that text.
+    5. Set **Condition 1**: **What to check**, then the **State** or **Measure**, the **Comparison** and, for a number, the **Threshold**. The [conditions](#conditions) below list every choice. **Add condition** adds another, up to ten; set **Together with the condition before** to **And: both must match** or **Or: either one is enough**.
+    6. Under **Where**, choose **Every cluster** (including clusters added later) or **Only the clusters or environments I choose**, then tick **Clusters** or **Environments**. An environment covers every cluster in it, including ones added later.
+    7. Choose the **Severity**: **Critical**, **Warning** or **Info**.
+    8. Set the [timing](#timing): **Wait before firing (minutes)** and **Quiet time after firing (minutes)**.
+    9. Under **Tell these destinations**, tick the destinations to notify.
+    10. Click **Add alert rule**.
+  </Tab>
+  <Tab title="CLI">
+    <CliVersion since="0.73.0" />
+
+    Write the alert as YAML. Field names are the platform's: `resource_type` is `cluster` or `cluster_resource`, the conditions use the values in [Conditions](#conditions), and `integration_names` are the names of your destinations.
+
+    ```yaml alert.yaml
+    name: production-cluster-offline
+    enabled: true
+    integration_names:
+      - platform-alerts
+    rules:
+      - name: production-cluster-offline
+        resource_type: cluster
+        all_clusters: true
+        severity: critical
+        cooldown_minutes: 15
+        conditions:
+          - condition_type: cluster_state
+            condition_operator: eq
+            condition_value: offline
+            logical_operator: AND
+    ```
+
+    ```bash
+    ankra alerts rules create -f alert.yaml
+    ankra alerts rules list
+    ```
+
+    For **What runs on clusters**, set `resource_type: cluster_resource` and name the kinds in `cluster_resource_types` (for example `[manifest]`). `min_failure_duration_minutes` is **Wait before firing** and `cooldown_minutes` is **Quiet time after firing**.
+
+    `ankra alerts rules get <alert-id>`, `update <alert-id> -f changes.yaml`, `disable <alert-id>`, `enable <alert-id>` and `delete <alert-id> --yes` manage it afterwards. Creating, changing and deleting need `alerts.manage`; `disable` and `enable` need `alerts.write`.
+  </Tab>
+  <Tab title="MCP">
+    The Ankra MCP server has `list_alerts`, `create_alert`, `set_alert_enabled` and `delete_alert`. `create_alert` writes only conditions the evaluator implements. You can also ask Ankra AI in chat to create, mute or delete an alert. See [MCP tools](/platform/mcp-tools).
+  </Tab>
+</Tabs>
+
+**You should see** the new rule in the list with its severity and a sentence for what it watches, for example **Critical · The cluster is offline on every cluster**, and under it the destinations it tells (**Tells platform-alerts**), or **Only through notification routes** when you ticked none. The switch on the row is on.
+
+To change a rule, open its options menu (**…**) and choose **Change…**. The switch turns a rule off without deleting it; an off rule shows **Off**. **Delete…** asks **Delete this alert rule?** and, once you click **Delete alert rule**, Ankra stops checking its conditions.
+
+## Conditions
+
+These are the conditions Ankra's rule evaluator implements, and the only ones the portal offers. MCP and Ankra AI refuse any other; from the CLI or the API, a condition outside them saves without complaint and never fires.
+
+### Watch: Clusters
+
+| What to check | State or Measure | Comparison |
+|---------------|------------------|------------|
+| **Cluster connection** | **Offline**, **Online** | **Is**, **Is not** |
+| **GitOps sync** | **Failing**, **Degraded (merge conflict)**, **Healthy** | **Is**, **Is not** |
+| **A cluster metric** | **CPU use (%)**, **Memory use (%)**, **Disk use (%)**, **Disk use on the fullest node (%)**, **Pod restarts in 15 minutes**, **Out-of-memory kills in 15 minutes**, **Nodes not ready**, **Nodes under disk pressure**, **Pending pods**, **Failed pods** | A number: **Above**, **At or above**, **Below**, **At or below**, **Equal to**, **Not equal to**, and a **Threshold** |
+| **Metrics stop arriving** | **Platform metrics** | **Minutes without metrics** |
+| **Vulnerabilities (CVEs)** | **New critical or high CVEs since the last scan**, **Critical CVEs**, **High CVEs**, **Critical and high CVEs**, **Critical CVEs with a fix**, **High CVEs with a fix**, **Security risk score**, **Known exploited CVEs (CISA KEV)**, **New known exploited CVEs since the last scan** | A number, as for a cluster metric |
+
+### Watch: What runs on clusters
+
+**Kinds to watch** are **Add-ons**, **Manifests**, **Stacks**, **GitOps repositories on GitHub**, **GitOps repositories on Bitbucket Cloud** and **GitOps repositories on Bitbucket Data Center**.
+
+| What to check | State | Comparison |
+|---------------|-------|------------|
+| **Resource state** | **All up**, **Up**, **Creating**, **Updating**, **Stopping**, **Down** | **Is**, **Is not** |
+| **Deployment job status** | **Blocked**, **Failed**, **Pending**, **Running**, **Succeeded**, **Timed out**, **Cancelling**, **Cancelled** | **Is**, **Is not** |
+
+In the CLI and API, the values are lower case with underscores: `cluster_state`, `gitops_sync`, `metric_threshold`, `metric_absence`, `security_findings`, `resource_state` and `job_status`, with values such as `offline`, `cpu_utilisation_pct`, `pods_pending`, `pods_failed`, `new_severe_cves`, `down` or `failed`, and operators `eq`, `neq`, `gt`, `gte`, `lt` and `lte`.
+
+## Timing
+
+| Field | What it does | Range |
+|-------|--------------|-------|
+| **Wait before firing (minutes)** | How long the conditions must keep matching before the alert fires. Leave it empty for Ankra's default: 5 minutes for **Cluster connection** and for pending or failed pods, otherwise none. | 0 to 1440 |
+| **Quiet time after firing (minutes)** | After it fires, the alert does not fire or tell anyone again for this long, so an ongoing problem is not sent over and over. | 1 to 1440, 15 for a new rule |
+
+So a rule on **Cluster connection** **Is** **Offline** with no wait set fires after the cluster has been offline for 5 minutes, not the moment it drops.
+
+## Who is told
+
+An alert firing goes to the destinations ticked on the rule, and to every destination a [notification route](/guides/notification-routing) sends alert firings to. A destination reached both ways gets the firing once.
+
+A route can also filter by application and by branch or pull request, but an alert firing carries neither, so a route that sets either filter never matches one. See [Scope a route to one application and its default branch](/guides/notification-routing#scope-a-route-to-one-application-and-its-default-branch).
+
+If you have set a [home channel](/guides/webhooks#home-channel), a critical or warning notification that no destination or route handles goes there, so it is never missed.
+
+## Follow a firing
+
+- **Ankra AI → Watching → All signals** (`/next/ai/alerts`) lists every alert with its severity, environment, the work on it and when it last fired. The views **All signals**, **Firing**, **Resolved** and **Disabled rules** narrow the list, with search and a **Severity** filter.
+- An alert's page shows whether the platform reports it firing, **Work on this alert** (the tickets linked to it), **Related agent runs** and **Signal details**. Open it from the list, or from the rule's options menu with **Open the alert**.
+- Each firing is also a notification under the bell. Its page shows **What happened**, an **AI analysis** when Ankra has made one, and **How to fix it**. See [Notifications and Needs you](/platform/activity-inbox).
+
+From the CLI, acknowledge one firing or snooze it for a number of minutes. Both need `alerts.write`:
+
+```bash
+ankra alerts triggers acknowledge <alert-id> <trigger-id> --notes "looking"
+ankra alerts triggers snooze <alert-id> <trigger-id> --minutes 120
 ```
-</Frame>
 
-### What Happens Behind the Scenes
+## Alerts from your own Alertmanager
 
-1. **AI Analysis Resource** - When conditions are met, Ankra creates an AI Analysis resource to track the investigation
-2. **Analysis Job** - A background job is scheduled to collect and analyze data
-3. **Data Collection** - The job gathers:
-   - Pod status and container states
-   - Kubernetes events (warnings, errors)
-   - Container logs (recent output)
-   - Job results and error messages
-4. **AI Analysis** - Ankra's AI processes the data to identify:
-   - Root cause of the issue
-   - Severity assessment
-   - Affected resources
-   - Recommended actions
-5. **AI Incident** - Results are saved as an AI Incident for review
+An Alertmanager you already run can post its alerts into Ankra through an alert ingest credential. Each alert it sends shows on **Alert rules** with the badge **From Alertmanager**; its conditions are your monitoring system's, so in Ankra you change only its name, description and destinations. See [Send your Alertmanager alerts to Ankra](/guides/alertmanager-to-ankra), which also covers silencing alerts in a cluster's Alertmanager.
 
-<Note>
-View all AI Incidents in the **AI** → **Inbox**. Each incident includes the full analysis, affected resources, and an interactive checklist of recommended actions.
-</Note>
+## Verify
 
----
+1. On **Integrations & alerts → Notification destinations**, use **Send a test** on each destination the rule tells, and check that the sample arrives.
+2. On **Integrations & alerts → Notification routes**, use **Where would it go?** with **Kind** set to **Alert firing** and the rule's severity, and check the destinations listed.
+3. Check the rule's row on **Alert rules**: it is switched on, and its sentence names the clusters you meant.
 
-## Alerts Dashboard
+## What can go wrong
 
-The Alerts page displays key metrics at a glance:
+**The rule never fires.**
 
-| Metric | Description |
-|--------|-------------|
-| **Total Alerts** | Number of configured alert rules |
-| **Active** | Alerts currently enabled and monitoring |
-| **Rules** | Total number of individual rules across all alerts |
-| **Triggers (24h)** | How many times alerts fired in the last 24 hours |
+- The row shows **Off**. Switch it on.
+- **Where** does not cover the cluster. Open **Change…** and check **Clusters** and **Environments**.
+- The conditions have not matched for the whole **Wait before firing** time, or the alert fired less than **Quiet time after firing** ago.
+- The row says **No conditions yet, so it never fires**. Add a condition.
+- A rule made outside the portal uses a condition the evaluator does not implement. Its form says **Its conditions use a form this page cannot show, so they stay as they are and cannot be changed here yet.** Such a condition never fires: recreate the rule with the [conditions](#conditions) above.
 
-You can filter alerts by status (Active/Disabled) using the quick filter pills on the dashboard.
+**It fires, but nobody hears about it.** The row says **Only through notification routes** and no route matches alert firings, or every destination it tells is **Off**. Tick a destination with **Change…**, or check with **Where would it go?** on **Notification routes**.
 
----
-
-## Alert Structure
-
-An alert consists of rules, conditions, and webhook integrations:
-
-<Frame>
-```mermaid
-flowchart TD
-    subgraph alert [Alert]
-        A[Name / Description / Enabled]
-    end
-
-    subgraph rules [Rules]
-        R1[Resource Type / Clusters / Severity / Cooldown]
-    end
-
-    subgraph conditions [Conditions]
-        C1[Condition 1]
-        C2[Condition 2]
-    end
-    subgraph webhooks [Webhooks]
-        W1[Slack]
-        W2[PagerDuty]
-    end
-    alert --> rules
-    rules --> conditions
-    C1 -->|AND / OR| C2
-    alert --> webhooks
-```
-</Frame>
-
----
-
-## Creating Alert Rules
-
-<Tip>
-**Ask Ankra AI instead.** In the chat, describe the alert you want - "page critical when any cluster goes offline", "warn when a production stack is down" - and the assistant proposes a **Create alert** action with every rule spelled out (severity, clusters, conditions, cooldown). It is created once you confirm. The assistant only writes conditions the evaluator implements, so an alert it creates always fires when its condition is met. It can also mute an alert (**Disable alert**) or remove one (**Delete alert**), and the same tools are on the [MCP server](/platform/mcp-tools) as `create_alert`, `set_alert_enabled` and `delete_alert`.
-</Tip>
-
-<Steps>
-  <Step title="Name & Details">
-    Configure the basic alert settings:
-    - **Alert Name:** A descriptive name (e.g., "Production Resources Down")
-    - **Severity:** Choose Critical, Warning, or Info
-    - **Cooldown:** Time in minutes before the alert can trigger again (prevents alert storms)
-    - **Clusters:** Select "All Clusters" or choose specific clusters to monitor
-  </Step>
-
-  <Step title="What to Monitor">
-    Select the resource type to monitor:
-
-    <CardGroup cols={2}>
-      <Card title="Cluster" icon="server">
-        Monitor overall cluster health including:
-        - Cluster connectivity state
-        - Agent status and availability
-      </Card>
-      <Card title="Cluster Resource" icon="cubes">
-        Monitor specific resource types:
-        - **GitOps** - GitHub repository sync status
-        - **Addon** - Add-on deployment health
-        - **Manifest** - Raw manifest deployments
-        - **Stack** - Stack deployment status
-      </Card>
-    </CardGroup>
-  </Step>
-
-  <Step title="When to Alert">
-    Define one or more conditions that trigger the alert. Multiple conditions can be combined using **AND** or **OR** logic.
-
-    **For Cluster monitoring:**
-    - **Cluster State:** Alert when cluster goes offline/online
-
-    **For Cluster Resource monitoring:**
-    - **Resource State:** Alert on state changes (up, down, creating, updating, stopping)
-    - **Job Status:** Alert on job outcomes (failed, timeout, blocked, etc.)
-  </Step>
-  <Step title="Notifications">
-    Select which destinations (webhooks) should receive notifications when this alert fires. You can configure destinations in the [Webhooks](/guides/webhooks) section.
-
-    In addition to the alert's own destinations, org-wide **routing rules** (Alerting → Destinations → Routing rules) can match alert firings by kind, severity, cluster, and source - for example, "every critical firing also goes to PagerDuty".
-
-    A destination that the alert already notifies directly is skipped by routing rules. That is a guarantee, not a coincidence of timing: **a notification is delivered at most once per destination**, so you can safely keep a destination attached to an alert *and* pointed at by a routing rule. See [Notification routing](/guides/notification-routing) for how rules are ordered, what Exclude and Stop on match actually do, and how to preview which destinations a notification would reach.
-
-    If you have set a [home channel](/guides/webhooks#home-channel), a critical or warning firing that no destination or routing rule handles falls back to the home so it is never missed.
-  </Step>
-</Steps>
-
----
-
-## Condition Types Reference
-
-### Cluster Conditions
-
-Use these when monitoring **Cluster** resource type:
-
-| Condition | Description | Values |
-|-----------|-------------|--------|
-| **Cluster State** | Monitor cluster connectivity | `offline`, `online` |
-| **GitOps Sync** | Monitor the cluster's GitOps sync verdict | `failing`, `degraded`, `healthy` |
-| **Metric Threshold** | Compare a platform metric against a numeric threshold | `cpu_utilisation_pct`, `memory_utilisation_pct`, `disk_utilisation_pct`, `pod_restarts_15m`, `oom_kills_15m`, `nodes_not_ready`, `pods_pending` |
-| **Metrics Stopped Flowing** | Fire when the cluster has shipped no platform metrics for longer than the threshold (minutes) | `platform_metrics` |
-| **Security Findings** | Compare the Trivy vulnerability posture against a numeric threshold | `critical`, `high`, `severe`, `fixable_critical`, `fixable_high`, `new_severe_cves`, `new_kev_cves`, `kev`, `risk_score` |
-
-### Cluster Resource Conditions
-
-Use these when monitoring **Cluster Resource** types (GitOps, Addon, Manifest, Stack):
-
-| Condition | Description | Values/Options |
-|-----------|-------------|----------------|
-| **Resource State** | Monitor resource health state | `all_up`, `up`, `creating`, `updating`, `stopping`, `down` |
-| **Job Status** | Monitor job execution status | `blocked`, `failed`, `pending`, `running`, `success`, `timeout`, `cancelling`, `cancelled` |
-
-### Condition Operators
-
-For numeric threshold conditions, you can use these operators:
-
-| Operator | Description |
-|----------|-------------|
-| `eq` | Equals |
-| `neq` | Not equals |
-| `gt` | Greater than |
-| `gte` | Greater than or equal |
-| `lt` | Less than |
-| `lte` | Less than or equal |
-
----
-
-## Alert Severity Levels
-
-| Level | Description | Use Case |
-|-------|-------------|----------|
-| **Critical** | Immediate action required | Production outages, service unavailable |
-| **Warning** | Attention needed soon | Resource pressure, degraded performance |
-| **Info** | Informational updates | Successful deployments, routine events |
-
----
-
-## Viewing Alert History
-
-Each alert tracks its trigger history. From the alert detail page, you can:
-
-- **View Statistics:** Total triggers, last check time, last triggered time
-- **Review History:** See when alerts triggered and what conditions matched
-- **Analyze Patterns:** Identify recurring issues across your infrastructure
-
-Navigate to **Alerts → [Alert Name] → View History** to access the full timeline.
-
----
-
+**Saving is refused.** The form names the field: **Choose at least one cluster or environment, or watch every cluster.**, **A whole number of minutes from 1 to 1440.**, or **Enter a number for every threshold.**
 
 ## Related
 
-- [Alert-triggered analysis](/platform/ai-insights#alert-triggered-analysis) - the AI analysis attached to every firing
-- [Webhooks](/guides/webhooks) - Configure notification endpoints for alerts
-
----
-
-Still have questions? [Join our Slack community](https://join.slack.com/t/ankra-community/shared_invite/zt-3a5rem8f8-cUho4epX2MoLT83bFf~VSA) and we'll help out.
+- [Alert in Slack when a manifest fails to deploy](/guides/webhook-integrations) - a worked example
+- [Webhooks](/guides/webhooks) - destinations, payloads and variables
+- [Notification routing](/guides/notification-routing) - send firings to more places, or keep them away
+- [Notifications and Needs you](/platform/activity-inbox) - where firings land in Ankra

@@ -1,246 +1,115 @@
 ---
 title: Add-ons
-description: Manage and deploy Helm add-ons that Ankra installs and keeps reconciled on your clusters.
+description: Learn how Ankra installs Helm charts as add-ons inside a Stack, keeps them reconciled, and shows what each release runs on your cluster.
 ---
 
-<Note>
-Add-ons are Helm charts that Ankra deploys to your clusters and keeps reconciled. They provide a standardized way to extend your clusters with monitoring, networking, security, and custom applications.
-</Note>
+An add-on is a Helm chart that Ankra installs on a cluster and keeps reconciled: an ingress controller, a monitoring tool, a database operator, or a chart you publish yourself. Every add-on belongs to a [Stack](/concepts/stacks), next to the manifests and applications it works with, so its values, chart version and dependencies are versioned and deployed together with them.
 
-## What is an Add-on?
-
-An add-on is a packaged application or tool that extends the functionality of your Kubernetes cluster. Add-ons are distributed as Helm charts and can include anything from monitoring tools and ingress controllers to security solutions and custom integrations. An add-on could even be your own application, integrated into the Ankra ecosystem for easy deployment and management.
-
----
-
-## Architecture Overview
-
-Understanding how add-ons flow from configuration to deployment helps you manage them effectively.
-
-### Deployment Pipeline
+## How an add-on reaches the cluster
 
 ```mermaid
 flowchart LR
-    Stack[Stack Builder or Git] --> Platform[Ankra platform]
+    Source[Stack editor or Git] --> Platform[Ankra platform]
     Platform --> Agent[Ankra agent]
     Agent --> Helm[helm upgrade --install]
-    Helm --> K8s[Kubernetes Resources]
+    Helm --> K8s[Kubernetes resources]
 ```
 
-**How it works:**
+1. **Stack editor or Git**: you choose the chart, pin its version and set its values in the Stack editor, or in a connected [GitOps repository](/concepts/gitops).
+2. **Ankra platform**: stores the desired state of the Stack and dispatches the deploy.
+3. **Ankra agent**: receives the deploy inside your cluster.
+4. **Helm release**: the agent runs `helm upgrade --install` with your values. The step succeeds once the release is healthy.
+5. **Kubernetes resources**: the rendered manifests are applied to the cluster.
 
-1. **Stack Builder or Git**: You configure add-ons with values and dependencies in the Stack Builder, or in a connected [GitOps repository](/concepts/gitops)
-2. **Ankra platform**: Stores the desired state of the stack and dispatches the deploy
-3. **Ankra agent**: Receives the deploy inside your cluster
-4. **Helm release**: The agent runs `helm upgrade --install` with your values; the step succeeds once the release is healthy
-5. **Kubernetes Resources**: The rendered manifests are applied to your cluster
+This is the **native** engine, the default for new clusters. Clusters created before it may still use the ArgoCD engine, where an ArgoCD installation in the cluster applies the chart instead; the Stack you build is the same either way. See [Deployment Engines](/concepts/deployment-engines) for how each engine detects drift and heals it.
 
-This is the **native** engine, the default for new clusters. Clusters created before it may still use the ArgoCD engine, where an ArgoCD installation in the cluster applies the chart instead; the stack you build is the same either way. See [Deployment Engines](/concepts/deployment-engines).
+## What an add-on is made of
 
-### Add-on Status
+You add an add-on to a Stack from **Add → Helm add-on** in the Stack editor. The **Add a Helm add-on** dialog searches the charts of the Helm registries your organisation has connected (**Find a chart**), then asks for four things:
 
-An add-on's status in the dashboard shows whether its latest deploy succeeded and whether the release has drifted from the desired state. The agent reports drift to the platform, and an add-on whose settings enable self-heal is reconciled back. See [Deployment Engines](/concepts/deployment-engines) for how each engine detects and heals drift.
+| Field | What it holds |
+|-------|---------------|
+| **Pinned chart version** | One exact release of the chart. The platform checks downgrades before deployment, so moving to an older release asks you to confirm. |
+| **Add-on name** | The name of the add-on in the Stack. Lowercase letters, digits and hyphens, unique within the Stack. |
+| **Namespace** | Where the release is installed. It is created by the add-on's release if it does not exist. |
+| **Values** | Your overrides for the chart's values, in YAML. Chart defaults are not repeated here. |
 
----
+A chart only appears once its registry is connected. Connecting a public or private Helm repository or OCI registry is described in [Registries](/guides/registries), and hosting your own charts on GHCR in [Create a Registry](/guides/create-a-registry).
 
-## Resource Hierarchy
+Once added, the add-on is a member of the Stack. Selecting it in the editor opens its resource editor:
 
-Each add-on creates a hierarchy of Kubernetes resources. Understanding this hierarchy helps with troubleshooting and resource management.
+| Tab | What it is for |
+|-----|----------------|
+| **Properties** | What the member is: its chart and registry, the Helm release name and the namespace. |
+| **Deployment settings** | How the release is deployed: Helm wait timeout, revisions to retain, the retry policy, and the Argo CD synchronization options. See [Add-on Settings](/concepts/addon-settings). |
+| **Values** and **Source** | The values you set, as fields or as YAML. |
+| **Diff** | Your values compared with the chart's defaults, so you can see exactly which keys this Stack sets. |
+| **Parents** | The other members this add-on waits for, and the members that wait for it. This is what orders a deploy. |
+| **Notes** | The add-on's **Operational notes · AGENTS.md**, described below. |
+| **Live state** | The last state the cluster reported for the release, with its health and the time of the last job update. |
 
-### Typical Add-on Resource Structure
+Every change you make lands in the Stack's shared draft and reaches the cluster only when the draft is deployed. How drafts, review and deployment work is explained in [Stacks](/concepts/stacks).
 
-```mermaid
-flowchart TD
-    App[Helm release] --> NS[Namespace]
-    App --> Deploy[Deployments]
-    App --> SVC[Services]
-    App --> CM[ConfigMaps]
-    App --> Secret[Secrets]
-    Deploy --> RS[ReplicaSets]
-    RS --> Pod[Pods]
-    SVC --> EP[Endpoints]
-```
+## Keeping secrets out of values
 
-**Resource types commonly created by add-ons:**
+A password, an API key or a webhook URL does not belong in an add-on's values as plain text. Ankra has two ways to keep it out:
 
-| Category | Resources |
-|----------|-----------|
-| **Workloads** | Deployments, StatefulSets, DaemonSets, Jobs |
-| **Networking** | Services, Ingresses, NetworkPolicies |
-| **Configuration** | ConfigMaps, Secrets |
-| **Storage** | PersistentVolumeClaims |
-| **RBAC** | ServiceAccounts, Roles, RoleBindings |
-| **Custom** | CRDs and custom resources |
+- **Organisation secrets.** Store the value once under **Infrastructure → Variables and secrets** and put its reference, `${SECRET_SLOT:<id>}`, in the values instead. The editor shows each reference with a lock and the name of the secret it points to, and marks a reference the organisation has no secret for as an error before you save or deploy. Ankra writes the value into a SOPS-encrypted file, so Git never holds the value in plain text, and the cluster decrypts it when it deploys. This needs the organisation's SOPS encryption: without it, Ankra refuses to save the reference. See [Organisation Secrets](/guides/organisation-secrets).
+- **SOPS encryption.** When the cluster is connected to Git, declare the value keys to encrypt in the add-on's `encrypted_paths`. Ankra encrypts those values with the organisation's SOPS key before it writes the values file to Git, keeps the key names readable for diffs, and decrypts them when it deploys. The Stack editor has no field for `encrypted_paths`: declare it in the cluster YAML, or use `ankra cluster encrypt`. SOPS needs a one-time setup for the organisation; see [SOPS](/guides/sops).
 
-Navigate to any installed add-on and open its [Resource Map](#resource-map) to see this hierarchy live for your cluster.
+## Operational notes (AGENTS.md)
 
----
+Every add-on can carry an **AGENTS.md**: a markdown document of operational learnings, such as upgrade gotchas, a safe rollout order, or values that must stay pinned, that teammates and Ankra AI build up over time. You edit it on the add-on's **Notes** tab. The notes are applied with the resource configuration and stored in Git as a plain markdown file, and the Stack editor refuses notes that look like they carry a credential. See [Teach Your Agents with AGENTS.md](/platform/agents-md).
 
-## Continuous Delivery Flow
+## What the cluster is running
 
-<Steps>
-  <Step title="Configuration Change">
-    You modify add-on values in the Stack Builder, or update values in your connected Git repository.
-  </Step>
-  <Step title="Change detected">
-    A change made in the Stack Builder is deployed when you deploy the stack. A change pushed to Git is picked up through the repository's webhook (or periodic polling).
-  </Step>
-  <Step title="Deploy">
-    The agent applies the difference with Helm on the native engine, or through ArgoCD on a cluster still using that engine.
-  </Step>
-  <Step title="Health Check">
-    The deploy is not marked successful until the release's resources are healthy.
-  </Step>
-</Steps>
+**Infrastructure → Clusters → &lt;your cluster&gt; → Add-ons** lists every Helm release on the cluster, not only the ones a Stack manages. For each one it shows:
 
-### Sync Settings
+| Column | What it tells you |
+|--------|-------------------|
+| **Add-on** | The release name. |
+| **Chart version** | The deployed chart version, and the newer release when the registry has one. |
+| **Namespace & stack** | Where the release runs and which Stack manages it. A release no Stack manages reads **Standalone**, and one that Ankra does not manage also reads **Not managed through Ankra**. |
+| **Health** | The release's reported health. |
+| **Security** | The security advisories reported for the release, or **No advisories reported**. |
 
-Each add-on's settings control how it is kept in sync:
+You can filter the list and sort it by name or namespace.
 
-| Setting | Behavior |
-|---------|----------|
-| **Automated sync** | Changes to the desired state deploy to the cluster automatically |
-| **Self-Heal** | Manual changes made in the cluster are reverted to match the desired state |
-| **Prune** | Resources removed from the desired state are deleted from the cluster |
+Opening an add-on shows its page:
 
-Both engines support these; see [Add-on Settings](/concepts/addon-settings).
+- **Release overview**: the **Helm chart** and version, the **Namespace**, and **Managed by**, which links to the owning Stack.
+- **Running workloads**: the Deployments, StatefulSets, DaemonSets, Jobs and CronJobs the release created, with their pods, as the cluster reports them.
+- **Configuration**: the values in two tabs. **Saved values** are the overrides saved in Ankra, without chart defaults. **Installed values** are the values the installed release reports, including chart defaults, and may differ from the saved ones. Protected values stay masked, including in YAML and copied text. A badge says whether the saved values reached the release: **Saved values applied**, **Not yet applied**, **Apply failed** or **Not reported**.
 
----
+**Edit add-on** opens the owning Stack in the editor with this add-on selected; a role that may not edit the Stack sees **View stack** instead. The **More add-on actions** menu holds **Reapply saved values**, which applies the stored configuration to the release again (workloads may restart, and unsaved draft changes are not deployed), and **View cluster operations**.
 
-## Manage Add-on Sources
+## Changing, upgrading and rolling back
 
-An add-on source in Ankra is either a Helm repository URL or an OCI (Open Container Initiative) registry URL. These sources contain the Helm charts you want to use for deploying add-ons to your clusters. Helm charts are a standard way to package Kubernetes applications, making it easy to manage dependencies and versioning for complex workloads.
+An add-on changes the same way as everything else in a Stack: you edit its values or pick a new **Pinned chart version** in the draft, review the change, and deploy it. In a cluster connected to Git you can also change the values file in the repository; Ankra picks the change up through the repository's webhook or periodic polling.
 
-By connecting both public and private Helm repositories or OCI registries, you can access a wide range of Kubernetes add-ons. This lets you integrate open-source tools, vendor solutions, or your own custom charts - all from a single interface. Managing sources centrally ensures your team always has access to the latest and most secure versions of your preferred add-ons.
-
-Setup steps live in one place: see [Registries](/guides/registries) for connecting a source, and [Create a Registry](/guides/create-a-registry) for hosting your own charts on GHCR.
-
----
-
-## Install Add-ons
-
-Add-ons are installed through [Stacks](/concepts/stacks), next to the [manifests](/concepts/stacks#manifests) they depend on, so they deploy in the right order as one unit.
-
-<Steps>
-  <Step title="Navigate to Stacks">
-    Go to the **Stacks** section in your cluster and click **+ Create** (or edit an existing stack).
-  </Step>
-  <Step title="Add an Add-on">
-    In the Stack Builder, click **Add Add-on**. Browse or search for charts from your connected registries.
-  </Step>
-  <Step title="Configure Values">
-    Select the chart version and configure the values. Pin an exact chart version in production to avoid unexpected upgrades. You can use the AI Assistant (`⌘+J`) to help customize the configuration.
-  </Step>
-  <Step title="Deploy">
-    For a new stack, click **Create Stack** to save and deploy it, installing the add-on on your cluster.
-  </Step>
-</Steps>
-
----
-
-## Encrypting Sensitive Values with SOPS
-
-When an add-on's values carry a password, an API key or a webhook URL and the cluster is connected to Git, list those key names under **Encrypted Keys (SOPS)** in the add-on's configuration, for example `adminPassword`. Ankra encrypts their values with SOPS before it writes the values file to Git, keeps the keys readable for diffs, and decrypts them when it deploys. SOPS needs a one-time setup for the organisation - see [SOPS](/guides/sops).
-
----
-
-## Operational Learnings with AGENTS.md
-
-Every add-on can carry an **AGENTS.md** - a markdown document of operational learnings (upgrade gotchas, safe rollout order, values that must stay pinned) that teammates and Ankra's AI build up over time. Edit it from the **AGENTS.md** tab on the add-on in the Stack Builder; editing it never triggers a redeploy. See [Teach Your Agents with AGENTS.md](/platform/agents-md).
-
----
-
-## Viewing Installed Add-ons
-
-Once deployed, you can monitor and manage add-ons from the Add-ons page.
-
-### Add-ons List
-
-Navigate to your cluster → **Add-ons** to see all installed add-ons with:
-
-- **Name and Version**: The Helm chart name and deployed version
-- **Status**: Current sync and health status
-- **Namespace**: Where the add-on is deployed
-- **Last Updated**: When the add-on was last modified
-
-### Add-on Details
-
-Click any add-on to view detailed information:
-
-| Tab | Description |
-|-----|-------------|
-| **Overview** | Chart info, status, metadata, and deployment state |
-| **Resource Map** | Visual hierarchy of all Kubernetes resources created by the add-on |
-| **Values** | Current Helm values configuration |
-| **Events** | Recent events related to the add-on's resources |
-
-### Resource Map
-
-The Resource Map provides a visual representation of all resources deployed by an add-on:
-
-- **Hierarchical View**: See parent-child relationships (e.g., Deployment → ReplicaSet → Pod)
-- **Quick Navigation**: Click any resource to view its details
-- **Status Indicators**: Identify unhealthy or pending resources at a glance
-- **Resource Types**: View all Kubernetes resource kinds in one place
-
-<Tip>
-Use the Resource Map when troubleshooting to quickly identify which resources are failing and their dependencies.
-</Tip>
-
----
-
-## Updating Add-ons
-
-### Changing Values
-
-1. Navigate to your stack in the Stack Builder
-2. Click the add-on you want to modify
-3. Update the Helm values as needed
-4. Save and deploy the stack
-
-### Upgrading Chart Versions
-
-1. Edit the stack containing the add-on
-2. Click the add-on and select a new chart version
-3. Review any breaking changes in the chart changelog
-4. Save and deploy to upgrade
+When the registry has a newer release, the **Chart version** column on the Add-ons page says so (`<version> available`). For an add-on a Stack manages, that link opens the Stack editor at the add-on with the new version chosen, so you review and deploy it like any other change.
 
 <Warning>
-Major version upgrades may include breaking changes. Review the chart's release notes and test in a non-production environment first.
+A major chart version can carry breaking changes. Read the chart's release notes, and deploy the new version to a non-production cluster first.
 </Warning>
 
-### Rollback
+To roll back, open the Stack and choose **More → History and rollback**. The page lists every recorded version of each member, who changed it and when, lets you compare two versions, and restores the one you pick. Restoring needs the `clusters.operate` permission. In a cluster connected to Git, reverting the commit in the repository has the same effect on the next sync.
 
-If an upgrade causes issues:
-
-1. Edit the stack and revert to the previous chart version
-2. Or use GitOps: revert the commit in your Git repository
-3. Ankra deploys the previous state again - from the stack when you deploy it, or from Git on its next sync
-
-Add-on settings and Helm values are also readable and updatable through Ankra's AI and MCP clients, alongside sync, rollback, and uninstall - so routine add-on operations can run straight from chat or your editor. See the [MCP Tool Reference](/platform/mcp-tools#add-ons).
-
----
-
-## Explore the Add-ons API
-
-Want to automate add-on management or integrate with your CI/CD workflows?
-Check out the [API Reference](/api-reference/introduction) for endpoints to list, install, and manage add-ons programmatically.
-
----
+Add-on settings and Helm values are also readable and changeable through Ankra AI and MCP clients, alongside sync, rollback and uninstall, so routine add-on work can run from chat or your editor. See the [MCP Tool Reference](/platform/mcp-tools#add-ons). To automate add-on management from your own tooling, see the [API Reference](/api-reference/introduction).
 
 ## Related
 
 <CardGroup cols={2}>
   <Card title="Stacks" icon="cubes" href="/concepts/stacks">
-    Build stacks with multiple add-ons.
+    How add-ons, manifests and applications deploy together.
   </Card>
   <Card title="Add-on Catalog" icon="box" href="/platform/addon-catalog">
     Browse available Helm charts.
   </Card>
-  <Card title="GitOps" icon="git-alt" href="/concepts/gitops">
-    Understand the GitOps workflow.
+  <Card title="Add-on Settings" icon="sliders" href="/concepts/addon-settings">
+    Deployment, retry and sync settings per add-on.
   </Card>
   <Card title="SOPS Encryption" icon="lock" href="/guides/sops">
-    Encrypt sensitive add-on values.
+    Encrypt sensitive add-on values in Git.
   </Card>
 </CardGroup>

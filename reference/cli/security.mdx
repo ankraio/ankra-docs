@@ -173,6 +173,128 @@ ankra security clusters [flags]
 | `--sort` | `actionable` | Sort key: actionable, known_exploited, severity, observed, accepted_risk, latest_report_at, status, name |
 | `--status` |   | Scanner or posture status filter: fresh, stale, unscanned, clean, critical, high, degraded |
 
+## ankra security code-dispositions
+
+A code disposition records a reviewed Semgrep or Checkov finding of a
+pipeline repository as a false positive or an accepted risk. The Ankra
+Pipelines image gate then stops blocking on that rule in that file, and names
+the disposition on every run it lets through. A CRITICAL finding cannot be
+disposed of. Container vulnerability dispositions are 'ankra security
+dispositions'.
+
+## ankra security code-dispositions create
+
+Record a reviewed Semgrep or Checkov finding as a false_positive or an
+accepted_risk. An accepted risk needs `--expires-at`, at most a year out. A
+CRITICAL finding is refused, as is a second active disposition of the same
+finding. See what it would cover first with 'preview'. It asks first; `--yes`
+skips the question and is required when there is no terminal to ask on.
+
+```bash
+ankra security code-dispositions create --application <application> --tool semgrep|checkov --rule <rule-id> --path <file> --disposition <kind> --reason <why> [flags]
+```
+
+**Examples**
+
+```bash
+ankra security code-dispositions create --application shop --tool semgrep \
+  --rule go.lang.security.audit.xss --path internal/web/render.go \
+  --disposition false_positive --reason "Output is escaped by the template"
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--application` |   | The application whose pipeline repository holds the finding (name or id) |
+| `--disposition` |   | false_positive or accepted_risk (required) |
+| `--expires-at` |   | Review deadline as a date (2026-12-31) or RFC3339; required for accepted_risk |
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+| `--path` |   | The file the finding is in, relative to the repository root (required) |
+| `--reason` |   | Why; recorded on the audit trail (required to create) |
+| `--repository-id` |   | The pipeline repository's id, instead of `--application` |
+| `--rule` |   | The rule id of the finding (required) |
+| `--tool` |   | semgrep or checkov (required) |
+| `-y`, `--yes` | `false` | Skip the confirmation prompt (required when stdin is not a terminal) |
+
+## ankra security code-dispositions list
+
+List code finding dispositions, newest first
+
+```bash
+ankra security code-dispositions list [flags]
+```
+
+**Examples**
+
+```bash
+ankra security code-dispositions list
+ankra security code-dispositions list --application shop --include-revoked -o json
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--all-projects` | `false` | Read the whole organisation instead of the project you act in |
+| `--application` |   | Only this application's pipeline repository (name or id) |
+| `--include-revoked` | `false` | List revoked dispositions too |
+| `--limit` | `0` | How many to list (at most 200; the platform's default when omitted) |
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+| `--repository-id` |   | Only this pipeline repository (its id) |
+
+## ankra security code-dispositions preview
+
+Show the finding a code disposition would cover, writing nothing
+
+```bash
+ankra security code-dispositions preview --application <application> --tool semgrep|checkov --rule <rule-id> --path <file> --disposition <kind> [flags]
+```
+
+**Examples**
+
+```bash
+ankra security code-dispositions preview --application shop --tool checkov --rule CKV_K8S_8 --path deploy/app.yaml --disposition false_positive
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--application` |   | The application whose pipeline repository holds the finding (name or id) |
+| `--disposition` |   | false_positive or accepted_risk (required) |
+| `--expires-at` |   | Review deadline as a date (2026-12-31) or RFC3339; required for accepted_risk |
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+| `--path` |   | The file the finding is in, relative to the repository root (required) |
+| `--reason` |   | Why; recorded on the audit trail (required to create) |
+| `--repository-id` |   | The pipeline repository's id, instead of `--application` |
+| `--rule` |   | The rule id of the finding (required) |
+| `--tool` |   | semgrep or checkov (required) |
+
+## ankra security code-dispositions revoke
+
+Revoke a code finding disposition. The image gate blocks on the finding again
+from its next run, and the record is kept for audit. It asks first; `--yes`
+skips the question and is required when there is no terminal to ask on.
+
+```bash
+ankra security code-dispositions revoke <disposition-id> --reason <why> [flags]
+```
+
+**Examples**
+
+```bash
+ankra security code-dispositions revoke 0b7c4d19-5f6a-4b8c-9d0e-1f2a3b4c5d6e --reason "Fixed in the code" --yes
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+| `--reason` |   | Why; recorded on the audit trail (required) |
+| `-y`, `--yes` | `false` | Skip the confirmation prompt (required when stdin is not a terminal) |
+
 ## ankra security compliance
 
 Show every cluster's benchmark compliance (CIS, NSA/CISA and the other
@@ -293,8 +415,8 @@ ankra security compliance frameworks report <framework-key> [flags]
 List the organisation's vulnerability-disposition policies. A disposition
 acknowledges a finding (it stays visible but leaves the actionable set) or
 accepts its risk, for every occurrence its selector matches - one CVE and
-package inside one add-on across the organisation, or pinned to one workload
-or one image digest when no add-on owns the image.
+package inside one add-on across the organisation, or pinned to one
+namespace, one workload or one image digest when no add-on owns the image.
 
 Each policy has a lifecycle status: active, expiring (the review deadline
 is near), fix_available (a fixed version exists, so the acceptance should be
@@ -339,14 +461,17 @@ moment a fixed version appears. `--allow-unmatched` stores a policy whose
 anchor no longer matches anything.
 
 `--scope` chooses what the policy is pinned to: organisation_addon (the
-default) for the add-on that owns the occurrence, or workload or image when
-no add-on owns the image.
+default) for the add-on that owns the occurrence, or, when no add-on owns
+the image, namespace (every workload in the namespace on its cluster,
+surviving rollouts and rebuilds), workload (one workload; a Deployment
+survives rollouts) or image (one digest; lapses on the next build).
 
 Examples:
 
 ```bash
 ankra security dispositions create --occurrence 4f1c... --disposition acknowledged --reason "tracked in PLA-812" --expires-at 2026-10-31
 ankra security dispositions create --occurrence 4f1c... --scope workload --disposition accepted_risk --reason "operator-managed, not reachable from outside the cluster"
+ankra security dispositions create --occurrence 4f1c... --scope namespace --disposition accepted_risk --reason "transitive via crewai, feature unused" --expires-at 2026-12-31
 ```
 
 ```bash
@@ -364,7 +489,7 @@ ankra security dispositions create [flags]
 | `--occurrence` |   | Occurrence id to anchor the disposition on (from 'ankra security finding &lt;id&gt;') |
 | `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
 | `--reason` |   | Why the finding is acknowledged or its risk accepted (kept for audit) |
-| `--scope` | `organisation_addon` | Selector scope: organisation_addon, workload or image; use workload or image when no add-on owns the occurrence's image |
+| `--scope` | `organisation_addon` | Selector scope: organisation_addon, namespace, workload or image; use namespace (survives rollouts and rebuilds), workload or image when no add-on owns the occurrence's image |
 | `-y`, `--yes` | `false` | Skip the confirmation prompt |
 
 ## ankra security dispositions preview
@@ -381,15 +506,24 @@ Anchor a new policy on one occurrence with `--occurrence` (an id from
 
 `--scope` chooses what the policy is pinned to. organisation_addon (the
 default) covers the add-on that owns the occurrence, on every cluster.
-workload covers one workload on one cluster and image covers one image
-digest wherever it runs; use either when no add-on owns the image, such as
-operator-managed pods, plain manifests or control-plane pods.
+When no add-on owns the image - your own application, operator-managed
+pods, plain manifests or control-plane pods - pick one of:
+
+```text
+namespace  every workload in the occurrence's namespace on its cluster;
+           survives rollouts and image rebuilds (the usual choice for a
+           transitive dependency's CVE in one application)
+workload   one workload on one cluster; a Deployment's pods pin the
+           Deployment, so the policy survives rollouts
+image      one image digest wherever it runs; lapses on the next build
+```
 
 Examples:
 
 ```bash
 ankra security dispositions preview --occurrence 4f1c... --disposition accepted_risk --expires-at 2026-12-31
 ankra security dispositions preview --occurrence 4f1c... --scope workload --disposition acknowledged
+ankra security dispositions preview --occurrence 4f1c... --scope namespace --disposition accepted_risk --expires-at 2026-12-31
 ```
 
 ```bash
@@ -406,7 +540,7 @@ ankra security dispositions preview [flags]
 | `--occurrence` |   | Occurrence id to anchor the disposition on (from 'ankra security finding &lt;id&gt;') |
 | `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
 | `--policy` |   | Existing policy id to re-preview instead of an occurrence |
-| `--scope` | `organisation_addon` | Selector scope: organisation_addon, workload or image; use workload or image when no add-on owns the occurrence's image |
+| `--scope` | `organisation_addon` | Selector scope: organisation_addon, namespace, workload or image; use namespace (survives rollouts and rebuilds), workload or image when no add-on owns the occurrence's image |
 
 ## ankra security dispositions revoke
 
@@ -467,6 +601,189 @@ ankra security enable-baseline [flags]
 | `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
 | `-y`, `--yes` | `false` | Skip the confirmation prompt |
 
+## ankra security evidence
+
+Security evidence is a bounded snapshot of what the Security Center knows: a
+compliance framework's report when one is asked for, and the SBOM image
+inventory with known-exploited vulnerabilities first.
+
+A destination is where evidence goes: a Vanta document, a Wazuh relay or a
+webhook that receives signed requests. A delivery is one snapshot sent to one
+destination. For Vanta, the upload and the submission are separate steps: a
+delivery reads "uploaded" until 'deliveries submit' submits the document.
+
+## ankra security evidence deliveries
+
+Send security evidence and follow its deliveries
+
+## ankra security evidence deliveries list
+
+List the organisation's evidence deliveries newest first (at most 100), for
+every destination or for one with `--destination`.
+
+```bash
+ankra security evidence deliveries list [flags]
+```
+
+**Examples**
+
+```bash
+ankra security evidence deliveries list
+ankra security evidence deliveries list --destination 0b7c4d19-5f6a-4b8c-9d0e-1f2a3b4c5d6e --limit 20
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--destination` |   | Only this destination's deliveries (its id) |
+| `--limit` | `0` | How many deliveries to list (1 to 100; the platform's default when omitted) |
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+
+## ankra security evidence deliveries send
+
+Capture one bounded evidence snapshot and queue it for the destination, due now:
+the SBOM image inventory, known-exploited vulnerabilities first (at most 2,000
+images), and with `--framework` that framework's report. `--month` YYYY-MM sends a
+recorded month instead of current observations. A disabled framework or a
+month that was not recorded is refused.
+
+The command returns once the delivery is queued; follow it with
+'ankra security evidence deliveries list'.
+
+```bash
+ankra security evidence deliveries send --destination <destination-id> [flags]
+```
+
+**Examples**
+
+```bash
+ankra security evidence deliveries send --destination 0b7c4d19-5f6a-4b8c-9d0e-1f2a3b4c5d6e
+ankra security evidence deliveries send --destination <id> --framework iso27001 --month 2026-10
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--destination` |   | The destination's id (required) |
+| `--framework` |   | Add this compliance framework's report |
+| `--month` |   | Send a recorded month (YYYY-MM) instead of current observations |
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+
+## ankra security evidence deliveries submit
+
+Submit the Vanta evidence document an uploaded delivery put there. Upload and
+submission are separate: a delivery to Vanta reads "uploaded", a draft, until
+it is submitted. A refused or uncertain submission leaves the delivery uploaded
+and says why.
+
+```bash
+ankra security evidence deliveries submit <delivery-id> [flags]
+```
+
+**Examples**
+
+```bash
+ankra security evidence deliveries submit 0b7c4d0f-5f6a-4b8c-9d0e-1f2a3b4c5d6e
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+
+## ankra security evidence destinations
+
+Manage where security evidence is sent
+
+## ankra security evidence destinations create
+
+Create an evidence destination. What it needs depends on `--kind`:
+
+```text
+webhook  --url (https). The secret is the signing secret requests are signed with.
+wazuh    --url (https) of the relay. The secret is the relay's bearer token.
+vanta    --document-id, --client-id and an optional --api-base-url (https).
+         The secret is the client secret of the Vanta application.
+```
+
+The secret is never taken as an argument. Pipe it on stdin with `--secret-stdin`,
+or run in a terminal to be asked for it with the input hidden. The platform
+stores it in its secret store and never returns it.
+
+```bash
+ankra security evidence destinations create --name <name> --kind vanta|wazuh|webhook [flags]
+```
+
+**Examples**
+
+```bash
+cat signing-secret.txt | ankra security evidence destinations create --name siem-webhook --kind webhook \
+  --url https://siem.example.com/ankra --secret-stdin
+ankra security evidence destinations create --name vanta --kind vanta --document-id <id> --client-id <id>
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--api-base-url` |   | A Vanta API base URL other than the default (https) |
+| `--client-id` |   | The client id of the Vanta application |
+| `--document-id` |   | The Vanta document evidence is uploaded to |
+| `--kind` |   | vanta, wazuh or webhook (required) |
+| `--name` |   | Destination name (required) |
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+| `--secret-stdin` | `false` | Read the signing secret, bearer token or client secret from stdin |
+| `--url` |   | The https URL of a webhook or Wazuh relay |
+
+## ankra security evidence destinations list
+
+List the organisation's evidence destinations, revoked ones included. Credentials are never returned.
+
+```bash
+ankra security evidence destinations list [flags]
+```
+
+**Examples**
+
+```bash
+ankra security evidence destinations list
+ankra security evidence destinations list -o json
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+
+## ankra security evidence destinations revoke
+
+Revoke a destination: the platform disables it, deletes its credential and
+cancels its deliveries that have not been delivered. The destination stays in
+the list as revoked, for the history, and cannot be enabled again. It asks
+first; `--yes` skips the question and is required when there is no terminal to
+ask on.
+
+```bash
+ankra security evidence destinations revoke <destination-id> [flags]
+```
+
+**Examples**
+
+```bash
+ankra security evidence destinations revoke 0b7c4d19-5f6a-4b8c-9d0e-1f2a3b4c5d6e --yes
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+| `-y`, `--yes` | `false` | Skip the confirmation prompt (required when stdin is not a terminal) |
+
 ## ankra security finding
 
 Show one finding: its CISA KEV listing and deadline, EPSS probability,
@@ -491,6 +808,58 @@ ankra security finding <finding-id> [flags]
 | `--page` | `1` | Occurrence page number |
 | `--page-size` | `50` | Occurrences per page (max 100) |
 | `--status` |   | List occurrences in one scan state: active or resolved (the detail alone shows active ones) |
+
+## ankra security finding rebuild
+
+Open one pull request per affected application repository bumping the
+Dockerfile base image to the advisory's fixed version, through the
+application's own GitHub credential. Every write goes to a new branch and a
+pull request, never to the default branch; an open Ankra pull request for the
+same finding and repository is reused. It opens the pull requests only: to
+have Ankra follow them to a verified fix, use 'ankra security remediations
+start'. It asks first; `--yes` skips the question and is required when there is
+no terminal to ask on.
+
+```bash
+ankra security finding rebuild <finding-id> [flags]
+```
+
+**Examples**
+
+```bash
+ankra security finding rebuild 0b7c4d15-5f6a-4b8c-9d0e-1f2a3b4c5d6e --yes
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+| `-y`, `--yes` | `false` | Skip the confirmation prompt (required when stdin is not a terminal) |
+
+## ankra security finding rebuild-plan
+
+Plan the base-image bump pull requests for a finding whose occurrences are
+application container images: per affected application repository, the
+Dockerfile FROM lines that would move to the advisory's fixed version, the
+branch the pull request would use and the open Ankra pull request already
+there; per image the lane cannot act on, the reason. A read: nothing is opened.
+
+```bash
+ankra security finding rebuild-plan <finding-id> [flags]
+```
+
+**Examples**
+
+```bash
+ankra security finding rebuild-plan 0b7c4d15-5f6a-4b8c-9d0e-1f2a3b4c5d6e
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
 
 ## ankra security findings
 
@@ -691,6 +1060,115 @@ ankra security policy-mode <audit|enforce|off> [flags]
 | `--cluster` |   | Cluster (name or id), required |
 | `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
 | `-y`, `--yes` | `false` | Skip the confirmation prompt |
+
+## ankra security remediations
+
+A remediation run is one fix pull request on one application (a finding's
+image rebuild, a base-image fix or a dependency bump), the pipeline runs of
+its commits and the rescan that proves the fix. A run reads "verified" only
+once every affected cluster was rescanned after the fix with no active
+occurrence; "uncertain" is a deadline that passed without proof and never
+means clean.
+
+## ankra security remediations cancel
+
+Stop a live run. The pull request and any running pipeline are left for their
+reviewers; a finished run is answered unchanged. It asks first; `--yes` skips
+the question and is required when there is no terminal to ask on.
+
+```bash
+ankra security remediations cancel <run-id> [flags]
+```
+
+**Examples**
+
+```bash
+ankra security remediations cancel 0b7c4d0f-5f6a-4b8c-9d0e-1f2a3b4c5d6e --yes
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+| `-y`, `--yes` | `false` | Skip the confirmation prompt (required when stdin is not a terminal) |
+
+## ankra security remediations get
+
+Show one remediation run with its receipt trail
+
+```bash
+ankra security remediations get <run-id> [flags]
+```
+
+**Examples**
+
+```bash
+ankra security remediations get 0b7c4d0f-5f6a-4b8c-9d0e-1f2a3b4c5d6e
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+
+## ankra security remediations list
+
+List the organisation's remediation runs newest first (at most 100). Without
+`--application` only runs of one finding are listed; with it the application's
+batched runs are listed too, and `--finding` then also matches a batched run
+that fixes the finding.
+
+```bash
+ankra security remediations list [flags]
+```
+
+**Examples**
+
+```bash
+ankra security remediations list
+ankra security remediations list --finding 0b7c4d15-5f6a-4b8c-9d0e-1f2a3b4c5d6e -o json
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--all-projects` | `false` | Read the whole organisation instead of the project you act in |
+| `--application` |   | Only this application's runs, batched ones included (name or id) |
+| `--finding` |   | Only runs that fix this finding (its id) |
+| `--limit` | `0` | How many runs to list (1 to 100; the platform's default when omitted) |
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+
+## ankra security remediations start
+
+Open or reuse the fix pull request of every application repository the finding
+affects (the image rebuild lane), start or answer the live remediation run of
+each, and send the pull request branch through Ankra Pipelines. Repeating the
+command reuses the live runs; nothing is approved, waived or accepted.
+
+You are the one asking, so the organisation's AI autonomy pause does not hold
+this start; it holds every step Ankra later takes on its own for the run. It
+asks first; `--yes` skips the question and is required when there is no terminal
+to ask on. Read what it would do with 'ankra security finding rebuild-plan'.
+
+```bash
+ankra security remediations start <finding-id> [flags]
+```
+
+**Examples**
+
+```bash
+ankra security remediations start 0b7c4d15-5f6a-4b8c-9d0e-1f2a3b4c5d6e --yes
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+| `-y`, `--yes` | `false` | Skip the confirmation prompt (required when stdin is not a terminal) |
 
 ## ankra security report-schedule
 

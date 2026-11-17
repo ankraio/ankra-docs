@@ -20,7 +20,7 @@ Use it to inspect clusters, workloads, logs, alerts, and related platform data f
 | `mcp:read` | Read-only platform tools only: a read token changes nothing |
 | `mcp:write` | The read surface plus mutating tools such as apply, scale, delete, and pull request creation |
 
-`mcp:write` implies read access. When creating a write token in the portal, Ankra selects both scopes.
+`mcp:write` implies read access. A token made in the portal with **Editor tools: read and change** carries both scopes.
 
 <Warning>
 MCP clients own the confirmation experience. Ankra does not show a second server-side confirmation prompt before a write tool runs. Only grant `mcp:write` to clients you trust.
@@ -28,21 +28,35 @@ MCP clients own the confirmation experience. Ankra does not show a second server
 
 ## Create an MCP Token
 
+Claude clients sign in with [OAuth](#connect-claude-with-oauth) and need no token. Make one for Cursor, other MCP clients and scripts.
+
+In the portal, **Create token** appears only once your account has two-step sign-in. Without it, **Your account → API access** shows **Add a second step to sign in first** with a **Set up two-step sign-in** link. See [Account security](/platform/account-security).
+
 <Tabs>
-  <Tab title="Ankra Platform">
+  <Tab title="Portal">
     <Steps>
-      <Step title="Open API Tokens">
-        Open your profile, select **API Tokens**, then select **Add Token**.
+      <Step title="Open API access">
+        Open **Your account → API access** (`/next/account/api`) and select **Create token**. The **Create a token** dialog opens.
       </Step>
-      <Step title="Choose MCP access">
-        Enter a descriptive name and select **mcp:read**. Select **mcp:write** only if the client needs to change resources.
+      <Step title="Choose what the token can do">
+        Enter a **Name** that says where the token is used, such as `Cursor on my laptop`. Under **What can it do?**, choose one:
+
+        | Choice | Scopes | Use it for |
+        | --- | --- | --- |
+        | **Editor tools: read and change** (selected by default) | `mcp:read`, `mcp:write` | An MCP client that deploys, scales and applies |
+        | **Editor tools: read only** | `mcp:read` | An MCP client that lists, describes and queries |
+        | **Full API access** | none | Scripts and CI that call the [REST API](/api-reference/introduction); it cannot call the MCP server |
+
+        Select **Editor tools: read only** unless the client needs to change resources. Pick a lifetime under **Expires after** (7 days, 30 days, 90 days or 1 year; 90 days is preselected), then select **Create token**.
       </Step>
       <Step title="Copy the token">
-        Copy the generated token immediately and store it securely. Ankra only shows it once.
+        The dialog now reads **Copy your token now**. Reveal the token, copy it into your client or a password manager, tick **I have stored it somewhere safe**, then select **Done**. Ankra shows the token only once.
+
+        The token is now listed under **Your tokens** with the access you chose, such as **Editor tools: read only**, and its expiry date.
       </Step>
     </Steps>
   </Tab>
-  <Tab title="Ankra CLI">
+  <Tab title="CLI">
     Create a read-only token:
 
     <CliVersion since="0.6.0" />
@@ -90,7 +104,7 @@ The sections below set each client up by hand, for an MCP client the CLI does no
 
 ## Connect Cursor
 
-Add Ankra to your Cursor MCP configuration:
+Add Ankra to your Cursor MCP configuration in `~/.cursor/mcp.json`. The **Connect your editor** section of **Your account → API access** shows the same block with your platform's address filled in.
 
 ```json
 {
@@ -120,7 +134,7 @@ Claude connects to Ankra over OAuth, so you do not need to create or copy a toke
 
 <Tabs>
   <Tab title="Claude web and desktop">
-    Custom connectors require a paid Claude plan. On Team and Enterprise plans an owner may need to add the connector for the organisation.
+    Custom connectors are available on every Claude plan; the Free plan allows one. On Team and Enterprise plans an owner may need to add the connector for the organisation.
 
     <Steps>
       <Step title="Open the Connectors settings">
@@ -182,7 +196,14 @@ Claude connects to Ankra over OAuth, so you do not need to create or copy a toke
   </Tab>
 </Tabs>
 
-By default, Ankra issues a seven-day MCP-only token to the client. The flow uses OAuth 2.1 authorization code with PKCE. No client secret or refresh token is issued, so when the grant expires, reconnect: select **Connect** on the Ankra connector in Claude's Connectors settings, or run `/mcp` and authenticate again in Claude Code.
+The flow uses OAuth 2.1 authorisation code with PKCE and no client secret. Ankra issues the client an MCP-only access token that lasts seven days, together with a refresh token. The client renews the access token on its own: each refresh token works once and is replaced by a new one with every renewal. You connect again only when the connection ends:
+
+- 90 days after you approved it, however often the client renewed;
+- after 30 days in which the client did not renew at all;
+- when a refresh token that was already used is presented again after its replacement was used, or more than 30 seconds after the renewal, which ends the connection and its access token at once (a client retrying a renewal whose answer it lost, within those 30 seconds, gets a new pair instead);
+- when you are no longer an active member of the organisation.
+
+To connect again, select **Connect** on the Ankra connector in Claude's Connectors settings, or run `/mcp` and authenticate again in Claude Code.
 
 ## How Tool Access Works
 
@@ -200,9 +221,9 @@ The [MCP Tool Reference](/platform/mcp-tools) lists the tools with the scope eac
 
 MCP is stateless: each `tools/call` is one request with nothing parked between calls. Three consequences follow, and the server's `instructions` field repeats them to the model on `initialize`.
 
-- **Every call has a 55-second deadline.** A call that outruns it answers `isError` with a timeout. A mutating call that had already started is not undone by that timeout, so read the target's state before repeating a write.
+- **Every call has a 55-second deadline**, except `workspace_exec`, which waits for its command (its `timeout_seconds` goes up to 330). A call that outruns its deadline answers `isError` with a timeout. A mutating call that had already started is not undone by that timeout, so read the target's state before repeating a write.
 - **Writes that start platform work do not wait for it.** Tools such as `apply_stack_changes`, `upgrade_cluster` or `update_node_group` answer at once with an `operation_id` (or a `live_status_hint` naming the id to poll). Call `wait_for_execution` with that id to block for up to 50 seconds and receive the settled execution, or `timed_out: true` with the last observed step summary; call it again to keep waiting. `get_execution_details` reads the same document without waiting.
-- **Confirmation cards do not exist over MCP.** A tool that raises a confirmation card in the Ankra chat executes directly here when the token holds `mcp:write`: the token scope is the approval. `apply_stack_changes` applies the stack draft the token last edited, so keep one client per token while editing a draft and pass `stack_name` on every apply.
+- **Confirmation cards do not exist over MCP.** A tool that raises a confirmation card in the Ankra chat executes directly here when the token holds `mcp:write`: the token scope is the approval. `apply_stack_changes` applies the draft its `draft_id` names, and refuses a draft of another organisation or cluster. Without `draft_id` it applies the most recently changed draft with that `stack_name` on that cluster, whoever changed it: a same-named draft edited in the portal or by another client after yours is the one that is applied. A dry run (`dry_run: true`) answers the `draft_id` it resolved, so read that draft and pass its `draft_id` to apply exactly it.
 - **A call can act under a Launch Plan approval.** Put the approval's id in the call's `_meta` as `"ankra/launch_plan_approval_id"`. The write then runs only if it is one of the actions you approved, the approval is yours, it has not expired or been revoked, and the plan has not changed since you approved it. Each approved action runs once. Any other call naming the approval is refused, and nothing runs.
 
 ## Links to the Portal
@@ -219,7 +240,9 @@ Everything the tools read and change is also visible in the Ankra portal, and th
 
 ### 401 Invalid or missing bearer token
 
-The token is missing, expired, revoked, or copied incorrectly. Create a new MCP token and update the client. For Claude clients connected with OAuth this usually means the seven-day grant expired - reconnect the Ankra connector in Claude's settings, or run `/mcp` and authenticate again in Claude Code.
+The token is missing, expired, revoked, or copied incorrectly. Create a new MCP token, or select **Renew** on it under **Your account → API access**, and update the client.
+
+A Claude client connected with OAuth renews its own access token, so a 401 there means the connection ended: 90 days passed since you approved it, the client did not renew for 30 days, a used refresh token was presented again, you left the organisation, or the token was revoked. Reconnect the Ankra connector in Claude's settings, or run `/mcp` and authenticate again in Claude Code.
 
 ### 403 Token has no MCP scope
 
@@ -247,4 +270,4 @@ Wait one minute and retry. If normal usage regularly reaches the limit, ask your
 - [Work the AI board with your own agent](/guides/board-own-agent)
 - [Portal URLs](/platform/portal-urls)
 - [AI Provider](/platform/ai-provider)
-- [Hermes Integration](/integrations/hermes)
+- [OpenClaw and Hermes agents](/integrations/openclaw)

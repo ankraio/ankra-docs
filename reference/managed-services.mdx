@@ -8,7 +8,7 @@ tag: "Closed Beta"
 **Closed beta.** These settings belong to [Managed services](/concepts/managed-services), which is in closed beta and enabled per organisation on request. [Contact support](/platform/support) to have it turned on for your organisation.
 </Warning>
 
-You choose these settings when you [set up a service](/guides/set-up-a-managed-service). Each one is a whole number within its range, and a field left empty takes the default. Changing a running service's settings from **Managed services** is not available yet, so size it for what you need from the start. Each section below describes the newest version of its package, which a new setup installs unless another version is named, and lists that version's settings.
+You choose these settings when you [set up a service](/guides/set-up-a-managed-service). Each one is a whole number within its range, and a field left empty takes the default. **Managed services** cannot change a running service's settings, so size it for what you need from the start. Each section below describes the newest version of its package, which a new setup installs unless another version is named, and lists that version's settings.
 
 Three rules hold for every service:
 
@@ -96,19 +96,33 @@ Package `victoria-metrics` 1.2.0: VictoriaMetrics 1.153, as a single server.
 | `memory_mib` | 256 to 16384 MiB | 512 | Memory for the server. VictoriaMetrics sizes its caches to 60% of it. |
 | `cpu_millicores` | 100 to 8000 | 250 | CPU for the server. |
 
-## GPU chat
+## Supabase
 
-Package `gpu-chat` 1.0.0: capability `inference`, protocol `openai`. It gives the applications connected to it an OpenAI-compatible endpoint inside the cluster: a LiteLLM broker in front of vLLM, routed by llm-d, on a GPU node, plus a Secret with its credentials. It can also run the Open WebUI chat interface.
-
-The cluster needs a Ready, schedulable node that advertises `nvidia.com/gpu`, which the NVIDIA device plugin publishes and Ankra does not install, with `gpu_count` GPUs on one node for each replica. Ankra counts the GPUs a node has, not the ones other pods hold, so a replica on a cluster whose GPUs are busy stays Pending and says why. Without such a node, setup is refused and says why.
+Package `supabase` 1.0.0: capability `database`, protocol `supabase`. A Supabase-compatible backend, so an application written against supabase-js runs against it unchanged: PostgreSQL 18.6 run by the CloudNativePG operator, with PostgREST (the data API), GoTrue (sign-in) and Supabase Storage behind an nginx gateway at `http://supabase.<service>.svc:8000`. Realtime, edge functions, image transformations and Studio are not run. Sign-in is by email and password, and accounts are confirmed at sign-up, because no mail server is configured. Applications connected to it receive `SUPABASE_URL`, `SUPABASE_ANON_KEY` and `SUPABASE_PUBLISHABLE_KEY`; the Secret they are given, `supabase-api-keys`, holds only the gateway URL and the publishable key.
 
 | Setting | Range | Default | What it changes |
 |---------|-------|---------|-----------------|
-| `model_tier` | 1 to 5 | 1 | The model and the GPU it needs: 1 is Qwen3 8B on one NVIDIA L4 (24 GB); 2 is Qwen3.8 27B in FP8 on an L40S (48 GB) or H100; 3 is Qwen3 32B on an L40S; 4 is Qwen3.8 27B on an H100 (80 GB); 5 is Qwen3.8 27B in NVFP4 on Blackwell (RTX PRO 6000 or B200). |
+| `storage_gib` | 1 to 1000 GiB | 5 | Size of the database's data volume. |
+| `file_storage_gib` | 1 to 1000 GiB | 5 | Size of the volume Storage keeps uploaded files on. |
+| `memory_mib` | 256 to 16384 MiB | 384 | Memory for the database. |
+| `cpu_millicores` | 100 to 8000 | 200 | CPU for the database. |
+
+PostgREST, GoTrue, Storage and the gateway have fixed sizes of their own.
+
+## GPU chat
+
+Package `gpu-chat` 1.1.0: capability `inference`, protocol `openai`. It gives the applications connected to it an OpenAI-compatible endpoint inside the cluster, plus a Secret with its credentials. The endpoint is a LiteLLM broker in front of vLLM, routed by llm-d, on a GPU node, or, at `model_tier` 0, in front of a llama.cpp server on ordinary nodes. It can also run the Open WebUI chat interface.
+
+For `model_tier` 1 to 5, the cluster needs a Ready, schedulable node that advertises `nvidia.com/gpu`, which the NVIDIA device plugin publishes and Ankra does not install, with `gpu_count` GPUs on one node for each replica. Ankra counts the GPUs a node has, not the ones other pods hold, so a replica on a cluster whose GPUs are busy stays Pending and says why. Without such a node, setup is refused and says why. `model_tier` 0 needs no GPU, but setup refuses it where no node has the model server's requests free, where Ankra cannot see the cluster's nodes and pods, and with more than one replica.
+
+| Setting | Range | Default | What it changes |
+|---------|-------|---------|-----------------|
+| `model_tier` | 0 to 5 | 1 | The model and what it runs on: 0 is Qwen3 1.7B (Q4_0) on llama.cpp, on CPU; 1 is Qwen3 8B on one NVIDIA L4 (24 GB); 2 is Qwen3.8 27B in FP8 on an L40S (48 GB) or H100; 3 is Qwen3 32B on an L40S; 4 is Qwen3.8 27B on an H100 (80 GB); 5 is Qwen3.8 27B in NVFP4 on Blackwell (RTX PRO 6000 or B200). |
 | `gpu_count` | 1 to 8 | 1 | GPUs for each replica of the model. |
 | `replicas` | 1 to 4 | 1 | Replicas of the model server. Each one takes `gpu_count` GPUs. |
 | `embeddings` | 0 or 1 | 1 | 1 also serves the bge-m3 embedding model on CPU at `/v1/embeddings`. |
 | `chat_ui` | 0 or 1 | 0 | 1 also runs the Open WebUI chat interface. |
+| `chat_ui_access` | 0 or 1 | 0 | 1 adds a NetworkPolicy that admits the Ankra Cloud tunnel connector's namespace to Open WebUI's port alone, so an Ankra Cloud tunnel hostname whose origin is the Service `open-webui` can serve the chat UI. It publishes nothing by itself, and nothing is published on the cluster's ingress. Behind a tunnel zone whose access policy is the organisation, only your organisation's members are let in. Needs `chat_ui` 1. |
 
 ## Health checks
 
@@ -123,6 +137,7 @@ Ankra decides a service's [health](/concepts/managed-services#health) from these
 | SeaweedFS | Deployment `seaweedfs-all-in-one`, 1 available | `seaweedfs-all-in-one` | `seaweedfs-s3-secret` |
 | VictoriaLogs | StatefulSet `victoria-logs`, 1 ready | `victoria-logs` | `victoria-logs-credentials` |
 | VictoriaMetrics | StatefulSet `victoria-metrics`, 1 ready | `victoria-metrics` | `victoria-metrics-credentials` |
+| Supabase | Every Deployment in the namespace ready (PostgREST, GoTrue, Storage and the gateway); PostgREST is ready only while it holds a database connection, so this covers the database too | `supabase` | `supabase-api-keys` |
 | GPU chat | Every StatefulSet and Deployment in the namespace ready (the model servers, the router, LiteLLM and its database, and the embedding server and chat UI when chosen); a workload switched off is scaled to zero and set aside | `litellm` | `gpu-chat-credentials` |
 
 Every service is also checked for the stack that owns it: a member that failed to apply or is being removed, or a stack that is gone or being removed, reads `degraded`.
@@ -132,7 +147,7 @@ Every service is also checked for the stack that owns it: a member that failed t
 | About 1 minute | How often each service is observed |
 | 5 minutes | How long an observation stands before it reads `unknown` |
 | 15 minutes | How recent Ankra's view of a resource type on the cluster must be for a missing object to count as missing; older reads `unknown` |
-| 10 minutes (PostgreSQL, OpenSearch), 30.5 minutes (GPU chat, which downloads its model on first start), 5 minutes (the others) | Grace window after a successful deployment, during which a failing check reads `progressing` |
+| 10 minutes (PostgreSQL, OpenSearch, Supabase and packages your organisation publishes), 30.5 minutes (GPU chat, which downloads its model on first start), 5 minutes (the others) | Grace window after a successful deployment, during which a failing check reads `progressing` |
 | 30 minutes | How long after its last write a stack member's apply still counts as in progress |
 
 ## Readiness check
@@ -148,6 +163,7 @@ Every service has a [readiness](/concepts/managed-services#readiness) check: a s
 | SeaweedFS | `curlimages/curl:8.16.0` | `admin_access_key_id` and `admin_secret_access_key` of `seaweedfs-s3-secret` |
 | VictoriaLogs | `curlimages/curl:8.16.0` | `username` and `password` of `victoria-logs-credentials` |
 | VictoriaMetrics | `curlimages/curl:8.16.0` | `username` and `password` of `victoria-metrics-credentials` |
+| Supabase | `curlimages/curl:8.16.0` | The publishable key of `supabase-api-keys` |
 | GPU chat | `curlimages/curl:8.16.0` | `api-key` and `model` of `gpu-chat-credentials` |
 
 Every check image, PostgreSQL's included, is pinned by digest as well as the tag shown, and the digest decides what the cluster pulls. What each check does is listed under [Readiness](/concepts/managed-services#readiness). The PostgreSQL check runs `psql -h postgresql-rw.<service>.svc.cluster.local -p 5432 -U app -d app -c "SELECT 1"`.
@@ -159,7 +175,7 @@ Every check image, PostgreSQL's included, is pinned by digest as well as the tag
 | Interval | About every 5 minutes, measured from the last attempt |
 | Result stands | 15 minutes |
 | Pod time limit | 60 seconds |
-| Grace window | While no check has passed yet: 10 minutes after a successful deployment for PostgreSQL and OpenSearch, 30.5 minutes for GPU chat, 5 minutes for the other services |
+| Grace window | While no check has passed yet: 10 minutes after a successful deployment for PostgreSQL, OpenSearch, Supabase and packages your organisation publishes, 30.5 minutes for GPU chat, 5 minutes for the other services |
 | Agent | The checks for services other than PostgreSQL need an agent recent enough to run them. Until it is, the service reads `unverified` and `readiness_check.reason` says to upgrade the agent. |
 
 At most one check pod runs on a cluster at a time.

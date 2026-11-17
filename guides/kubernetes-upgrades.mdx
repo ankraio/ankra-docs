@@ -15,7 +15,7 @@ Clusters whose control plane your cloud runs (EKS, GKE, AKS, DOKS, UKS, OVHcloud
 
 ## What an upgrade does
 
-You start an upgrade from **Settings** → **General** → **Kubernetes Version** in the dashboard, with `ankra cluster upgrade <cluster> <version>` on the CLI, or with the MCP `upgrade_cluster` tool. All three start the same operation.
+You start an upgrade from **Settings → Upgrades and maintenance → Kubernetes version** in the portal, with `ankra cluster upgrade <cluster> <version>` on the CLI, or with the MCP `upgrade_cluster` tool. All three start the same operation.
 
 - **Only catalogue versions.** The target must be one Ankra lists: `ankra cluster k3s-versions` or `ankra cluster kubeadm-versions`.
 - **One minor version per upgrade, never down.** 1.35 to 1.36 is one upgrade. To reach 1.37, run a second upgrade (a second hop) once the first has finished on every node. Downgrades are refused.
@@ -89,11 +89,42 @@ ankra cluster backups status --cluster my-cluster
 - **Choose the target.** List versions with `ankra cluster k3s-versions` or `ankra cluster kubeadm-versions` and pick the next minor version, or a newer patch of the current one.
 - **Check every node's version.** `ankra cluster get nodes` shows each node's version. Nodes already at the target are skipped.
 - **Confirm the restore points.** Every stateful Stack is protected with a recent restore point (`ankra cluster backups status`), and the cluster has a recent **Scheduled etcd Snapshot** in `ankra cluster operations list`.
-- **Check PodDisruptionBudgets.** A budget that allows zero disruptions - for example on a single-replica database - parks the upgrade at that node. Relax it for the window, scale the workload up, or move it to a node the hop skips.
-- **Make databases stop in time.** A pod being evicted must shut down within the 300-second drain timeout. CloudNativePG's default stop delay is longer: lower it for the window, or move the primary off the node first.
+- **Check PodDisruptionBudgets.** A budget that allows zero disruptions - for example on a single-replica database - parks the upgrade at that node. Relax it for the window, scale the workload up, or move it to a node the hop skips. The budget CloudNativePG puts on a database's primary is handled for you, see [CloudNativePG databases](#cloudnativepg-databases).
+- **Make databases stop in time.** A pod being evicted must shut down within the 300-second drain timeout. CloudNativePG's default stop delay is longer: lower it for the window. You do not need to move CloudNativePG primaries off the node yourself; the upgrade switches them over to a replica before the drain.
 - **Freeze other changes.** No scaling, node-group changes or other cluster operations during the window.
 - **Leave control planes memory headroom.** Each hop restarts the Kubernetes server. A control plane running close to its memory limit may not come back cleanly; resize it first if it is tight.
 - **Pick a window.** Plan for the timings in [What to expect](#what-to-expect).
+
+### CloudNativePG databases
+
+CloudNativePG guards each database's primary with a PodDisruptionBudget that allows no disruption, so a plain drain of the primary's node would park the upgrade. A Kubernetes version upgrade hands the primary over first. After it cordons a node and before it evicts anything, Ankra switches every CloudNativePG primary on that node over to a replica on another node, the same planned switchover as CloudNativePG's own `promote` command. It waits up to 10 minutes until CloudNativePG reports the replica as the new primary, that pod is ready as primary and the old one has stepped down, then drains the node, evicting the old primary as a replica like any other pod.
+
+The replica Ankra hands over to must be ready, reported healthy by the database, not fenced, and on another node that is schedulable. Ankra refuses before it changes anything when, for any primary on the node:
+
+- the database is not in the phase `Cluster in healthy state`, or is already switching over;
+- it has no such replica; or
+- it runs a single instance and its owner has not accepted a restart (below).
+
+The node is then not drained and nothing is upgraded on it: Ankra puts it back in service and the upgrade parks at that node with "Node &lt;node&gt; was not drained, so nothing was upgraded on it: &lt;reasons&gt;. The node is back in service.", naming each database and why. A switchover CloudNativePG does not finish within 10 minutes also puts the node back undrained; that failure is retried like any other.
+
+**A single-instance database** has no replica to take over. Its owner can accept a planned restart instead, on the CloudNativePG `Cluster` itself, by setting the annotation `upgrade.ankra.io/accept-single-instance-restart-until` to an RFC 3339 instant:
+
+```yaml
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: my-database
+  annotations:
+    upgrade.ankra.io/accept-single-instance-restart-until: "2026-12-01T06:00:00Z"
+spec:
+  instances: 1
+```
+
+Until that instant, the drain shuts the instance down through CloudNativePG instead of evicting it, CloudNativePG starts it again on a node it can be scheduled on, and Ankra waits up to 10 minutes for it to be ready there before it goes on. **The database is down for that restart.** If the instance is not ready elsewhere within 10 minutes, the upgrade stops at that node and puts the node back in service so the instance can start there again; check the instance's volume and scheduling before you retry. An annotation that is missing, is not an RFC 3339 instant or has passed counts as no. The other way past is a replica (`spec.instances: 2`). Ankra never deletes or edits a budget, and a single-instance database whose budgets are switched off (`spec.enablePDB: false`) is drained as before.
+
+The [preflight](#run-the-upgrade-preflight) reads the same rules: a primary budget the upgrade will hand over, or a single instance whose owner accepted a restart, is a warning that says what the drain will do, not a block. A database that is not healthy, and a single instance with no current acceptance, still block; for a single instance the finding names the annotation. A forced upgrade (`--force`) still tries each switchover, then drains whether or not it worked.
+
+This covers Kubernetes version upgrades only. [OS patch runs](/guides/os-patching) and other drains, such as removing a node, do not switch primaries over.
 
 ### Run the upgrade preflight
 
@@ -111,7 +142,7 @@ ankra cluster backups status --cluster my-cluster
     ankra cluster upgrade my-cluster v1.36.4            # kubeadm: a plain upstream tag
     ankra cluster upgrade my-cluster v1.36.4+k3s1       # k3s
     ```
-    In the dashboard, open **Settings** → **General**, pick the target under **Kubernetes Version** and confirm.
+    In the portal, open **Infrastructure → Clusters → &lt;your cluster&gt; → Settings → Upgrades and maintenance**. Under **Kubernetes version**, choose **Version to upgrade to** and click **Review upgrade**. The dialog runs the preflight under **Before you upgrade** and marks each finding **Blocks the upgrade** or **Worth knowing**; Ankra does not start the upgrade until the blocking items are fixed. Click **Upgrade to &lt;version&gt;**. Starting an upgrade needs `clusters.operate` (Operator, Admin or Owner).
   </Step>
   <Step title="Follow it">
     ```bash
@@ -141,6 +172,7 @@ ankra cluster operations retry <operation-id>
 | What happened | What Ankra does | What you do |
 |---|---|---|
 | A drain is blocked by a PodDisruptionBudget | Retries the drain for about 10 minutes, then parks the upgrade at that node and uncordons it. The other workers' steps are cancelled and planned again on their own within about 10 minutes; they park too while the blocker remains | Relax the budget or add replicas, then `ankra cluster operations retry <operation-id>` |
+| "Node &lt;node&gt; was not drained, so nothing was upgraded on it: ... The node is back in service." A CloudNativePG primary on the node could not be handed over | Changes nothing on that node: it is not drained or upgraded, it is put back in service, and the upgrade parks there. The message names each database and why | Fix what it names, as in [CloudNativePG databases](#cloudnativepg-databases): wait until the database reports `Cluster in healthy state`, give it a ready replica on another schedulable node, or accept a restart of a single-instance database. Then `ankra cluster operations retry <operation-id>` |
 | You cancelled the upgrade (`ankra cluster operations cancel <operation-id>`) | Marks the run cancelled at once, but the node being upgraded finishes its whole upgrade (about 3 minutes) and is uncordoned. A cancel does not stop the upgrade for good: Ankra plans the remaining nodes again on its own, usually within about 10 minutes | Nothing, or `ankra cluster operations retry <operation-id>` to resume sooner, once the node being upgraded has finished (until then the retry is refused with "Execution still has steps stopping"); keeping the upgrade stopped needs an operations hold, which only Ankra staff can place |
 | Any other failure | Retries automatically with backoff | Follow it with `ankra cluster operations steps <operation-id>` |
 
@@ -149,6 +181,8 @@ ankra cluster operations retry <operation-id>
 </Warning>
 
 While Ankra holds a cluster for a recovery, a new upgrade request is refused with a message naming when the hold ends; run it again after that time.
+
+In the portal, a stopped upgrade shows on **Settings → Upgrades and maintenance** with the nodes still on the old version. **Resume upgrade** starts a new attempt of the stopped run (it needs `executions.operate`), and **Force drain the remaining nodes** goes on past the PodDisruptionBudgets that stopped it, the same as `--force`.
 
 If a node is still cordoned after you have fixed the cause and nothing is running, put it back with `ankra cluster uncordon <node>`.
 
@@ -173,7 +207,7 @@ After a rollback the cluster reads its previous version and Ankra does not upgra
 
 You can rebuild a whole cluster from its state captured off-cluster yourself. A stop captures the state and terminates the virtual machines; a start with the state restored builds new ones from it:
 
-<CliVersion since="0.18.0" command="cluster <provider> stop / start --restore-state" />
+<CliVersion since="0.18.0" command="cluster &lt;provider&gt; stop / start --restore-state" />
 
 ```bash
 ankra cluster hetzner stop my-cluster                          # capture state, then tear down
@@ -183,6 +217,20 @@ ankra cluster hetzner start my-cluster --restore-state=true    # require the cap
 The same commands exist under `ovh`, `upcloud`, `digitalocean`, `proxmox` and `morpheus`, the providers whose stop terminates the virtual machines. On Scaleway, AWS EC2 and Ankra Cloud a stop powers the servers off and keeps them, so there is nothing to rebuild. With `--restore-state=true` the start is refused if no captured state exists; without the flag, a start restores it when there is one.
 
 The cluster comes back with new virtual machines and new IP addresses, at the same Kubernetes version. StatefulSets reattach their same cloud volumes with their data, Secrets, ConfigMaps and other objects come back as they were at the capture, and the Ankra agent comes back online. In testing on Hetzner a stop with the capture took about 2.5 to 3 minutes and a start with the restore about 6 minutes. See [Stop, Start and Power Schedules](/platform/cluster-power-schedules) for every option.
+
+### Restore a named snapshot
+
+On the providers whose stop deletes the servers, a start restores the newest snapshot captured after the cluster's last start by itself. When there is none but older snapshots exist, for example after the control plane was lost, the start is refused and the refusal names the newest one. `ankra cluster state-snapshots latest` shows that snapshot: its id, what captured it (`stop`, `power_schedule` or `scheduled`), when, and the Kubernetes version it holds. Pass the id to the provider's start:
+
+<CliVersion since="0.71.0" command="cluster &lt;provider&gt; start --restore-snapshot-id" />
+
+```bash
+ankra cluster state-snapshots latest --cluster my-cluster
+ankra cluster hetzner start my-cluster --restore-snapshot-id <id>
+ankra cluster ankracloud start my-cluster --restore-snapshot-id <id> --restore-over-kept-etcd
+```
+
+`--restore-snapshot-id` takes a snapshot id (a UUID; anything else exits 2 before any request is made) and implies `--restore-state=true`. On Scaleway, AWS EC2 and Ankra Cloud a stop keeps the servers, so a start restores nothing by itself and refuses a named snapshot too: the kept control planes still hold their etcd, and a restore would reset it. When those machines are lost, their etcd with them, add `--restore-over-kept-etcd` to confirm it. The first control plane's install still refuses to restore over an etcd it finds alive, so a wrong confirmation cannot overwrite a live cluster.
 
 ### Apply conflicts after a restore
 
@@ -206,7 +254,7 @@ After a restore Ankra applies the cluster's Stacks again. An object you changed 
     Yes, for as long as it takes to fix what stopped it. Control planes on the new version with workers on the old one is a supported state and workloads keep running. Resume with `ankra cluster operations retry`.
   </Accordion>
   <Accordion title="Are patch versions upgraded automatically?">
-    Only if you turn on **Auto upgrade patch versions** under **Settings** → **General** → **Kubernetes Version**. Minor versions are never upgraded automatically.
+    Only if automatic patch upgrades are turned on for the cluster. They are off by default, and neither the portal nor the CLI has a switch for them. Minor versions are never upgraded automatically.
   </Accordion>
 </AccordionGroup>
 

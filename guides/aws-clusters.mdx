@@ -6,11 +6,12 @@ icon: "aws"
 
 import { CliVersion } from "/snippets/cli-version.jsx";
 
-Choose self-managed EC2 over [Amazon EKS](/guides/eks-clusters) when you want the control plane on instances you own, with no EKS control-plane fee, or when the cluster has to join a VPC you already run. Ankra creates the network (or adopts yours), a bastion, the control plane and worker instances, installs Kubernetes with the AWS cloud controller manager and EBS CSI driver, and then operates the cluster - this is an **Ankra Managed** cluster. The [comparison table](/guides/managed-kubernetes#cloud-managed-or-ankra-managed) sets the two side by side.
+Choose self-managed EC2 over [Amazon EKS](/guides/eks-clusters) when you want the control plane on instances you own, with no EKS control-plane fee, or when the cluster has to join a VPC you already run. Ankra creates the network (or adopts yours), a bastion, the control plane and worker instances, installs Kubernetes with the AWS cloud controller manager and EBS CSI driver, and then operates the cluster - this is an **Ankra Managed** cluster. The [comparison table](/guides/managed-kubernetes#provider-managed-or-ankra-managed) sets the two side by side.
 
 ## Before you start
 
-- An **AWS credential** whose role carries the **Provisioning** scope (the one write role for EKS and self-managed clusters) or the EC2-only **Self-managed** scope; access keys with the equivalent policy also work. A provisioning stack launched before the self-managed statements were added must be updated. See [AWS Credentials](/platform/credentials/aws#provisioning).
+- A **payment method** on the organisation. Without one, the create is refused with "Add a payment method to create this cluster." See [Credit and payment method](/platform/billing#credit-and-payment-method).
+- An **AWS credential** whose role carries the **Provisioning** scope (the one write role for EKS and self-managed clusters) or the EC2-only **Self-managed** scope; access keys with the equivalent policy also work. A provisioning stack launched before the self-managed statements were added must be updated. See [AWS Credentials](/platform/credentials/aws#provisioning). Add it at **Integrations & alerts → Credentials → Add credential → Amazon Web Services (AWS)**, or with **Add a credential** inside the create form.
 - An **SSH key credential** - your own public key, or one Ankra generates. See [SSH Key Credentials](/platform/credentials/ssh-key).
 - A decision on the **network**. Nothing needs to exist in the account beforehand unless you adopt a VPC.
 
@@ -32,32 +33,39 @@ For an adopted VPC, preflight picks the mode when you leave it out: subnets that
 ## Create the cluster
 
 <Tabs>
-  <Tab title="Dashboard">
+  <Tab title="Portal">
+    Follow [Create a Cluster](/guides/create-a-cluster) with these AWS choices:
+
     <Steps>
-      <Step title="Open the create dialog">
-        Go to **Clusters**, click **Create cluster** and pick **AWS** under **Ankra Managed** (the **AWS** card under **Cloud Managed** creates [EKS](/guides/eks-clusters)).
+      <Step title="Choose AWS">
+        Go to **Infrastructure → Clusters**, click **Add a cluster**, pick **AWS**, then **Ankra managed** under **Who runs Kubernetes on AWS?** (**Provider managed** creates an [EKS](/guides/eks-clusters) cluster).
+
+        The form **Add an AWS EC2 cluster** opens.
       </Step>
-      <Step title="Basics">
-        Name the cluster and pick the AWS credential, the SSH key and the region. A read-only (cost) credential, or a provisioning role whose stack predates the self-managed statements, is listed but refused at preflight with the missing permission named.
+      <Step title="Where it runs">
+        Choose the **AWS EC2 credential**, the **SSH key** and the **Region**. Regions the credential may use are listed first; a region closed to it, often by a policy in your AWS organisation, is listed with the reason and cannot be chosen.
+
+        Then pick **Internet access for the nodes**: **A NAT gateway in every availability zone** (the default), **One NAT gateway for all zones**, or **Through the management server (lowest cost, development only)**. See the egress table above.
       </Step>
-      <Step title="Network">
-        Keep **Create a new VPC (recommended)** - optionally with your own network range and availability zones - or switch to **Use an existing VPC** and pick the VPC, the node subnets and a public bastion subnet; the wizard shows each subnet's zone and route. Choose the egress. **Bastion allowed IPs** starts as `0.0.0.0/0`: SSH is key-only, password login is off and sshd is rate-limited on the host, but replace it with your own CIDRs to close the port to everyone else. Ankra's own addresses stay admitted.
-      </Step>
-      <Step title="Compute">
-        Pick the control plane count (1, 3 or 5) and instance type, one or more worker node groups, the bastion instance type (a burstable type such as `t3.small` is enough, unless it is the NAT), the root volume size (an encrypted gp3 volume, 40 GiB by default), the Ubuntu series (24.04 by default) and what happens to EBS volumes on teardown. Instance types load live with prices; only `amd64` types are offered.
+      <Step title="Control plane, servers and worker nodes">
+        Pick **Single node** or **High availability**, the **Control plane size**, the **Management server** size, and one or more node groups. Instance types load live with prices, and only `amd64` types are offered. The form starts with `t3.small` for the management server and `t3.medium` for the control plane and workers. A burstable management server is enough unless it is also the nodes' NAT.
       </Step>
       <Step title="Kubernetes">
-        Keep **kubeadm** (the default, Cilium only) or pick **k3s**, the version, and the etcd topology or CNI. The CNI defaults to Cilium; a k3s cluster can pick Calico or flannel, but only Cilium and Calico enforce the [IMDS guard](/reference/aws#imds-guard), so flannel gets a preflight warning. See [Choices fixed at create time](/guides/operate-ankra-managed-clusters#choices-fixed-at-create-time).
+        Keep **kubeadm** (Cilium only) or pick **k3s** and a **Network plugin**. Only Cilium and Calico enforce the [IMDS guard](/reference/aws#imds-guard), so flannel gets a warning in the checks. With k3s and Cilium or Calico, **Network plugin features** appear under **Advanced configuration**.
       </Step>
-      <Step title="GitOps">
-        Optionally connect a Git repository. Two checkboxes are on by default:
-        - **Include Networking Stack** - Traefik, cert-manager and a Let's Encrypt ClusterIssuer, with Traefik behind a Network Load Balancer the AWS cloud controller creates. To serve Gateway and HTTPRoute resources from the same Traefik as well, see [Gateway API](/guides/gateway-api).
-        - **Include DNS Integration** - a delegated subdomain on `ankra.cc` with external-dns wired, so Ingress hostnames publish their DNS records automatically.
+      <Step title="Network (Advanced configuration)">
+        Under **Advanced configuration**:
+
+        - For a created VPC, keep **Private network range** empty for `10.0.0.0/16`, or enter a range from `/16` to `/20`.
+        - To adopt a VPC, tick **Use an existing VPC** under **AWS network**. Pick the **Existing VPC**, tick its **Node subnets** (each shows its zone and egress), and pick the **Management server subnet**. Under **Existing VPC internet access**, keep **Inspect existing routes during preflight**, or choose **Use the VPC’s existing outbound routes** or **Route through the management server**.
+        - **Addresses allowed to reach the management server** starts empty, which allows SSH from any address. SSH is key-only, but enter your own IPv4 ranges, such as `203.0.113.0/24`, to close the port to everyone else; Ankra's own addresses stay admitted.
       </Step>
-      <Step title="Review">
-        Click **Run preflight**. It reports the network ownership, the zones it resolved, the egress mode, the AMI, and the vCPU, VPC, NAT gateway, Elastic IP and security-group quotas. Once nothing is an error, click **Create cluster** and follow the progress view.
+      <Step title="Review and create">
+        Click **Review cluster**. Under **Checks before creating**, Ankra asks AWS whether the account can create this cluster. It reports the network ownership, the zones it resolved, the egress mode, the AMI, and the vCPU, VPC, NAT gateway, Elastic IP and security-group quotas. A read-only (cost) credential, or a provisioning role whose stack predates the self-managed statements, fails here with the missing permission named. Once no check has failed, click **Create cluster**.
       </Step>
     </Steps>
+
+    The form always uses Ubuntu 24.04, an encrypted 40 GiB gp3 root volume and `retain` for EBS volumes on teardown. For other values, create the cluster with the CLI or API (`--ubuntu-series`, `--root-volume-gib`, `--retention-policy`). For a created VPC, the availability zones are ticked under **AWS network**; leave them all unticked to let preflight place the cluster.
   </Tab>
   <Tab title="CLI">
     <CliVersion since="0.17.0" />
@@ -140,7 +148,7 @@ For an adopted VPC, preflight picks the mode when you leave it out: subnets that
 
 ## Verify
 
-1. The cluster moves from **Provisioning** to **Online** in the clusters list once the Ankra Agent has connected.
+1. In **Infrastructure → Clusters**, the cluster's status moves from **In progress** to **Online** once the Ankra Agent has connected.
 2. Point `kubectl` at it through Ankra (this needs a [Cluster Access](/guides/cluster-access) grant) and check the nodes:
 
    <CliVersion since="0.3.0" command="cluster kubeconfig add" />
@@ -167,7 +175,7 @@ Everything carries `ankra.cloud/cluster-id=<id>`, `ankra.cloud/managed=true` and
 - **An instance type change replaces nodes.** EC2 cannot resize a running instance, so each node of the group is drained, terminated and recreated on the new type, one at a time.
 - **Control plane.** A cluster whose nodes span more than one zone needs three control planes and cannot go below three. `ankra cluster aws control-plane get|set-count|set-instance-type` manage it.
 - **Restart** is an EC2 reboot; if the instance does not respond it falls back to a stop and start, which keeps the private IP. `ankra cluster aws nodes cloud-init-log` reads a node's cloud-init status over the bastion. OS-level diagnosis and repair over SSH run through Ankra's AI (`ssh_diagnose_node`, `ssh_repair_node`).
-- **Bastion.** Resize it from **Nodes → Bastion & VMs** or with `PUT /api/v1/clusters/aws/{cluster_id}/bastion/instance-type`; there is no CLI verb on AWS. The instance is stopped, changed and started, keeping its Elastic IP. SSH as `ubuntu` through it (`ankra cluster aws access-info`); only `bastion_allowed_ips` and Ankra's addresses reach it.
+- **Bastion.** Resize it from **Infrastructure → Clusters → &lt;your cluster&gt; → Kubernetes → Nodes → Manage nodes and groups** with **Resize bastion or gateway**, with `ankra cluster aws bastion resize <cluster> <instance-type>` (an EC2 type such as `t3.medium`; `ankra cluster aws instance-types` lists them) or with `PUT /api/v1/clusters/aws/{cluster_id}/bastion/instance-type`. The instance is stopped, changed and started, keeping its Elastic IP. SSH as `ubuntu` through it (`ankra cluster aws access-info`); only `bastion_allowed_ips` and Ankra's addresses reach it.
 - **Upgrades** move the AWS cloud controller manager with the nodes: its minor version is pinned to the cluster's Kubernetes minor.
 
 <Warning>

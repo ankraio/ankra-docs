@@ -1,482 +1,288 @@
 ---
-title: Cluster Security
-description: Fleet-wide Trivy vulnerability and compliance posture, actionable cluster checks, organisation policies, NetworkPolicy exposure scoring, and per-add-on security views.
+title: Cluster security
+description: How Ankra finds vulnerabilities on your clusters, prepares fixes for them, records decisions, and where each part lives in the Security menu.
 ---
 
 import { CliVersion } from "/snippets/cli-version.jsx";
 
-Ankra turns [Trivy Operator](https://aquasecurity.github.io/trivy-operator/latest/) vulnerability and compliance reports into a prioritised security workflow across your organisation, and computes pod-security posture itself from the inventory the agent already streams. The platform reads the operator's Kubernetes reports through the agent. No scanner runs on Ankra's side and no image data leaves your cluster.
+Ankra collects what scanners find on your clusters, ranks it by how likely it is to be used by attackers, prepares the fixes it can run, and records what your team decides about the rest. This page explains where each part lives and how it works. To fix one vulnerability end to end, follow [Fix a vulnerable image with a pull request](/guides/fix-a-vulnerable-image).
 
-<Note>
-Security is a **read and policy layer** over Trivy Operator image CVEs, benchmark compliance, and configuration audits. You install and configure the operator like any other add-on. Ankra surfaces, ranks, explains, and helps remediate what it finds.
-</Note>
+## What Security looks at
 
----
+Four sources write findings. The **Vulnerabilities** view can show each one alone:
+
+| Choice in the portal | What it checks |
+|---|---|
+| **Image vulnerabilities (Trivy)** | The packages inside the container images your clusters run |
+| **Node kernel vulnerabilities** | The kernel each node runs |
+| **Node package vulnerabilities** | The operating system packages installed on each node |
+| **Endpoint checks (Samma)** | The public addresses your Ingresses serve: certificate and TLS, security headers, the HTTP to HTTPS redirect, DNS records and the domain's registration |
+
+Container images are scanned inside each cluster by [Trivy Operator](https://aquasecurity.github.io/trivy-operator/latest/), which the security baseline installs. The platform reads the operator's reports through the Ankra agent. The Samma endpoint checks also run from inside the cluster.
+
+Images are also scanned in two places outside the scanner on your clusters:
+
+- Before Ankra proposes an add-on upgrade as a fix, it pulls the new release's image through the platform's registry cache and scans it there, so the proposal can say whether the upgrade clears the finding.
+- An application image built by [Ankra Pipelines](/get-started/ankra-ci) is scanned in the pipeline. A version no cluster runs yet is judged from that scan.
+
+### Node package findings
+
+**Node package vulnerabilities** are the operating system packages installed on each node, such as OpenSSH, sudo and OpenSSL, matched against the Ubuntu and Debian security advisories. Each advisory that applies is one occurrence on that node, and **Vulnerabilities** counts these occurrences as **Nodes**. The kernel is not part of it: **Node kernel vulnerabilities** covers the kernel.
+
+- **What is reported.** An advisory that CISA lists as known exploited, or a critical or high one for which the distribution has published a fixed package. A critical or high advisory with no published fix that nobody is known to exploit is not reported, and neither is a medium or low one that is not on CISA's list.
+- **Where the package list comes from.** The dry run of [OS patching](/guides/os-patching) records each node's installed packages, and so does a patch run. Ankra starts a dry run itself once a day on every running cluster covered below, so you do not have to; a dry run changes nothing on the nodes. When that dry run fails on a cluster, Ankra tries it again a week later.
+- **How fresh it must be.** A package list older than 48 hours no longer counts. The node then reports nothing new, and the findings it already had stay open until a fresh list says otherwise.
+- **Which clusters are covered.** Clusters Ankra built on Ankra Cloud, AWS, DigitalOcean, Hetzner, OVHcloud, Scaleway or UpCloud, for nodes that run Ubuntu or Debian. Imported clusters, Proxmox VE and HPE Morpheus clusters, playgrounds and nodes on another operating system get no node package findings, and the bastion's packages are not matched.
+
+A node with no recent package list has not been checked. It shows no finding, which does not mean its packages are clean.
+
+## Before you start
+
+- **A scanner on the cluster.** A cluster without one reads **Never** under **Last scan** and nothing on it is counted. See [Turn on scanning](#turn-on-scanning).
+- **The right permission.** Built-in roles carry these by default; a [custom role](/guides/roles-and-access) can grant them:
+
+| Permission | Built-in roles | What it allows |
+|---|---|---|
+| `security.read` | Viewer and above | Open **Security** and a cluster's **Security** page |
+| `security.triage` | Operator, admin, owner | **Acknowledge** an issue, and turn on scanning |
+| `security.manage` | Admin, owner | **Accept the risk**, change or revoke a decision, open fix pull requests |
+
+The platform checks every permission itself; the portal only greys out what you cannot do and says why ("Accepting a risk needs the security.manage permission.").
 
 ## Where to work
 
-| Surface | Purpose |
-|---------|---------|
-| **Organisation → Security** | Fleet overview, findings, cluster coverage, compliance, and organisation-wide policies |
-| **Cluster → Security** | Scoped overview, findings, workloads, and actionable compliance checks for one cluster |
-| **Stack add-on → Overview** | Compact security posture for one add-on, with a deep link into cluster Security |
+| Where | Address | What it answers |
+|---|---|---|
+| **Security** in the main menu | `/next/security` | The organisation's view: what to fix first, every finding, fixes in progress, coverage, evidence and decisions |
+| **Infrastructure → Clusters → *your cluster* → Security** | `/next/clusters/<cluster-id>/security` | What needs fixing on this one cluster, and the button for each fix |
+| An advisory page | `/next/security/advisories/<cve-id>` | One CVE: what the public record says and where it is in your organisation |
 
-The dashboard **Fleet Security** widget summarises actionable severe risk and links into the organisation Security Center.
+### The Security menu
 
----
+Opening **Security** swaps the sidebar to its own menu. Each row is a view:
 
-## Which project a read covers
+| View | What it is for |
+|---|---|
+| **Overview** | Prioritise what needs a decision, then follow each fix to fresh evidence. The fixes Ankra prepared, ranked, with the button that opens each one |
+| **Resources** | Focus on a pod, deployment source, namespace, stack or application, then expand to the fleet |
+| **Vulnerabilities** | Every issue a scanner found in what runs, the ones attackers use first, then by the chance of use |
+| **Exposure** | Every public address your clusters scan: what fails and what to change, what each scan saw, and when it runs next. Shown only in an organisation where a cluster runs the Samma endpoint scanner |
+| **Fix activity** | Follow pull requests, builds and rescans. A started fix is still an open issue |
+| **Coverage** | See where the picture is current and which clusters need a fresh report |
+| **Evidence** | Framework observations (compliance) and the software inventory (bills of materials), with downloads |
+| **Accepted risks** | Who accepted each risk or acknowledged each issue, why, and when the decision comes back |
+| **Software lifecycle** | Source checks, image versions, release gates and deployed evidence, per application |
 
-In an organisation with [projects](/concepts/projects), every Security Center read covers the project you act in: the findings, workloads, bills of materials and posture of that project's clusters. A finding, image or cluster of another project is left out of every list and is a `404` when named. In an organisation with projects off, a read covers the whole organisation, as before.
+### The Overview
 
-An organisation-wide member can read past that project:
+The Overview opens with two numbers: how many issues are open, and how many of them are **used by attackers**. Each opens **Vulnerabilities** with that filter. Below them are the fixes that need you, one row each, with one button: **Review fix**, **See the next step** for a fix already under way, or **See what happened** for a fix you started that went wrong. A fix Ankra cannot run is listed under **with no fix Ankra can run** with **See the issue** and **Ask Ankra where it is declared**. Fixes that carry on without you are under **In progress**, and fixes you set aside are under **Set aside**: Ankra does not offer those again until you bring them back.
 
-- **In the new Ankra portal**, **Security** has a **This project** / **All projects** choice in the page header, beside **Security in Classic Ankra**. **All projects** reads every project and offers no changes: to act on a finding, open the project it belongs to.
-- **On the API**, the `GET` routes under `/api/v1/org/security/...`, and the per-cluster stack, pod, compliance, policy-violation, network-exposure and add-on security reads under `/api/v1/org/clusters/imported/{cluster_id}/...`, take `project_id`: `all` for the whole organisation, or a project's id for that project. The snapshot history and report schedule routes do not. Without it a read covers the project the request acts in. Any other value is refused with `422 project_id must be a UUID or all`. Writes ignore it and act in the project you act in.
-- **From the CLI**, `--all-projects` reads the whole organisation and the global `--project <name>` reads another project.
+Two folds at the bottom explain the page. **Issues that are in no plan** points at the issues no fix covers. **How Security decides** gives the order (fixes for issues used by attackers first, then the upgrades that close the most with one change), what "used by attackers" means, what counts as fixed, and which clusters have no current report.
 
-A pinned token and a member limited to projects read their own project only, also while the organisation has projects off. `project_id=all` or another project's id is refused with `403 Pinned tokens cannot act outside their project` or `403 Members limited to projects cannot act outside their project`. The new portal does not offer **All projects** to a member limited to projects; an address that asks for it shows **Not available with your access** with **Show this project**.
+### A cluster's Security page
 
-The compliance framework scores, the compliance report, and evidence destinations and deliveries are the organisation's, whichever project you act in. A pinned token and a member limited to projects are refused them with `403 Organisation compliance documents are not available to pinned tokens or members limited to projects`.
+**Infrastructure → Clusters → *your cluster* → Security** answers three questions in order: is this cluster safe, what do I do about it, and where are the issues.
 
-Classic Ankra's Security pages read your [current project](/concepts/projects#your-current-project), which you switch in the new Ankra portal, and have no choice to widen them. Read the whole organisation in the new portal, with `--all-projects`, or with `project_id=all`.
+- **A one-line verdict** at the top, for example "Nothing needs you. The last scan found no open issues."
+- **Four numbers**: **Issues found**, **Known to be used by attackers**, **Fixes ready** (waiting for your review) and **Last scan** (**Up to date**, **Out of date**, or **Never** for a cluster with no scanner). The first two count each issue once on the cluster, however many occurrences it has there, as the cluster's row in **Security → Coverage** does.
+- **Needs you**: every fix Ankra prepared for the cluster. Each row says what kind of change it is (**Add-on upgrade**, **Image rebuild**, **Turn on scanning** or **Fix plan**), whether it also changes other clusters, and has the button that opens its review. Add-on security updates for this cluster are listed here too. A fix with a published version that Ankra cannot apply is listed under **fixes you apply yourself**, with **See details** and **Ask Ankra where it is set**. When the scanner stopped reporting, **The vulnerability scanner stopped reporting** offers **Check the scanner add-on** and **Ask Ankra why**.
+- **Where the issues are**: one row per Stack with its **Open occurrences** by severity (one for each container an issue is in), **Used by attackers**, **Containers scanned** and **Containers with SBOM**. **Containers scanned** says how many of the Stack's containers have a current report on the image they run, such as **All** or **3 of 5**; a container without one is unknown, not clean. Open a Stack to see its add-ons, pods and images. Pods outside any Stack are counted below the table with **See them by namespace**.
+- **Look deeper**: links into the organisation's **Security**, focused on this cluster: every vulnerability on the cluster, issues by namespace and pod, the risks your team accepted, and fixes in progress.
 
-<CliVersion since="0.65.0" command="security --all-projects" />
+Nothing on this page runs until you approve it: each row opens the review of its fix, and closing the review brings you back here. Fix pull requests are the one thing Ankra can start on its own, as an application's **Keep it safe** setting allows (see [What counts as fixed](#how-fixes-work)).
+
+## Turn on scanning
+
+A cluster with no scanner shows **Turn on vulnerability scanning** on its Security page: "This cluster has no scanner, so nothing on it is checked. Ankra installs a read-only scanner that reports within about 15 minutes."
+
+1. Select **Turn on scanning**. **Security → Coverage** opens and lists every cluster that **sent no scanner report**.
+2. Select **Review fix**. The plan installs the Ankra security baseline (Trivy Operator with conservative defaults) on those clusters and shows the exact change.
+3. Select **Enable the baseline on *your cluster***. This needs `security.triage`.
+
+The first reports arrive within about 15 minutes of each install. The cluster's **Last scan** then reads **Up to date** and its row in **Coverage** moves out of the gap.
+
+<CliVersion since="0.74.0" />
 
 ```bash
-ankra security overview --all-projects            # every project's totals and exploited-in-the-wild summary
-ankra security findings --project payments        # the findings of another project
-ankra security clusters --all-projects -o json    # every project's per-cluster posture, for reporting
+ankra security enable-baseline --cluster my-cluster   # publish the baseline Stack on a cluster that has none
+ankra security clusters                               # every cluster's scanner freshness and counts
 ```
 
-Most `ankra security` reads take `--all-projects`; the [command reference](/reference/cli/security) shows it per command. `compliance`, `history` and `report-schedule` do not: `ankra security compliance` reads the project you act in, and the compliance frameworks, report and export are the organisation's. A refused `--all-projects` says that a pinned token or a member limited to projects reads only their own project.
+From chat or the MCP server the tool is `enable_security_baseline`, confirmed before it runs.
 
----
+### The security baseline
 
-## Prerequisites
+`ankra-security-baseline` is the public stack profile the platform installs on every cluster it provisions, unless the organisation turned off **Security baseline on new clusters** under **Identity & access → Sign-in and security → New clusters**, and the one **Enable the baseline** installs on an imported cluster. Like every profile it is a catalogue entry you can open, copy and fork. It carries:
 
-Trivy Operator must be running in each cluster you want to assess. If it is not installed, the Security views explain the setup state and link to **Settings → Integrations → Trivy Operator**.
+- **Trivy Operator** for image vulnerabilities, sized for a small cluster by default. Its workload configuration audit, RBAC assessment, CIS compliance report and CIS node assessment are off by default, because each of them loads the control plane. Turn them on per cluster with the profile inputs `trivy_config_audit_enabled`, `trivy_rbac_assessment_enabled`, `trivy_cluster_compliance_enabled` and `trivy_infra_assessment_enabled`.
+- **Pod Security Standards, enforced by Kubernetes itself.** The profile ships an `ankra-pod-security` ConfigMap declaring the standard (`baseline` or `restricted`), the policy mode and the exempt namespaces. The Ankra agent labels every other namespace for [Pod Security Admission](https://kubernetes.io/docs/concepts/security/pod-security-admission/), the admission controller built into every API server: `pod-security.kubernetes.io/audit` and `/warn` at the standard in Audit mode, and `/enforce` as well once you switch the cluster to Enforce. Labels are only ever raised, so a namespace you hold at a stricter level keeps it, and the agent records what it set so switching back to Audit restores the previous state.
+- **A guard for the enforce label.** A ValidatingAdmissionPolicy (Kubernetes 1.30 or newer) refuses lowering the enforce label of a managed namespace below the declared floor for anyone but the agent. It fails open: an admission it cannot evaluate is admitted.
 
-<Steps>
-  <Step title="Add the Trivy Operator add-on">
-    From **Settings → Integrations → Trivy Operator**, or the Stack Builder, add the `trivy-operator` Helm add-on and deploy it. It scans workloads and writes vulnerability, compliance, and configuration-audit reports.
-  </Step>
-  <Step title="Wait for the first reports">
-    The operator scans images shortly after install. Until reports exist, the integration shows `installed_no_reports`.
-  </Step>
-  <Step title="Open Security">
-    Use the organisation **Security** entry for fleet triage, or a cluster's **Security** sidebar entry for a scoped view.
-  </Step>
-  <Step title="Optional: publish a software bill of materials">
-    The **SBOM** tab reads the operator's SbomReports, which are off by default because they are the largest objects it writes. On a cluster with control-plane headroom, set the security baseline input **Software bill of materials per image** (`trivy_sbom_generation_enabled`) to `true`; the next scan pass fills the tab. A package list, never image content, then leaves that cluster.
-  </Step>
-</Steps>
+The baseline adds no policy engine: the API server itself evaluates the namespace labels and the guard, with no admission webhook and no extra pod. A cluster that installed the baseline while it still carried Kyverno keeps those Kyverno add-ons, and the policy mode then sets both. Kyverno is available as the opt-in `ankra-policy-engine` profile, for image-signature verification and policies of your own.
 
----
+<Warning>
+`ankra security policy-mode off --cluster my-cluster` permanently uninstalls every Kyverno add-on on the cluster (charts `kyverno` and `kyverno-policies`), whether an older baseline, the `ankra-policy-engine` profile or you installed it, and leaves Pod Security Admission in Audit. Switching back to `audit` or `enforce` does not reinstall Kyverno.
+</Warning>
 
-## Security baseline
-
-`ankra-security-baseline` is the public stack profile the platform installs on every cluster it provisions, unless the organisation opted out, and the one **Enable security baseline** installs on an imported cluster's Security page. Like every profile it is a catalogue entry you can open, copy and fork. From version 5 it carries:
-
-- **Trivy Operator** for image vulnerabilities, sized for a small cluster by default. Its workload configuration audit, RBAC assessment, CIS compliance report and CIS node assessment are off by default since version 7, because each of them loads the control plane. Turn them on per cluster with the profile inputs `trivy_config_audit_enabled`, `trivy_rbac_assessment_enabled`, `trivy_cluster_compliance_enabled` and `trivy_infra_assessment_enabled` to fill the CIS compliance view.
-- **Pod Security Standards, enforced by Kubernetes itself.** The profile ships an `ankra-pod-security` ConfigMap declaring the standard (`baseline` or `restricted`), the policy mode and the exempt namespaces. The Ankra agent labels every other namespace for [Pod Security Admission](https://kubernetes.io/docs/concepts/security/pod-security-admission/), the admission controller built into every API server: `pod-security.kubernetes.io/audit` and `/warn` at the standard in Audit mode, and `/enforce` as well once you switch the cluster to Enforce. Labels are only ever raised, so a namespace you hold at a stricter level keeps it, and the agent records what it set so switching back to Audit restores the previous state exactly.
-- **A guard for the enforce label.** A ValidatingAdmissionPolicy (Kubernetes 1.30 or newer) refuses lowering the enforce label of a managed namespace below the declared floor for anyone but the agent, so enforcement cannot be switched off with a namespace edit. It fails open: an admission it cannot evaluate is admitted.
-
-No policy engine runs on the cluster. Earlier versions of the baseline carried Kyverno with its Pod Security Standards preset; a cluster that installed one keeps it, receives the new manifests on its next update, and the policy mode toggle drives both mechanisms until you remove the two Kyverno add-ons from the stack. Kyverno remains available as the opt-in `ankra-policy-engine` profile, in the same safe mode, for image-signature verification and policies of your own.
-
-### What runs where
-
-| Concern | Where it is computed |
-|---|---|
-| Image vulnerabilities, and the configuration audits and CIS benchmark on a cluster that turned them on | Trivy Operator, on the cluster; the platform reads its reports |
-| Pod Security Standards and configuration posture of every workload | The platform, from the inventory the agent streams; no report object is written on the cluster |
-| Pod-security enforcement | The API server's Pod Security Admission, from namespace labels the agent manages |
-| Enforce-label protection | A ValidatingAdmissionPolicy the API server evaluates in-process |
-
-The Security Center's **Policies** tab shows both halves per cluster: the platform posture table (every check, how many workloads pass and fail it, and when the inventory it was computed from was last seen) and the Pod Security Admission line (mode, standard, and how many namespaces carry the labels), beside the policy engine's own reports where one is installed. Enforcement is measured from the namespaces, not assumed from the setting.
-
-### Sizing
-
-The platform sizes the baseline from the cluster's shape. A control plane below **8 GB** of memory, or one whose size the platform cannot determine, gets the **lite** shape: the CIS node assessment is off so no collector job lands on the control plane, and one image scan runs at a time. The cluster carries a notification saying so until the control plane grows. A control plane of 8 GB or more gets the standard shape, and three or more workers let two scans run at once. A cluster you moved to Enforce, or whose exempt list you changed, keeps that across every republish.
-
-### Inputs
+**Sizing.** The platform sizes the baseline from the cluster's shape. A control plane below **8 GB** of memory, or one whose size the platform cannot determine, gets the **lite** shape: one image scan at a time, and the cluster carries a notification saying so. A control plane of 8 GB or more gets the standard shape, and three or more workers let two scans run at once.
 
 | Input | Default | Meaning |
 |---|---|---|
-| `pod_security_standard` | `baseline` | The standard every managed namespace is labelled with; `restricted` will flag most off-the-shelf charts |
+| `pod_security_standard` | `baseline` | The standard every managed namespace is labelled with; `restricted` flags most off-the-shelf charts |
 | `policy_mode` | `Audit` | Audit reports and warns and never blocks; Enforce makes the API server refuse pods that violate the standard |
-| `pod_security_exempt_namespaces` | the control plane, scanner, agent, GitOps, CNI, Hetzner and cert-manager namespaces | Namespaces the standard is never applied to. `kube-system`, `kube-public`, `kube-node-lease` and the agent's namespace are exempt whatever the list says; a single `-` exempts nothing else |
+| `pod_security_exempt_namespaces` | `kube-system`, `kube-public`, `kube-node-lease`, `kyverno`, `trivy-system`, `ankra`, `argocd`, `hcloud`, `calico-system`, `tigera-operator`, `cert-manager` | Namespaces the standard is never applied to. `kube-system`, `kube-public`, `kube-node-lease`, `ankra` and the agent's own namespace stay exempt whatever the list says; a single `-` exempts nothing else |
 | `trivy_scan_concurrency` | `1` | Image scans that run at once |
 | `trivy_scan_job_timeout` | `10m` | How long one image scan may run |
-| `trivy_infra_assessment_enabled` | `true` | The CIS node assessment (the lite shape turns it off) |
-| `trivy_sbom_generation_enabled` | `false` | The SBOM opt-in described above |
+| `trivy_infra_assessment_enabled` | `false` | The CIS node assessment |
+| `trivy_sbom_generation_enabled` | `false` | A bill of materials per image (see [Bills of materials](#bills-of-materials)) |
 
-The policy mode is also on the API: `POST /org/clusters/imported/{cluster_id}/security/policy-mode` with `{"mode": "audit"}` or `{"mode": "enforce"}`, and the per-cluster `GET .../security/policy-violations` read carries `policy_mode` beside a `platform_posture` block with the posture table and the `pod_security` coverage figures.
+The portal has no switch for the policy mode. Use `ankra security policy-mode audit|enforce --cluster my-cluster` (both directions ask first; `--yes` skips the question), and read the posture with `ankra security violations --cluster my-cluster`. From chat or the MCP server the tools are `set_cluster_security_policy_mode` and `get_cluster_policy_violations`.
 
-**From the CLI and MCP.** `ankra security policy-mode audit|enforce --cluster <cluster>` switches the mode (both directions confirm; `--yes` skips the prompt), `ankra security violations --cluster <cluster>` reads the posture table and the results per policy, and `ankra security enable-baseline --cluster <cluster>` publishes the baseline stack on a cluster that has none. From chat or the MCP server the same three are `set_cluster_security_policy_mode`, `get_cluster_policy_violations` and `enable_security_baseline`; the two writes are confirmed before they run.
+## How fixes work
 
----
+Ankra prepares a fix wherever it can run one, and lists it on the Overview and on the cluster's Security page. A fix that opens pull requests in an application's repository is also listed under **What needs you** on that application's [**Security** view](/platform/application-page#security), with **Review fix**. Every fix opens a review with **The exact change**, **Rollout and proof** (the risk, how to undo it, and what proves it worked) and, once it has started, **What happened so far**. Nothing you start here runs until you approve it.
 
-## Connection and scanner states
+| Kind | What Ankra does | The button |
+|---|---|---|
+| **Add-on upgrade** | Moves an add-on to a release whose image Ankra scanned and found clear of the issue. A fleet upgrade rolls in steps: each later step waits until the one before reports healthy, and for your yes. You can also approve every remaining cluster at once (**All *n* clusters at once**) | **Upgrade *add-on* on *cluster*** |
+| **Image rebuild** | Opens one pull request per application repository that moves the Dockerfile base image to the fixed version. Only `FROM` lines change, on a new branch | **Open *n* pull requests** |
+| **Turn on scanning** | Installs the security baseline on clusters with no scanner report | **Enable the baseline on *cluster*** |
+| An upgrade Ankra AI prepares | Hands the upgrade to Ankra AI, which shows the exact release and changelog before anything rolls | **Prepare the upgrade with Ankra** |
 
-| State | Meaning |
-|-------|---------|
-| `not_installed` | Trivy Operator CRDs are not present - install the add-on |
-| `installed_no_reports` | The operator is installed but has not produced reports yet |
-| `connected` / fresh | Live or recently materialised reports are available |
-| `degraded` / stale | The live read failed or data is older than the freshness window; cached data may still be shown |
-| `unscanned` | The cluster has no usable security snapshot yet |
+**The order of a staged upgrade is held by the platform.** A later step of a fleet add-on upgrade cannot be approved or run until every cluster of the earlier steps has the new chart version and reports it healthy. The platform checks this itself, not only the page, so a step approved through the API or from a page left open is refused the same way. A refused step is not approved and stays as it was, and the refusal names the cluster it waits for, for example "*cluster* is still rolling *add-on version*. This step unlocks when it reports healthy." **All *n* clusters at once** is refused too while a cluster that already has the new version has not reported it healthy.
 
----
+A stopped cluster is never a fix target. An add-on upgrade skips the add-ons of a stopped cluster and names them in the plan ("*add-on* is stopped on *cluster*"); they come back into the plan on the first read after the cluster runs again.
 
-## Observed vs actionable risk
+An offline cluster, one whose Ankra agent is not connected, is never a fix target either, even when its stack already declares the new version. The plan names it ("*cluster* is offline, so Ankra cannot reach it to upgrade *add-on* until it is back online"), no later step waits for it, and a change that did not complete there before it went offline does not mark the fix as failed. It comes back into the plan once its agent connects again.
 
-Every finding is tracked with two complementary views:
+**What counts as fixed.** A pull request, a passing build and a deployment are separate steps. An issue stays open until a new scan of the clusters it was on says it is gone. **Security → Fix activity** follows every started fix through those steps: **Fix in progress**, **Waiting for rescan**, and **Fixed** only once a rescan of every affected cluster finds nothing left. A pull request that fixes several of one application's issues at once, such as a base-image fix or a dependency bump, is one row in **Fix activity**, and opening it goes to the application's **Security** view, which follows the pull request and its checks. An application's **Keep it safe** setting decides how far Ankra goes with fix pull requests on its own. At **Together**, the default, Ankra opens them and keeps them green, and you approve each merge. At **Ankra runs it** it also merges them, once their checks and review pass. At **You run it** it only suggests. Ankra never accepts a risk for you.
 
-- **Observed** - everything Trivy currently reports, including accepted risk.
-- **Actionable** - findings that still need attention: open **and** acknowledged. Accepted risk is excluded from actionable totals, remediation queues, and threshold alerts, but remains visible.
+**When there is no fix.** A finding with no published fix, or one Ankra cannot apply (no application of yours builds the image), is yours to decide: fix it where the image is declared, or record a decision as described below.
 
-Primary KPIs, fleet posture, alerts, scheduled reports, and AI summaries use **actionable** counts. Observed and accepted-risk totals stay available for context.
+## Open issues and decisions
 
----
+The tabs of **Security → Vulnerabilities** sort issues by what was decided about them. They overlap: an acknowledged issue is also in **Open**, and an issue accepted in some containers is also in **Open** where other containers have it undecided.
 
-## Exploitation intelligence (CISA KEV and EPSS)
+| Tab | Means |
+|---|---|
+| **Open** | Nobody decided about it, or it is acknowledged. Open issues are what every count, alert and report uses |
+| **Acknowledged** | Your team has seen it. It stays open and stays counted |
+| **Accepted** | The risk is accepted until a review date. It leaves the open count but stays visible |
+| **Resolved** | No cluster's newest scan finds it any more |
 
-CVSS severity says how bad a vulnerability could be; it says nothing about whether anyone is exploiting it. The Security Center cross-references every finding with two public feeds so you can prioritise on real-world exploitation:
+An occurrence is one container (or node, or endpoint) holding the issue. A finding the scanner no longer reports moves to **Resolved** only after it has been missing from two consecutive full resource syncs, so a partial sync never reads as a clean bill. To bring that forward, run **Run a full sync…** twice from **Infrastructure → Clusters → *your cluster* → Settings → Kubernetes sync** (this needs `clusters.write`), letting the first finish before starting the second.
 
-- **CISA Known Exploited Vulnerabilities (KEV)** - the catalog of CVEs with confirmed in-the-wild exploitation. A listed finding carries a **KEV** marker, the date CISA added it, the federal remediation deadline, and whether it is known to be used in ransomware campaigns.
-- **FIRST EPSS** - the daily Exploit Prediction Scoring System: the probability the CVE is exploited in the next 30 days, and where that probability ranks among all scored CVEs (for example `EPSS 94% · top 1%`).
+### Acknowledge or accept the risk
 
-The join happens on the platform by CVE id against the ids already present in your Trivy reports, so no image data leaves your cluster and Trivy Operator needs no extra configuration. The platform refreshes both feeds every six hours; a CVE that first appears between two refreshes has its KEV status immediately (the whole catalog is stored) and its EPSS score after the next pass.
+Open a finding from **Security → Vulnerabilities**. Its page leads with what you can do about it. Where no fix is published, it says **No fix is published yet.** and offers **Acknowledge** and **Accept the risk**; elsewhere they are under **Not fixing it now?**
 
-Where it appears:
+- **Acknowledge** (`security.triage`) records that your team has seen it. The issue stays open and stays counted.
+- **Accept the risk** (`security.manage`) takes it off the open count until a **Review date**, from tomorrow and never more than a year out. An issue used by attackers warns: "Attackers use this issue somewhere. Accepting takes it off the open count without fixing it."
 
-- **The exploited-in-the-wild banner** - when CISA lists any of your actionable findings, the Overview, the Findings page, and each cluster's Security tab open with a red banner naming how many vulnerabilities are being exploited, how many are past CISA's remediation deadline, and how many CISA links to ransomware campaigns, with **Review exploited findings** and **Fix with AI** one click away. It only appears on a synced catalog with a real count - it never renders "nothing exploited" from a catalog that has not been read.
-- **Findings** - the list opens ranked by **Exploitability** (KEV listing first, then EPSS, then severity), so the top of the page is what is actually being exploited. Each listed finding shows the **KEV** marker, CISA's remediation deadline in explicit tense (**deadline passed 2025-04-22** turns red), a **ransomware** marker where CISA reports ransomware use, and the EPSS probability. The **Known exploited (CISA KEV)** chip narrows to listed findings. The detail sheet quotes CISA's own entry - vulnerability name, vendor and product, the deadline, and **CISA required action** - and shows EPSS and KEV under **Advisory details**.
-- **Overview** - a **Known exploited** scorecard tile with the overdue and ransomware subsets, and remediation candidates ranked known-exploited first with their CISA deadline.
-- **Clusters**, **Workloads**, and the add-on security panel - a known-exploited count beside the actionable and fixable counts, in red wherever it is above zero.
-- **Alerts** - two `security_findings` metrics: `kev` (actionable known-exploited findings on a cluster) and `new_kev_cves` (known-exploited CVEs new since the previous scan). The built-in new-severe-CVE notification also flags KEV listings of any severity.
-- **Scheduled reports** - a known-exploited banner, **KEV** markers and EPSS in the top-CVE table, and fix groups that clear a known-exploited CVE listed first.
-- **API and MCP** - `known_exploited`, `kev_date_added`, `kev_due_date`, `kev_ransomware_use`, `kev_vendor_project`, `kev_product`, `kev_vulnerability_name`, `kev_required_action`, `epss_score`, and `epss_percentile` on every finding and remediation candidate, a `known_exploited` filter on the findings and workloads lists, `known_exploited` counts on the overview, cluster, workload, and add-on reads, and `known_exploited_overdue` and `known_exploited_ransomware` finding counts on the overview. Pull them into your own reporting with a personal API token (`ankra tokens create`) against `GET /api/v1/org/security/overview`, `/findings`, `/findings/{finding_id}`, `/workloads`, and `/clusters` on `https://platform.ankra.app` - for example `GET /api/v1/org/security/findings?known_exploited=true&sort=exploitability&order=desc`. A pull without `project_id` reads the project the token acts in (see [your current project](/concepts/projects#your-current-project) for the order), so in an organisation with projects a report meant for the whole organisation adds `project_id=all`, which a pinned token or a member limited to projects is refused ([which project a read covers](#which-project-a-read-covers)). The AI security context carries the same fields.
-- **CLI** - `ankra security overview` (totals, coverage, remediation candidates, and the exploited-in-the-wild summary first), `ankra security findings` (exploitability order by default, with `--known-exploited`, `--severity`, `--status`, `--fixable`, `--cluster`, `--addon`, `--namespace`, `--sort`), `ankra security finding <id>` (CISA's entry, deadline and required action above every occurrence) , `ankra security advisory <cve>` (the platform's own advisory for a CVE: the parsed NVD/OSV record, CISA's guidance, affected versions in words, and your exposure) and `ankra security clusters`; every one takes `-o json` for reporting and, in an organisation with projects, reads the project you act in unless you add `--all-projects` ([which project a read covers](#which-project-a-read-covers)).
+Both need a **Reason**. **What this decision covers** chooses the scope:
 
-<CliVersion since="0.14.0" command="security" />
+| Choice | Covers | Survives a rollout | Survives an image rebuild |
+|---|---|---|---|
+| **This add-on (*name*) on every cluster** | The add-on the occurrence belongs to, on every cluster | Yes | Yes |
+| **Everything in namespace *name*** | Every workload in the occurrence's namespace, on that cluster | Yes | Yes |
+| **This workload (*name*)** | The one workload it was seen in. For a Deployment's pods this is the Deployment | Yes | Yes |
+| **This exact image (*digest*)** | The image digest, wherever it runs | Yes | No |
 
-```bash
-ankra security overview                      # totals, coverage, and the exploited-in-the-wild summary
-ankra security findings --known-exploited    # only the findings CISA lists as exploited, deadline first
-ankra security finding <id>                  # CISA's entry, deadline and required action for one finding
-ankra security advisory <cve>                # the platform's advisory: parsed NVD/OSV record, CISA guidance, your exposure
-ankra security clusters -o json              # per-cluster posture for reporting
-```
+Images that belong to no add-on (your own applications, operator-created pods, plain manifests) cannot take the add-on scope; for your own application, the namespace is usually the right choice. The image scope stops matching when the image is rebuilt, so the finding returns for a fresh decision.
 
-Until the platform has synced the catalog at least once, the overview tile and the findings page say so rather than reporting zero: an unsynced catalog is unknown, not clean.
+**Security → Accepted risks** lists every decision under **Needs review** (an accepted risk that expires soon, or an acknowledged issue that now has a fix) and **Accepted and acknowledged**. Nothing is extended silently: **Keep accepted** needs a reason, and **Reopen for fixing** returns the issue to open. Each decision is written with its event and an audit log entry in one transaction.
+
+<Warning>
+When a decision expires, or a fix becomes available for one set to end then, its findings are open again and can fire threshold alerts. A decision made in the portal ends when a fix becomes available, unless someone then chooses **Keep accepted** or **Keep acknowledged** and gives a reason. From the CLI, pass `--expire-when-fix-available`.
+</Warning>
+
+From the terminal, `ankra security dispositions preview`, `create`, `update` and `revoke` carry the same decisions, with `--scope namespace`, `workload` or `image`. See [`ankra security dispositions`](/reference/cli/security#ankra-security-dispositions). From chat or the MCP server the tools are `preview_security_disposition`, `create_security_disposition`, `update_security_disposition` and `revoke_security_disposition`; the writes are confirmed before they run.
+
+## Used by attackers and chance of use
+
+Severity says how bad an issue could be; it says nothing about whether anyone exploits it. Ankra joins every finding by CVE id against two public feeds:
+
+- **Used by attackers**: CISA, the US cyber security agency, lists the issue in its Known Exploited Vulnerabilities catalogue as used in real attacks somewhere. It does not mean anyone attacked you. A listed issue shows CISA's remediation deadline, whether CISA links it to ransomware, and CISA's required action.
+- **Chance of use**: EPSS, a public prediction that the issue is used somewhere in the next 30 days.
+
+The join happens on the platform, using the CVE ids already in your scanners' reports. **Vulnerabilities** lists the issues used by attackers first, then by chance of use. Until the platform has read CISA's list, the counts say **How many are used by attackers is unknown** rather than zero.
 
 ## Advisory pages
 
-Every finding links to an **Ankra advisory page** for its CVE at `/organisation/security/advisories/CVE-...` - the **Advisory** link on each findings row and **Open advisory** in the finding sheet - instead of sending you to the scanner's external advisory site. The platform reads the public record itself, from the NVD 2.0 API and OSV, parses it, and renders it in the Security Center's own vocabulary:
+Every finding with a CVE id links to an Ankra advisory page (**Read the advisory** on a finding, **About this CVE** in the Vulnerabilities list) at `/next/security/advisories/<cve-id>`. The platform reads the public record itself, from NVD and OSV, and shows it under two headings:
 
-- **Summary** - the analyst description, weakness classes (CWE ids), and aliases such as the GHSA id.
-- **Exploitation** - CISA's KEV entry when the CVE is listed (catalog name, vendor and product, date added, the remediation deadline in explicit tense, ransomware use, and **CISA required action**), the FIRST EPSS probability, and CISA's SSVC decision (exploitation observed, automatable, technical impact) as NVD republishes it.
-- **Severity** - the lead CVSS score and vector spelled out component by component (attack vector, privileges required, user interaction, impact), with every published assessment - NVD's own and the CNA's - one click away.
-- **Affected versions** - the CNA's affected products and version ranges from NVD and the ecosystem package ranges from OSV, written as "2.34 before 2.39 (fixed in 2.39)" rather than as commit hashes.
-- **In your fleet** - the current findings for the CVE (one per package, with occurrences, clusters, workloads, and how many occurrences have a fix), each opening the finding sheet.
-- **References** - the sources' links grouped by kind: patches and vendor advisories first, then exploits, trackers, and mailing lists.
+- **Where it is in your organisation**: one issue for each package that carries the CVE, with the workloads and clusters it runs on and whether a fixed version exists.
+- **What the advisory says**: the description, CISA's entry when the CVE is listed, the severity, the affected and fixed versions, and the references. **Dates, scoring vector and sources** folds the detail.
 
-An advisory has three states and the page says which one it is in. A CVE the platform has not read yet shows **Fetching this advisory from NVD and OSV** and refreshes on its own - opening the page moves that CVE to the front of the platform's read queue, and most records arrive within a minute. A CVE neither source holds a record for (a reserved or very new id) says **No public advisory record for this CVE yet** and is re-checked every two weeks. Only a record both sources actually returned renders as the advisory, with a provenance footnote naming when NVD and OSV were last read and linking to their own pages.
+A record the platform has not read yet says "The public advisory has been requested and is not held yet. Check again in a minute." A CVE neither source holds a record for says "The public sources hold no advisory text for this CVE." The same advisory is `ankra security advisory <cve>` on the CLI and `get_security_advisory` on the MCP server.
 
-The platform reads advisories for every CVE its security findings reference, known-exploited ones first, and re-reads stored records every 14 days so a reanalysed score or a newly published fixed version lands without anyone asking. The same content is available on the API as `GET /api/v1/org/security/advisories/{cve_id}` with a personal API token and on the CLI as `ankra security advisory <cve>`; its `status` field carries the three states (`fetched`, `pending`, `missing`, plus `error` while a source cannot be read).
+## Bills of materials
 
----
+A bill of materials (SBOM) lists every package in a container image. Trivy Operator writes one per image only when the baseline input `trivy_sbom_generation_enabled` is `true`, because they are the largest objects it writes. Turn it on per cluster that has control-plane headroom; the next scan fills the inventory. **Where the issues are** and **Coverage** count the containers with and without one, and a container without one is a gap to close, never clean.
 
-## Organisation Security Center
+Open the inventory from **Security → Vulnerabilities** with **Images and packages (SBOM)** at the bottom of the list, or from **Security → Evidence**. In the portal each image downloads as CycloneDX JSON; `ankra security sbom export <image> --format csv` gives a CSV.
 
-The organisation Security Center has eight sections:
+### Licence risk
 
-### Overview
-
-Emphasises what to fix first. When CISA lists any actionable finding, the page opens with the exploited-in-the-wild banner. A fleet scorecard follows: a posture ring showing the share of scanned clusters with no actionable critical or high findings, a plain-language verdict, a **Known exploited** tile counting findings on the CISA Known Exploited Vulnerabilities (KEV) catalog (with how many are past CISA's deadline and how many are used in ransomware), and tiles for actionable critical, actionable high, fixable severe, and scanner coverage. Remediation candidates rank known-exploited CVEs first, ahead of CVSS severity. Below it sit the fleet trend, ranked remediation opportunities, and policies nearing review.
-
-The page reads from posture rollups the platform keeps current as scans land, so the overview, the findings list, and the cluster posture answer in milliseconds on fleets with millions of recorded occurrences.
-
-The fleet posture trend is built from **daily snapshots**, so you can see whether actionable risk is rising or falling over time rather than only its current level. The same trend feeds [scheduled security reports](/guides/security-reports).
-
-**From the CLI and MCP.** One cluster's snapshots are readable off the browser: `ankra security history --cluster <cluster> [--days 90]` prints the day-by-day table (findings by severity, fixable severe, workloads and namespaces scanned, risk score, the actionable / acknowledged / accepted-risk split) with a one-line trend; from chat or the MCP server the tool is `get_cluster_security_history`, and with an API token the route is `GET /api/v1/org/clusters/imported/{cluster_id}/security/trivy/history?days=`. A cluster without snapshots yet answers an empty list, not zeros.
-
-**Fix top findings with AI** hands the highest-ranked remediation candidates to Ankra AI with fleet context attached and asks for a prioritised plan. See [Ask Ankra AI](#ask-ankra-ai).
-
-### Findings
-
-Server-paginated inventory of logical findings, deduplicated across clusters and workloads. Status filter chips carry live counts: **Actionable** (open and acknowledged, the default view), **Open**, **Acknowledged**, **Accepted risk**, and **Resolved**. Filter further by severity, fixability, **Known exploited (CISA KEV)**, cluster, add-on, and namespace. Each finding carries its exploitation intelligence: a **KEV** marker when CISA lists the CVE as exploited in the wild, CISA's remediation deadline, a **ransomware** marker where CISA reports it, and the FIRST **EPSS** probability and percentile. The list opens sorted by **Exploitability** (KEV listing, then EPSS, then severity); every other sort is one click away. The detail sheet lists occurrences and matching policies, quotes CISA's required action for a listed CVE, and carries the disposition actions plus **Ask Ankra AI**.
-
-Every number on a row opens the rows behind it. The **Occurrences** chips (**Open · 7**, **Resolved · 2**) count occurrences - one per workload, container and image, so a workload can carry several - and selecting one opens the sheet on exactly that status: the live statuses filter the remediation plan, and **Resolved** shows the occurrences the scanner no longer reports, most recently resolved first, with the workload, image and when each was resolved. The **Affected** cell (**7 clusters · 7 workloads**) opens the sheet's **Affected clusters** table, one row per cluster with its live workloads, the same four status counts, and when it last reported the finding; each cluster name deep-links into that cluster's Security tab with the finding already open, so a fleet-wide count can be followed down to one cluster's rows. A cluster that has since been deleted keeps its row (its occurrences are still part of the totals) but is marked **deleted** and not linked. The counts and the lists are computed by the same query, so a chip never claims a row the sheet cannot show. The API exposes the same views as `clusters` on `GET /api/v1/org/security/findings/{finding_id}` and the paginated `GET /api/v1/org/security/findings/{finding_id}/occurrences?status=resolved&cluster_id=…`.
-
-**When an occurrence becomes resolved.** Deleting a workload, or the `VulnerabilityReport` trivy-operator wrote for it, does not retire its occurrences on the next pass. The platform re-evaluates findings every five minutes, but it counts an occurrence as missing only once per completed full resource sync of the vulnerability-report kinds, and retires it after it has been missing on two consecutive full syncs, so a partial or interrupted sync can never read as a clean bill. Full syncs run about once an hour, which means an image that stopped running stays **Open** for one to two hours before it moves to **Resolved** and the cluster's and namespaces' actionable, critical and known-exploited totals drop with it. To bring that forward, run **Full Sync** from the cluster's [Settings → Kubernetes](/platform/cluster-settings#kubernetes) tab twice, letting the first finish before starting the second; the evaluation that follows the second sync retires the occurrences.
-
-### Clusters
-
-Per-cluster actionable posture, observed/accepted context, scanner freshness, and a deep link into that cluster's Security view.
-
-### Workloads
-
-The fleet broken down the way a platform team owns it: **cluster, then namespace, then workload, then pod**. Each row is one namespace on one cluster with its scanned workloads and images, the pods the cluster runs there right now, the actionable findings by severity, the known-exploited count, fixable severe findings, and the last scan. Cluster-scoped reports (node and control-plane images) keep a row of their own, labelled **Cluster-scoped**, so the rows still add up to the cluster's totals. Search by namespace or cluster, scope to one cluster, and sort by actionable findings, severity, known exploited, workloads, or pods.
-
-A namespace is where the drill-down starts, because it is usually how a team owns its workloads. Every row carries the way down: **Findings**, **Bill of materials** and **Containers** open the Findings and SBOM tabs already narrowed to that namespace on that cluster, and every figure on the row is a link to the list it counts - the actionable total to those findings, the known-exploited count to the KEV-listed ones, the image count to the images running there, the pod count to the running containers. Rows also say how many of their images have a bill of materials, with a link to the containers running without one. Once narrowed, a **scope bar** at the top of the Findings, Workloads and SBOM tabs names the cluster and namespace, offers the same scope on the other surfaces, and drops it in one click; the tab bar carries the scope across too, so switching tabs never falls back to the fleet.
-
-**Show workloads** on a row lists the scanned workload images in that namespace, riskiest first, each linking to its live Kubernetes page and to the bill of materials of the containers it runs. **Show pods** under a workload lists the pods it owns right now - resolved through the owner chain, so a Deployment's report on its ReplicaSet reaches the pods - with every container joined to the findings of the workload container behind it: critical and high counts, known-exploited markers, readiness and restarts, and the running image digest. A container the scanner has no report for is marked **Not scanned**, never shown as clean, and a pod nobody scanned reads **Not scanned** rather than healthy. A namespace with more than 2,000 pods says the listing is capped.
-
-The API exposes the same three levels: `GET /api/v1/org/security/namespaces?cluster_id=&search=&sort=&order=`, the existing `GET /api/v1/org/security/workloads?cluster_id=&namespace=`, and `GET /api/v1/org/security/pods?cluster_id=&namespace=&workload_uid=` (or `workload_kind` + `workload_name`).
-
-**From the CLI and MCP.** `ankra security namespaces [--cluster]`, `ankra security workloads` (the findings filters plus `--sort risk_score`) and `ankra security pods --cluster <cluster> --namespace <namespace> [--workload-kind --workload-name]` walk the same three levels, and `ankra security finding <id> --status resolved --cluster <cluster>` lists one finding's occurrences instead of the summary. From chat or the MCP server the tools are `list_security_namespaces`, `list_security_workloads`, `list_security_pods` and `list_security_finding_occurrences`.
-
-### SBOM
-
-The fleet's **software bill of materials**: every package the scanner found in every container image, where it runs, and whether a finding names it. It answers the question a new CVE raises - *where do we run this package* - without waiting for a rescan.
-
-**Components** lists one row per package name, version and ecosystem across every image that carries it: its licences and their **licence risk tier**, how many images, workloads and clusters carry it, and the findings that name that exact package and version on those images (with **actionable** and **known exploited** counts; the findings count links to the Findings tab searched for the package). Search by name or package URL, filter by ecosystem or licence tier (the chips carry live counts), keep only packages with or without findings, and scope to one cluster or namespace.
-
-#### Licence risk
-
-Every component's licences - the SPDX identifiers, expressions or names the scanner recorded - are classified into one of six tiers, ordered by what they oblige of the code that links the package. The classification follows SPDX semantics: an `OR` expression lets you pick the least consequential alternative, an `AND` binds every term, and a package that names several licences is taken to be under all of them.
+Every package's licences are sorted into one of six tiers, by what they oblige of the code that links the package. An `OR` expression takes the least demanding alternative, an `AND` binds every term, and a package that names several licences is taken to be under all of them.
 
 | Tier | Licences | What it means for a service you host |
 |---|---|---|
-| **Network copyleft** | AGPL, SSPL, EUPL, OSL, RPL, CAL | Serving it over a network counts as distribution: the source of every service that links it must be published. The single biggest landmine for a proprietary backend. |
-| **Source-available** | BUSL, Elastic License, Redis Source Available, Commons Clause, PolyForm, non-commercial Creative Commons | Hosting it as part of a managed service needs a commercial licence from the author, whatever your repository's visibility. |
-| **Copyleft** | GPL, GFDL, CeCILL, Sleepycat, CC-BY-SA | Safe behind a private backend (the "SaaS loophole"); shipping it in a browser bundle, mobile app or CLI is distribution and requires publishing the source of what it links. |
-| **Weak copyleft** | LGPL, MPL, EPL, CDDL, CPL, and GPL with a linking or Classpath exception | Links alongside proprietary code; only modifications to the component itself must be published. |
-| **Permissive** | MIT, Apache-2.0, BSD, ISC, Unlicense, CC0, Zlib, PostgreSQL, Python, Boost | No obligation on the surrounding code. |
-| **Unclassified** | Anything else, `NOASSERTION`, or a row the classifier has not reached yet | Not a verdict: confirm the terms before relying on it. An unclassified component never counts as permissive. |
+| **Network copyleft** | AGPL, SSPL, EUPL, OSL, RPL, CAL | Serving it over a network counts as distribution: the source of every service that links it must be published |
+| **Source-available** | BUSL, Elastic License, Redis Source Available, Commons Clause, PolyForm, non-commercial Creative Commons | Hosting it as part of a managed service needs a commercial licence from the author |
+| **Copyleft** | GPL, GFDL, CeCILL, Sleepycat, CC-BY-SA | Safe behind a private backend; shipping it in a browser bundle, mobile app or CLI is distribution |
+| **Weak copyleft** | LGPL, MPL, EPL, CDDL, CPL, and GPL with a linking or Classpath exception | Only changes to the component itself must be published |
+| **Permissive** | MIT, Apache-2.0, BSD, ISC, Unlicense, CC0, Zlib, PostgreSQL, Python, Boost | No obligation on the surrounding code |
+| **Unclassified** | Anything else, or `NOASSERTION` | Not a verdict: confirm the terms. An unclassified package never counts as permissive |
 
-The SBOM summary counts the packages under the two tiers that reach the hosting service (**Licence obligations**) and breaks every view down by tier; each figure links to the list it counts, and the tier chips narrow the component list the same way the ecosystem chips do. An image's row and its detail page carry the same per-tier counts, and the CSV export gains a `license_risk` column. Classification happens once, when the bill of materials is stored, so the fleet-wide "every AGPL package we run" read is an indexed filter rather than a rescan; rows stored before the tier existed are classified in the background within a few minutes of a deploy.
+From the terminal, `ankra security sbom`, `sbom images`, `sbom image <image>`, `sbom component <name> --version <version> --type <ecosystem>`, `sbom containers` and `sbom export <image> [--format csv]` read the same inventory. See [`ankra security sbom`](/reference/cli/security#ankra-security-sbom).
 
-Isolating a network-copyleft component behind its own service, reached over REST or gRPC rather than linked into your code, keeps the obligation with that service alone; the tier is the same either way, so the filter is the place to check that no such package sits in an image of your own application.
+## Which project a read covers
 
-Every figure in a component row opens the list it counts. The package name opens the **package page**: the images whose bill of materials name that exact name, version and ecosystem, every workload container currently running those images (cluster, namespace, workload, container, image, last seen), and the clusters they run on with per-cluster workload and image counts. The **images**, **workloads** and **clusters** figures in *Where it runs* open that page scrolled to the matching section, and each entry there links onward - an image to its bill of materials, a workload to its live Kubernetes page, a cluster to its security tab, a per-cluster count to the same page narrowed to that cluster (each cluster row reads *N workloads in M containers*) - so the trail from a licence tier to the place it runs never dead-ends. The lists cap at 200 images and 500 containers and say so when they do. The same read is `GET /org/security/sbom/component?name=&version=&package_type=` (add `cluster_id=` to narrow it to one cluster), `ankra security sbom component <name> --version <v> --type <ecosystem> [--cluster <name>]`, and the `get_security_sbom_component` AI tool.
+In an organisation with [projects](/concepts/projects), every Security read covers the project you act in. A finding, image or cluster of another project is left out of every list. In an organisation with projects off, a read covers the whole organisation.
 
-**Images** lists every image with a bill of materials: OS, component count, its licence risk (the obliging tiers it carries), the workloads, clusters and namespaces running it, the actionable findings attributed to it, and when the bill of materials was generated. Opening an image shows its identity (reference, digest, registry, CycloneDX version), the workload containers running it, its **Vulnerabilities** - every CVE the scanner names on the image, one row per CVE and installed package version across every container running it, with the fixed version, the CISA KEV listing and EPSS probability, the worst disposition across its occurrences and where it runs, each opening the finding for its advisory and remediation plan - then its full component list with the same search, ecosystem and findings-first controls, and two **Download** buttons: a CycloneDX 1.5 JSON document (what Dependency-Track, Grype and licence scanners ingest) or a flat CSV, rebuilt from the stored components and complete rather than paged. The counts on the image summary open the lists they count: the component count the components, the findings and known-exploited counts the vulnerabilities, the workload count the containers running the image.
+- **In the portal**, an organisation-wide member sees **Show security for** with **This project** and **All projects** in the page header. **All projects** reads every project and offers no changes: to act on a finding, switch to the project it belongs to. A member limited to projects is not offered the choice; an address that asks for it shows **Not available with your access** with **Show this project**.
+- **From the CLI**, `--all-projects` reads the whole organisation and the global `--project <name>` reads another project. `compliance`, `history` and `report-schedule` take no `--all-projects`.
+- **On the API**, the `GET` routes under `/api/v1/org/security/...` take `project_id`: `all` for the whole organisation, or a project's id. Any other value is refused with `422 project_id must be a UUID or all`.
 
-**Containers** starts from the other end: every container the clusters are running *right now*, init containers included, joined to the bill of materials of its image - or marked **No bill of materials** when the scanner has none for it. Those rows sort first, because they are the gap to close: a cluster with SBOM generation switched off, a registry the scanner cannot pull from, or a tag that rolled since the last scan. The headline counts running containers, how many have a bill of materials and how many do not, before the status chips or the search narrow the list, so the figure holds while you drill. Column headers sort like every other list in the portal.
+A pinned token and a member limited to projects read their own project only, and are refused `project_id=all` with `403 Pinned tokens cannot act outside their project` or `403 Members limited to projects cannot act outside their project`. The compliance framework scores and report are the organisation's, whichever project you act in; a pinned token and a member limited to projects are refused them with `403 Organisation compliance documents are not available to pinned tokens or members limited to projects`.
 
-Every view scopes by **cluster**, **namespace** and **workload** (the resolved Deployment, StatefulSet, DaemonSet or CronJob; a bare pod matches its own name), so "what does this deployment ship" is one filter away. The coverage headline above a scoped list is that scope's, not the fleet's, and every figure in it links to the list it counts - components, images, workloads, the packages a finding names, the containers with and without a bill of materials, the clusters publishing one - so a number is never a dead end.
+## From the CLI and MCP
 
-An application's **Security** section carries the same data per version on its **SBOM** view: one row per pushed tag of each component's image, with the bill of materials the scanner holds for it (and the obliging licence tiers it carries), the findings currently attributed to it (known-exploited and fixable-severe counts included), where it is running, and which sources saw it - so a tag nobody deployed, a deployed tag with no bill of materials, and a scanned tag the registry no longer lists stay distinguishable. The CycloneDX and CSV downloads sit on each row.
-
-The pane also reads the licences against the application's own repository. When the repository is **private** and the newest scanned version of a component links a network-copyleft package, a **Licence obligation** notice says so in plain terms - hosting that version as-is obliges you to publish its source, or to move the package behind a separate service - and lists the packages, each opening the image's bill of materials filtered to that tier. A source-available package raises the same notice whatever the visibility, because a managed service needs a commercial licence either way; GPL packages get a quieter note about distribution. A public repository has already met the disclosure obligation and the notice says that instead; a repository the platform has not synced is treated as private until someone confirms otherwise, never as public. The same verdict is on the API (`repository.visibility`, `license_exposure.source_disclosure_required`, `license_exposure.service_licence_required` and the flagged `components` on `GET /org/applications/{id}/security/versions`).
-
-The bill of materials is **opt-in per cluster** (see [Prerequisites](#prerequisites)). The tab's coverage line says how many scanned clusters publish one, and the empty state names the input to turn on, so an empty inventory reads as a switch nobody has flipped rather than a fleet with no packages. Images are keyed by digest and their components stored once, so an image running on ten clusters costs one bill of materials; an image no cluster runs any more keeps its last bill of materials but shows no workloads.
-
-The API exposes `GET /api/v1/org/security/sbom` (components; `search`, `package_type`, `vulnerable`, `cluster_id`, `namespace`, `workload_kind`, `workload_name`, `image`, `sort`, `order`), `GET /api/v1/org/security/sbom/images` (the same scope), `GET /api/v1/org/security/sbom/image?image=<digest or reference>`, `GET /api/v1/org/security/sbom/containers` (`cluster_id`, `namespace`, `workload_kind`, `workload_name`, `status=present|absent`, `search`; the response carries an `inventory` block counting the scope), `GET /api/v1/org/security/sbom/image/export?image=<identity>&format=cyclonedx|csv` (a download), and `GET /api/v1/org/security/sbom/image/findings?image=<identity>` (the CVEs on one image: `search`, `severity`, `sort`, `order`, paging; `image.sbom_status` says whether a bill of materials is stored, and a `summary` block totals the image before the filters narrow the rows). Every read carries a `coverage` block with `scanned_clusters` against `clusters_with_sbom`, scoped the way the list is. Namespace rows on `GET /api/v1/org/security/namespaces` carry `sbom_images`, the distinct images running there with a bill of materials. Per application, `GET /org/applications/{id}/security/versions` lists the image versions.
-
-From the terminal, `ankra security sbom`, `ankra security sbom images`, `ankra security sbom image <image>`, `ankra security sbom findings <image>` (the CVEs on one image, `--severity` repeatable), `ankra security sbom containers` and `ankra security sbom export <image> [--format csv]` read the same data; every one takes `-o json`, and the inventories take `--cluster`, `--namespace`, `--workload-kind` and `--workload-name`. From chat or the MCP server, the tools are `list_security_sbom_components`, `list_security_sbom_images`, `get_security_sbom_image`, `list_security_sbom_image_findings` and `list_security_sbom_containers`.
-
-### Policies
-
-Organisation-wide disposition rules: active, expiring, fix-available, mitigated, unmatched, expired, and revoked. Edit, renew, or soft-revoke with a fresh server-side match preview.
-
-**From the CLI and MCP.** `ankra security dispositions` lists the policies (`--status` and `--disposition` repeatable, `--sort updated_at`), `ankra security dispositions preview --occurrence <id> --disposition accepted_risk` shows what a decision would cover, `ankra security dispositions create --occurrence <id> --disposition acknowledged|accepted_risk --reason "…" [--expires-at 2026-12-31] [--expire-when-fix-available]` writes it after printing that preview and asking (`--yes` skips the prompt), `--scope workload` or `--scope image` on either records it for a finding no add-on owns (see [what a disposition is pinned to](#what-a-disposition-is-pinned-to)), and `update <policy-id>` / `revoke <policy-id> --reason "…"` carry the lifecycle. From chat or the MCP server the tools are `list_security_dispositions`, `preview_security_disposition`, `create_security_disposition`, `update_security_disposition` and `revoke_security_disposition`; the three writes are confirmed before they run and re-check `security.triage` or `security.manage` exactly as the portal does.
-
-### Network Exposure
-
-How tightly a cluster's NetworkPolicies are scoped, in and out. Identity - not port or CIDR - is what excludes an attacker, so a workload with no policy, or an allow-rule broader than a named workload identity, counts as over-privileged.
-
-Ingress and egress are scored separately, each from 0 to 100, and each blends two halves:
-
-| Half | Question |
-|------|----------|
-| Coverage | How many workloads are selected by any policy in that direction? |
-| Tightness | Of the rules that admit traffic, how many are scoped to a named workload identity? |
-
-A rule counts as broad unless every peer is identity-scoped. An `ipBlock` on ingress, a `namespaceSelector`, an empty selector, or a missing `from` / `to` all make a rule broad.
-
-Findings list every unprotected workload and every broad rule, ranked by severity with ingress before egress. Filter by flow, namespace, or severity. An unprotected workload is high severity on ingress and medium on egress, because egress default-deny is uncommon enough that its absence is exposure to review rather than an active misconfiguration.
-
-<Warning>
-This score reads your policy objects, never your traffic. It cannot tell you whether a policy is safe to apply, and three limits follow from that:
-
-- **Enforcement is not verified.** The score reflects how the policies are written, not whether your CNI enforces `NetworkPolicy` at all.
-- **A fully locked-down cluster and a broken one score identically.** A default-deny in every namespace with no allow-rules scores 100 out of 100 while blocking every flow in the cluster. Treat a high score as "policy is written tightly", not "the cluster is healthy".
-- **Coverage is partial.** Only Deployments, StatefulSets, and DaemonSets are inventoried, and ports are not scored.
-
-Use it to find workloads nobody has scoped yet. Do not use it to decide a policy change is safe - that needs observed traffic, which this metric does not have.
-</Warning>
-
-**From the CLI and MCP.** `ankra security network-exposure --cluster <cluster>` prints both scores with their coverage and tightness halves and the ranked findings; the tool is `get_cluster_network_policy_overprivilege`. Both are live reads through the agent, so an offline cluster answers with a retry hint rather than a stale score.
-
-### Compliance
-
-Benchmark scores for CIS Kubernetes, NSA/CISA hardening, and Pod Security Standards, alongside configuration-audit findings and report coverage. Filter for clusters that need attention, compare frameworks, and select a cluster to open its full Security workspace on the Compliance tab.
-
-**From the CLI and MCP.** `ankra security compliance` is the benchmark rollup (in an organisation with projects it covers the project you act in and takes no `--all-projects`; `GET /api/v1/org/security/compliance?project_id=all` reads the whole organisation's), `ankra security compliance frameworks` lists GDPR, ISO 27001, SOC 2 and NIST CSF with each framework's switch and live score, `frameworks enable|disable <key>` flips one (`--yes` skips the prompt), `frameworks report <key> [--month 2026-08]` reads a report control by control, and `ankra security compliance export --format csv|json [--start-date --end-date] [--output-file]` downloads the [evidence report](/security/compliance-management#the-compliance-report). Per cluster, `ankra security benchmarks --cluster <cluster>` lists every failing control with its remediation and `benchmarks resources --cluster <cluster> --check <id> [--source config_audit]` the objects behind one control. From chat or the MCP server: `get_security_compliance_overview`, `list_security_compliance_frameworks`, `get_security_compliance_framework_report`, `set_security_compliance_framework` (confirmed, `security.manage`) and, per cluster, `get_compliance_reports`.
-
----
-
-## Cluster Security view
-
-Each cluster Security page shares the same domain model, scoped to that cluster:
-
-- Quiet scanner/freshness status with refresh and secondary actions ([schedule a report](/guides/security-reports), create an alert).
-- **Stacks** - the cluster broken down the way Ankra deployed it, and the tab the page opens on when the cluster runs stacks. One row per stack with its attribution status, scope (add-ons · manifests · matched workloads · unmatched members), actionable findings with the fixable severe count, the known-exploited count, and how many of its running containers have a bill of materials; a closing **Outside any stack** row counts the system namespaces, node images and hand-applied objects no stack owns, so the rows add up to the cluster. Every figure opens the list it counts, already narrowed to the stack, and the stack name opens the stack's own [Security tab](#stack-security), where a member drills on to its workloads and pods. The summary strip above the table (actionable in stacks, known exploited, stacks with a gap to close, containers without a bill of materials) links the same way. A stack whose members matched nothing reads **Unmatched**, never clean. A cluster with no stack opens on the Overview instead, and `?tab=` in the URL always wins.
-- **Overview** - the exploited-in-the-wild banner, the actionable summary, and then the breakdowns: a **Known exploited (CISA KEV)** card (how many of this cluster's findings CISA lists as exploited, their share of its actionable occurrences, how many are past CISA's deadline or used in ransomware, and the exploited findings themselves with their deadlines), the **Risk breakdown** (severity mix, review state, fix readiness), the ranked remediation list, the cluster's **Application hotspots** (workloads ranked by weighted actionable risk), and the trend.
-- **Findings** - server-side list and detail sheet with acknowledge / accept-risk flows, including the KEV markers, EPSS scores, and exploitability sort.
-- **Workloads** - risk explorer with namespace and add-on filters. The organisation-wide [Workloads](#workloads) tab adds the namespace and pod levels above and below it.
-- **Network Exposure** - the same NetworkPolicy scoping scores and findings described above, for this cluster alone.
-- **Compliance**: failed and passed benchmark checks, configuration-audit hotspots, scanner remediation, and **Fix with AI** actions.
-
-Use the Compliance filters to focus by result, severity, framework, check ID, or remediation text. Failed checks show affected results and scanner guidance. Passed checks stay collapsed by benchmark until you need evidence for an audit.
-
----
-
-## Stack security
-
-A stack's detail page has a **Security** tab built around what makes the stack up: its running pods, each under the add-on or manifest that deploys it, and every container of every pod with its own CVE report, bill of materials and KEV report one click away.
-
-The stack is attributed to running objects two ways, one per member kind. An **add-on** is a Helm release, so every object in the cluster's resource cache carrying that release's identity - the `meta.helm.sh/release-name` annotation with its release namespace, or the `app.kubernetes.io/instance` label the chart stamped - belongs to it, whether or not the chart is in the add-on catalog. A **manifest** is the objects its YAML declares, matched by kind, namespace and name. From those objects the scope walks two owner levels down (Deployment → ReplicaSet → Pod, CronJob → Job → Pod), because the scanner reports on the controller that owns the pods, not the object you wrote.
-
-The tab has three views, and the view and its filters live in the page URL so a container's report can be handed to someone as a link:
-
-- **Pods** (the default) - a posture strip on top: actionable occurrences by severity, the **known-exploited** count, the fixable severe count, the component count and how many of the stack's running containers have a bill of materials, each figure opening the list it counts. Below it the running pods, grouped under the member that deploys each. A pod names its namespace, its owner workload (linked to the workload page), its priority and when it was last seen, then every container and init container: image, scan state, actionable findings by severity, KEV count, bill of materials, and three openers - **CVE**, **SBOM** and **KEV** - into the container's dedicated view. Search matches pod, namespace, member, workload, container and image; a member chip narrows to one add-on or manifest; a member with no running pod attributed is listed as unmatched, never dropped. A stack past the read's container cap says the listing is partial.
-- **Findings** - the stack's CVEs with the same severity, status, known-exploited and fix-available filters, sorts and detail sheet as the Security Center, and facet counts computed for the stack alone.
-- **Components** - every package in the images the stack's pods run, searchable, with a **Vulnerable only** switch and the findings that name each component.
-
-The pods list is also the way down through Kubernetes. Under a member's heading, **Show workloads** lists the workloads that member deploys - the Deployments, StatefulSets, DaemonSets, CronJobs and Jobs its release identity or declared objects resolved to - each with its pods, scan state, severe actionable findings, known-exploited count and how many of its containers have a bill of materials. A workload opens on its own **Security** tab, its **Bill of materials** link opens the Security Center's containers list scoped to that workload, and **Show pods** lists the pods it runs right now, each opening on the pod's [Security tab](#pod-security). Every link from a security surface to a Kubernetes object lands on that object's Security tab rather than its overview, so the path cluster → stack → member → workload → pod → container never leaves the security view. The workloads read is `GET /org/clusters/imported/{cluster_id}/stacks/{stack_name}/security/workloads`; the cluster's stack list is `GET /org/clusters/imported/{cluster_id}/security/stacks`, both with `/api/v1` twins. On the CLI, `ankra security stacks --cluster <cluster>` prints the stack list, `ankra security stack <name> --cluster <cluster>` the stack with its members and their workloads, and `ankra security pod <namespace> <pod> --cluster <cluster>` one pod container by container; Ankra AI and the MCP server answer the same questions through `list_cluster_security_stacks`, `get_cluster_stack_security` and `get_cluster_pod_security`.
-
-The tab never renders an absent answer as a clean one. A cluster the scanner has not reported on reads **not scanned** and its containers are still listed, each marked **Not scanned**; a stack whose members resolve to no object in the resource cache reads **unmatched** (it may not be deployed yet, or its workloads carry no Helm release identity); pods that were attributed but carry no report yet read **no reports yet**; and when the CISA catalog has not been synced, every known-exploited figure reads unknown rather than zero. The summary is on the API as `GET /org/clusters/imported/{cluster_id}/stacks/{stack_name}/security`, with `/pods`, `/findings` and `/sbom` lists beside it and `/api/v1` twins for API tokens.
-
-### The container view
-
-Every container - opened from the stack's pods, from the pod's Security tab, or by link - has one dedicated view with three sections named in the URL (`section=cve`, `sbom` or `kev`):
-
-- **CVE report** - every CVE the scanner names on the container's image, one row per CVE and installed version, with severity, exploitation (CISA listing and EPSS), installed and fixed versions, disposition and where else the image runs; each opens the finding and its advisory.
-- **Bill of materials** - the image's components with the findings that name each exact version, searchable and filterable by ecosystem, with the **CycloneDX** and **CSV** downloads. A container whose image has no stored bill of materials says so as a state to act on, with the opt-in guidance, rather than showing an empty list.
-- **KEV report** - the same CVE list filtered to the CISA Known Exploited Vulnerabilities catalog, with the remediation deadline each carries. While the catalog has not been synced the report reads **unknown**, never empty.
-
-Around the reports is the ring of links that closes the circle: the pod's Security tab, the stack and the member that deploy the pod, the owning workload's page, the image in the Security Center's SBOM tab, every container running the same image, and the findings of the namespace. A container no report covers is marked **Not scanned** in the view's header, and the CVE figure reads *not scanned* rather than zero.
-
----
-
-## Pod security
-
-A pod's detail page has a **Security** tab (shortcut `s`) that reads the pod container by container: every container and init container it runs, each with the CVEs the scanner attributes to the workload container behind it and the bill of materials of its image. The owner chain is walked the way the namespace breakdown walks it (Pod → ReplicaSet → Deployment, Pod → Job → CronJob), so a Deployment's report on its ReplicaSet reaches the pod. When one of the cluster's stacks deploys the pod, the tab says which stack and which add-on or manifest, linked back to that stack's pods.
-
-The summary shows the pod's actionable occurrences by severity, how many of its containers the scanner covers, the known-exploited and fixable-severe counts, and how many containers have a bill of materials with the component and image totals. The **By container** table lists init containers first with the image, readiness and restarts, the scan state, actionable findings by severity, the KEV count and the bill of materials (components and OS, or **Absent**), and the same three openers as the stack's pods - **CVE**, **SBOM**, **KEV** - into the container view described above, named in the URL (`container=` and `section=`) so it can be linked to directly.
-
-Nothing absent reads as clean: a container no report covers is marked **Not scanned**, a container whose image has no stored bill of materials reads **Absent** and its SBOM view explains what is missing, a pod with neither reads **no report yet**, an unscanned cluster says so, an unsynced CISA catalog leaves the known-exploited figure unknown, a pod nothing in a stack deploys simply carries no stack line, and a pod whose stacks' members could not be read says the stack is **unknown** rather than pretending there is none. The same read is on the API as `GET /org/clusters/imported/{cluster_id}/security/pods/{namespace}/{pod_name}` - its `stack` field names the deploying member or is null, and `stack_attribution` says what that null means (`attributed`, `none` or `unknown`) - with an `/api/v1` twin for API tokens.
-
----
-
-## Add-on security posture
-
-On a stack add-on's **Overview**, a compact Security panel shows:
-
-- Actionable critical/high counts, the known-exploited (CISA KEV) count, and the accepted-risk count
-- Affected images and workloads
-- Scan freshness and scanner setup states
-- Partial-attribution warnings when ownership cannot be proven for every report
-
-Cluster-scoped and ambiguous reports are **not** attributed to an add-on. The panel's **Open in Security** action deep-links into the cluster Security view filtered by that add-on's slug. A security API failure never blocks the operational add-on overview.
-
-**From the CLI and MCP.** `ankra security addon <addon-name> --cluster <cluster>` reads the same panel, and `get_cluster_addon_security` is the tool. Per application, `ankra application security-versions <application> [--component <name>]` and `get_application_security_versions` list every pushed image version with its bill of materials, findings and licence exposure.
-
----
-
-## Acknowledge vs accept risk
-
-Two distinct dispositions are available for a finding:
-
-| Disposition | Effect |
-|-------------|--------|
-| **Acknowledged** | Reviewed, but still **actionable** and alertable |
-| **Accepted risk** | Excluded from actionable totals, remediation queues, and threshold alerts; still visible in observed/accepted totals |
-
-Accepted risk requires:
-
-- A reason
-- An actor (recorded in audit)
-- A review deadline, maximum one year
-- Optionally, automatic expiry when a fix becomes available
-
-Matching uses a deterministic selector: organisation + CVE + package type + package name + what the disposition is pinned to. Creation always shows a server preview of affected findings, clusters, ambiguous exclusions, and the observed→actionable count change. Policies are never hard-deleted; they can be revoked, expire, mitigate when no matches remain, or reopen if findings return.
-
-### What a disposition is pinned to
-
-A disposition is created from one occurrence of a finding, and its scope decides what it covers:
-
-| Scope | Covers | Needs |
-|-------|--------|-------|
-| `organisation_addon` (default) | The add-on the occurrence belongs to, on every cluster (for example, Grafana across the fleet) | The occurrence attributed to an add-on with high confidence |
-| `workload` | The one workload it was seen in: cluster, kind, namespace and name | A workload recorded on the occurrence |
-| `image` | The image digest it was seen in, wherever that image runs | An image digest recorded on the occurrence |
-
-Some images belong to no add-on: pods an operator creates from a custom resource (a CloudNativePG `Cluster`, for example), workloads from plain manifests, control-plane pods, and charts the add-on catalogue does not know. The default scope refuses those, and the refusal names the two scopes that work. Use `workload` to decide for one place, or `image` to decide once for an image that runs in several namespaces or clusters:
+The `ankra security` commands read and change everything above. The ones you reach for first:
 
 ```bash
-ankra security dispositions preview --occurrence <id> --scope workload --disposition accepted_risk
-ankra security dispositions create --occurrence <id> --scope image --disposition accepted_risk \
-  --reason "No upstream fix; reviewed" --expires-at 2026-12-31
+ankra security overview                      # totals, coverage and the issues used by attackers
+ankra security findings --known-exploited    # only the findings CISA lists as exploited
+ankra security finding <finding-id>          # one finding with every place it occurs
+ankra security advisory <cve>                # the advisory, CISA's guidance and your exposure
+ankra security clusters --all-projects -o json   # per-cluster posture for reporting
+ankra cluster baseline --cluster my-cluster  # the cluster's Ankra Baseline score, which includes its known-exploited issues
 ```
 
-An image-scoped disposition follows the digest, so it stops matching when the image is rebuilt or upgraded and the finding returns for a fresh decision. From chat or the MCP server, pass the same `scope` to `preview_security_disposition` and `create_security_disposition`.
+Per cluster, `ankra security stacks`, `stack <name>`, `namespaces`, `pods`, `pod <namespace> <pod>`, `addon <addon-name>`, `history`, `benchmarks` and `network-exposure` take `--cluster`. The portal has no view for the CIS benchmark controls of one cluster or for its NetworkPolicy exposure score; use `ankra security benchmarks --cluster my-cluster` and `ankra security network-exposure --cluster my-cluster`. Every command is in the [`ankra security` reference](/reference/cli/security), and every MCP tool is under [Security Center in MCP tools](/platform/mcp-tools#security-center).
+
+### NetworkPolicy exposure score
+
+`ankra security network-exposure --cluster my-cluster` scores how tightly the cluster's NetworkPolicies are written, ingress and egress separately, each from 0 to 100 (higher is tighter). Each score is the average of two halves: coverage, the share of workloads a policy selects in that direction, and tightness, the share of allow rules scoped to a named workload identity. The findings list every workload no policy selects (high severity on ingress, medium on egress, because egress default-deny is uncommon) and every rule broader than a named identity. From chat or the MCP server the tool is `get_cluster_network_policy_overprivilege`.
 
 <Warning>
-Expiry or fix availability can make findings actionable again and may fire threshold alerts. It does **not** emit a false “new CVE discovered” notification - “new” means newly observed in raw scan data **and** currently actionable.
+The score is computed from the policy objects, not from traffic. It does not check that your CNI enforces NetworkPolicy, it does not score ports, and it counts only Deployments, StatefulSets and DaemonSets: a direction with none of them reads `n/a (no workloads to score)`. A default-deny in every namespace with no allow rules scores 100 while it blocks every flow, so a high score means the policies are written tightly, not that traffic reaches where it should. Use it to find workloads nobody has scoped, never to decide that a policy change is safe.
 </Warning>
-
----
-
-## Permissions
-
-| Permission | Who can use it (built-in defaults) | Capabilities |
-|------------|--------------------------------------|--------------|
-| `security.read` | Viewer and above | View Security Center, cluster Security, add-on posture |
-| `security.triage` | Operator, admin, owner | Acknowledge findings |
-| `security.manage` | Admin, owner | Accept risk, create/edit/revoke organisation policies |
-
-Custom roles may grant these permissions. Backend enforcement is authoritative; the UI only gates controls.
-
-All disposition mutations are audited and write append-only policy events in the same transaction.
-
----
-
-## Ask Ankra AI
-
-The AI assistant can read the same vulnerability and compliance data. Three entry points open chat already grounded in what you are looking at:
-
-| Action | Where | What it sends |
-|--------|-------|---------------|
-| **Fix top findings with AI** | Organisation Overview | The top remediation candidates with their severity, package, reach, and fix availability, and a request for a prioritised fleet remediation plan |
-| **Ask Ankra AI** | Any finding detail sheet | The finding and the cluster the occurrence was seen on |
-| **Fix with AI** | A failed compliance check | The check, benchmark, severity, affected count, and remediation |
-
-The agent can inspect affected Kubernetes resources, propose or apply safe changes, and verify the result. Risky or disruptive changes still require confirmation.
-
-<Note>
-Product analytics for these actions record only that an AI action happened, through a strict allowlist. CVE identifiers, finding titles, prompts, and workload names are never sent.
-</Note>
-
-```text
-What are the most critical actionable vulnerabilities in this cluster?
-Which single image upgrade fixes the most high-severity CVEs?
-Why is CIS check 1.1.1 failing, and can you fix the affected resources?
-```
-
-The assistant distinguishes observed, actionable, acknowledged, and accepted-risk findings. Accepted risk is never treated as “gone.”
-
----
 
 ## Related
 
 <CardGroup cols={2}>
-  <Card title="Add-ons" icon="puzzle-piece" href="/concepts/addons">
-    Install Trivy Operator and other add-ons.
+  <Card title="Fix a vulnerable image" icon="wrench" href="/guides/fix-a-vulnerable-image">
+    Open a fix pull request and follow it to a verified rescan.
+  </Card>
+  <Card title="Scheduled security reports" icon="envelope" href="/guides/security-reports">
+    Email a weekly or monthly summary of a cluster's posture.
   </Card>
   <Card title="Roles and access" icon="user-shield" href="/guides/roles-and-access">
-    Grant security.read, security.triage, and security.manage.
+    Grant security.read, security.triage and security.manage.
   </Card>
-  <Card title="AI Assistant" icon="robot" href="/platform/ai-assistant">
-    Triage vulnerabilities in chat.
-  </Card>
-  <Card title="AI Insights" icon="lightbulb" href="/platform/ai-insights">
-    Proactive cluster health analysis.
+  <Card title="Compliance management" icon="clipboard-check" href="/security/compliance-management">
+    Frameworks, monthly evidence and exports.
   </Card>
 </CardGroup>

@@ -1,112 +1,65 @@
 ---
-title: Build a Cloudflare Stack
-description: Use Cloudflare Tunnel to securely expose Kubernetes services without opening firewall ports
+title: Expose services with a Cloudflare Tunnel Stack
+description: Run cloudflared on your cluster as a Stack so Cloudflare Tunnel serves your Kubernetes services without public IPs or open firewall ports.
 ---
 
-<Note>
-Cloudflare Tunnel lets you expose services running in your cluster to the internet without configuring public IPs, opening firewall ports, or managing TLS certificates.
-</Note>
+import { CliVersion } from "/snippets/cli-version.jsx";
 
-<Card title="AI Prompts" icon="wand-magic-sparkles" href="#ai-prompts">
-  Use the AI Assistant (`⌘+J`) for guidance on building your Cloudflare Tunnel stack.
-</Card>
+Cloudflare Tunnel exposes services running in your cluster to the internet without public IPs, open firewall ports or certificates you manage yourself. You create the tunnel in Cloudflare, then run its connector, `cloudflared`, on your cluster as a [Stack](/concepts/stacks) of three manifests. The tunnel token is sealed with your organisation's encryption key, so it never reaches Git in plain text.
 
----
+You end up with a `cloudflare-tunnel` Stack on your cluster and a service answering on a Cloudflare hostname. It takes about 20 minutes.
 
-## Why Cloudflare Tunnel?
-
-| Traditional Ingress | Cloudflare Tunnel |
+| Ingress on the cluster | Cloudflare Tunnel |
 |---------------------|-------------------|
-| Requires public IP or LoadBalancer | Works behind NAT, no public IP needed |
-| Open firewall ports (80, 443) | No inbound ports required |
-| Manage TLS certificates yourself | Automatic TLS from Cloudflare |
-| DDoS protection costs extra | DDoS protection included |
-| Complex DNS configuration | Automatic DNS via Cloudflare |
+| Needs a public IP or a LoadBalancer | Works behind NAT, no public IP needed |
+| Ports 80 and 443 open to the internet | No inbound ports |
+| Certificates issued on the cluster | TLS ends at Cloudflare |
+| DNS records point at the cluster | Cloudflare creates the hostname's record |
 
-Cloudflare Tunnel is ideal for:
-- Clusters running on-premises or in private networks
-- Development and staging environments
-- Services that need Cloudflare's security features
-- Teams that want zero-trust access controls
+A tunnel suits clusters on premises or in private networks, development and staging clusters, and services you want behind Cloudflare Access.
 
----
+## Before you start
 
-## Prerequisites
+- **A Cloudflare account** with a domain added.
+- **A cluster connected to Ankra** and online, with the service you want to expose running on it. See [Import a cluster](/guides/import-cluster).
+- **A role that may create and deploy Stacks** on that cluster. See [Create and change a stack](/guides/create-and-change-a-stack).
+- **The organisation's encryption key.** Open **Infrastructure → Variables and secrets**. If **Encryption key** reads **No encryption key yet**, click **Make the key** (it needs a role that may manage the key). See [SOPS](/guides/sops).
+- **The `ankra` CLI**, signed in to your organisation, to seal the token.
 
-Before you start:
-
-- A Cloudflare account with a domain added
-- A cluster imported into Ankra with the agent connected
-- The service you want to expose running in your cluster
-
----
-
-## Step 1: Create a Cloudflare Tunnel
+## Step 1: Create the tunnel in Cloudflare
 
 <Steps>
-  <Step title="Log into Cloudflare Dashboard">
-    Go to [dash.cloudflare.com](https://dash.cloudflare.com) and select your account.
+  <Step title="Open Tunnels">
+    In the [Cloudflare dashboard](https://dash.cloudflare.com), open **Zero Trust**, then **Networks** → **Tunnels**.
   </Step>
-  <Step title="Navigate to Zero Trust">
-    Click **Zero Trust** in the sidebar, then **Networks** → **Tunnels**.
+  <Step title="Create a tunnel">
+    Click **Create a tunnel**, choose **Cloudflared** as the connector type, and give it a name such as `my-cluster-tunnel`.
   </Step>
-  <Step title="Create a Tunnel">
-    Click **Create a tunnel** and select **Cloudflared** as the connector type.
+  <Step title="Copy the tunnel token">
+    Cloudflare shows the token in its install command (it starts `eyJ`). Copy it; you need it in Step 3. Do not install the connector: the Stack runs it. Click **Next**.
   </Step>
-  <Step title="Name Your Tunnel">
-    Give it a descriptive name like `my-cluster-tunnel` or `prod-services`.
-  </Step>
-  <Step title="Copy the Tunnel Token">
-    Cloudflare will show you a token. Copy it - you'll need this for the Kubernetes deployment.
-    The token looks like: `eyJhIjoiNjM...`
-  </Step>
-  <Step title="Skip the Connector Setup">
-    Don't install the connector yet. We'll deploy it via Ankra instead. Click **Next**.
-  </Step>
-  <Step title="Configure Public Hostname">
-    Add a public hostname for your service:
-    - **Subdomain**: e.g., `app` or `api`
-    - **Domain**: Select your Cloudflare domain
-    - **Service**: `http://your-service.namespace.svc.cluster.local:port`
-    You can add more hostnames later.
-  </Step>
-  <Step title="Save the Tunnel">
-    Click **Save tunnel**. The tunnel will show as "Inactive" until we deploy the connector.
+  <Step title="Add a public hostname">
+    Add a hostname for your service:
+    - **Subdomain**: for example `app`
+    - **Domain**: your Cloudflare domain
+    - **Service**: `http://<service>.<namespace>.svc.cluster.local:<port>`
+
+    Click **Save tunnel**. The tunnel shows as **Inactive** until the connector runs.
   </Step>
 </Steps>
 
----
-
 ## Step 2: Create the Stack in Ankra
 
+The Stack holds a Namespace, the Secret with the token, and the `cloudflared` Deployment, in that order. The steps below use the stack editor; [Create and change a stack](/guides/create-and-change-a-stack) explains each screen.
+
 <Steps>
-  <Step title="Open Stack Builder">
-    Navigate to your cluster → **Stacks** → **Create Stack**.
-  </Step>
-  <Step title="Name Your Stack">
-    Name it `cloudflare-tunnel` or similar.
-  </Step>
-  <Step title="Add a Secret Manifest">
-    Click **+ Add** → **Manifest** and create a Secret for the tunnel token:
-    ```yaml
-    apiVersion: v1
-    kind: Secret
-    metadata:
-      name: cloudflare-tunnel-token
-      namespace: cloudflare
-    type: Opaque
-    stringData:
-      token: "YOUR_TUNNEL_TOKEN_HERE"
-    ```
+  <Step title="Start the draft">
+    Open **Infrastructure → Clusters → &lt;your cluster&gt;**, then **Stacks** under **Technical details**. Click **Create a stack**, keep **Compose a stack**, enter `cloudflare-tunnel` as the **Stack name**, and click **Start the draft**.
 
-    Replace `YOUR_TUNNEL_TOKEN_HERE` with the token from Cloudflare.
-
-    <Tip>
-    **Encrypt your token with SOPS**: If you have [SOPS encryption](/guides/sops) enabled, add `token` to the **Encrypted Keys** section in the manifest editor. Your token will be encrypted before being pushed to Git and automatically decrypted during deployment.
-    </Tip>
+    The stack editor opens and reads **No resources yet**.
   </Step>
-  <Step title="Add a Namespace Manifest">
-    Click **+ Add** → **Manifest** for the namespace:
+  <Step title="Add the namespace">
+    Click **Add → Manifest**. Enter `cloudflare-namespace` as the **Resource name**, paste this into **Manifest source**, and click **Add to draft**:
 
     ```yaml
     apiVersion: v1
@@ -115,8 +68,25 @@ Before you start:
       name: cloudflare
     ```
   </Step>
-  <Step title="Add the Cloudflared Deployment">
-    Click **+ Add** → **Manifest** for the tunnel connector:
+  <Step title="Add the Secret, with a placeholder">
+    Click **Add → Manifest** again. Enter `cloudflare-tunnel-token` as the **Resource name** and paste the Secret below. Leave the placeholder: you set the real token in Step 3, sealed, so it is never stored in plain text.
+
+    ```yaml
+    apiVersion: v1
+    kind: Secret
+    metadata:
+      name: cloudflare-tunnel-token
+      namespace: cloudflare
+    type: Opaque
+    stringData:
+      token: replace-me
+    ```
+
+    Click **Add to draft**.
+  </Step>
+  <Step title="Add the cloudflared Deployment">
+    Click **Add → Manifest**, enter `cloudflared` as the **Resource name**, paste this and click **Add to draft**. Replace `latest` with a release tag from [cloudflared's releases](https://github.com/cloudflare/cloudflared/releases) so every deploy runs the same version.
+
     ```yaml
     apiVersion: apps/v1
     kind: Deployment
@@ -139,6 +109,8 @@ Before you start:
               args:
                 - tunnel
                 - --no-autoupdate
+                - --metrics
+                - 0.0.0.0:2000
                 - run
                 - --token
                 - $(TUNNEL_TOKEN)
@@ -162,130 +134,37 @@ Before you start:
                 initialDelaySeconds: 10
                 periodSeconds: 10
     ```
+
+    The editor now shows three resources and reads **All changes saved**.
   </Step>
-  <Step title="Connect Dependencies">
-    In the Stack Builder canvas, connect:
+  <Step title="Set the order">
+    Select `cloudflare-tunnel-token`, open its **Parents** tab and tick `cloudflare-namespace` under **Depends on**. Then select `cloudflared` and tick `cloudflare-tunnel-token`.
 
-    ```
-    Namespace → Secret → Deployment
-    ```
-
-    This ensures resources deploy in the correct order.
+    The **Graph** draws namespace, then Secret, then Deployment.
   </Step>
-</Steps>
+  <Step title="Review and deploy">
+    Click **Review changes**, read the **Draft change log**, then click **Create and deploy stack**.
 
----
-
-## Step 3: Deploy and Verify
-
-<Steps>
-  <Step title="Save and Deploy">
-    Click **Save**, then **Deploy**. Watch the deployment in **Operations**.
-  </Step>
-  <Step title="Check Cloudflare Dashboard">
-    Go back to the Cloudflare Zero Trust dashboard. Your tunnel should now show as **Healthy**.
-  </Step>
-  <Step title="Test Your Service">
-    Navigate to your configured hostname (e.g., `https://app.yourdomain.com`). Your service should be accessible.
+    The editor reads "Deployment accepted. Follow the operation for its outcome." Follow it in **Deployments** in the editor, or the cluster's **Operations**. The `cloudflared` pods start, but cannot connect until the token is set.
   </Step>
 </Steps>
 
----
+## Step 3: Set the token, sealed
 
-## Configuring Routes
+Set the real token and seal it in one command. The CLI applies the value in memory, sends the document to Ankra to be encrypted with your organisation's key, and writes the sealed result back to the Stack in a single change, so the plain token never reaches Git history.
 
-You configure which services are exposed in the Cloudflare dashboard, not in Kubernetes.
+<CliVersion since="0.20.0" />
 
-### Adding a New Route
-
-1. Go to **Zero Trust** → **Networks** → **Tunnels**
-2. Click your tunnel → **Configure**
-3. Go to **Public Hostname** tab
-4. Click **Add a public hostname**
-5. Configure:
-   - **Subdomain**: The subdomain to use
-   - **Domain**: Your Cloudflare domain
-   - **Service**: The internal Kubernetes service URL
-
-### Service URL Format
-
-For Kubernetes services, use this format:
-
-```
-http://SERVICE_NAME.NAMESPACE.svc.cluster.local:PORT
+```bash
+ankra cluster encrypt manifest cloudflare-tunnel-token \
+  --key token \
+  --set 'stringData.token=<your-tunnel-token>' \
+  --cluster my-cluster
 ```
 
-Examples:
-- `http://nginx.default.svc.cluster.local:80`
-- `http://api-server.backend.svc.cluster.local:3000`
-- `http://grafana.monitoring.svc.cluster.local:3000`
+Every cluster decrypts sealed values when it deploys them; there is nothing to turn on per cluster. The one exception is a playground: while the organisation has a cluster of its own, the playground's agent is not handed the organisation's key, so run the tunnel on one of your own clusters.
 
----
-
-## Multiple Services
-
-One tunnel can expose multiple services. Add multiple public hostnames in Cloudflare:
-
-| Hostname | Service |
-|----------|---------|
-| `app.example.com` | `http://frontend.default.svc.cluster.local:80` |
-| `api.example.com` | `http://backend.default.svc.cluster.local:3000` |
-| `grafana.example.com` | `http://grafana.monitoring.svc.cluster.local:3000` |
-
----
-
-## High Availability
-
-The example deployment runs 2 replicas for redundancy. For production:
-
-```yaml
-spec:
-  replicas: 3
-  template:
-    spec:
-      affinity:
-        podAntiAffinity:
-          preferredDuringSchedulingIgnoredDuringExecution:
-            - weight: 100
-              podAffinityTerm:
-                labelSelector:
-                  matchLabels:
-                    app: cloudflared
-                topologyKey: kubernetes.io/hostname
-```
-
-This spreads replicas across different nodes.
-
----
-
-## Encrypting Secrets with SOPS
-
-If you're using GitOps to store your Stack configuration, you should encrypt the tunnel token with SOPS to avoid committing secrets in plaintext.
-
-### Enable SOPS Encryption
-
-<Steps>
-  <Step title="Initialize SOPS at Organisation Level">
-    Go to **Organisation Settings** → **Encryption** and click **Initialize Encryption**. This generates an AGE key pair for your organisation.
-  </Step>
-  <Step title="Enable SOPS on Your Cluster">
-    Navigate to your cluster → **Settings** → **Encryption** and toggle on **Enable SOPS Decryption**. On the ArgoCD engine this deploys the decryption key to ArgoCD; on the native engine the agent decrypts on its own.
-  </Step>
-  <Step title="Mark the Token for Encryption">
-    When editing the Secret manifest in the Stack Builder, expand the **Encrypted Keys (SOPS)** section and add `token` as an encrypted key.
-  </Step>
-</Steps>
-
-### How It Works
-
-1. When Ankra writes the Stack to your Git repository, it seals the `token` field with your organisation's AGE public key
-2. The sealed manifest is what your Git repository stores (if GitOps is enabled)
-3. When the Stack deploys, the value is decrypted inside your cluster - by the agent on the native engine, or by ArgoCD's helm-secrets plugin on the ArgoCD engine
-4. Your tunnel token never appears in plaintext in Git
-
-### Example Encrypted Manifest
-
-After encryption, the Secret looks like this in Git:
+In Git, the Secret then looks like this, with `ENC[...]` in place of the token and the encryption parameters in the `sops` block:
 
 ```yaml
 apiVersion: v1
@@ -304,129 +183,110 @@ sops:
         ...
         -----END AGE ENCRYPTED FILE-----
   encrypted_regex: ^(token)$
-  version: 3.9.4
 ```
 
-The `ENC[...]` value is the encrypted token. The `sops` metadata block contains the encryption parameters.
+To rotate the token later, run the same command with the new token. See [SOPS](/guides/sops) for how sealing works.
 
-<Note>
-Learn more about SOPS encryption in the [SOPS Encryption guide](/guides/sops).
-</Note>
+## Verify
 
----
+1. The pods are running:
 
-## Access Controls
+   ```bash
+   ankra cluster get pods -n cloudflare --cluster my-cluster
+   ```
 
-Cloudflare Tunnel integrates with Cloudflare Access for zero-trust security:
+   Both `cloudflared` pods read `Running`.
+2. In Cloudflare's **Zero Trust** → **Networks** → **Tunnels**, your tunnel reads **Healthy**.
+3. Open your hostname, for example `https://app.example.com`. Your service answers.
 
-1. Go to **Zero Trust** → **Access** → **Applications**
-2. Click **Add an application**
-3. Select **Self-hosted**
-4. Configure the application URL (your tunnel hostname)
-5. Add access policies (e.g., require SSO, specific emails, IP ranges)
+## Add more services
 
-This lets you protect internal services with identity-aware access without VPNs.
+You choose which services the tunnel exposes in Cloudflare, not in Kubernetes. Open the tunnel in **Zero Trust** → **Networks** → **Tunnels**, then open **Configure**, choose **Public Hostname** and click **Add a public hostname**, and give each one a service URL in this form:
 
----
+```
+http://SERVICE_NAME.NAMESPACE.svc.cluster.local:PORT
+```
 
-## Troubleshooting
+| Hostname | Service |
+|----------|---------|
+| `app.example.com` | `http://frontend.default.svc.cluster.local:80` |
+| `api.example.com` | `http://backend.default.svc.cluster.local:3000` |
+| `grafana.example.com` | `http://grafana.monitoring.svc.cluster.local:3000` |
+
+## Run more replicas across nodes
+
+For production, open `cloudflared` in the stack editor, edit its **Source** tab, and spread three replicas over different nodes:
+
+```yaml
+spec:
+  replicas: 3
+  template:
+    spec:
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels:
+                    app: cloudflared
+                topologyKey: kubernetes.io/hostname
+```
+
+Then **Review changes** and **Deploy reviewed changes**.
+
+## Put Cloudflare Access in front
+
+Cloudflare Access adds sign-in in front of a tunnel hostname: in **Zero Trust** → **Access** → **Applications**, click **Add an application**, choose **Self-hosted**, enter the tunnel hostname and add the policies you need. See [Cloudflare's Access documentation](https://developers.cloudflare.com/cloudflare-one/policies/access/).
+
+## What can go wrong
 
 <AccordionGroup>
-  <Accordion title="Tunnel Shows as Inactive">
-    1. Check the cloudflared pods are running:
+  <Accordion title="The tunnel stays Inactive">
+    1. Check the pods and their logs:
        ```bash
-       kubectl get pods -n cloudflare
+       ankra cluster get pods -n cloudflare --cluster my-cluster
+       ankra cluster logs -l app=cloudflared -n cloudflare --tail 50 --follow=false --cluster my-cluster
        ```
-    2. Check the logs for errors:
-       ```bash
-       kubectl logs -n cloudflare -l app=cloudflared
-       ```
-    3. Verify the token in the secret is correct
+    2. If the logs show the token is refused, the Secret still holds `replace-me` or an old token. Run the command in [Step 3](#step-3-set-the-token-sealed) again.
+    3. If the deployment failed, open the cluster's **Operations** for the failing step.
   </Accordion>
   <Accordion title="502 Bad Gateway">
-    The tunnel is working but can't reach the backend service:
-    1. Verify the service URL in Cloudflare is correct
-    2. Check the service exists and has endpoints:
+    The tunnel works but cannot reach the service.
+    1. Check the service URL in Cloudflare.
+    2. Check the service exists:
        ```bash
-       kubectl get svc,endpoints -n YOUR_NAMESPACE
+       ankra cluster get services -n <namespace> --cluster my-cluster
        ```
-    3. Test connectivity from cloudflared pod:
+    3. Call it from a `cloudflared` pod (take the pod name from `ankra cluster get pods`):
        ```bash
-       kubectl exec -n cloudflare -it deploy/cloudflared -- wget -qO- http://SERVICE.NAMESPACE.svc.cluster.local:PORT
+       ankra cluster exec <cloudflared-pod> -n cloudflare --cluster my-cluster -- wget -qO- http://<service>.<namespace>.svc.cluster.local:<port>
        ```
   </Accordion>
-  <Accordion title="Connection Timeouts">
-    1. Check if the service is responding slowly
-    2. Increase timeout in Cloudflare tunnel settings
-    3. Verify there are no NetworkPolicies blocking traffic
-  </Accordion>
-  <Accordion title="DNS Not Resolving">
-    1. DNS propagation can take a few minutes
-    2. Verify the hostname is configured in the Cloudflare dashboard
-    3. Check that your domain's nameservers point to Cloudflare
+  <Accordion title="The hostname does not resolve">
+    1. A new hostname can take a few minutes to answer.
+    2. Check the hostname is configured on the tunnel in Cloudflare.
+    3. Check your domain's name servers point to Cloudflare.
   </Accordion>
 </AccordionGroup>
 
----
+## Ask Ankra AI
 
-## AI Prompts
+Press `⌘J` (or `Ctrl+J`) to open **Ask Ankra** and describe what you need, for example:
 
-Press `⌘+J` to open the AI Assistant and use these prompts:
+```
+I have a service called api-server in the default namespace on port 8080.
+Help me expose it through my Cloudflare Tunnel.
+```
 
-<AccordionGroup>
-  <Accordion title="Basic Cloudflare Tunnel Stack">
-    ```
-    Create a stack to deploy Cloudflare Tunnel. I have a tunnel
-    token ready. Deploy cloudflared with 2 replicas in a
-    cloudflare namespace.
-    ```
-  </Accordion>
-  <Accordion title="Expose an Existing Service">
-    ```
-    I have a service called api-server in the default namespace
-    on port 8080. Help me set up Cloudflare Tunnel to expose it.
-    ```
-  </Accordion>
-  <Accordion title="Production Tunnel Setup">
-    ```
-    Create a production-ready Cloudflare Tunnel deployment with:
-    - 3 replicas spread across nodes
-    - Resource limits
-    - Health checks
-    - Pod disruption budget
-    ```
-  </Accordion>
-  <Accordion title="Troubleshoot Tunnel Issues">
-    ```
-    My Cloudflare Tunnel shows as inactive in the dashboard.
-    Help me troubleshoot why the cloudflared pods aren't
-    connecting.
-    ```
-  </Accordion>
-</AccordionGroup>
+```
+My Cloudflare Tunnel shows as inactive. Help me find out why the
+cloudflared pods in the cloudflare namespace are not connecting.
+```
 
-<Tip>
-The AI provides recommendations for your Stack. Just describe your tunnel setup and which services you want to expose, then build based on the guidance.
-</Tip>
+## Next steps
 
----
-
-## Next Steps
-
-<CardGroup cols={2}>
-  <Card title="SOPS Encryption" icon="lock" href="/guides/sops">
-    Encrypt secrets in your Stacks before pushing to Git.
-  </Card>
-  <Card title="Cloudflare Access" icon="shield-halved" href="https://developers.cloudflare.com/cloudflare-one/policies/access/">
-    Add zero-trust access controls to your services.
-  </Card>
-  <Card title="Stack Builder" icon="cubes" href="/concepts/stacks">
-    Learn more about building and managing Stacks.
-  </Card>
-  <Card title="GitOps Sync" icon="git-alt" href="/concepts/gitops">
-    Store your tunnel configuration in Git.
-  </Card>
-  <Card title="Monitoring Stack" icon="chart-line" href="/guides/monitoring-stack">
-    Expose Grafana via Cloudflare Tunnel.
-  </Card>
-</CardGroup>
+- [SOPS](/guides/sops) - seal other secrets in your Stacks.
+- [Create and change a stack](/guides/create-and-change-a-stack) - the draft, review and deploy loop.
+- [GitOps](/concepts/gitops) - keep the Stack in your own repository.
+- [Monitoring stack](/guides/monitoring-stack) - a Grafana you can put behind the tunnel.

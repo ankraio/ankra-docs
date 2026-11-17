@@ -1,0 +1,116 @@
+---
+title: Troubleshoot a Cluster
+description: Find out what is wrong on a cluster in the order that works - Health, then Kubernetes, then Cluster logs, then Ankra AI - and fix it without a kubeconfig.
+---
+
+import { CliVersion } from "/snippets/cli-version.jsx";
+
+Something on a cluster is not right: an application is down, a pod keeps restarting, an alert fired. This guide walks the order that finds the cause fastest in the Ankra portal: **Health** for what is unhealthy, **Kubernetes** for the object and its events, **Cluster logs** for what the containers printed, and **Ask Ankra** to read it all with you. It takes a few minutes, and you need no kubeconfig.
+
+For an index by symptom, see [Troubleshooting by Symptom](/guides/troubleshooting).
+
+## Before you start
+
+- **The cluster is connected to Ankra.** The cluster's **Overview** shows its status; **Offline** means the agent is not reporting, and most of this guide then shows recorded data. See [When the agent is offline](#when-the-agent-is-offline).
+- **Your role can read what you need.** Reading logs needs `kubernetes.logs` (every built-in role but `viewer`). Opening a shell needs `kubernetes.exec`, and restarting, editing or deleting a resource needs `kubernetes.write` (`owner`, `admin` and `operator`). See [Roles & Access](/guides/roles-and-access).
+
+## 1. Start from Health
+
+Open **Infrastructure → Clusters → &lt;your cluster&gt; → Health** (`/next/clusters/<cluster-id>/health`).
+
+**Reported health** gives an **Overall score**, **Node health**, **Pod health** and **Add-on health**. **Health checks** below has one row per area, each with a link:
+
+| Check | What it counts | Link |
+|-------|----------------|------|
+| **Nodes** | ready, unavailable, total | **Inspect nodes** |
+| **Pods** | running, pending, failed, crash-looping, image pull failures, unknown | **Inspect pods** |
+| **Add-ons** | healthy, degraded, progressing, unknown | **Inspect add-ons** |
+| **Cluster agent** | `Reported online` or `Reported offline`, its version and last check-in | **Agent settings** |
+| **GitOps** | whether a repository is connected, and on which branch | **Inspect operations** |
+
+**Check:** find the row whose counts are not all healthy, and follow its link. A count under crash-looping, pending, failed or image pull failures takes you to the pods.
+
+If the page shows **Current health is unknown**, the readings are old: the agent is offline, or the platform could not confirm a recent sync. Go to [When the agent is offline](#when-the-agent-is-offline).
+
+## 2. Find the object in Kubernetes
+
+**Inspect pods** opens **Technical details → Kubernetes → Workloads → Pods**. To find the pod in trouble, sort the list by **Most restarts** or by **Phase, running last**.
+
+Open the pod. Its **Overview** shows the phase, containers ready, restarts, each container's state, its conditions and its **Events**, newest first. The events usually name the cause: a failed probe, an image that cannot be pulled, no node with room.
+
+**Check:** you can say which container is failing and what the last event says about it.
+
+For a Deployment, StatefulSet or other workload, open it under **Workloads** instead: its **Events** tab and its **Pods** tab show the same from the workload's side. [Kubernetes Resources](/platform/kubernetes-insights) covers every tab.
+
+<CliVersion since="0.13.0" />
+
+From the terminal, the same reads:
+
+```bash
+ankra cluster get pods -n my-namespace
+ankra cluster describe pod my-pod -n my-namespace
+ankra cluster events --for pod/my-pod -n my-namespace
+```
+
+## 3. Read what the containers printed
+
+Open the pod's **Logs** tab, or **Technical details → Kubernetes → Cluster logs** for every pod at once.
+
+- A container that keeps restarting printed its error in the run before the restart. On the pod's **Logs** tab choose **Previous instance**; in **Cluster logs → Live** turn on **Previous run**.
+- To see what happened before now, use **Cluster logs → History**, pick a window that covers the start of the trouble, and set **Severity** in **Filters** to errors. **Patterns** groups repeated lines, so a new error stands out among the noise.
+
+History needs a log store: [Ankra hosted logs](/guides/hosted-logs) or a [log source](/integrations/log-sources) of your own. Without one, History offers to set one up, and **Live** still works. [Logs](/platform/logs) covers each control.
+
+**Check:** you have the error line, or you know the container wrote nothing.
+
+```bash
+ankra cluster logs my-pod -n my-namespace --previous
+```
+
+## 4. Ask Ankra
+
+Ankra AI can read the pod, its events and its logs for you, and propose a fix.
+
+- On the pods list, open the menu (the three dots) on a pod that is not healthy and choose **Investigate restarts with Ankra**, **Investigate unready containers with Ankra** or **Explain &lt;phase&gt; status with Ankra**. The question is sent at once.
+- On **Cluster logs**, click **Ask Ankra** to ask about the lines shown: the question carries the window, the namespace and pod filters, the search text and the most frequent errors.
+- On any page, press `⌘J` (`Ctrl+J`) to open **Ask Ankra** with the cluster as its scope, and ask in your own words.
+
+**Check:** the answer names a cause you can verify in the events or logs you read. In Ask mode nothing changes; in Agent mode nothing happens until you approve it. See [AI Assistant](/platform/ai-assistant).
+
+```bash
+ankra chat --cluster my-cluster "Why is pod my-pod in namespace my-namespace restarting?"
+```
+
+## 5. Fix it
+
+Where the fix goes depends on what owns the object:
+
+- **A resource a [Stack](/concepts/stacks) deployed** - change the Stack, which is its source of truth. The resource's review links **Edit owning stack**.
+- **A failed deploy** - **Technical details → Operations** shows the failed step and its error, and retries it. See [Operations](/platform/operations).
+- **A workload you manage by hand** - on its page click **Review resource actions**, then **Restart**, **Edit manifest** or **Delete**. See [Change a resource](/platform/kubernetes-insights#change-a-resource).
+- **A container you need to look inside** - open a shell on the pod's **Exec** tab ([Pod Terminal](/platform/pod-terminal)). When the image has no shell, start a [debug pod](/platform/debug-pods) with `ankra cluster debug create`: the portal has no page for creating debug pods.
+
+## Verify
+
+Open **Health** again. The check you started from shows no crash-looping, pending or failed pods, and on the pod's **Overview** the **Restarts** count stays where it is. In **Cluster logs → Live** the container writes its normal output.
+
+## When the agent is offline
+
+When the cluster's agent stops reporting, the cluster shows **Offline**, **Health** says `The cluster agent is offline. These are the last reported readings.`, the Kubernetes lists say `The cluster is offline. These are previously recorded resources.`, and the pods list may say `The cluster agent is offline, so no pods are reported.`
+
+What still works: every list and page shows the last copy Ankra recorded, and **Cluster logs → History** searches the lines a log store already holds. What does not: **Live** logs (`Live logs need the cluster agent.`), the **Exec** tab, and every action under **Review resource actions**, which needs a live read.
+
+Bring the agent back first: see [Ankra Agent → Troubleshooting](/concepts/cluster-agent#troubleshooting).
+
+## Where things are
+
+- There is no page of cluster widgets to start the day from. **Home** opens on Ask Ankra and what needs you; see [Home](/platform/home). Each cluster's **Overview** and **Health** say how it is doing.
+- Debug pods are created from the CLI with `ankra cluster debug create`, and appear in the portal as ordinary pods. See [Debug Pods](/platform/debug-pods).
+- Logs are under **Technical details → Kubernetes → Cluster logs** and on each pod's **Logs** tab, not in the cluster's own menu.
+
+## Where to go next
+
+- [Troubleshooting by Symptom](/guides/troubleshooting) - an index from what you see to the page that fixes it.
+- [Read a cluster's overview and health](/platform/cluster-overview-and-health) - what each health score and check means.
+- [Logs](/platform/logs) - every control of Cluster logs and the pod Logs tab.
+- [Kubernetes Resources](/platform/kubernetes-insights) - every resource page and action.

@@ -235,7 +235,8 @@ The tests run against a real Postgres sidecar on three Python versions, side by 
 
 ```mermaid
 flowchart LR
-    checkout --> t1[test 3.11] & t2[test 3.12] & t3[test 3.13]
+    checkout --> d1[deps 3.11] & d2[deps 3.12] & d3[deps 3.13]
+    d1 & d2 & d3 --> t1[test 3.11] & t2[test 3.12] & t3[test 3.13]
     pg[(postgres:16 sidecar)] -.-> t1 & t2 & t3
 ```
 
@@ -267,25 +268,35 @@ services:
 stages:
   - name: "checkout"
     kind: "checkout"
-  - name: "test"
+  - name: "deps"
     kind: "run"
     image: "python:${{ matrix.python }}-slim"
     needs: ["checkout"]
+    matrix:
+      python: ["3.11", "3.12", "3.13"]
+    network: "egress-https"
+    env:
+      PIP_CACHE_DIR: "/workspace/.ankra-python-cache/pip"
+    run: |
+      python -m venv .venv-${{ matrix.python }}
+      .venv-${{ matrix.python }}/bin/pip install -r requirements.txt
+    cache:
+      - key: "pip-${{ matrix.python }}-${{ hashFiles('requirements.txt') }}"
+        paths: [".ankra-python-cache/pip"]
+        restore_keys: ["pip-${{ matrix.python }}-"]
+        fallback: "none"
+  - name: "test"
+    kind: "run"
+    image: "python:${{ matrix.python }}-slim"
+    needs: ["deps"]
     matrix:
       python: ["3.11", "3.12", "3.13"]
     services: ["postgres"]
     network: "services"
     env:
       DATABASE_URL: "postgresql://postgres:test@postgres:5432/billing"
-      PIP_CACHE_DIR: "/workspace/.ankra-python-cache/pip"
     run: |
-      pip install -r requirements.txt
-      pytest --junitxml=reports/junit.xml
-    cache:
-      - key: "pip-${{ matrix.python }}-${{ hashFiles('requirements.txt') }}"
-        paths: [".ankra-python-cache/pip"]
-        restore_keys: ["pip-${{ matrix.python }}-"]
-        fallback: "none"
+      .venv-${{ matrix.python }}/bin/pytest --junitxml=reports/junit.xml
     artifacts:
       - name: "junit"
         paths: ["reports/junit.xml"]
@@ -297,7 +308,7 @@ stages:
       memory: "2Gi"
 ```
 
-- `network: services` lets the stage reach its sidecar by name. It is a protected tier, so it applies after an administrator approves the definition.
+- `network: services` lets the stage reach its sidecar by name and nothing beyond the run, PyPI included. So the `deps` stage installs the requirements on `egress-https` into a virtual environment in the run's workspace, and the test stage runs from it. `needs: ["deps"]` waits for every leg of `deps`, so all three environments exist before any test leg starts. It is a protected tier, so it applies after an administrator approves the definition.
 - The matrix value is part of the cache key, so each Python version keeps its own wheels.
 
 ## A repository with no application
@@ -431,6 +442,15 @@ on_failure:
         paths: ["reports/traces.tgz"]
 ```
 
+The `on.schedule` entry decides which stages a nightly firing runs; it does not fire anything by itself. Create the schedule that fires it, with the same cron and branch:
+
+```bash
+ankra pipeline schedules create --repository <repository-id> --cron "0 2 * * 1-5" --ref main
+ankra pipeline schedules list --repository <repository-id>
+```
+
+Use `--application my-app` instead of `--repository` when the repository backs an application. The schedule is listed with its cron and `--timezone` (UTC unless you set one).
+
 Dispatch it by hand:
 
 ```bash
@@ -489,20 +509,26 @@ stages:
 
 Each extra tag is a manifest re-tag of the one gate-approved digest. No layer is pushed again. A registry that refuses a tag, for example through a tag-immutability rule, fails the step and names the tag, so a `latest` that did not move never reads as published.
 
-## A matrix across operating systems and architectures
+## Tests on each CPU architecture
 
-`runs_on` places one leg per architecture on matching nodes of your CI cluster.
+One stage per architecture, each placed by `runs_on` on matching nodes of your CI cluster.
 
 ```yaml
-- name: "test"
+- name: "test-amd64"
   kind: "run"
   image: "golang:1.26"
   needs: ["checkout"]
-  matrix:
-    arch: ["amd64", "arm64"]
   runs_on:
     node_selector:
-      kubernetes.io/arch: "${{ matrix.arch }}"
+      kubernetes.io/arch: "amd64"
+  run: "go test ./..."
+- name: "test-arm64"
+  kind: "run"
+  image: "golang:1.26"
+  needs: ["checkout"]
+  runs_on:
+    node_selector:
+      kubernetes.io/arch: "arm64"
   run: "go test ./..."
 ```
 

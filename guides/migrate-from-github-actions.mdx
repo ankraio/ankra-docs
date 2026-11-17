@@ -1,19 +1,107 @@
 ---
-title: Migrate from GitHub Actions
-description: Convert a GitHub Actions workflow, a GitLab CI file, a Bitbucket pipeline or a CircleCI config into .ankra/pipeline.yaml, read every note the converter leaves, and run both side by side until you trust it.
+title: Move to Ankra Pipelines
+sidebarTitle: Move to Ankra Pipelines
+description: Move your CI from GitHub Actions, GitLab CI, Bitbucket Pipelines or CircleCI to Ankra Pipelines, one repository at a time, without losing a step.
 ---
 
 import { CliVersion } from "/snippets/cli-version.jsx";
 
-Ankra converts an existing CI definition into an [Ankra pipeline](/guides/ankra-pipelines) - the `.ankra/pipeline.yaml` its own engine runs inside your cluster. One converter reads four formats: GitHub Actions workflows, a `.gitlab-ci.yml`, a `bitbucket-pipelines.yml` and a `.circleci/config.yml`.
+[Get started with Ankra CI](/get-started/ankra-ci) moves one repository. This guide is the plan for the rest of them: what to set up once for the organisation, how to convert an existing CI definition into `.ankra/pipeline.yaml`, what to review in the result, how to run both side by side, and the checklist to repeat for each repository.
+
+One converter reads four formats: GitHub Actions workflows, a `.gitlab-ci.yml`, a `bitbucket-pipelines.yml` and a `.circleci/config.yml`.
 
 <Note>
 A converted pipeline is a starting point a person reviews, never a drop-in replacement. The rule the converter holds to: something it cannot map is either carried across as a stage that **fails with an explanation**, or reported as a note with the job or step it came from - never dropped silently. A converted pipeline that quietly skipped a toolchain step would go green having built nothing.
 </Note>
 
-## Migrate an existing application with one call
+## The plan at a glance
 
-For an application already connected to Ankra, this is the fast path, and it takes effect the moment you ask. An application that still builds from a GitHub Actions workflow - the one Ankra generated at setup, or one your repository wrote itself - shows **Convert to Ankra Pipelines** on its journey card and **Convert** on its row in the Applications list. The same conversion is one command or one call:
+```mermaid
+flowchart LR
+    Setup[Set up once: cluster, workers, capacity] --> Convert[Convert one repository]
+    Convert --> Review[Review the notes]
+    Review --> Side[Run both side by side]
+    Side --> Switch[Switch the required check, remove the old workflow]
+    Switch --> Repeat[Repeat per repository]
+```
+
+A repository moves in an afternoon once the organisation is set up. The side-by-side period is what takes calendar time: give it a few days of normal pull requests, so you see the flaky tests and the slow ones before anyone depends on the new check.
+
+## Before you start
+
+- **An organisation owner or admin** for the set-up below. Other roles can read the settings but not change them.
+- **A cluster to run pipelines on**, whose agent can run pipeline workers. See [Where your pipeline runs](/pipelines/where-pipelines-run).
+- **The repository connected to Ankra**, as an application or as a bare repository. See [Ankra Pipelines](/guides/ankra-pipelines).
+
+## Set up once for the organisation
+
+<CliVersion since="0.28.0" command="org ci-settings pool add" />
+
+<Steps>
+  <Step title="Choose the cluster that runs pipelines">
+    <Tabs>
+      <Tab title="Portal">
+        Open **Build & delivery → Builds and clusters** (`/next/organisation/pipelines`). Under **Where pipelines run**, choose the **Cluster**, then **Save changes**.
+      </Tab>
+      <Tab title="CLI">
+        ```bash
+        ankra org ci-settings set --cluster my-cluster
+        ```
+      </Tab>
+    </Tabs>
+
+    Until a cluster is chosen, the section reads **No cluster runs pipelines yet**. Once it is, it shows the cluster's capacity.
+  </Step>
+  <Step title="Give its agent pipeline workers">
+    A playground starts with two pipeline workers, and so can a non-production cluster you create (see [Before your first run](/guides/ankra-pipelines#before-your-first-run)). Other clusters start with none. The portal cannot set how many workers a cluster has: an application's **Pipelines** view only offers **Enable build execution**, which turns on one. Use the CLI:
+
+    ```bash
+    ankra cluster agent ci set --workers 4 --cluster my-cluster
+    ```
+
+    Each worker runs one step at a time. Size it to how many steps you expect at once across all your repositories at a busy moment, and raise it later: a step that waited for a free worker says **Waiting for a CI worker** on its run.
+  </Step>
+  <Step title="Let the cluster grow under load">
+    Steps reserve the CPU and memory they ask for, so a busy hour needs nodes, not only workers. Turn on [autoscaling](/guides/cluster-autoscaling) for the node group your steps run on, so the cluster adds a node rather than queueing steps.
+  </Step>
+  <Step title="Decide your image policy">
+    With no prefix listed, a step may use any image. Ankra's own step images and your organisation's registry are always allowed. To limit steps to images you trust, add each registry or path:
+
+    <Tabs>
+      <Tab title="Portal">
+        In **Build & delivery → Builds and clusters**, under **Build rules**, add each prefix to **Images steps may use**, then **Save changes**.
+      </Tab>
+      <Tab title="CLI">
+        ```bash
+        ankra org ci-settings set --allowed-image-prefix ghcr.io/my-org/
+        ```
+      </Tab>
+    </Tabs>
+  </Step>
+  <Step title="Check the image gate">
+    The image gate decides which scan findings block a publish. The default, `app`, blocks fixable critical and high findings in your own dependencies. It is **Stop a build on vulnerabilities** under **Build rules**, and `ankra org ci-settings get` prints it.
+  </Step>
+</Steps>
+
+`ankra org ci-settings get` shows all of this, and how many CI slots are in use right now.
+
+<Tip>
+When one cluster is no longer enough, add another under **CI clusters** with **Add a cluster**, or with `ankra org ci-settings pool add my-second-cluster`. New runs go to the least busy cluster for its weight.
+</Tip>
+
+## Convert one repository
+
+Pick a pilot repository that gets real pull requests every day, has tests that mostly pass today, and is not the one every release depends on. Then get its pipeline the fastest way that fits:
+
+| The repository today | The fastest way to a pipeline |
+| --- | --- |
+| An Ankra application that builds with a GitHub Actions workflow | `ankra application pipeline convert <application-id>`, below |
+| Any repository with GitHub Actions, GitLab CI, Bitbucket Pipelines or CircleCI | Ask Ankra AI to convert the files. See [Convert with Ankra AI](#convert-with-ankra-ai) |
+| A repository with simple test commands | Copy a [starter pipeline](/guides/ankra-ci-starter-pipelines) and change the test command |
+
+### Convert an application with one command
+
+For an application that still builds from a GitHub Actions workflow (the one Ankra generated at setup, or one your repository wrote itself), the conversion is one command or one API call. The portal has no button for it.
 
 ```bash
 ankra application pipeline convert <application-id>
@@ -25,7 +113,7 @@ curl -X POST https://platform.ankra.app/api/v1/org/applications/<application-id>
   -d '{}'
 ```
 
-One click does all of this:
+The conversion does all of this:
 
 - Reads what builds the application today and converts it into `.ankra/pipeline.yaml` through the same converter [Ankra AI uses](#convert-with-ankra-ai), then stores that as the application's pipeline definition of record.
 - Records the application as building on Ankra Pipelines (`pipeline_source` becomes `ankra_pipeline`) right away, so the next push to the tracked branch builds through the pipeline. Nothing waits on a merge.
@@ -36,7 +124,7 @@ The pull request is the repository catching up with what Ankra already runs: mer
 
 `GET .../pipeline-migration` reads what builds the application today and what a conversion would act on, without changing anything.
 
-## Convert with Ankra AI
+### Convert with Ankra AI
 
 Ask Ankra AI in the portal chat, or call the tool through the [MCP server](/platform/mcp-server). Example prompts:
 
@@ -54,6 +142,38 @@ The tool behind it is `cicd_convert_workflow_to_pipeline`:
 It answers with the rendered `pipeline_yaml`, the `notes` naming every construct it could not carry across faithfully, and a validation verdict. It writes nothing to the repository: open the pull request yourself, or ask the AI to open one. Its twin, `cicd_validate_pipeline_yaml`, validates a definition you wrote or edited and lists every violation with its key and severity - see [Validation](/guides/pipeline-reference#validation).
 
 ## What maps to what
+
+### GitHub Actions concepts in Ankra
+
+| GitHub Actions | Ankra Pipelines |
+| --- | --- |
+| `.github/workflows/*.yml`, one file per workflow | One `.ankra/pipeline.yaml` per repository |
+| `on: push`, `pull_request` | `on.push`, `on.pull_request`, with `branches` and `paths` |
+| `on: workflow_dispatch` with `inputs` | `on.manual` with `inputs` |
+| `on: schedule` | `on.schedule`, plus `ankra pipeline schedules create` |
+| `jobs.<id>` | A stage in `stages`, with a `kind` |
+| `runs-on` | Your pipeline cluster. `runs_on.node_selector` places a step on particular nodes |
+| `actions/checkout` | A `kind: checkout` stage |
+| `actions/setup-node`, `setup-python`, `setup-go` | The stage's `image`, for example `node:24-alpine` |
+| `steps[].run` | The stage's `run` script |
+| Marketplace actions (`uses:`) | A `run` script that does the same thing; the converter writes these for common actions |
+| `needs` | `needs` |
+| `if:` | `if:`, with `success()`, `failure()`, `always()` and `cancelled()` |
+| `strategy.matrix` | `matrix`, with `include` and `exclude` |
+| `services` | A top-level `services` block, named on each stage that uses it |
+| `env` | `env` on a stage, or `defaults.env` |
+| `secrets.X` | A declared `secrets` entry, delivered as a file under `/run/agent-secrets/` |
+| `actions/cache` | A stage's `cache` block |
+| `actions/upload-artifact` | A stage's `artifacts` list |
+| JUnit or test report actions | A stage's `test_results` list |
+| `docker/build-push-action` | The `build`, `scan`, `gate` and `publish` stages |
+| `concurrency`, `cancel-in-progress` | `concurrency.group`, `concurrency.cancel_in_progress` |
+| `timeout-minutes` | A stage's `timeout`, such as `"45m"` |
+| `permissions` | `permissions`, approved by an administrator |
+
+GitLab CI maps the same way: each job becomes a stage, `image` and `script` become the stage's `image` and `run`, `needs` stays `needs`, `services` becomes the `services` block, and `rules` become the stage's `when` and `if`.
+
+### How the converter maps steps
 
 Jobs become stages, `needs` becomes `needs`, conditions keep their `${{ }}` delimiters, and the `steps`, `matrix`, `inputs`, `env` and `needs` references map one to one. A reference to the `github` context does not: the validator reports it with the Ankra equivalent (`github.sha` is `ankra.sha`, `github.event_name` is `event.kind`, and so on) for you to rewrite. See [Expressions](/guides/pipeline-reference#expressions) for the two deliberate departures.
 
@@ -161,8 +281,8 @@ Two Bitbucket settings carry across without a note: `clone: depth` becomes the c
 4. **Secrets and credentials.** The converter declares what the workflow referenced; the `secrets` block names a source (`app_env_secret`, `org_variable`, `registry`, `credential`) that has to exist in the organisation. Delivery is live for `secrets` sourced `app_env_secret`, `org_variable` or `registry`, and for `credentials` sourced `git` or `registry` - each revealed once, at step start, to a file the step reads. `secrets: [{from: credential}]` still validates but is not deliverable yet, and a `credentials` binding sourced `cloud` or `object_storage` is refused by name until the run has its own scoped identity - reconsider any converted cloud-credential step against that gap.
 5. **Filters.** Where a `rules:`, `except:` or trigger `types` narrowing was lost, add `when:` or `if:` so the pipeline does not run more often than the workflow did.
 6. **Resources and timeouts.** A stage takes 500m CPU, 1Gi memory and 30 minutes unless it says otherwise; a Go build or a Playwright suite wants more of the first two. A pull request from a fork gets less than a converted workflow may expect, whatever the file asks for: 2 CPU, 4Gi, a 60-minute step timeout, 8 matrix legs per stage, no sidecar services and no caches, with 256 MiB of artifacts and logs for the whole run. The clamps are applied to the plan, so the pull request's own status comment shows the smaller run rather than the one the file declared - see [Forks](/guides/ankra-pipelines#what-a-step-runs-as).
-7. **Caches, if you add one by hand.** A `cache:` block does not behave the way `actions/cache` does across branches. An Ankra cache claim is scoped to the trust of the run that resolved it, so every run that is not on your default branch - a feature branch, a tag, any pull request - shares one non-default scope, and none of them can read or write the claim your default branch's builds use. GitHub restores a default-branch cache into any branch; Ankra deliberately does not, because that is the path a less-trusted ref uses to poison what production builds from. Budget one cold build per cache key on each side of that line, and none at all on a fork's pull request, which resolves no shared cache.
-8. **What executes today, and what the converter never adds.** `checkout`, `run`, `build`, `scan`, `gate`, `publish` and `deploy` all execute end to end; `verify` and the kinds with no executor yet (`preview`, `agent`, `approval`, `webhook`, `automation`, `ankra`, `external`) validate with a warning and are **skipped**, so a converted `approval` stage blocks nothing and a converted `webhook` notifies nobody. A `deploy` stage releases only to [host targets](/reference/cli/targets) outside Kubernetes, so a converted job that ran `kubectl` or `helm` does not become one; deploy to a cluster through the application's push to deploy instead - see [What is in place today](/guides/ankra-pipelines#what-is-in-place-today). The converter itself never writes a `gate` or a `publish` stage - no source format has one to map from - so a workflow whose `docker/build-push-action` pushed straight to your registry converts into a pipeline whose `build` stage pushes a digest to Ankra's own **CI staging repository only**, and stops there: without a `gate` stage after `scan` and a `publish` stage after `gate`, nothing ever reaches your real repository. Add both by hand (see the [worked example](/guides/ankra-pipelines#connect-a-repository-push-see-the-run)) rather than assuming the converted file publishes what the workflow did.
+7. **Caches, if you add one by hand.** A `cache:` block is scoped by the trust of the run, not by its branch. Every run that is not on your default branch - a feature branch, any pull request, a merge train car - saves into one shared branch scope, and nothing saved there ever reaches a default-branch run, because that is the path a less-trusted ref uses to poison what production builds from. A branch run reads the default branch's entries first and the branch scope's second, so a pull request starts warm from your default branch. A tag run and a restricted fork's pull request get no shared cache at all. On an agent without cache archives the two scopes never share a volume, so there you budget one cold build per cache key on each side of that line. See [Caches](/pipelines/caching#trust-scopes-a-branch-can-never-poison-main).
+8. **What executes, and what the converter never adds.** `checkout`, `run`, `build`, `scan`, `gate`, `publish`, `deploy` and `environment` all execute end to end; `verify` and the kinds with no executor (`preview`, `agent`, `approval`, `webhook`, `automation`, `ankra`, `external`) validate with a warning and are **skipped**, so a converted `approval` stage blocks nothing and a converted `webhook` notifies nobody. A `deploy` stage releases only to [host targets](/reference/cli/targets) outside Kubernetes, so a converted job that ran `kubectl` or `helm` does not become one; deploy to a cluster through the application's push to deploy instead - see [What is in place today](/guides/ankra-pipelines#what-is-in-place-today). The converter itself never writes a `gate` or a `publish` stage - no source format has one to map from - so a workflow whose `docker/build-push-action` pushed straight to your registry converts into a pipeline whose `build` stage pushes a digest to Ankra's own **CI staging repository only**, and stops there: without a `gate` stage after `scan` and a `publish` stage after `gate`, nothing ever reaches your real repository. Add both by hand (see the [worked example](/guides/ankra-pipelines#connect-a-repository-push-see-the-run)) rather than assuming the converted file publishes what the workflow did.
 
 Then validate it:
 
@@ -176,16 +296,60 @@ ankra pipeline validate .ankra/pipeline.yaml --application my-service
 
 Keep the workflow. A pipeline run and a workflow run on the same commit are independent: the workflow's checks keep their names, the pipeline's is `Ankra pipeline`, and both appear on the pull request. But know what actually decides which one a pull request's **preview** deploys from, because it is not a setting you flip: `.ankra/pipeline.yaml` outranks a workflow the moment it is committed on the default branch *and* the organisation has a CI cluster to run it on - the application reads as `ankra_pipeline`-sourced from that point on, whether or not a workflow still runs alongside it, and its previews deploy the pipeline's own digest from then on (one that has not built the head yet answers *build missing* rather than quietly falling back to the workflow's image). A merge to your default branch is more forgiving: your own CI's build observation always outranks the pipeline's, so a workflow that keeps publishing keeps being what gets deployed, and the pipeline's digest is only used once nothing higher-ranked has been observed for that commit. Retire the workflow deliberately, once you have watched the pipeline publish correctly on its own for a while.
 
-Two rules for the overlap:
+While both run, compare them on the same pull requests:
 
-- Do not make `Ankra pipeline` a required check in branch protection until it has been green for as long as you would trust any new CI system, and never while its stages include a kind that does not execute yet. Such a stage is skipped, not failed, so the check goes **green** having done none of what the stage names - read the run's skipped stages, not only its conclusion.
-- Retire the workflow deliberately. Ankra does not delete a workflow for you; when it proposes retiring a generated one, it will be a reviewable pull request that you merge.
+- **Does the Ankra pipeline fail where the old CI passes?** Usually it is one of the [three rules every step follows](/guides/ankra-ci-starter-pipelines#three-rules-every-step-follows): a tool writing into `HOME`, a step that needs the network, or a tool the old runner had preinstalled. [Troubleshooting](/guides/ankra-ci-troubleshooting) has the fixes.
+- **Is it fast enough?** Add [caches](/guides/ankra-ci-starter-pipelines#make-it-faster-with-caches) for your package manager and give heavy steps the CPU and memory they need. `ankra pipeline get <run-id>` prints, per step, how long it waited and its memory and CPU peaks against what it asked for. [Fast CI](/pipelines/fast-ci) covers skipping what a change cannot reach.
+- **Are the secrets right?** Move each secret into Ankra once and declare it in the pipeline. See [Use a secret in a step](/guides/ankra-ci-starter-pipelines#use-a-secret-in-a-step).
 
-<CardGroup cols={2}>
-  <Card title="Ankra Pipelines" icon="diagram-project" href="/guides/ankra-pipelines">
-    Prerequisites, the first green run, the security model and limits.
-  </Card>
-  <Card title="pipeline.yaml reference" icon="book" href="/guides/pipeline-reference">
-    Every key, the expression language and the diagnostics the validator reports.
-  </Card>
-</CardGroup>
+<Warning>
+**Publish an image from one system at a time.** While both run, let only one of them push images and deploy, or two builds of the same commit race for the same tag. Leave publishing in the old CI during the comparison, or leave the `publish` stage out of the Ankra pipeline until you switch.
+</Warning>
+
+Do not make `Ankra pipeline` a required check until it has been green for as long as you would trust any new CI system, and never while its stages include a kind that does not execute. Such a stage is skipped, not failed, so the check goes **green** having done none of what the stage names: read the run's skipped stages, not only its conclusion.
+
+## Switch over
+
+When the Ankra pipeline has been green on a week of pull requests, or as long as your team needs to trust it:
+
+<Steps>
+  <Step title="Approve the pipeline on the default branch">
+    A pipeline that declares secrets, caches, resources, services or other protected settings needs an administrator's approval before every run gets them. A run's check, titled **Awaiting authority approval**, lists any protected setting that is not approved. The request waits in **Build & delivery → Builds and clusters**, under **Pipeline settings waiting for approval**, until a person approves or dismisses it. When nothing is left, the card reads **Nothing waits for approval**.
+  </Step>
+  <Step title="Make Ankra pipeline the required check">
+    On GitHub that is the branch protection rule or ruleset on your default branch. Remove the old CI's checks from the required list in the same change. The next pull request shows `Ankra pipeline` as required.
+  </Step>
+  <Step title="Remove the old workflow">
+    Delete `.github/workflows/*.yml` or `.gitlab-ci.yml`, so every commit is built once. Ankra does not delete a workflow you wrote. The next push runs only the Ankra pipeline.
+  </Step>
+  <Step title="Add publishing back">
+    If you held it out, add the `build`, `scan`, `gate` and `publish` stages from [Build, scan and publish an image](/guides/ankra-ci-starter-pipelines#build-scan-and-publish-an-image). The next push to the default branch publishes the image.
+  </Step>
+</Steps>
+
+## Repeat for each repository
+
+Once the organisation is set up, each repository needs only this:
+
+- [ ] Repository connected to Ankra Pipelines
+- [ ] `.ankra/pipeline.yaml` committed, validated and approved
+- [ ] Green on several pull requests while the old CI still runs
+- [ ] `Ankra pipeline` required, old CI checks no longer required
+- [ ] Old workflow files removed
+- [ ] Publishing and deploys come from the Ankra pipeline
+
+## What changes for developers
+
+Share this with the team when a repository switches:
+
+- **The check is called `Ankra pipeline`.** It has a table of steps and a link to the run in Ankra.
+- **Logs and test results are in Ankra.** Open the run from the check, or use the CLI: `ankra pipeline logs <run-id> --step <step> --follow`.
+- **Re-run only what failed** with **Re-run failed steps** on the run page, or `ankra pipeline rerun <run-id> --failed-only`.
+- **Pipeline changes in a pull request run on that pull request.** Changing a stage or a script takes effect at once. Adding a secret, a cache, more memory or a service takes effect after it is merged and an administrator approves it.
+
+## Related
+
+- [Get started with Ankra CI](/get-started/ankra-ci): one repository, end to end.
+- [Ankra Pipelines](/guides/ankra-pipelines): prerequisites, the security model and limits.
+- [pipeline.yaml reference](/guides/pipeline-reference): every key, the expression language and the validator's diagnostics.
+- [Starter pipelines](/guides/ankra-ci-starter-pipelines) and [Troubleshooting](/guides/ankra-ci-troubleshooting).

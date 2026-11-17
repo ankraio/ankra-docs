@@ -18,7 +18,7 @@ Autoscaling is configured per node group with three settings:
 | Setting | Meaning |
 |---|---|
 | **Enabled** | Whether the autoscaler manages this group's node count |
-| **Min** | The group never shrinks below this many nodes (minimum `1`) |
+| **Min** | The group never shrinks below this many nodes: at least `1` in the portal, `0` through the CLI or API to [scale the group to zero](#scale-a-group-to-zero) |
 | **Max** | The group never grows beyond this many nodes (up to `100`, and within the cluster's node limit below) |
 
 Behind the scenes:
@@ -37,7 +37,7 @@ Enabling autoscaling requires a recent `ankra-agent` (the platform tells you the
 
 ## Enable at cluster creation
 
-In the create wizard for any of these providers, toggle **Enable autoscaling** on a node group and set **Min**/**Max**. The node count becomes the group's *initial* count and must lie within the bounds.
+On the **Configuration** step of **Add a cluster**, tick **Scale this group automatically** on a node group and set **At least** and **At most**. The node count becomes the group's *initial* count and must lie within the bounds. The box appears only for providers that keep the range at create time.
 
 Via the API, include an `autoscaling` object per node group:
 
@@ -58,19 +58,25 @@ Via the API, include an `autoscaling` object per node group:
 
 ## Enable on an existing cluster
 
-### Via the Platform UI
+### In the portal
+
+Changing autoscaling needs `clusters.write` on the cluster (Member, Operator, Admin or Owner).
 
 <Steps>
-  <Step title="Open the node groups">
-    Open **Nodes** in the cluster sidebar, then the **Node groups** tab.
+  <Step title="Open the node group">
+    Go to **Infrastructure → Clusters → &lt;your cluster&gt; → Kubernetes → Nodes**, click **Manage nodes and groups**, then **Inspect and edit** on the group.
   </Step>
-  <Step title="Toggle autoscaling on the node group">
-    On the node group card, switch **Autoscaling** on and set **Min** and **Max**. The manual node-count stepper becomes read-only ("Managed by autoscaler").
+  <Step title="Set the bounds">
+    Open the **Autoscaling** tab, tick **Enable autoscaling** and set **Minimum nodes** and **Maximum nodes**. The page says "Ankra adjusts the node count between these limits as workloads need capacity."
   </Step>
-  <Step title="Save">
-    Saving persists the bounds and installs the Cluster Autoscaler (plus metrics-server) on first enable.
+  <Step title="Confirm">
+    Click **Review change**, then **Confirm change**. The first enable on a cluster installs the Cluster Autoscaler (plus metrics-server).
+
+    **Check:** **Current settings** reads **Autoscaling** with your range, and the group's row on **Node management** shows the same range.
   </Step>
 </Steps>
+
+While autoscaling is on, the **Node count** tab is disabled: "Disable autoscaling before changing the fixed count." To turn autoscaling off, untick **Enable autoscaling** on the same tab; the group keeps its current requested count.
 
 ### Via the CLI
 
@@ -84,11 +90,19 @@ ankra cluster node-group autoscaling get <cluster_id> <group_name>
 ankra cluster node-group autoscaling set <cluster_id> <group_name> \
   --enabled --min 1 --max 5
 
+# Enable with bounds and wait for the operation that moves the group inside them
+ankra cluster node-group autoscaling set <cluster_id> <group_name> \
+  --enabled --min 1 --max 3 --wait
+
 # Disable (the group keeps its current node count)
 ankra cluster node-group autoscaling set <cluster_id> <group_name> --enabled=false
 ```
 
 The cloud provider is detected automatically from the cluster.
+
+<CliVersion since="0.71.0" command="cluster node-group autoscaling set --wait" note="Earlier releases accept --wait on this command too, but it does not follow the operation, and they print neither the outcome nor the operation." />
+
+The command prints what the new bounds do to the group's node count and, once an operation has started for it, that operation's id, which you can follow with `ankra cluster operations list <operation_id>`. With `--wait` it follows that operation until it ends, and fails with the operation's status and recorded error if it does not succeed. `--timeout` defaults to one hour for this command, because nodes leave one at a time.
 
 ### Via the API
 
@@ -100,6 +114,15 @@ GET /api/v1/clusters/{provider}/{cluster_id}/node-groups/{group_name}/autoscalin
 PUT /api/v1/clusters/{provider}/{cluster_id}/node-groups/{group_name}/autoscaling
 { "enabled": true, "min_count": 1, "max_count": 5 }
 ```
+
+### When the group is outside the new bounds
+
+The platform moves a group that is outside the bounds you set to the nearest count inside them:
+
+- **More nodes than Max.** The group scales down to **Max**. The least busy nodes go first, and each one is cordoned, waits up to 15 minutes for the pipeline steps running on it, and is then drained behind its PodDisruptionBudgets, one node at a time.
+- **Fewer nodes than Min.** The group scales up to **Min**, the way a manual scale-up adds nodes.
+
+A group already inside the bounds keeps its node count, and so does a group you turn autoscaling off for. The move runs as an operation on the cluster: when another operation is already working on the cluster it starts once that one finishes, and on a stopped cluster the group starts with the new count.
 
 ---
 
@@ -118,13 +141,24 @@ New nodes added by the autoscaler carry the group's labels and taints, plus the 
 - **Node upgrades and autoscaling do not fight**: a node the autoscaler is draining for removal is skipped by Kubernetes version upgrades.
 - **Control planes are never autoscaled** - only worker node groups.
 
-## Limitations (v1)
+## Scale a group to zero
 
-- **Min must be at least 1.** Scale-to-zero is not supported yet: the autoscaler templates new nodes from a live node of the group.
-- While a group has zero *Ready* nodes, scale-up is degraded for the same reason.
+A **Min** of `0` lets the autoscaler remove every node of a group while nothing needs it, and add one again when a pod needs the group. Set it with the CLI or the API; the portal refuses it with "Self-managed autoscaling requires at least one node."
+
+<CliVersion since="0.73.0" command="cluster node-group autoscaling set --min 0" />
+
+```bash
+ankra cluster node-group autoscaling set <cluster_id> <group_name> \
+  --enabled --min 0 --max 3
+```
+
+When you lower the floor to zero, the platform records a template of the group's nodes, so the autoscaler can simulate a new node once the group is empty. The platform refuses the zero floor when:
+
+- The cluster's agent is older than 2.1.1081, or has not reported its version yet: "Autoscaling min_count 0 (scale-to-zero) requires ankra-agent 2.1.1081 or newer (cluster runs &lt;version&gt;); upgrade the agent first". Upgrade it on **Settings → Agent**.
+- The platform cannot size the group's instance type, so it has no template to keep.
+
+## Limitations
+
+- Autoscaling is not available on Proxmox VE and HPE Morpheus clusters. The portal says Ankra cannot add or remove their workers by itself; set the node group's count instead.
 - Deleting a node group removes its autoscaling settings with it.
 - **The cluster's pod range caps the whole cluster.** A cluster created with a network identity holds at most 64 nodes, control planes included (see [Network ranges and their limits](/platform/cluster-mesh#network-ranges-and-their-limits)). A **Max** that would let the groups grow past that is refused when you set it, and a scale-up the autoscaler asks for past it is refused, so the autoscaler backs off instead of adding a node that could never become Ready.
-
-<Tip>
-Operators can globally suspend autoscaler-driven scaling without touching clusters by setting `AUTOSCALER_ENDPOINTS_ENABLED=false` on the platform - the in-cluster autoscaler keeps observing, but its scaling requests are refused until the switch is turned back on.
-</Tip>

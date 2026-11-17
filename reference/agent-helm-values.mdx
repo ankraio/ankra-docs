@@ -1,7 +1,9 @@
 ---
 title: Agent Helm Values
-description: Every configurable value of the ankra-agent Helm chart - workers, watch tuning, security contexts, metrics, and public IP reporting.
+description: Every configurable value of the ankra-agent Helm chart - workers, pipelines, watch tuning, logs, metrics, security contexts and rollout.
 ---
+
+import { CliVersion } from "/snippets/cli-version.jsx";
 
 Reference for the `ankra-agent` chart installed from `oci://registry.ankra.cloud/ankra/ankra-agent`. For installation and architecture, see [Cluster Agent](/concepts/cluster-agent).
 
@@ -13,14 +15,29 @@ helm upgrade --install ankra-agent oci://registry.ankra.cloud/ankra/ankra-agent 
   --namespace=ankra --create-namespace
 ```
 
-Copy the exact install command from the Import dialog: it pins the agent version and carries your cluster's token. Add `--set` flags for the values below to that command.
+Copy the exact install command from Ankra: it pins the agent version and carries your cluster's token, and when the cluster has pipeline settings stored, it carries those as further `--set` flags. Add `--set` flags for the values below to that command.
+
+- **A cluster you are connecting:** **Infrastructure → Clusters → Add a cluster → Connect an existing cluster**, tab **Install the agent**. Name the cluster, select **Get the install command**, then **Show the install command**.
+- **A cluster already in Ankra:** **Infrastructure → Clusters → &lt;your cluster&gt; → Settings → Upgrades and maintenance**, section **Agent install command**, **Create install command**.
+
+<Warning>
+**Create install command** makes a new agent token and replaces the previous one, so every install command created before it stops working. The command is shown once: leaving the page clears it.
+</Warning>
+
+Both need the `agents.manage` permission, because the command contains the agent's token. Without it the connect page reads **Your role cannot show the install command**.
+
+## Values across upgrades
+
+When Ankra upgrades the agent, the agent reads the values you set on its release and passes them to the new release, so a value you set with `--set` survives the upgrade. Five values are Ankra's and are not carried: `config.ankra_url`, `config.token` and the pipeline values `ci_worker_count` and `ci_storage_class` come from Ankra, and `image.tag` is dropped so the image follows the chart version. The CPU and memory values are carried separately, see [Set through Ankra](#set-through-ankra).
+
+If the release's values cannot be read, the agent refuses the upgrade rather than reset your values to the chart defaults. The refusal starts `Refused the cluster agent upgrade: the current values of the ankra-agent release could not be read`, gives the reason, and ends `upgrading without them would reset the customer's chart values to the defaults.`
 
 ## Connection
 
 | Value | Default | Description |
 |-------|---------|-------------|
 | `config.ankra_url` | `https://platform.ankra.app` | Platform endpoint the agent connects to |
-| `config.token` | `""` | Agent token from the import flow (required unless using an existing secret) |
+| `config.token` | `""` | Agent token from the install command (required unless you use an existing Secret) |
 | `config.existing_secret_name` | `""` | Read the token from an existing Kubernetes Secret instead |
 | `config.secret_key` | `""` | Key within that Secret holding the token |
 
@@ -31,17 +48,39 @@ Copy the exact install command from the Import dialog: it pins the agent version
 | `read_worker_count` | `5` | Concurrent worker slots for read jobs |
 | `write_worker_count` | `5` | Concurrent worker slots for write jobs (create, update, delete) |
 | `nats_worker_max_workers` | `15` | Maximum NATS worker threads for processing commands |
-| `resources.requests.cpu` | `200m` | CPU request |
-| `resources.requests.memory` | `256Mi` | Memory request |
-| `resources.limits.memory` | `1Gi` | Memory limit |
+| `resources.requests.cpu` | `200m` | CPU request. **Set through Ankra** (below) |
+| `resources.requests.memory` | `256Mi` | Memory request. **Set through Ankra** (below) |
+| `resources.limits.memory` | `2Gi` | Memory limit, sized for the largest pipeline-step pool on a large cluster. An agent first installed under the earlier `1Gi` default takes `2Gi` at its next upgrade. **Set through Ankra** (below) |
 | `replica_count` | `1` | Agent replicas |
 | `terminationGracePeriodSeconds` | `600` | Grace period so in-flight work can finish - don't set this low |
-| `ci_worker_count` | `0` | Concurrent worker slots for [Ankra Pipelines](/guides/ankra-pipelines) steps. Zero - the default - means the agent runs no pipeline-step scheduler and does not advertise the capability. **Set through Ankra, not here** (below) |
-| `ci_storage_class` | `""` | StorageClass for pipeline cache volumes and for a workspace claim that names none; empty is the cluster default. **Set through Ankra, not here** (below) |
+| `shutdown_drain_seconds` | `420` | How long a stopping agent lets in-flight jobs (Helm applies) finish before cancelling them. Keep it well under `terminationGracePeriodSeconds`: after the drain the agent still needs about two minutes to unwind and report a cancelled job |
+| `strategy` | `RollingUpdate`, `maxSurge: 0`, `maxUnavailable: 1` | Rollout strategy of the agent's Deployment. The old pod releases its resources before its replacement is scheduled, so an upgrade needs no spare room on a full single-node cluster, at the cost of a few seconds without an agent. Override only on clusters with guaranteed headroom |
 
-<Warning>
-`ci_worker_count` and `ci_storage_class` are the two values Ankra owns on the agent's behalf. Set them per cluster through the platform - `PUT /api/v1/org/clusters/{cluster_id}/agent/ci-settings`, or the CLI verb [Ankra Pipelines](/guides/ankra-pipelines#connect-a-repository-push-see-the-run) shows - and Ankra re-renders the agent's own release with them. A value you pass to `helm upgrade` yourself is overwritten the next time Ankra renders that release.
-</Warning>
+## Pipelines
+
+These values shape the [Ankra Pipelines](/guides/ankra-pipelines) steps the agent runs.
+
+| Value | Default | Description |
+|-------|---------|-------------|
+| `ci_worker_count` | `0` | Concurrent worker slots for pipeline steps, separate from the read and write pools. Zero means the agent runs no pipeline-step scheduler and does not advertise the capability, so the platform refuses a pipeline step for this cluster up front. At most 128. **Set through Ankra** (below) |
+| `ci_storage_class` | `""` | StorageClass for pipeline cache volumes and for a workspace claim that names none; empty is the cluster default. **Set through Ankra** (below) |
+| `ci_namespace` | `ankra-ci` | Namespace an ordinary pipeline step (checkout, run, scan, verify) runs in. A step naming any other namespace is refused |
+| `ci_build_namespace` | `ankra-ci-build` | Namespace a build step's rootless BuildKit pod runs in |
+| `ci_max_timeout_seconds` | `21600` | Ceiling on a pipeline step's `timeout_seconds`, checked by the agent before it runs anything |
+| `ci_reservation_image` | `registry.k8s.io/pause:3.10`, pinned by digest | Image of the placeholder pod that holds room for a run's later steps when run reservation is on for the cluster. Override it on a cluster that cannot pull from `registry.k8s.io` or admits images only from its own registry |
+
+### Set through Ankra
+
+`ci_worker_count`, `ci_storage_class` and the agent's CPU and memory requests and limits are values Ankra holds per cluster. Every install or upgrade command Ankra generates for the cluster carries them, and a value Ankra holds wins over the one the running Deployment carries. Set them with the CLI:
+
+<CliVersion since="0.34.0" />
+
+```bash
+ankra cluster agent resources set --memory-limit 2Gi --cluster my-cluster
+ankra cluster agent ci set --workers 50 --cluster my-cluster
+```
+
+Read them back with `ankra cluster agent resources get` and `ankra cluster agent ci get`. Both `set` commands say whether the agent took the values right away or takes them at its next upgrade. See [`ankra cluster agent resources`](/reference/cli/cluster#ankra-cluster-agent-resources) and [`ankra cluster agent ci`](/reference/cli/cluster#ankra-cluster-agent-ci).
 
 ## Kubernetes Watch
 
@@ -55,26 +94,32 @@ Streaming of live resource state to the platform. Only override when you need to
 | `k8s_watch.reconnect_delay_ms` | `1000` | Initial reconnect delay |
 | `k8s_watch.max_reconnect_delay_ms` | `30000` | Reconnect backoff ceiling |
 | `k8s_watch.max_events_per_sec` | `500` | Event rate limit |
-| `k8s_watch.strip_fields` | `true` | Strip managed fields to reduce payload size |
+| `k8s_watch.strip_fields` | `true` | Remove `metadata.managedFields` and the `kubectl` last-applied annotation from each watched object before it is sent, to keep payloads small. `false` takes effect on agent 2.1.1339 or later; older agents ignore it and keep removing them |
 | `k8s_watch.timeout_seconds` | `300` | Watch connection timeout |
+| `k8s_watch.buffer_replay_interval_sec` | `5` | How often watch batches buffered on disk after a failed publish are retried |
+| `k8s_watch.buffer_replay_backoff_max_sec` | `60` | Ceiling of the retry backoff |
+| `k8s_watch.redact_secrets` | `true` | Replace the values of Secret `data` and `stringData` with SHA-256 digests in the watch stream and in full-sync listings, before they leave the cluster. A read of one named Secret and a single-page list read keep the values. Set `false` only for debugging |
+| `k8s_watch.dynamic_discovery` | `true` | Watch every served resource type (CRDs, operator resources) in addition to the built-in list, up to `dynamic_discovery_max_watches`. `false` keeps the cluster on the built-in list |
+| `k8s_watch.dynamic_discovery_max_watches` | `200` | Most resource types discovery watches |
 
-## Public IP Reporting (Fleet World Map)
+## Hosted Logs
 
-Places imported clusters on the [fleet dashboard map](/platform/dashboard) when they run in private networks. Disabled by default; enabling makes the agent perform an outbound HTTP lookup. Leave disabled for air-gapped clusters.
+The agent can follow the logs of the cluster's running containers through the API server, up to `logs_ship.max_containers` at once, and send the lines to Ankra's hosted log store. Whether it does is decided per cluster in Ankra, and the switch is off until someone turns it on; see [Hosted Logs](/guides/hosted-logs). These values are the local limits.
 
 | Value | Default | Description |
 |-------|---------|-------------|
-| `public_ip.reporting_enabled` | `false` | Report the agent's public egress IP on check-in |
-| `public_ip.lookup_url` | `https://api.ipify.org?format=json` | Endpoint returning the caller's public IP |
-| `public_ip.refresh_seconds` | `3600` | How often the cached IP is refreshed |
-| `public_ip.lookup_timeout_seconds` | `5` | Per-lookup HTTP timeout |
+| `logs_ship.enabled` | `true` | Local permission for hosted log shipping. `true` lets the agent obey the cluster's switch in Ankra. `false` is a local opt-out that wins over the platform: the log shipper never runs, and the agent tells the platform it will not obey the switch |
+| `logs_ship.max_containers` | `100` | Most containers followed at once, one API server log stream each |
+| `logs_ship.exclude_namespaces` | `""` | Comma-separated namespaces whose logs are never shipped, such as `kube-system,monitoring` |
+| `logs_ship.max_bytes_per_second` | `262144` (256 KiB/s) | Send rate limit in raw log-line bytes per second, which is the platform's per-cluster ingest allowance: the platform discards anything past it. Lines held back wait in the kubelet's log files rather than being dropped. A value that is not positive falls back to the default |
+| `logs_ship.burst_bytes` | `8388608` (8 MiB) | Bytes the shipper may send ahead of the rate limit after a quiet spell or at start |
 
 ## Image
 
 | Value | Default | Description |
 |-------|---------|-------------|
 | `image.repository` | `registry.ankra.cloud/ankra/agent` | Agent image |
-| `image.tag` | `""` (follows chart version) | Explicit tag override - empty is the contract the platform auto-upgrade relies on; set only to pin a specific build |
+| `image.tag` | `""` (follows chart version) | Explicit tag override - empty is what Ankra's automatic upgrades rely on; set only to pin a specific build. Ankra replaces it on upgrade (see [Values across upgrades](#values-across-upgrades)) |
 | `image.pull_policy` | `Always` | Image pull policy |
 | `image.pull_secrets` | `[]` | Pull secrets |
 
@@ -90,6 +135,7 @@ The chart enforces non-root defaults matching the image's `ankra` user (UID/GID 
 | `writable_volumes.tmp_size_limit` | `1Gi` | `/tmp` size cap |
 | `writable_volumes.cache_size_limit` | `4Gi` | Cache size cap |
 | `writable_volumes.config_size_limit` | `16Mi` | Config size cap |
+| `pod_security_labels_enabled` | `true` | Keeps every namespace's Pod Security Admission labels in line with the `ankra-pod-security` ConfigMap the security baseline ships. Turn it off only while diagnosing: with it off, a cluster's Enforce mode is declared and never applied |
 
 ## Scheduling and Service
 
@@ -99,8 +145,10 @@ The chart enforces non-root defaults matching the image's `ankra` user (UID/GID 
 | `service_account.name` | `ankra-agent-sa` | Service account name |
 | `service_account.annotations` | `{}` | Service account annotations (e.g. IRSA) |
 | `service.type` / `service.port` | `ClusterIP` / `8080` | Agent HTTP service |
+| `service.node_port` | `""` | Fixed node port, used only when `service.type` is `NodePort` |
+| `service.annotations` | `{}` | Annotations on the agent's Service |
 | `pod_annotations` | `{}` | Extra pod annotations |
-| `log_level` | `INFO` | `DEBUG`, `INFO`, `WARNING`, `ERROR`, or `CRITICAL` |
+| `log_level` | `INFO` | `DEBUG`, `INFO`, `WARNING` or `ERROR`, in any case. `WARN` is read as `WARNING`, `CRITICAL` and `FATAL` as `ERROR`; anything else falls back to `INFO` |
 
 ## Metrics
 
@@ -110,9 +158,28 @@ The chart enforces non-root defaults matching the image's `ankra` user (UID/GID 
 | `metrics.serviceMonitor.interval` | `30s` | Scrape interval |
 | `metrics.serviceMonitor.scrapeTimeout` | `10s` | Scrape timeout |
 | `metrics.serviceMonitor.labels` | `{}` | Extra ServiceMonitor labels |
-| `metrics_collect.enabled` | `true` | Ship built-in cluster metrics (nodes, namespaces, workloads) to the Ankra platform; `false` opts this cluster out of platform metrics |
+| `metrics.prometheusRule.enabled` | `false` | Install a Prometheus Operator PrometheusRule that alerts when the agent is OOM-killed or restarts in a loop (`AnkraAgentOOMKilled`, `AnkraAgentRestartLoop`). Needs kube-state-metrics in the cluster |
+| `metrics.prometheusRule.labels` | `{}` | Extra PrometheusRule labels |
+| `metrics_collect.enabled` | `true` | Send [Ankra built-in metrics](/platform/cluster-metrics#ankra-built-in-metrics) (nodes, namespaces, workloads) to the Ankra platform. `false` turns collection off on agent 2.1.1339 or later; older agents ignore it and keep sending metrics |
 | `metrics_collect.interval_seconds` | `30` | Collection interval |
 | `metrics_collect.max_workloads` | `200` | Cap on per-workload series (top by CPU; restarting workloads are always kept) |
+
+## Public IP Reporting
+
+Makes the agent report its public egress IP to Ankra on check-in. Disabled by default; enabling it makes the agent perform an outbound HTTP lookup to `public_ip.lookup_url`. Leave it disabled for air-gapped clusters.
+
+| Value | Default | Description |
+|-------|---------|-------------|
+| `public_ip.reporting_enabled` | `false` | Report the agent's public egress IP on check-in |
+| `public_ip.lookup_url` | `https://api.ipify.org?format=json` | Endpoint returning the caller's public IP, as JSON `{"ip": "..."}` or plain text |
+| `public_ip.refresh_seconds` | `3600` | How often the cached IP is refreshed |
+| `public_ip.lookup_timeout_seconds` | `5` | Per-lookup HTTP timeout |
+
+## Diagnostics
+
+| Value | Default | Description |
+|-------|---------|-------------|
+| `pprof.enabled` | `false` | Serve Go's `/debug/pprof/` profiling handlers on the health port, 8080. Turn it on only while taking a heap profile or goroutine dump from the agent |
 
 ## Advanced Environment Tuning
 

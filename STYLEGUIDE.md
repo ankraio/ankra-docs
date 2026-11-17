@@ -131,6 +131,22 @@ import { CliVersion } from "/snippets/cli-version.jsx";
 
 Every `/api/v1/...` and `/org/...` path stated by hand (curl examples, endpoint tables, `GET /org/...` lines, inline mentions) is checked against the cluster's route census by `pnpm run check:api-paths`; a path or method the router does not serve fails CI. Write the path the reader will actually send: the bearer-token form is `/api/v1/...` and the session form is `/org/...`, and they are different routes on the cluster, so a curl example for a token user shows the `/api/v1/...` form. Placeholders are `{snake_case}` in prose and tables and `<kebab-case>` only inside copy-pasteable curl; both count as one dynamic segment, except `{provider}`, which stands for a provider name, literal or parameter (`/api/v1/clusters/{provider}/{cluster_id}/node-groups` documents `/api/v1/clusters/ovh/...`, `/api/v1/clusters/hetzner/...` and the rest at once), and a trailing `...` means "and whatever follows". An endpoint documented before it ships goes in `scripts/api-paths-allowlist.json` and comes out when it lands.
 
+## Menu paths and commands are checked
+
+Two checks in Docs CI hold every hand-written page to the product as it is today (`reference/cli/`, `changelog.mdx` and `integrations/ankra-cli-changelog.mdx` are records and are not checked):
+
+- **Menu paths** (`pnpm run check:portal-labels`). Bold each label exactly as the portal shows it, same case and spelling, and join them with `→`: `**Settings** → **General** → **Danger zone**`, or one bold span, `**Settings → General**`. `->` and a spaced `>` are read too. Every label must be one the portal shows, and every `/next/...` address (bare in prose, or under `https://platform.ankra.app`) must be a route it serves. Write a placeholder as `<cluster-id>` in an address, where it fills only a dynamic part of a route, and as `[your cluster]` in a path, where it is not checked. Only bold joined by arrows is a path: a label in plain text is not checked, so do not unbold a stale label to get past the check.
+- **Commands** (`pnpm run check:cli-commands`). Every `ankra ...` in a shell fence or in inline code must be a command in `reference/cli/`, with flags from its table or the global flags. A placeholder where a subcommand goes (`ankra cluster <provider> stop`) passes when some subcommand fits; `discover|import` must be valid for each.
+
+When one fails, the message names the page, the line and what is missing. Fix the page to what the product has. The portal's source is private, so the label check reads `scripts/portal-inventory.json`, and the message says which portal commit and date it was built from: a label or page that shipped after that commit fails until the inventory is regenerated. Once the inventory is more than 14 days old, every run prints a warning that says so, and a run with `--strict` fails. Regenerate it with read access to `ankraio/ankra-frontend` and commit it in the same pull request:
+
+```bash
+git -C ../ankra-frontend fetch origin
+python3 scripts/gen_portal_inventory.py --frontend-repo ../ankra-frontend
+```
+
+A command documented before its release passes once `reference/cli/` is regenerated for that release; until then, and for a label of another product (GitHub, the Azure portal, Cloudflare) or a name that is data, add the page and label or command to `scripts/portal-labels-allowlist.json` or `scripts/cli-commands-allowlist.json` with a reason. Paths and commands that were already stale when the checks landed are listed in `scripts/portal-labels-baseline.json` and `scripts/cli-commands-baseline.json`; when you fix a page, remove its entries (the check warns about entries that no longer fail, and `--update` rewrites the baseline from what fails now).
+
 ## Code blocks
 
 - Shell fences are `bash`. Use `bash CLI` / `bash cURL` titles inside `<CodeGroup>`.

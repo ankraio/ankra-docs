@@ -152,6 +152,11 @@ answer=$(jq -r '.answer' result.json)
 error=$(jq -r '.error // empty' result.json)
 failed_tools=$(jq -r '[.tool_calls[] | select(.success == false) | .tool_name] | join(", ")' result.json)
 
+if [ "$status" -eq 9 ]; then
+  # The agent paused and the platform resumes the conversation by itself: no answer yet, and nothing failed.
+  echo "The check is still running (state $(jq -r '.state' result.json), conversation $(jq -r '.conversation_id' result.json))" >&2
+  exit "$status"
+fi
 if [ -n "$error" ]; then
   echo "The turn failed: $error" >&2
   exit 1
@@ -167,6 +172,7 @@ fi
 |---|---|
 | `answer` | The AI's answer as text. |
 | `error` | Present when the turn failed, was cancelled or expired. The command then exits non-zero after printing the document. |
+| `state` | How the command left the conversation: `completed`, `failed`, `awaiting_user` (the turn needs a confirmation or an answer from you; the command exits `0`) or `waiting` (the agent paused on a condition the platform resumes by itself; the command exits `9`). |
 | `conversation_id`, `continuable` | Pass the ID to `--conversation` to ask a follow-up, when `continuable` is `true`. |
 | `session_id` | The chat session the platform opened. |
 | `mode` | The safety mode the turn ran in: `ask`, `agent` or `plan`. |
@@ -175,6 +181,10 @@ fi
 | `pending_actions` | Changes the AI proposed that have **not** run: `action_id`, `tool_name`, `description`, `parameters`, `risk_level`, `reversible`, `created_at`, `expires_in_seconds`. |
 
 A turn that starts and then fails still prints the document, with `error` set, and exits non-zero. When the platform refuses to start the turn, nothing is printed on standard output and the command exits with that error's [exit code](/reference/cli) (`6` for a rejected token, `3` for an unknown cluster). `-o` works for a one-shot question only, not for interactive chat.
+
+<CliVersion since="0.71.0" command="chat --wait" />
+
+A turn the agent pauses, waiting on a condition the platform resumes by itself, is not a finished answer: the command prints the document with `state` set to `waiting` and exits `9`, a code for work that is waiting and has not failed. Pass `--wait` to follow the conversation through its pauses instead; it exits `5` if a pause outlasts `--wait-timeout` (4 hours by default), with the conversation still running, and `ankra chat show` reads it later. A turn that needs a confirmation or an answer from you ends with `state` `awaiting_user` and exits `0`. Older releases print no `state` and exit `0` at a pause, so a script on them reads a paused conversation as a finished one.
 
 ---
 

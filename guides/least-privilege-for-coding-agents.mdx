@@ -1,0 +1,183 @@
+---
+title: Give a Coding Agent Least Privilege
+description: Connect Claude Code, Cursor or Codex to Ankra with only the access it needs, keep a person in front of the changes that matter, and see every call it made.
+---
+
+import { CliVersion } from "/snippets/cli-version.jsx";
+
+A coding agent reaches Ankra in two ways: through the [Ankra MCP server](/platform/mcp-server), where it calls tools with a token, and through the `ankra` CLI, when it runs commands in your terminal. Each way carries its own credential, so each needs its own limit. At the end of this guide your agent reads with a token that cannot change anything, makes changes only as a service account with a narrow role, and every call it makes is in the organisation's audit log.
+
+## Before you start
+
+- **Two-step sign-in on your account.** The portal makes a personal token only for an account that has it. Without it, creating one answers: "Add a second step to sign in first. Ankra makes a token only for an account with two-step sign-in." See [Account security](/platform/account-security).
+- **The `members.manage` permission** for step 2. Service tokens are listed and created only by people who hold it; anyone else sees **Your role cannot see service tokens**. See [Roles and access](/guides/roles-and-access).
+- **The `audit.read` permission** for step 5. In the portal the audit log is open to owners and admins. See [Audit log](/guides/audit-log).
+- **The Ankra CLI** at the version below, signed in with `ankra login`. See [Ankra CLI](/integrations/ankra-cli).
+
+## Choose what the agent may do
+
+A token's access is chosen once, when it is made. The portal asks **What can it do?** and offers three answers:
+
+| Answer | Scope | What it reaches |
+|---|---|---|
+| **Editor tools: read only** | `mcp:read` | The MCP server's read tools. "Lists, describes and queries. It cannot change anything." |
+| **Editor tools: read and change** | `mcp:read` and `mcp:write` | The read tools and the tools that deploy, scale and apply. |
+| **Full API access** | none | The REST API and the `ankra` CLI. The MCP server refuses it. |
+
+Three rules decide what an agent can do with an MCP token:
+
+- **The token's owner sets the ceiling.** A personal token acts as you, and a service token acts with its service account's role. A tool that role may not run is left out of the agent's tool list and refused if the agent calls it anyway.
+- **An MCP token reaches the MCP server and nothing else.** The REST API and the CLI refuse it, and it is pinned to one project.
+- **Ankra asks for no confirmation over MCP.** A tool that raises a confirmation card in the Ankra chat runs at once over MCP when the token has `mcp:write`: the scope is the approval. Ankra marks every tool that changes state with `readOnlyHint: false` and `destructiveHint: true`, and every read tool with `readOnlyHint: true`, so a client that asks you before a change can tell them apart.
+
+## Set it up
+
+<Steps>
+  <Step title="Connect the agent with a read-only token">
+    Start every agent on read only. It can then list clusters, read logs and events and explain what it sees, and it cannot change anything.
+
+    <CliVersion since="0.73.0" />
+
+    <Tabs>
+      <Tab title="CLI">
+        ```bash
+        ankra mcp connect --client claude-code
+        ```
+
+        Use `--client cursor` or `--client codex` for those clients. The command makes a personal token that only the MCP server accepts, read only unless you pass `--write`, pinned to the project you are acting in (`--project` chooses another) and expiring in 90 days. It never prints the token: it stores it in `~/.ankra/mcp/<client>.json`, readable only by you. Claude Code gets a headers helper that fetches the token when it needs it. Cursor and Codex read `ANKRA_MCP_TOKEN`, so add this to your shell profile:
+
+        ```bash
+        export ANKRA_MCP_TOKEN="$(ankra mcp token --client cursor)"
+        ```
+
+        Running `ankra mcp connect` again replaces the token and revokes the old one.
+      </Tab>
+      <Tab title="Portal">
+        1. Open **Your account → API access** (`/next/account/api`) and select **Create token**. The **Create a token** dialog opens.
+        2. Give it a **Name** that says where it is used, such as `Cursor on my laptop`.
+        3. Under **What can it do?**, choose **Editor tools: read only**.
+        4. Choose how long it lives under **Expires after**: **7 days**, **30 days**, **90 days** or **1 year**.
+        5. Select **Create token**. The dialog now reads **Copy your token now**. Copy it, select **I have stored it somewhere safe**, then **Done**.
+
+        Put the token in your client's configuration as [Ankra MCP server](/platform/mcp-server) describes for that client. Keep it out of files you commit.
+      </Tab>
+    </Tabs>
+
+    **Check:** the agent's list of Ankra tools holds read tools only. In Claude Code, run `/mcp` and open **ankra**. Ask the agent to list your clusters: it answers with the clusters of the token's project.
+
+    <Note>
+    Claude can also connect with OAuth instead of a token. Ankra's consent page then lists the access the client asked for: "Read access: list and inspect clusters, workloads, logs, and events", and when it asks for writes, "Write access: run mutating operations such as scaling, restarting, and applying changes". If the client asks for more than you want to give, select **Deny** and connect it with a read-only token instead.
+    </Note>
+  </Step>
+
+  <Step title="Give changes to a service account with a narrow role">
+    When the agent should change things, do not give it a read-and-change token of your own: that token acts with your whole role. Make a **service token** instead. It acts with the role of its service account, which you choose, it stays in one organisation, and the audit log names the service account for everything it does.
+
+    <Tabs>
+      <Tab title="Portal">
+        1. Open **Identity & access → API and automation** (`/next/organisation/automation`) and select **Create token**. The **Create a service token** dialog opens.
+        2. Under **Service account**, choose **A new one** and enter a **Service account name** such as `coding-agent`. It shows in the audit log for everything the token does.
+        3. Under **Role**, choose the lowest role that covers the job. You can give a built-in role up to your own, and only one whose every permission you hold yourself.
+        4. Under **What can it do?**, choose **Editor tools: read and change**.
+        5. When your organisation uses projects, choose the **Project**. The token then reaches only that project's clusters, applications and other resources.
+        6. Choose **Expires after** (**30 days**, **90 days** or **1 year**) and select **Create token**. Copy the token from **Copy the token now**, select **I have stored it somewhere safe**, then **Done**.
+      </Tab>
+      <Tab title="CLI">
+        ```bash
+        ankra tokens create coding-agent --service --role operator \
+          --scopes mcp:read,mcp:write --project <project> \
+          --expires 2027-01-31T00:00:00Z
+        ```
+
+        `--role` takes `owner`, `admin`, `operator`, `member`, `viewer` or a custom role's slug, and may not carry permissions you lack. `--project` pins the token to one project. The token is shown once.
+      </Tab>
+    </Tabs>
+
+    Configure the client with this token as [Ankra MCP server](/platform/mcp-server) describes. `ankra mcp connect` makes personal tokens only, so it does not take a service token.
+
+    **Check:** the token is listed under **Service tokens** with its service account and role, or in `ankra tokens list --service`.
+
+    <Warning>
+    A service token keeps working when the person who made it leaves the organisation. Revoke it from its row's menu (**Revoke…**) or with `ankra tokens revoke <token_id> --service` when the agent no longer needs it: it stops at once.
+    </Warning>
+  </Step>
+
+  <Step title="Keep the CLI from acting as you">
+    An agent that runs `ankra` in your terminal does not use its MCP token. The CLI takes its credential in this order: the `--token` flag, then the login `ankra login` saved in `~/.ankra.yaml`, then `ANKRA_API_TOKEN`. While a login is saved, the CLI ignores `ANKRA_API_TOKEN` and says so on stderr:
+
+    ```text
+    Note: ANKRA_API_TOKEN env var is set but differs from saved login token. Using login token.
+    ```
+
+    So an agent with access to your home directory can act with your login. To give its CLI commands a narrow role, make a second service token for the account with **Full API access** (or `ankra tokens create coding-agent --service --role operator` with no `--scopes`), and run the agent where no login is saved, such as a container or a CI job, with that token in `ANKRA_API_TOKEN`.
+
+    **Check:** inside the agent's environment, `ankra login status -o json` reports `"token_source": "env"`, and the `organisation` it names is yours. A command the role does not allow exits with code 7. See [Script the Ankra CLI](/guides/script-the-cli) for every exit code.
+  </Step>
+
+  <Step title="Keep a person in front of the changes that matter">
+    Some decisions need a person:
+
+    - **The Kubernetes access policy** is changed by a person, never by a token. `ankra org access-policy set` and the MCP tool `propose_cluster_access_policy` only record a proposal and answer an apply link, which an owner or admin opens, signed in, to apply it. See [Organisation access policy](/guides/cluster-access#organisation-access-policy).
+    - **Ankra AI actions that wait for a person** are approved or rejected by a person signed in to the portal, or on the approval card in Slack or Teams. Resuming the organisation's paused AI actions also needs a person signed in. No token can do either, whatever its scope: `mcp:write` and **Full API access** are both refused.
+    - **A pipeline definition's protected sections** are approved only by a person: `ankra pipeline definitions approve` refuses a service account's token.
+
+    For everything else, the token's scope is the approval. To review each change before it reaches a cluster, keep the agent on read only and let it propose changes in Git: it edits the cluster and Stack YAML in your [GitOps](/concepts/gitops) repository on a branch and opens a pull request, a person reviews and merges it, and Ankra syncs the merged change.
+
+    **Check:** `ankra org access-policy get` shows the policy in force and any proposal waiting for an owner or admin.
+  </Step>
+
+  <Step title="See what the agent did">
+    Every call to a tool the token can see, refused calls included, is written to the organisation's audit log with the action `mcp_tool_call`. A call to a tool outside the token's list answers `Unknown tool` and leaves no row. The row records the tool's name, whether it changes state, whether it succeeded, the token's id and name, whether it is a service account, the cluster, the reason for a refusal, the error of a failed call, how long it took, the names of the arguments it passed (not their values), and the MCP client and agent that sent it. A CLI request names the CLI's version and the command, never its arguments or flags; under a coding agent the CLI also names the agent and a digest of its session.
+
+    <Tabs>
+      <Tab title="Portal">
+        Open **Identity & access → Audit log** (`/next/organisation/audit`). Type the service account's name or a tool's name in **Search events**, and choose a period under **When**. Open an event to see its **Recorded details**.
+      </Tab>
+      <Tab title="CLI">
+        ```bash
+        ankra org audit-logs list --since 24h --action mcp_tool_call
+        ankra org audit-logs list --since 24h --actor-type service_account --outcome failed
+        ```
+
+        Add `-o json` to read the details of each row, or `ankra org audit-logs export --file agent.csv` with the same filters to keep a copy.
+      </Tab>
+    </Tabs>
+
+    **Check:** each tool call the agent made in the last day has its own row, named after the service account or after you.
+  </Step>
+</Steps>
+
+## Verify
+
+Ask the agent, on its read-only connection, to scale a deployment. It has no tool for it: write tools are not in its list, and a call to one answers `Unknown tool`. Then run the same request through the service token. A change its role allows runs and appears in the audit log under the service account's name. A change its role does not allow is refused, and the refused call is in the audit log as a failed row:
+
+```bash
+ankra org audit-logs list --since 1h --action mcp_tool_call --outcome failed
+```
+
+## What can go wrong
+
+### The agent's tool list holds only read tools
+
+The token has `mcp:read` only. Make a token with **Editor tools: read and change**, or run `ankra mcp connect --client <client> --write`.
+
+### "Token has no MCP scope; create a token with mcp:read or mcp:write"
+
+The client was given a **Full API access** token. The MCP server accepts only tokens made with editor tools access.
+
+### "Service account tokens cannot act outside their organisation"
+
+The request named another organisation (`--org`, `ANKRA_ORG` or the `X-Ankra-Organisation-Id` header). A service account belongs to one organisation. A pinned token answers "Pinned tokens cannot act outside their organisation" in the same case.
+
+### The agent's CLI commands act as you
+
+A login is saved in `~/.ankra.yaml`, and it wins over `ANKRA_API_TOKEN`. Run the agent where no login is saved, as step 3 describes.
+
+## Related
+
+- [Ankra MCP server](/platform/mcp-server) - connect each client, and the troubleshooting for 401 and 403 answers
+- [MCP tools](/platform/mcp-tools) - every tool and whether it reads or changes
+- [Service tokens](/guides/service-tokens) - rotate, revoke and delete organisation tokens
+- [Roles and access](/guides/roles-and-access) - the permissions of each role
+- [Audit log](/guides/audit-log) - filters, export and retention
+- [CLI, MCP, API or Terraform](/concepts/cli-mcp-api-terraform) - which way to automate Ankra

@@ -12,7 +12,7 @@ import { CliVersion } from "/snippets/cli-version.jsx";
 
 A managed service answers only inside its own cluster, at fixed addresses in its namespace. It keeps the credentials it generated in a Secret in that namespace, and a workload can read a Secret only in its own namespace.
 
-Ankra connects your application for you when it runs on the same cluster as the service: once the service is ready, Ankra copies the connection into the application's namespace, and the application's containers read it as environment variables such as `DATABASE_URL`. The copy happens inside the cluster, and Ankra never sees the values. An application on another cluster is not connected for you: give it the values yourself, as in [Connect from another cluster](#connect-from-another-cluster).
+Ankra connects your application for you when it runs on the same cluster as the service: once the service is ready, Ankra copies the connection into the application's namespace, and the application's containers read it as environment variables such as `DATABASE_URL`. The copy happens inside the cluster, and the values are not sent to Ankra. An application on another cluster is not connected for you: give it the values yourself, as in [Connect from another cluster](#connect-from-another-cluster).
 
 ---
 
@@ -86,6 +86,7 @@ Each service delivers the variables its kind of client conventionally reads:
 | SeaweedFS (S3) | `S3_ENDPOINT`, `AWS_ENDPOINT_URL_S3`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_REGION`, `S3_FORCE_PATH_STYLE` | Both endpoint variables are `http://seaweedfs-all-in-one.<service>.svc.cluster.local:8333`. The key pair is the admin pair. `AWS_REGION` is `us-east-1` and `S3_FORCE_PATH_STYLE` is `true`. |
 | VictoriaLogs | `VICTORIA_LOGS_URL`, `VICTORIA_LOGS_USERNAME`, `VICTORIA_LOGS_PASSWORD` | |
 | VictoriaMetrics | `VICTORIA_METRICS_URL`, `VICTORIA_METRICS_USERNAME`, `VICTORIA_METRICS_PASSWORD` | |
+| Supabase | `SUPABASE_URL`, `SUPABASE_ANON_KEY`, `SUPABASE_PUBLISHABLE_KEY` | `SUPABASE_URL` is the gateway's in-cluster address. Both key variables carry the same publishable key. |
 | GPU chat | `OPENAI_BASE_URL`, `OPENAI_API_KEY`, `OPENAI_MODEL` | See [OpenAI-compatible inference](#openai-compatible-inference). |
 
 Every service also delivers each variable under its own prefix: the service name in capitals, with hyphens as underscores. A PostgreSQL service named `orders-db` delivers `ORDERS_DB_DATABASE_URL`, `ORDERS_DB_PGHOST` and so on.
@@ -107,7 +108,7 @@ A service set up again under the name of a retired one is a new service, not the
 
 ## Find the connection details
 
-Open the service in **My services**. Its **Connect** section shows:
+Open **Infrastructure → Managed services**, choose the service in **My services**, and open **Connections** in the service's menu. Its **Connect** section shows:
 
 - the namespace, which is the service name;
 - each address, with a **Copy** button;
@@ -128,6 +129,7 @@ The same details are on the service in the API, as `connection` on [Get a manage
 | OpenSearch | `https://opensearch.<service>.svc.cluster.local:9200` | `opensearch-credentials` | `url`, `username`, `password`, `ca.crt` |
 | SeaweedFS (S3) | `http://seaweedfs-all-in-one.<service>.svc.cluster.local:8333` | `seaweedfs-s3-secret` | `admin_access_key_id`, `admin_secret_access_key`, `read_access_key_id`, `read_secret_access_key` |
 | VictoriaLogs | `http://victoria-logs.<service>.svc.cluster.local:9428` | `victoria-logs-credentials` | `url`, `username`, `password` |
+| Supabase | `http://supabase.<service>.svc.cluster.local:8000` | `supabase-api-keys` | `url`, `anon-key` |
 | GPU chat | `http://litellm.<service>.svc.cluster.local:4000/v1` | `gpu-chat-credentials` | `url`, `api-key`, `model` |
 | VictoriaMetrics | `http://victoria-metrics.<service>.svc.cluster.local:8428` | `victoria-metrics-credentials` | `url`, `username`, `password` |
 
@@ -164,7 +166,7 @@ ankra cluster get secrets opensearch-credentials -n search --reveal -o json | jq
 
 An application on another cluster than the service is not connected for you, and the service's addresses do not resolve there. Reaching the service from another cluster needs a network path between the clusters that you provide, and the address that path exposes. A service whose client port admits only the namespaces named under [Addresses and Secrets](#addresses-and-secrets) also needs a NetworkPolicy of your own in its namespace that admits the traffic of that path.
 
-Give the application the values as [environment secrets](/reference/cli/application#ankra-application-env-secrets), from the service page's **Use it in &lt;application&gt;** button, which opens the application's **Settings › Secrets**, or from the CLI. Piping the value keeps it out of your shell history:
+Give the application the values as [environment secrets](/reference/cli/application#ankra-application-env-secrets), from the service page's **Use it in &lt;application&gt;** button, which opens the application's **Secrets**, or from the CLI. Piping the value keeps it out of your shell history:
 
 ```bash
 ankra cluster get secrets postgresql-app -n orders-db --reveal -o json \
@@ -187,6 +189,7 @@ A value you copy this way is yours: [deleting the service](/guides/delete-a-mana
 - **OpenSearch.** Use HTTPS with basic auth as `admin`, the only user. The certificate is signed by a private CA generated in the cluster: have your client trust `OPENSEARCH_CA_CERT`, which holds that CA's certificate.
 - **SeaweedFS.** Use the S3 API over plain HTTP inside the cluster, with path-style addressing. The admin key pair, the one delivered, can read, write, list and administer buckets. The read-only key pair can only read, and is in the service's Secret only.
 - **VictoriaLogs.** Send logs over HTTP with basic auth, as JSON lines, Loki push, OpenTelemetry or Elasticsearch bulk, and query them with LogsQL. No log collector is installed, so ship logs with your own agent.
+- **Supabase.** Use supabase-js, or any Supabase client, with `SUPABASE_URL` and the publishable key. The gateway serves the data API at `/rest/v1`, sign-in at `/auth/v1` and Storage at `/storage/v1`. Sign-in is by email and password, and accounts are confirmed at sign-up. The secret key and the JWT secret stay in the service's own namespace and are never delivered.
 - **VictoriaMetrics.** Push metrics with basic auth using Prometheus `remote_write`, OpenTelemetry, InfluxDB or another supported protocol, and query with PromQL or MetricsQL on the Prometheus HTTP API. It scrapes nothing itself, so push from vmagent, a Prometheus agent or an OpenTelemetry Collector.
 
 ## OpenAI-compatible inference
@@ -220,7 +223,7 @@ response = client.chat.completions.create(
 print(response.choices[0].message.content)
 ```
 
-With `embeddings` set to 1, the same endpoint also answers `POST /v1/embeddings` with the bge-m3 model. The endpoint is not exposed outside the cluster. `api-key` is a client key the service creates for its consumers; it cannot mint, change or revoke keys. With `chat_ui` set to 1 the service also runs the Open WebUI chat UI, reachable from inside the service's namespace only. See [Managed Service Settings](/reference/managed-services#gpu-chat) for the models each `model_tier` runs.
+With `embeddings` set to 1, the same endpoint also answers `POST /v1/embeddings` with the bge-m3 model. The endpoint is not exposed outside the cluster. `api-key` is a client key the service creates for its consumers; it cannot mint, change or revoke keys. With `chat_ui` set to 1 the service also runs the Open WebUI chat UI, reachable from inside the service's namespace only, and with `chat_ui_access` set to 1 also from the Ankra Cloud tunnel connector's namespace. See [Managed Service Settings](/reference/managed-services#gpu-chat) for the models each `model_tier` runs.
 
 ## Check that the service answers
 
@@ -230,10 +233,10 @@ A finished deployment is not yet a ready service. The service's **Service health
 ankra cluster get pods -n <service>
 ```
 
-A PostgreSQL service can report its deployment finished 30 to 100 seconds before the database accepts connections. Check the database itself until its `Ready` condition is `True`:
+A PostgreSQL service can report its deployment finished 30 to 100 seconds before the database accepts connections. Check the database itself: the command prints its state once, so run it again until its `Ready` condition is `True`:
 
 ```bash
-ankra cluster describe Cluster postgresql -n <service> --group postgresql.cnpg.io
+ankra cluster describe Cluster postgresql -n <service> --group postgresql.cnpg.io --api-version v1
 ```
 
 About every five minutes, a service's namespace also holds a short-lived pod: labelled `app.kubernetes.io/name=ankra-postgres-connection-test` for PostgreSQL, and `app.kubernetes.io/name=ankra-service-canary` for every other service. That is Ankra's readiness check, which connects the way an application would; it is deleted when it finishes.
