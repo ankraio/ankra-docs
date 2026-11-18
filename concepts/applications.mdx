@@ -54,11 +54,34 @@ flowchart LR
 <Note>
 **When setup stops before the pull request.** In two cases Ankra opens no setup pull request and deploys nothing. The setup ends as failed, and the application's error message says why:
 
-- **Nothing in the repository keeps running.** When the analysis finds only a program that runs once and exits, or nothing that runs at all, the message starts "Ankra did not set this repository up as an always-on application" and ends "Add a program that keeps running and listens on a port, then run setup again."
+- **Nothing in the repository keeps running.** When the analysis finds only a program that runs once and exits, or nothing that runs at all, the message starts "Ankra did not set this repository up as an always-on application" and gives the reason. That is a decision, not a fault, and the application's page says so: see [A repository that is not a service](#a-repository-that-is-not-a-service).
 - **Nothing can be built.** When there is no Dockerfile in the repository, on an open setup branch or among the files Ankra generated, the failed `setup_stopped` task says what Ankra found and what it could not write. Add a Dockerfile and run setup again.
 
 Both messages carry the same sentence: "No setup pull request was opened and nothing was deployed." A repository that commits its own manifests under `.ankra/manifests/`, or whose own CI already publishes an image, still gets its setup pull request, with no build for anything that has no Dockerfile. So does a monorepo in which at least one component can be built.
 </Note>
+
+### A repository that is not a service
+
+Ankra deploys an application as a service: a program that keeps running and answers on a port. Some repositories hold something else - a tools image that Kubernetes Jobs run, an image another workload uses, a batch job, documentation. For one of those Ankra sets nothing up on purpose, and the application says that instead of showing a setup that failed.
+
+On the application's **Environments** view, the card headed **Not a service** says what builds the repository: Ankra Pipelines, a workflow in your repository (your own, or the one Ankra added), or nothing that publishes an image to Ankra. When Ankra could not tell what builds it, the card says so. It shows the newest published version, the reason Ankra gave, and a way to the pipeline runs. Where nothing publishes an image to Ankra, there are no runs to show, and the card shows a version only when Ankra has seen one published. The card offers no **Retry setup** and no **Fix with Ankra**, because nothing failed. The **Overview** says the application is not deployed as a service and that there is nothing to take live, and the applications list shows it as **Not deployed as a service**.
+
+The application read carries the verdict in `workload`: `job` for a program that runs and exits, `none` for a repository with nothing to run, `service` for one Ankra set up, and `null` when no verdict is recorded. `analysis_status` stays `failed` for `job` and `none`, so a client that waits for the setup to end still sees it end.
+
+If the repository does hold a program that keeps running, choose **This is a service** on that card. Ankra runs the setup again and treats the repository as a service. Over the API, the statement goes with the retry:
+
+```bash
+curl -X POST https://platform.ankra.app/api/v1/org/applications/<application-id>/retry \
+  -H "Authorization: Bearer $ANKRA_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"workload_preference": "service"}'
+```
+
+`"auto"` withdraws the statement, and Ankra decides again on the next setup run. A retry that states nothing keeps a statement you made earlier. Stating either needs the `applications.write` and `applications.deploy` permissions.
+
+An application whose setup stopped this way before the verdict was recorded shows as a failed setup until its setup runs once more: choose **Retry setup**, or run `ankra application retry <application-id>`.
+
+Every setup run reads the repository again, so its answer can change. If a run reads the repository as a service, Ankra opens a setup pull request as it does for any service. Close that pull request when the repository is not one. Nothing is deployed until a setup pull request merges, and Ankra merges one by itself only where you have [opted in to merging](#opting-in-to-merging).
 
 ### When your repository already has CI
 
@@ -239,6 +262,8 @@ The Applications list groups applications under **Needs you**, **Ankra is on it*
 Removing takes the application off one cluster and leaves the application, and everywhere else it runs, in place. Ankra uninstalls its workloads, services and configuration in that namespace, and deletes the installation record once the uninstall has been handed to the cluster; the place reads as removing in the deployments read until the cluster has taken it down. A deployment that holds data (a CloudNativePG database, a persistent volume claim or a StatefulSet's volume claims in the application's manifests) is removed only when a complete restore point of its stack, taken in the last 24 hours, covers that data. An add-on among what it would remove, such as a wizard stack's database add-on, is never covered, because Ankra cannot see its volumes from its definition, and neither is a manifest Ankra cannot read. Otherwise nothing is removed, and the removal fails with a reason naming the data and the two ways forward: take a restore point and remove again within a day, or remove those members from the stack yourself on the cluster's Stacks page. The application itself, with its settings, secrets, published images and release history, its other deployments, the add-ons on that cluster other workloads may use, and the cluster itself all stay, so you can deploy there again from **Environments → Deploy a version**. To stop a deployment for a while without losing anything, park it instead; to take the application out of Ankra everywhere, delete it.
 
 Its home is **Settings** → **Park or remove** (`?view=settings&section=runtime`). The environment in view lists where the application runs, each place with **Park** (or **Wake**) and **Uninstall**; below it are the places that run the application outside every environment, a stack the deploy wizard made or an add-on carrying its chart in a stack the application did not create, which cannot be parked. Each of those has **Uninstall**, except an add-on Ankra can name, which has **Remove** and is taken out of its stack. **Where it runs**, the last section of **Environments**, offers **Uninstall** on an environment's place too, behind the same review, and links everything else to Park or remove. Removing an installation or a wizard stack needs permission to deploy the application (`applications.deploy`); an add-on's removal needs `stacks.delete` on that cluster instead, as below.
+
+A deploy to a parked environment keeps it parked. If the deploy sets `replicas`, that number is how many copies run when the environment is woken.
 
 The review names what goes and what stays before anything happens and, opened from Park or remove on an environment's place that is not parked, offers **Park instead**. Removing an installation takes one deliberate press, except when the deployment serves a production environment, is the only place the application runs, or Ankra could not read where else it runs or which environment it serves: then the cluster's name has to be typed. The platform answers as soon as it has accepted the teardown, not when it is done: the installation reads `removing` until the teardown job has handed the uninstall to the cluster and deletes it, or `failed` with its reason, which is also what `ankra application installations` shows. When the commit to the cluster's Git repository has to wait, for example because the repository has changes Ankra has not taken in yet, the removal still finishes and the installation is deleted; the job's answer says the commit to Git is deferred and what it waits for. Park or remove lists it under **Being removed**, reading every few seconds for the first two minutes and every half minute after that, and says what became of a removal asked for there once it settles: removed, naming any stacks left in place because other workloads may use them, or that it did not finish, with the platform's reason when it gave one, in which case the deployment is listed again and can be removed again once the cause is fixed. A deployment that holds data with no fresh restore point fails this way, with the reason above. A second removal of the same deployment is refused as **Already being removed** (`409`), a deployment no longer on that cluster as **Nothing to remove**, and while a removal runs a deploy to the same cluster and namespace is refused with `409`.
 

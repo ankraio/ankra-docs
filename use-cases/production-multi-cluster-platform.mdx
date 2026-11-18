@@ -305,6 +305,8 @@ Two small stacks that everything else depends on. They go into `clusters/infrast
     ```
 
     On another provider, change `provisioner`, `driver` and `parameters` to that CSI driver's values.
+
+    The snapshot class needs the volume snapshot CRDs on the cluster. Where they are missing, the stack fails with `no matches for kind "VolumeSnapshotClass"`: leave that manifest out. Ankra's backups work without it.
   </Step>
   <Step title="Pre-created Secrets, sealed">
     The passwords Grafana, OpenSearch, the log shippers and Harbor read are created in one stack that the consumers list as a parent, so a Secret always exists before the chart that mounts it. Write them in plaintext, then seal them before committing.
@@ -335,28 +337,43 @@ Two small stacks that everything else depends on. They go into `clusters/infrast
                 name: grafana-namespace
             encrypted_paths:
               - admin-password
+          - name: opensearch-namespace
+            from_file: stacks/infra-secrets/manifests/opensearch-namespace.yaml
           - name: opensearch-admin
             from_file: stacks/infra-secrets/manifests/opensearch-admin.yaml
+            parents:
+              - kind: manifest
+                name: opensearch-namespace
             encrypted_paths:
               - password
           - name: opensearch-log-shipper-production
             from_file: stacks/infra-secrets/manifests/opensearch-log-shipper-production.yaml
+            parents:
+              - kind: manifest
+                name: opensearch-namespace
             encrypted_paths:
               - password
           - name: opensearch-log-shipper-development
             from_file: stacks/infra-secrets/manifests/opensearch-log-shipper-development.yaml
+            parents:
+              - kind: manifest
+                name: opensearch-namespace
             encrypted_paths:
               - password
     ```
+
+    The three OpenSearch Secrets live in the `opensearch` namespace, so this stack creates it. A manifest name is unique across the whole cluster file, which is why the `logs` stack in Step 5 does not declare the namespace again.
 
     Seal every Secret in file mode before the commit; the CLI rewrites the file in place and verifies each listed value is `ENC[...]`:
 
     ```bash
     ankra cluster encrypt manifest grafana-admin --all-data -f clusters/infrastructure-<short-id>/infrastructure.yaml
     ankra cluster encrypt manifest opensearch-admin --all-data -f clusters/infrastructure-<short-id>/infrastructure.yaml
+    ankra cluster encrypt manifest opensearch-log-shipper-production --all-data -f clusters/infrastructure-<short-id>/infrastructure.yaml
+    ankra cluster encrypt manifest opensearch-log-shipper-development --all-data -f clusters/infrastructure-<short-id>/infrastructure.yaml
     ```
 
-    `--all-data` seals every key under `data` and `stringData` of a Secret. For a value inside Helm values, `ankra cluster encrypt addon <name> --key <key> -f <cluster.yaml>` does the same. [SOPS Encryption](/guides/sops) covers rotation and glob keys.
+    `--all-data` seals every key under `data` and `stringData` of a Secret. For a value inside Helm values, `ankra cluster encrypt addon --name <name> --key <key> -f <cluster.yaml>` does the same. [SOPS Encryption](/guides/sops) covers rotation and glob keys.
   </Step>
 </Steps>
 
@@ -469,10 +486,10 @@ One Prometheus holds every cluster's series. The hub scrapes itself; the spokes 
 
     Three lines do the multi-cluster work. `enableRemoteWriteReceiver` opens `/api/v1/write`. The default `scrapeClass` stamps `cluster=infrastructure` on the hub's own scrapes so they sit next to the spokes' series, which carry their own `cluster` external label. `group_by` includes `cluster` so one noisy spoke does not fold into another's alert. Every rule in this Prometheus now evaluates the spokes' series too, so their alerts reach the channel without any Alertmanager on the spokes.
 
-    Seal the webhook before committing: `ankra cluster encrypt addon kube-prometheus-stack --key webhook_url -f <cluster.yaml>`. Alertmanager is the one place a Slack receiver is `slack_configs` with `api_url` instead; everything else is identical.
+    Seal the webhook before committing: `ankra cluster encrypt addon --name kube-prometheus-stack --key webhook_url -f <cluster.yaml>`. Alertmanager is the one place a Slack receiver is `slack_configs` with `api_url` instead; everything else is identical.
   </Step>
   <Step title="Grafana with Prometheus and Tempo data sources">
-    Grafana is a separate add-on so it can be upgraded, restarted and gated independently of Prometheus. The sign-in block refers to the gate from Step 6; leave `auth.proxy` out until that stack exists, and the local admin from `grafana-admin` is the only account.
+    Grafana is a separate add-on so it can be upgraded, restarted and gated independently of Prometheus. The sign-in block refers to the gate from Step 6; leave `auth.proxy` out until that stack exists, and the local admin from `grafana-admin` is the only account. Until then Grafana's hostname answers `404 page not found`, because its Ingress names the gate's middleware, which is not there yet.
 
     ```yaml
     # stacks/monitoring/add-ons/grafana/values.yaml
@@ -1003,13 +1020,8 @@ The OpenSearch operator runs a three-node cluster with Dashboards. Fluent Bit on
       - name: logs
         description: OpenSearch operator, cluster, Dashboards, retention and Fluent Bit.
         manifests:
-          - name: opensearch-namespace
-            from_file: stacks/logs/manifests/opensearch-namespace.yaml
           - name: opensearch-securityconfig
             from_file: stacks/logs/manifests/opensearch-securityconfig.yaml
-            parents:
-              - kind: manifest
-                name: opensearch-namespace
             encrypted_paths:
               - internal_users.yml
           - name: opensearch-cluster
@@ -1067,7 +1079,7 @@ The OpenSearch operator runs a three-node cluster with Dashboards. Fluent Bit on
         index_pattern: "infrastructure-*"
     ```
 
-    The spokes get the same block with their own index pattern once Step 8 has them shipping. [Log Sources](/integrations/log-sources) has the field mappings OpenSearch needs.
+    Ankra reads a log source through that cluster's own agent, so a spoke cannot use this address inside the infrastructure cluster: the hub exposes only `/_bulk` to the spokes. Once Step 8 has them shipping, search the spokes' indices (`production-*`, `development-*`) in OpenSearch Dashboards on the hub. [Log Sources](/integrations/log-sources) has the field mappings OpenSearch needs.
   </Step>
 </Steps>
 
@@ -1899,6 +1911,8 @@ The spokes carry no Grafana, no Alertmanager, no rules and no queryable Promethe
   <Step title="Application databases on the spokes">
     Every stateful application stack on a spoke follows one shape: a CloudNativePG cluster with three instances spread across workers, the retain storage class, and an owner role per database. This is what makes Step 9 work, because the backup data plane captures CloudNativePG clusters by name.
 
+    So far only the hub has the two things this manifest needs. Before it, add to each spoke's cluster file the `storage` stack from Step 3 (the `block-storage-retain` StorageClass) and the `cloudnative-pg` operator add-on from Step 6's `sso-gateway` stack, in a stack of its own with the same chart version, and let both come up before the database's stack. Without them the spoke has no `postgresql.cnpg.io` CRD and its claims have no class.
+
     ```yaml
     # stacks/shop/manifests/shop-postgres.yaml
     apiVersion: postgresql.cnpg.io/v1
@@ -1955,15 +1969,17 @@ A vault is where restore points land; a stack's backup policy is what puts them 
       --retention daily=7,weekly=4,monthly=6 \
       --include-pvc shop/uploads \
       --backup-now --wait
-
-    ankra cluster stacks protect identity \
-      --vault production-backups \
-      --schedule "10 1 * * *" \
-      --retention daily=7,weekly=4,monthly=6 \
-      --backup-now --wait
     ```
 
-    The first command reports `Backup stack: installing` until Velero is actually on the cluster; a capture started before then waits rather than failing. The policy lands in the cluster file as a `backup` block, so from here on it is reviewed and versioned like everything else:
+    `shop/uploads` stands for a volume of your own, written `namespace/claim`. The command accepts a name that does not exist, so check it against `ankra cluster stacks data list shop`.
+
+    On a cluster's first protected stack the command returns with `Backup stack: installing` while Ankra installs the backup components, and it can say that the first restore point could not be started. When `ankra cluster backups status --cluster production` reads `Backup components: ready`, take it:
+
+    ```bash
+    ankra cluster stacks restore-points create shop --wait --cluster production
+    ```
+
+    The policy lands in the cluster file as a `backup` block, so from here on it is reviewed and versioned like everything else:
 
     ```yaml
     stacks:
@@ -1982,7 +1998,7 @@ A vault is where restore points land; a stack's backup policy is what puts them 
               - shop/uploads
     ```
 
-    Repeat on the development cluster against `development-backups`. The hub's own stateful stacks - `sso-gateway`, `registry`, `uptime` - are protected the same way into a third vault, or into `production-backups` if you prefer fewer buckets.
+    Repeat on the development cluster against `development-backups`. The hub's own stateful stacks - `monitoring`, `logs`, `sso-gateway`, `registry`, `uptime` - are protected the same way into a third vault, or into `production-backups` if you prefer fewer buckets.
   </Step>
   <Step title="Read the posture">
     ```bash
@@ -2013,13 +2029,19 @@ Most of this is already in place from Step 1. What remains is turning it on wher
 
 <Steps>
   <Step title="Security baseline on every cluster">
-    Clusters Ankra provisions arrive with the `ankra-security-baseline` stack: Trivy Operator for image vulnerabilities, configuration audits and the CIS benchmark, and Pod Security Standards enforced by the API server from namespace labels the agent manages. It starts in **Audit** mode. Once the Security Center shows no workloads failing the `baseline` standard, enforce it:
+    Clusters Ankra provisions arrive with the `ankra-security-baseline` stack: Trivy Operator for image vulnerabilities, configuration audits and the CIS benchmark, and Pod Security Standards enforced by the API server from namespace labels the agent manages. It starts in **Audit** mode. Read what fails the `baseline` standard first, and enforce only once nothing you need is listed:
 
     ```bash
-    ankra security policy-mode enforce --cluster production
     ankra security violations --cluster production
+    ankra security policy-mode enforce --cluster production
     ankra security overview
     ```
+
+    `policy-mode enforce` asks you to confirm; in a script, add `--yes`.
+
+    <Warning>
+    The node agents this page installs in Step 8, the node exporter in `metrics-agent` and Fluent Bit in `log-shipping`, mount host paths, which `baseline` forbids, so `ankra security violations` lists both stacks from the start. With enforce on, a pod that fails the standard is refused the next time it is created: Fluent Bit's is refused with `violates PodSecurity "baseline:latest": hostPath volumes`. Keep a cluster in audit mode while it runs them.
+    </Warning>
 
     Kyverno is not part of the baseline; it is the opt-in `ankra-policy-engine` profile for image-signature verification and policies of your own. [Cluster Security](/guides/cluster-security#the-security-baseline) describes what runs where.
   </Step>
@@ -2048,8 +2070,10 @@ Most of this is already in place from Step 1. What remains is turning it on wher
     Run `ankra cluster sops-config` once to confirm the organisation has its AGE key, then make a rule of it: no `stringData` in a commit, no webhook URL in values. The pre-push check is the simplest one there is:
 
     ```bash
-    grep -rn "stringData:" clusters/ --include=*.yaml | grep -v ENC
+    grep -rl "stringData:" clusters/ --include='*.yaml' | xargs -r grep -L 'ENC\['
     ```
+
+    It lists every Secret file that holds no sealed value, and prints nothing when all of them are sealed.
   </Step>
 </Steps>
 
@@ -2095,8 +2119,8 @@ Run through this once at the end, and again after any change to the hub.
 
     Exactly `https://staff-login.example.com/`, trailing slash included. Then in a browser, from `https://metrics.example.com/`: the Microsoft 365 sign-in, and Grafana with your address in the top right. Start a sign-in from a tool, never from `staff-login` itself.
   </Step>
-  <Step title="Logs are searchable from Ankra">
-    Open the production cluster's **Logs** and search `cluster:production`. Rows appear with `kubernetes.namespace_name` and `app.*` fields. In OpenSearch Dashboards the same query runs against `production-*`.
+  <Step title="Logs are searchable on the hub">
+    In OpenSearch Dashboards on the infrastructure cluster, search `cluster:production` against `production-*`. Rows appear with `kubernetes.namespace_name` and `app.*` fields.
   </Step>
   <Step title="Backups are on and recent">
     ```bash
