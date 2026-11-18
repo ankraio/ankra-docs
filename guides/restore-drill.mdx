@@ -117,6 +117,8 @@ The Stack holds a namespace, a 1 GiB volume and a small pod that mounts it.
     Click **Configure protection**. Choose your **Backup vault**, keep `daily` as the **Schedule**, and enter `drill/data` under **Persistent volumes to include**. Volumes not listed there are not backed up. Type `drill` into **Type drill to confirm** and click **Save policy**.
 
     The page reads **Backup policy saved**, and **Backup policy** names your vault and `drill/data`.
+
+    On the first Stack you protect on a cluster, Ankra installs its backup components before anything is captured. That takes a few minutes. Go on when `ankra cluster backups status --cluster my-cluster` reads `Backup components: ready`.
   </Step>
 </Steps>
 
@@ -136,8 +138,7 @@ The Stack holds a namespace, a 1 GiB volume and a small pod that mounts it.
 From the CLI, the same restore point:
 
 ```bash
-ankra cluster select my-cluster
-ankra cluster stacks restore-points list drill
+ankra cluster stacks restore-points list drill --cluster my-cluster
 ```
 
 ## 4. Break the data
@@ -162,6 +163,12 @@ A restore in place removes the Stack's current volumes before it writes the rest
     Click the **Complete** restore point, then **Restore in place**. Type `drill` into **Type drill to confirm** and click **Replace the data**.
 
     The page reads "Restoring drill. The stack's apps stop while their data is replaced, then start again." The progress reads **Running**, then **Finished**.
+
+    The restore can be refused with `This stack's data has changed since the restore point was taken`, giving as the reason that the Stack's databases could not be read. The drill Stack has no database, and nothing is wrong with the restore point. Restore it from the CLI instead, with the restore point's id from the list above. It asks you to type `drill`:
+
+    ```bash
+    ankra cluster stacks restore-points restore drill <restore-point-id> --force --cluster my-cluster
+    ```
   </Step>
   <Step title="Check the data is back">
     The pod was replaced, so look up its new name, then read the file:
@@ -184,6 +191,8 @@ The second half of the drill is the disaster case: the data comes back on anothe
     On the *drill backups* page, click **Clone with data**. Choose `drill-target` as the **Target cluster**, choose **Take a new restore point now** as the **Data source**, type `drill` to confirm and click **Clone with data**. Do not choose **Use the newest complete restore point** here: the newest one is the safety copy the restore took, which holds the line `broken`.
 
     The progress shows **Draft created on drill-target** ("Not deployed yet"), then **Copying the data** until it reads **Finished**, then **Deploy the draft**: "Ready: open the draft and deploy it". The source Stack keeps running and is not changed.
+
+    Copying the data restores the Stack's whole namespace, so the copy's pod already runs on `drill-target` at this point. Deploying the draft makes the Stack own it.
   </Step>
   <Step title="Deploy the copy">
     Open **Infrastructure → Clusters** and the cluster `drill-target`, then **Stacks** under **Technical details**, and open `drill`. Click **Review changes**, then **Create and deploy stack**.
@@ -198,28 +207,33 @@ The second half of the drill is the disaster case: the data comes back on anothe
   </Step>
 </Steps>
 
-From the CLI, the clone is `ankra cluster stacks clone drill --to drill-target --with-data`; see [Clone Stacks](/guides/clone-stack).
+From the CLI, the clone is `ankra cluster stacks clone drill --to drill-target --with-data --cluster my-cluster`; see [Clone Stacks](/guides/clone-stack).
 
 ## Verify
 
 You have now seen the same line come back twice: in place on `my-cluster`, and on `drill-target`. To keep the evidence, list the restore points and the runs that moved the data:
 
 ```bash
-ankra cluster select my-cluster
-ankra cluster stacks restore-points list drill
+ankra cluster stacks restore-points list drill --cluster my-cluster
 ankra runs list --cluster my-cluster
 ```
 
 ## Clean up
 
 1. On *drill backups*, click **Stop future backups**, type `drill` and click **Stop backups**. Restore points already taken stay in the vault until you delete them.
-2. Delete the drill Stack on both clusters: open it in the stack editor and choose **Delete stack** from **More**, or from the CLI:
+2. Delete the restore points the drill made, each by its id:
 
    ```bash
-   ankra cluster select my-cluster
-   ankra cluster stacks delete drill
-   ankra cluster select drill-target
-   ankra cluster stacks delete drill
+   ankra cluster stacks restore-points list drill --cluster my-cluster
+   ankra cluster stacks restore-points delete drill <restore-point-id> --cluster my-cluster
+   ```
+
+   The vault keeps a small volume repository for the `drill` namespace after that, which Ankra cannot remove yet. `ankra backup vaults contents <vault>` lists it.
+3. Delete the drill Stack on both clusters: open it in the stack editor and choose **Delete stack** from **More**, or from the CLI:
+
+   ```bash
+   ankra cluster stacks delete drill --cluster my-cluster
+   ankra cluster stacks delete drill --cluster drill-target
    ```
 
 ## What can go wrong
