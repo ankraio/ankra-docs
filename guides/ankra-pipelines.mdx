@@ -754,6 +754,23 @@ Set the mode with `--placement required|preferred`, and remove the placement wit
 
 The placement is set by whoever may manage the cluster's agent, outside any pipeline definition, so it needs no [authority approval](#logic-is-open-authority-is-closed). A stage's `runs_on` applies on top of it: its node selector is merged with a `required` placement's, and a stage asking for a different value of a key the placement sets is refused before it runs. To create such a group, `ankra cluster node-group add <cluster> --name pipelines --instance-type <type> --taints dedicated=ci:NoSchedule` taints it from its first node. An agent older than the placement ignores it, so upgrade it (`ankra cluster agent upgrade`) before relying on it.
 
+### Workspace storage
+
+Every run takes a new workspace volume. Which StorageClass it comes from is decided for each CI cluster, in this order:
+
+1. **The class you named** with `ankra cluster agent ci set --storage-class <class>`. It is used as named.
+2. **The cluster's default StorageClass**, when its provisioner creates volumes.
+3. **The disk of the node the run is placed on**, when the cluster has neither. Each run's workspace is then a directory on that node, so pipelines run on a cluster with no storage driver and no StorageClass.
+
+The third is node-local storage. The cluster's agent sets it up the first time a step needs it: a small volume provisioner in namespace `ankra-ci-node-local` and a StorageClass of the same name. You install and configure nothing. What to know:
+
+- **The class is for pipelines only.** An admission policy refuses a PersistentVolumeClaim that names `ankra-ci-node-local` outside the pipeline namespaces, so nothing else can fill a node's disk through it. The policy needs Kubernetes 1.30 or later; on an older cluster the agent installs nothing and the run fails with `node_local_storage_not_ready`.
+- **A workspace lives on one node**, under `/var/lib/ankra-ci-node-local`, and every step of the run is placed on that node. The directory is removed when the run's volume is deleted.
+- **Ankra keeps 15% of the node's disk free.** A step whose workspace would leave less waits for room. A workspace larger than the node's disk can ever give fails with `node_local_volume_refused`.
+- **Caches still need a StorageClass.** On a cluster with none, a step's caches run without a volume and the step reports `cache_volume_fallback`.
+
+An agent older than node-local storage cannot set it up, and the run fails for want of a volume. Upgrade the agent (`ankra cluster agent upgrade`); the run's page says so under `volume_provisioning_refused`. To keep workspaces off the nodes, or caches between runs, install a storage driver and name its class. See [Set up storage on a cluster you connect](/guides/storage-on-your-own-cluster), and [Node-local storage is not ready](/guides/ankra-ci-troubleshooting#node-local-storage-is-not-ready) when the setup fails.
+
 ### Ankra platform builders
 
 Ankra platform builders are the Ankra-operated build lane a `build` step falls back to when the pipeline cluster cannot build. The fallback covers two causes:
@@ -876,6 +893,9 @@ A step that failed for a reason Ankra recognises, or that has waited more than t
 | `image_pull_auth`, `image_pull_failed` | As above, for a step that gave up on its image | As above |
 | `deadline_exceeded` | The step ran longer than its `timeout` | Raise the stage's `timeout`, or make the step faster |
 | `deadline_exceeded_waiting` | The step's whole time budget went on waiting for its pod to start | Fix what held it (see the waiting codes), then run again |
+| `volume_provisioning_refused` | The cluster refused the step's workspace or cache volume and gives the same answer on every retry, or nothing on the cluster creates that volume | Fix what the detail names, or name a StorageClass that creates volumes with `ankra cluster agent ci set --storage-class <class>`. When the run's page says to upgrade the agent, do that: see [Workspace storage](#workspace-storage) |
+| `node_local_storage_not_ready` | The cluster keeps each run's workspace on the disk of its node, and the agent could not set that up | The `next_step` field names the cause and the way out. See [Node-local storage is not ready](/guides/ankra-ci-troubleshooting#node-local-storage-is-not-ready) |
+| `node_local_volume_refused` | The node refused the step's workspace, for a reason that does not change on retry | Ask for a smaller workspace, give the pipeline steps nodes with larger disks, or fix what the detail names |
 | `no_ci_cluster` | The organisation has no CI cluster | `ankra org ci-settings set --cluster <cluster>`, then run again |
 | `definition_needs_approval` | Nobody has approved the pipeline definition, so the run did not execute its protected sections | Approve it (step 5), then run again |
 
