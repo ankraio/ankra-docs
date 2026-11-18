@@ -43,13 +43,14 @@ You end up with:
 
 <CliVersion since="0.78.0" command="alerts ingest-credentials create" />
 
-From the CLI, one command creates the same credential and prints its id, the webhook URL and the token, this once:
+From the CLI, one command creates the same credential. It prints the credential's id and the webhook URL, and writes the token to a new file that only you can read, so the token never reaches your terminal:
 
 ```bash
-ankra alerts ingest-credentials create --name production-alertmanager --cluster my-cluster
+ankra alerts ingest-credentials create --name production-alertmanager --cluster my-cluster \
+  --token-file ./ingest-token
 ```
 
-Add `--token-file ./ingest-token` to write the token to a new file that only you can read, and keep it out of the output.
+Leave `--token-file` out to have the token printed instead, this once.
 
 <Warning>
 The token cannot be shown again or changed in place. If you lose it, add a new credential, point Alertmanager at it, and delete the old one.
@@ -76,6 +77,31 @@ receivers:
 `credentials_file` reads the token from a mounted Secret, so it never sits in the configuration. `credentials: <your-token>` works too, if the file is itself kept secret. `send_resolved: true` lets Ankra close the firing when Alertmanager says the alert resolved.
 
 With kube-prometheus-stack, the same `route` and `receivers` go under `alertmanager.config` in the add-on's values, and the Secret is mounted with `alertmanager.alertmanagerSpec.secrets`, which mounts it under `/etc/alertmanager/secrets/<secret-name>/`. To keep your existing receivers, add `ankra` as a second receiver and send alerts to both with a `continue: true` route.
+
+The Secret that path reads is named `ankra-alert-ingest`, lives in the namespace Alertmanager runs in (`monitoring` here) and holds the token under the key `token`:
+
+```yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: ankra-alert-ingest
+  namespace: monitoring
+stringData:
+  token: <your-token>
+```
+
+Add it to a Stack as a manifest and seal the `token` key before Ankra stores it, as [SOPS](/guides/sops) describes, then list `ankra-alert-ingest` under `alertmanager.alertmanagerSpec.secrets`.
+
+To try the path with one alert before you send everything, keep your default receiver and add a child route for kube-prometheus-stack's `Watchdog` alert. It always fires, so it reaches Ankra within a minute of the deploy:
+
+```yaml
+route:
+  receiver: <your-default-receiver>
+  routes:
+    - receiver: ankra
+      matchers:
+        - alertname="Watchdog"
+```
 
 A sender that cannot set an `Authorization` header can send the token in an `X-Ankra-Alert-Token` header instead.
 
@@ -109,7 +135,7 @@ The answer counts what Ankra took from the delivery: `received`, `firing_new`, `
 
 Each alert takes its severity from the `severity` label and is a warning when the label is missing. In **Notifications**, `critical`, `error` and `high` show as critical, `warning` and `medium` as a warning, and any other value, `page` for example, as info. An alert with no `alertname` label is filed as `external-alert`.
 
-To close the test firing, send the same body again with both `status` values set to `resolved` and an `endsAt` time. To stop an alert reaching anyone in Ankra, switch it off or delete it on **Alert rules**; its conditions stay in Alertmanager, so in Ankra you change only its name, description and destinations.
+To close the test firing, send the same body again with both `status` values set to `resolved` and `endsAt` set to the current time, such as `"endsAt": "2026-11-16T10:05:00Z"`. The answer then counts one under `resolved`. To stop an alert reaching anyone in Ankra, switch it off or delete it on **Alert rules**; its conditions stay in Alertmanager, so in Ankra you change only its name, description and destinations.
 
 ## 4. Decide who is told
 
@@ -122,11 +148,10 @@ A silence stops matching alerts at the source, in the cluster's own Alertmanager
 <CliVersion since="0.73.0" />
 
 ```bash
-ankra cluster select my-cluster
 ankra cluster alertmanager silences create --matcher alertname=KubeVersionMismatch \
-  --duration 2w --comment "pending upgrade"
-ankra cluster alertmanager silences list
-ankra cluster alertmanager silences expire <silence-id> --yes
+  --duration 2w --comment "pending upgrade" --cluster my-cluster
+ankra cluster alertmanager silences list --cluster my-cluster
+ankra cluster alertmanager silences expire <silence-id> --yes --cluster my-cluster
 ```
 
 Each `--matcher` is `name=value` for an exact match or `name=~regex`, and at least one must be exact so a silence cannot mute everything. `--duration` runs from `5m` to `30d` and is `2h` when you leave it out; `--comment` is required. For a cluster that runs several Alertmanagers or a non-standard install, add `--namespace`, `--service` and `--port`. The MCP tools are `list_alertmanager_silences`, `create_alertmanager_silence` and `expire_alertmanager_silence`, see [MCP tools](/platform/mcp-tools).
