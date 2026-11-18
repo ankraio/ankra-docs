@@ -33,12 +33,12 @@ ROLES = ["owner", "admin", "operator", "member", "viewer"]
 # Presentation grouping only: every permission the registry holds is printed,
 # and a domain missing from this map lands in "Other" rather than vanishing.
 AREAS = [
-    ("Organisation, people and audit", ["organisation", "members", "billing", "tokens", "audit"]),
+    ("Organisation, people and audit", ["organisation", "members", "billing", "tokens", "audit", "projects"]),
     ("Clusters and Kubernetes", ["clusters", "agents", "kubernetes", "kube_access"]),
-    ("Stacks, configuration and secrets", ["stacks", "variables", "profiles", "helm", "git", "sops", "credentials"]),
+    ("Stacks, configuration and secrets", ["stacks", "variables", "profiles", "helm", "git", "sops", "credentials", "secrets"]),
     ("Applications and delivery", ["applications", "pipelines", "promotions", "environments", "executions", "runs", "automations"]),
     ("Alerts, security and backups", ["alerts", "security", "backups"]),
-    ("AI", ["ai", "ai_actions"]),
+    ("AI", ["ai", "ai_actions", "workspaces"]),
 ]
 
 DRIVER = """package main
