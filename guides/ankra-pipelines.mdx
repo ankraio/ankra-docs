@@ -712,10 +712,18 @@ A queued run says which limit it is behind: on the run page under its status, on
 | `waiting_on_ci_workers` | The CI cluster's agent runs no pipeline steps, is offline, or is missing | The message names the fix, usually `ankra cluster agent ci set --workers N` |
 | `waiting_on_ci_slots` | Every CI slot on the cluster is taken | Raise `ci_worker_count`, and check the node group can grow to match |
 | `waiting_for_room_on_cluster` | With the run reservation on, the cluster is at the number of runs it admits while their reservations are placed | It is admitted as earlier reservations are placed |
-| `waiting_on_run_node` | The node the run's workspace lives on has no room for its next step | It starts when the run's other steps on that node finish |
+| `waiting_on_run_node` | The node the run's workspace lives on has no room for its next step. The step's own row says what fills the node | It starts when the run's other steps on that node finish, or when other work there leaves room. See [A step that waits for the node of its run](#a-step-that-waits-for-the-node-of-its-run) |
 | `waiting_on_capacity` | The run's steps are queued behind other work on the cluster | They start as slots free up |
 
-Once a run's first step has started it shows no `Waiting:` line. A run that is waiting for a node with room for its reservation is already admitted, so it carries `reservation_wait` instead, and the run page shows **Waiting for a node with room for this run** with the room it needs and what the autoscaler is doing. If no node has room within 10 minutes, the first step goes back to the queue (`returned_to_queue`). The step carries the diagnosis `run_reservation_pending` (see [Diagnosis codes](#diagnosis-codes)).
+Once a run's first step has started, the one wait it still shows this way is `waiting_on_run_node`. A run that is waiting for a node with room for its reservation is already admitted, so it carries `reservation_wait` instead, and the run page shows **Waiting for a node with room for this run** with the room it needs and what the autoscaler is doing. If no node has room within 10 minutes, the first step goes back to the queue (`returned_to_queue`). The step carries the diagnosis `run_reservation_pending` (see [Diagnosis codes](#diagnosis-codes)).
+
+#### A step that waits for the node of its run
+
+All steps of one run share one workspace volume, so a later step can only run on the node that holds it. When that node has no room, Ankra keeps the step off the cluster instead of leaving a pod pending there, and the step's row on the run page says what it needs, which node it has to run on and what ends the wait:
+
+- **The run's own steps fill the node.** The step starts when one of them finishes. Lower the stage's `resources` to fit more steps on one node.
+- **Other runs' steps fill the node, and none of this run's steps is running.** The step starts when they leave room. The row names the time, 15 minutes after the step became ready, when Ankra sends it to the node anyway.
+- **The cluster's own workloads fill the node.** No step finishing would make room, so Ankra does not hold the step at all. It is sent at once, and if the node really has no room for it the step fails about a minute later as one that can never be scheduled, naming what it asks for and what the node has left. Lower the stage's `resources`, or move some of those workloads off that node.
 
 #### Seeing and raising capacity
 
@@ -876,7 +884,7 @@ A step that failed for a reason Ankra recognises, or that has waited more than t
 | `scale_up_failed` | The autoscaler asked for a node and it was not added, for a reason that is not a known quota | Check the CI cluster's node groups, or add a pool member |
 | `node_group_at_max` | Every node group that could run the step is at its maximum size | Raise the node group's autoscaling maximum, or add a pool member |
 | `no_node_group_fits` | No node group's node type has enough CPU or memory for the step | Lower the stage's `resources`, or add a node group with a larger node type |
-| `insufficient_capacity` | No node has room for the step and nothing is adding one | Enable autoscaling on the CI node group, add nodes, or add a pool member |
+| `insufficient_capacity` | No node has room for the step and nothing is adding one | Add nodes, turn on autoscaling for the CI node group if it is off, or add a pool member |
 | `run_node_full` | The step must run on the node that holds the run's workspace, and that node is full | It starts when the run's other steps finish |
 | `image_pull_auth` | The registry refused the step's image to the cluster's credentials | Check the image name, then add the registry's credential to the organisation, or use a public image |
 | `image_pull_failed` | The cluster could not pull the image for another reason | Check that the image and tag exist and that the registry is reachable from the cluster |
@@ -893,7 +901,7 @@ A step that failed for a reason Ankra recognises, or that has waited more than t
 | `build_runtime_confined` | The cluster's node runtime stops the rootless image builder | Keep `--build-fallback platform_builders`, or build on a cluster whose runtime allows the builder |
 | `image_pull_auth`, `image_pull_failed` | As above, for a step that gave up on its image | As above |
 | `deadline_exceeded` | The step ran longer than its `timeout` | Raise the stage's `timeout`, or make the step faster |
-| `deadline_exceeded_waiting` | The step's whole time budget went on waiting for its pod to start | Fix what held it (see the waiting codes), then run again |
+| `deadline_exceeded_waiting` | The step's whole time budget went on waiting for its pod to start | Fix what held it (see the waiting codes), then run again. A step that found no node with room says only that: its record does not say whether the cluster tried to add one |
 | `volume_provisioning_refused` | The cluster refused the step's workspace or cache volume and gives the same answer on every retry, or nothing on the cluster creates that volume | Fix what the detail names, or name a StorageClass that creates volumes with `ankra cluster agent ci set --storage-class <class>`. When the run's page says to upgrade the agent, do that: see [Workspace storage](#workspace-storage) |
 | `node_local_storage_not_ready` | The cluster keeps each run's workspace on the disk of its node, and the agent could not set that up | The `detail` field names the cause, and `next_step` the way out. See [Node-local storage is not ready](/guides/ankra-ci-troubleshooting#node-local-storage-is-not-ready) |
 | `node_local_volume_refused` | The node refused the step's workspace, for a reason that does not change on retry | Ask for a smaller workspace, give the pipeline steps nodes with larger disks, or fix what the detail names |
