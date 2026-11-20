@@ -29,7 +29,13 @@ disconnects the application. Every confirmation asks first; `--yes` skips the
 question for scripts. Retiring a service deletes its data, so delete also
 needs `--acknowledge-data-loss`. 'ankra services disconnect' takes one
 application off a service that keeps running for the others, and deletes
-nothing.
+nothing. 'ankra services connect' adds one more application to a service
+that already runs.
+
+A PostgreSQL service can be created from the backups of another one: 'ankra
+services setup &lt;name&gt; `--from` &lt;service&gt;' starts the new service with the
+other's data, as of `--at` or as of the newest point its backups reach, and
+leaves the other unchanged.
 
 An application namespace on the service's own cluster receives the connection
 once the service is running: a &lt;service&gt;-connection Secret in its namespace,
@@ -54,9 +60,54 @@ ankra services packages list
 ankra services setup orders-db --package postgresql --cluster prod --consumer 0b7c4d19-...
 ankra services list
 ankra services get orders-db
+ankra services connect orders-db --consumer 0b7c4d19-...
 ankra services disconnect orders-db --application storefront
 ankra services delete orders-db --acknowledge-data-loss
 ```
+
+## ankra services connect
+
+Connect an application environment to a managed service that already runs, so
+the application uses that service instead of getting one of its own.
+
+`--consumer` is the binding of the application's namespace, from 'ankra services
+consumers bind'. The namespace must be on the service's own cluster and in its
+data boundary.
+
+The service is not redeployed and nothing restarts. The application joins the
+service's consumers and receives the connection as environment variables
+(DATABASE_URL, ...) the way every consumer does: without a redeploy while none
+of its running pods reads the connection, otherwise at its next deploy.
+'ankra services get &lt;service&gt;' shows its pickup.
+
+Connecting is refused while the service is still being installed, while it is
+being retired, and when the service changed after this command read it: run
+the command again.
+
+A service created from another service's backups ('ankra services setup
+`--from`') starts with no applications. This is how it gets them.
+
+A name that runs on more than one cluster needs `--cluster`.
+
+```bash
+ankra services connect <service> [flags]
+```
+
+**Examples**
+
+```bash
+ankra services consumers bind --application storefront --cluster prod --namespace storefront
+ankra services connect orders-db --consumer 0b7c4d19-5f6a-4b8c-9d0e-1f2a3b4c5d6f
+ankra services connect orders-db --cluster prod --consumer 0b7c4d19-5f6a-4b8c-9d0e-1f2a3b4c5d6f -o json
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--cluster` |   | The cluster the service runs on, when its name is not unique (name or id) |
+| `--consumer` |   | Consumer binding id of the application's namespace ('ankra services consumers bind') |
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
 
 ## ankra services consumers
 
@@ -1176,9 +1227,29 @@ ankra*, cert-manager, ...); the platform refuses any other name when the
 review is prepared, before anything is stored.
 
 Every setup needs at least one consumer (`--consumer`, from 'ankra services
-consumers bind'). The region and data boundary default to the cluster's
-placement policy. Parameters (`--param`) default to the package's defaults;
-'ankra services packages get &lt;package&gt;' lists them with their bounds.
+consumers bind'), except a service created from another one with `--from`. The
+region and data boundary default to the cluster's placement policy. Parameters
+(`--param`) default to the package's defaults; 'ankra services packages get
+&lt;package&gt;' lists them with their bounds.
+
+`--from` creates a PostgreSQL service from the backups of another PostgreSQL
+service of the organisation, named by its name or id. The new service starts
+with the other's data as of `--at` (a time in RFC 3339, for example
+2026-11-18T09:30:00Z), or as of the newest point its backups reach when `--at`
+is left out. The moment must be inside the window Ankra can confirm from the
+other service's backups: the platform refuses any other moment, and a window
+it could not read. The other service is not changed and may be retired or on
+a cluster that no longer exists, as long as its backups are still kept. The
+review names the source and the moment before anything is set up. The new
+service starts with no applications: connect them with 'ankra services
+connect' once it runs. `--consumer` is refused with `--from`.
+
+`--backup-vault` names the backup vault the service is backed up into ('ankra
+backup vaults list'). An organisation with more than one verified vault needs
+it, because the platform does not choose between them. A service created with
+`--from` is always backed up into the vault that holds the other service's
+backups, so there `--backup-vault` is accepted only when it names that vault.
+The review names the vault before anything is set up.
 
 Confirming starts the deployment; it is not proof that the service is ready.
 Follow it with 'ankra services get &lt;name&gt;'.
@@ -1194,15 +1265,20 @@ ankra services setup orders-db --package postgresql --cluster prod --consumer 0b
 ankra services setup orders-db --package postgresql@1.0.0 --consumer <id> --param storage_gib=20 --param instances=3
 ankra services setup orders-db --package postgresql --consumer <id> --review-only
 ankra services setup orders-db --package postgresql --consumer <id> --yes -o json
+ankra services setup orders-db-copy --package postgresql --cluster prod --from orders-db --at 2026-11-18T09:30:00Z
+ankra services setup orders-db --package postgresql --consumer <id> --backup-vault production-backups
 ```
 
 **Flags**
 
 | Flag | Default | Description |
 |------|---------|-------------|
+| `--at` |   | With `--from`: the moment to restore to, in RFC 3339 (default: the newest point the other service's backups reach) |
+| `--backup-vault` |   | Backup vault the service is backed up into (name; 'ankra backup vaults list'); needed when the organisation has more than one verified vault |
 | `--cluster` |   | The cluster to run the service on (name or id; default: the selected cluster) |
 | `--consumer` | `[]` | Consumer binding id the service is for (repeatable; 'ankra services consumers bind') |
 | `--data-boundary` |   | Data boundary (default: the cluster's placement policy) |
+| `--from` |   | Create the service from the backups of this PostgreSQL service (name or id) |
 | `--mode` | `customer` | Operating mode: customer (runs on your cluster) or existing |
 | `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
 | `--package` |   | The package to set up: name, name@version or id ('ankra services packages list') |
