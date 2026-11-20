@@ -79,14 +79,13 @@ Each service delivers the variables its kind of client conventionally reads:
 
 | Service | Variables | Values |
 |---------|-----------|--------|
-| PostgreSQL | `DATABASE_URL`, `JDBC_DATABASE_URL`, `PGHOST`, `PGPORT`, `PGDATABASE`, `PGUSER`, `PGPASSWORD` | `DATABASE_URL` and `JDBC_DATABASE_URL` carry the user and password, and name the read-write address. `PGHOST` is `postgresql-rw.<service>.svc.cluster.local`. |
+| PostgreSQL | `DATABASE_URL`, `JDBC_DATABASE_URL`, `PGHOST`, `PGPORT`, `PGDATABASE`, `PGUSER`, `PGPASSWORD`, `DATABASE_CA_CERT` | `DATABASE_URL` and `JDBC_DATABASE_URL` carry the user and password, and name the read-write address. `PGHOST` is `postgresql-rw.<service>.svc.cluster.local`. `DATABASE_CA_CERT` is the PEM text of the service's CA certificate, not a file path; see [PostgreSQL and TLS](#postgresql-and-tls). |
 | Valkey | `REDIS_URL`, `REDIS_HOST`, `REDIS_PORT`, `REDIS_USERNAME`, `REDIS_PASSWORD` | `REDIS_URL` is a complete `redis://` URL for the primary. |
 | NATS | `NATS_URL`, `NATS_USER`, `NATS_PASSWORD` | `NATS_URL` carries no credentials. |
 | OpenSearch | `OPENSEARCH_URL`, `OPENSEARCH_USERNAME`, `OPENSEARCH_PASSWORD`, `OPENSEARCH_CA_CERT` | `OPENSEARCH_CA_CERT` is the PEM text of the service's CA certificate, not a file path. |
 | SeaweedFS (S3) | `S3_ENDPOINT`, `AWS_ENDPOINT_URL_S3`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_REGION`, `S3_FORCE_PATH_STYLE` | Both endpoint variables are `http://seaweedfs-all-in-one.<service>.svc.cluster.local:8333`. The key pair is the admin pair. `AWS_REGION` is `us-east-1` and `S3_FORCE_PATH_STYLE` is `true`. |
 | VictoriaLogs | `VICTORIA_LOGS_URL`, `VICTORIA_LOGS_USERNAME`, `VICTORIA_LOGS_PASSWORD` | |
 | VictoriaMetrics | `VICTORIA_METRICS_URL`, `VICTORIA_METRICS_USERNAME`, `VICTORIA_METRICS_PASSWORD` | |
-| Supabase | `SUPABASE_URL`, `SUPABASE_ANON_KEY`, `SUPABASE_PUBLISHABLE_KEY` | `SUPABASE_URL` is the gateway's in-cluster address. Both key variables carry the same publishable key. |
 | GPU chat | `OPENAI_BASE_URL`, `OPENAI_API_KEY`, `OPENAI_MODEL` | See [OpenAI-compatible inference](#openai-compatible-inference). |
 
 Every service also delivers each variable under its own prefix: the service name in capitals, with hyphens as underscores. A PostgreSQL service named `orders-db` delivers `ORDERS_DB_DATABASE_URL`, `ORDERS_DB_PGHOST` and so on.
@@ -129,7 +128,6 @@ The same details are on the service in the API, as `connection` on [Get a manage
 | OpenSearch | `https://opensearch.<service>.svc.cluster.local:9200` | `opensearch-credentials` | `url`, `username`, `password`, `ca.crt` |
 | SeaweedFS (S3) | `http://seaweedfs-all-in-one.<service>.svc.cluster.local:8333` | `seaweedfs-s3-secret` | `admin_access_key_id`, `admin_secret_access_key`, `read_access_key_id`, `read_secret_access_key` |
 | VictoriaLogs | `http://victoria-logs.<service>.svc.cluster.local:9428` | `victoria-logs-credentials` | `url`, `username`, `password` |
-| Supabase | `http://supabase.<service>.svc.cluster.local:8000` | `supabase-api-keys` | `url`, `anon-key` |
 | GPU chat | `http://litellm.<service>.svc.cluster.local:4000/v1` | `gpu-chat-credentials` | `url`, `api-key`, `model` |
 | VictoriaMetrics | `http://victoria-metrics.<service>.svc.cluster.local:8428` | `victoria-metrics-credentials` | `url`, `username`, `password` |
 
@@ -166,7 +164,7 @@ ankra cluster get secrets opensearch-credentials -n search --reveal -o json | jq
 
 An application on another cluster than the service is not connected for you, and the service's addresses do not resolve there. Reaching the service from another cluster needs a network path between the clusters that you provide, and the address that path exposes. A service whose client port admits only the namespaces named under [Addresses and Secrets](#addresses-and-secrets) also needs a NetworkPolicy of your own in its namespace that admits the traffic of that path.
 
-Give the application the values as [environment secrets](/reference/cli/application#ankra-application-env-secrets), from the service page's **Use it in &lt;application&gt;** button, which opens the application's **Secrets**, or from the CLI. Piping the value keeps it out of your shell history:
+Give the application the values as [environment secrets](/reference/cli/application#ankra-application-env-secrets), from the service page's **Use it in &lt;application&gt;** button, which opens the application's **Variables**, or from the CLI. Piping the value keeps it out of your shell history:
 
 ```bash
 ankra cluster get secrets postgresql-app -n orders-db --reveal -o json \
@@ -183,14 +181,49 @@ A value you copy this way is yours: [deleting the service](/guides/delete-a-mana
 
 ## Notes per service
 
-- **PostgreSQL.** `DATABASE_URL` and `JDBC_DATABASE_URL` carry the operator's `fqdn-uri` and `fqdn-jdbc-uri`. The operator also writes `uri`, `jdbc-uri` and `host` keys, but they name the short host `postgresql-rw`, which resolves only inside the service's own namespace. You connect as `app`, the owner of the database `app`, and superuser access is off. The read-only address reaches replicas only, so it answers only when `instances` is above 1, and no variable names it. The image includes the pgvector and pgaudit extensions.
+- **PostgreSQL.** `DATABASE_URL` and `JDBC_DATABASE_URL` carry the operator's `fqdn-uri` and `fqdn-jdbc-uri`. The operator also writes `uri`, `jdbc-uri` and `host` keys, but they name the short host `postgresql-rw`, which resolves only inside the service's own namespace. You connect as `app`, the owner of the database `app`, and superuser access is off. The read-only address reaches replicas only, so it answers only when `instances` is above 1, and no variable names it. The image includes the pgvector and pgaudit extensions. A service that delivers `DATABASE_CA_CERT` accepts encrypted connections only: see [PostgreSQL and TLS](#postgresql-and-tls).
 - **Valkey.** Authenticate as the `app` user, which `REDIS_USERNAME` carries, with `REDIS_PASSWORD`; `REDIS_URL` is a complete `redis://` URL that carries both. Write to the primary address. The read-replicas address serves reads from every pod.
 - **NATS.** Connect as `app`. `NATS_URL` carries no credentials, so pass `NATS_USER` and `NATS_PASSWORD` separately. JetStream is on; memory-backed streams are disabled.
 - **OpenSearch.** Use HTTPS with basic auth as `admin`, the only user. The certificate is signed by a private CA generated in the cluster: have your client trust `OPENSEARCH_CA_CERT`, which holds that CA's certificate.
 - **SeaweedFS.** Use the S3 API over plain HTTP inside the cluster, with path-style addressing. The admin key pair, the one delivered, can read, write, list and administer buckets. The read-only key pair can only read, and is in the service's Secret only.
 - **VictoriaLogs.** Send logs over HTTP with basic auth, as JSON lines, Loki push, OpenTelemetry or Elasticsearch bulk, and query them with LogsQL. No log collector is installed, so ship logs with your own agent.
-- **Supabase.** Use supabase-js, or any Supabase client, with `SUPABASE_URL` and the publishable key. The gateway serves the data API at `/rest/v1`, sign-in at `/auth/v1` and Storage at `/storage/v1`. Sign-in is by email and password, and accounts are confirmed at sign-up. The secret key and the JWT secret stay in the service's own namespace and are never delivered.
 - **VictoriaMetrics.** Push metrics with basic auth using Prometheus `remote_write`, OpenTelemetry, InfluxDB or another supported protocol, and query with PromQL or MetricsQL on the Prometheus HTTP API. It scrapes nothing itself, so push from vmagent, a Prometheus agent or an OpenTelemetry Collector.
+
+## PostgreSQL and TLS
+
+A PostgreSQL service whose connection includes `DATABASE_CA_CERT` accepts a connection over the network only when it is encrypted, and refuses any other with `pg_hba.conf rejects connection ... no encryption`. It presents a certificate signed by a CA of its own, generated in the cluster when the service is set up and valid for ten years. `DATABASE_CA_CERT` carries that CA's certificate, so your application can check that it is talking to the service. A service without the variable is older and is described at the end of this section.
+
+The delivered `DATABASE_URL`, `JDBC_DATABASE_URL` and `PG*` variables say nothing about TLS, so what happens depends on your client's default:
+
+| Client | What to do |
+|--------|------------|
+| Clients that try TLS first: `psql` and everything built on libpq (psycopg, the Ruby `pg` gem, PHP), pgx, asyncpg, the PostgreSQL JDBC driver | Nothing. They connect encrypted with the variables as delivered. |
+| Clients that connect without TLS unless told to: node-postgres (`pg`), postgres.js and the libraries built on them | Pass the CA in the client's `ssl` option, as below. Without it the connection is refused. |
+
+```javascript node-postgres
+import pg from "pg";
+
+const pool = new pg.Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: { ca: process.env.DATABASE_CA_CERT },
+});
+```
+
+```javascript postgres.js
+import postgres from "postgres";
+
+const sql = postgres(process.env.DATABASE_URL, {
+  ssl: { ca: process.env.DATABASE_CA_CERT },
+});
+```
+
+With the CA passed like this, the client also verifies the server's certificate. A client that tries TLS first encrypts the connection without verifying the certificate. To verify there too, set `sslmode=verify-full` and give the client the CA. A client that takes a file path (libpq's `sslrootcert`, for example) needs the value of `DATABASE_CA_CERT` written to a file first.
+
+The certificate names the service's in-cluster addresses, so verification passes for the host in the delivered variables and fails for an IP address or a port-forward to `localhost`.
+
+<Note>
+A service whose connection has no `DATABASE_CA_CERT` was set up before TLS was required. It presents a certificate from a CA that is renewed every 90 days, offers TLS, and also accepts connections without it. Its certificate is not changed in place: a service whose applications receive `DATABASE_CA_CERT` is one you set up new.
+</Note>
 
 ## OpenAI-compatible inference
 

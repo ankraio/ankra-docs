@@ -383,24 +383,35 @@ An id prefix is resolved against the stack's 200 most recent restore points, so 
   </Tab>
 </Tabs>
 
+Before stopping workloads, the agent checks that every claim has a completed
+filesystem capture bound to the selected restore point and storage location.
+Missing or unreadable recovery metadata stops the restore before claims are
+removed. Recovery selects only the proven archived Pods and claims, even if the
+current workload labels have changed. Annotation-only Restic backups, native or
+CSI snapshots (including mixed backups), and selected Pods with additional or
+unbound volume captures are refused until their recovery has its own per-claim
+qualification.
+
+
 The platform accepts the restore and answers with the sequence it will follow, which the CLI prints before any of it runs:
 
-1. Scale down the workloads in the stack that own the data being restored.
-2. Remove the volumes the restore point replaces, so the restored data is not written beside the old data.
-3. Restore the restore point's assets onto the cluster through the backup data plane.
-4. Scale the workloads back up over the restored data.
+1. Take a safety restore point before removing anything, and refuse the restore if it cannot be taken.
+2. Scale down the workloads in the stack that own the data being restored.
+3. Remove the volumes the restore point replaces, so the restored data is not written beside the old data.
+4. Restore the restore point's assets onto the cluster through the backup data plane.
+5. Scale the workloads back up over the restored data.
 
 `--yes` skips the typed confirmation for scripts. `--force` is needed when the stack's data has changed since the restore point was taken: the refusal compares the restore point's assets against the stack's current inventory, and **an inventory whose live database scan did not run counts as drift**, because "we could not read it" is not "it is unchanged". `--force` does not reach the ownership check that runs before it: a restore point carrying a volume the stack's live inventory lists as not owned by this stack, or one in a namespace the stack no longer uses, is refused outright, see [Troubleshooting](#troubleshooting). A volume deleted since the restore point was taken is not refused by this check; the drift check names it.
 
 <Warning>
-**Only volumes captured by Velero can be restored in place.** A restore point carrying anything else, such as a CloudNativePG or Percona database, is refused with `Restoring this restore point in place is not supported yet: it carries a database this platform cannot yet recreate in place.` The ordinary restore path would report success over unchanged data, which is worse than refusing - see [Restoring in place](/concepts/backup-vaults#restoring-in-place).
+**Only volumes captured by Velero can be restored in place.** A restore point carrying anything else, such as a CloudNativePG or Percona database, is refused with `Restoring this restore point in place is not supported yet: it carries a database this platform cannot yet recreate in place.` The ordinary restore path would report success over unchanged data, which is worse than refusing - see [Restoring in place](/concepts/backup-vaults#restoring-in-place). The database of a managed PostgreSQL service is restored into a new service instead: see [Restore a managed PostgreSQL service](/guides/restore-a-managed-postgresql-service).
 </Warning>
 
 A restore is also refused against a cluster that is offline or stopped - the sequence destroys before it replaces, so it must not start against a cluster nobody can reach - and against a restore point that is not `complete`.
 
 ## Clone a Stack with its data
 
-**Clone with data** on the Stack's backups page copies the Stack and its data to another cluster as a draft. Pick the **Target cluster** and the **Data source** - **Take a new restore point now** or **Use the newest complete restore point** - and click **Clone with data**. The source Stack keeps running and is not changed, and nothing runs on the target until you open the draft there and deploy it, once the data has been copied. [Clone Stacks](/guides/clone-stack) covers cloning in full, including from the CLI.
+**Clone with data** on the Stack's backups page copies the Stack and its data to another cluster as a draft. Pick the **Target cluster** and the **Data source** - **Take a new restore point now** or **Use the newest complete restore point** - and click **Clone with data**. The source Stack keeps running and is not changed, and captured application workloads stay stopped until you deploy the reviewed target draft after the data copy. Temporary recovery Pods and the database recovery engine may run to recover the selected data. [Clone Stacks](/guides/clone-stack) covers cloning in full, including from the CLI.
 
 ## Unprotect a stack
 
@@ -415,6 +426,8 @@ Confirmation is the typed stack name again; `--yes` skips it. Turning protection
 ## Back up an application's data
 
 An application's owner does not need to open its Stack. **Applications → &lt;your application&gt; → Data → Backups** shows, for the environment chosen at the top of the page, the **Protection** posture, the **Destination** vault, the **Data assets** and the **Last backup**, then the **Restore points** with their restore-test evidence (**Inspect evidence**).
+
+The **Destination** names the vault and where its bucket is, such as **demo-backups, Hetzner object storage in Helsinki, Finland**. For a bucket you brought, the line under the vault says Ankra has no record of where it is. When Ankra should know and cannot say, that line starts with **Place not known**. [Where the cluster is](/platform/application-page#where-the-cluster-is) lists the three answers and what each means.
 
 **Back up now** takes a restore point of the Stack the environment runs in: the dialog names the Stack, the cluster and the vault, and its **Back up now** button sends it. The card then reads "Backup requested. It appears in the list below when it finishes." When the Stack runs a database that is not set up for backups yet, the dialog says so: Ankra sets it up first, which restarts the database one instance at a time. Taking a backup needs `backups.operate`; without it the card says "You need permission to run backups and restores. Ask an admin."
 
@@ -453,10 +466,13 @@ An organisation with no vault at all gets a call to action rather than a report 
 | `This organisation has more than one ready backup vault; name the one to write to.` | The request named no vault, the stack has no policy, and there is more than one candidate | Pass `--vault <name>`, or protect the stack so its policy names one |
 | `This organisation has no ready backup vault to write a restore point to.` | No vault is `ready` | Register or provision one, above |
 | `This selection covers none of the stack's data, so the restore point would carry nothing.` | The selection excluded everything the stack holds | `ankra cluster stacks data list <stack>` to see the asset names, then widen the selection |
+| `Where this stack's data lives could not be established: a member's namespace refers to a variable the stack does not define.` | An add-on or manifest names its namespace with a `${{ ankra.NAME }}` reference that no stack, cluster or organisation variable answers, and nothing else in the stack holds data. The message ends with the reference | Set the variable, for example `ankra cluster stacks variables set <stack> <name> <value>`, then try again. `ankra cluster stacks data list <stack>` reads `custom_resource_scan: unavailable` while a reference is unanswered |
+| A CloudNativePG restore point fails with `exit status 1`, and the instance's log says `XAmzContentSHA256Mismatch` | The stack was protected into an UpCloud vault before 20 November 2026. Its object store does not turn off the uploader's default checksums, which UpCloud Object Storage refuses, so no write-ahead log and no base backup is stored | Protect the stack again, which rewrites the object store, then restart the database's instances once, one pod at a time: `ankra cluster delete pod <instance> -n <namespace>`. CloudNativePG starts each one again, and an instance reads the setting when it starts |
 | `This stack's data has changed since the restore point was taken` | Drift between the restore point and the live inventory, **or** an inventory whose database scan did not run | Take a fresh restore point, or restore with `--force` if the drift is expected |
 | `This restore point carries volumes this stack does not own, so restoring it in place would replace another stack's data; it cannot be restored in place.` | The in-place sequence would remove and replace a claim the stack's live inventory lists as not owned by this stack, or one in a namespace none of the stack's members use - another stack's data, or an orphan claim, in a namespace other stacks also use; typically a restore point taken before the inventory became stack-scoped. The message names the claims. `--force` does not override this refusal; drift and ownership are separate checks | This restore point cannot be restored in place at all. Restore this stack from a newer restore point - one taken since the inventory became stack-scoped carries only what the stack owns - and the other data from the restore point of the stack that owns it. When the message says the stack no longer exists on the cluster, neither an in-place restore nor a [clone](/guides/clone-stack) can carry this restore point today, because a clone reads the stack from the source cluster. A claim that really is this stack's but sits in a shared namespace needs a member that declares it or the workload that mounts it; once the live inventory lists it as the stack's, this refusal stops naming it and the next restore point captures it |
-| `Restoring this restore point in place is not supported yet` | The restore point carries something other than volumes captured by Velero, such as a CloudNativePG or Percona database | Ankra cannot restore these in place. The capture is still good and the databases are still in the vault |
+| `Restoring this restore point in place is not supported yet` | The restore point carries something other than volumes captured by Velero, such as a CloudNativePG or Percona database | Ankra cannot restore these in place. The capture is still good and the databases are still in the vault. A managed PostgreSQL service can be [restored into a new service](/guides/restore-a-managed-postgresql-service) |
 | `Only a complete restore point can be restored.` | The restore point is `creating` or `failed` | `ankra runs get <run-id>` on the run that was sealing it |
+| `cannot prove volume recovery before quiesce` | At least one claim has no completed, matching filesystem capture with a snapshot ID, or the metadata cannot be read | No workload has been stopped or claim removed by this attempt. Use a qualified PVC-only filesystem restore point; annotation-only Restic, native/CSI snapshots and additional or unbound captures need separate qualification |
 | `This cluster is not online, so its data cannot be restored right now.` | The target cluster is stopped or its agent is not connected | Bring the cluster back, then retry |
 | `A backup, restore or clone is using this restore point` | A delete raced a run that is reading the restore point | Wait for the run to finish, or `ankra runs cancel <run-id>` |
 | `Backup stack: installing` never becomes `ready` | The cluster's agent is too old to run the backup jobs, or a resource name the backup stack needs is already taken by a user-authored resource | Upgrade the [cluster agent](/concepts/cluster-agent); rename the colliding resource. `ankra runs list --cluster <name>` shows steps that never got claimed |
