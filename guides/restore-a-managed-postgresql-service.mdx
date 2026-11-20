@@ -37,16 +37,16 @@ The built-in `owner`, `admin` and `operator` roles hold all of them. See [Roles 
 
 ## Choose the moment
 
-Ankra accepts a moment it can confirm from the restore points it has: from just after the **oldest** kept backup finished to the end of the **newest** one. A daily schedule with seven days of retention gives you any moment in roughly the last week, up to the end of last night's backup.
+Ankra accepts a moment it can confirm from the restore points it has: from a few minutes after the **oldest** kept restore point completed to the time the **newest** backup started. A daily schedule with seven days of retention gives you any moment in roughly the last week, up to the start of last night's backup.
 
 | You want | Do this |
 |----------|---------|
 | The newest data the backups hold | Leave the moment out |
-| A moment before the newest backup finished | Name the moment |
+| A moment before the newest backup started | Name the moment |
 | A moment after the newest backup, such as ten minutes ago | Take a restore point of the service first, then name the moment |
 | A moment before the oldest kept backup | Not possible: those backups are no longer kept |
 
-Taking a restore point first works because a backup that completes proves the service's backups reach that time. It does not restart a database that already has a complete restore point:
+Taking a restore point first works because a backup that completes proves the service's backups reach the time it started. It does not restart a database that already has a complete restore point:
 
 ```bash
 ankra cluster stacks restore-points create orders-db --cluster my-cluster --wait
@@ -54,7 +54,7 @@ ankra cluster stacks restore-points create orders-db --cluster my-cluster --wait
 
 Leaving the moment out gives you everything that has reached the vault, and that trails the database by up to five minutes: PostgreSQL sends its log to the vault one segment at a time, when the segment is full or after five minutes. If the change you need was made in the last few minutes, take a restore point first.
 
-A service with a single restore point has no moment to name yet. Leave the moment out, or take a second restore point.
+A service with a single restore point has no moment to name yet. Leave the moment out, or take a second restore point: a moment from five minutes after the first one completed can then be named.
 
 Write the moment in RFC 3339 with its time zone, for example `2026-11-18T09:30:00Z` or `2026-11-18T10:30:00+01:00`.
 
@@ -66,7 +66,7 @@ The portal has no restore action yet. Use the CLI or MCP.
 
 <Tabs>
   <Tab title="CLI">
-    <CliVersion since="0.82.0" />
+    <CliVersion since="0.83.0" />
 
     ```bash
     ankra services setup orders-db-restored --package postgresql --cluster my-cluster \
@@ -84,7 +84,7 @@ The portal has no restore action yet. Use the CLI or MCP.
   </Tab>
 </Tabs>
 
-The new service is installed like any other, and then PostgreSQL replays the backups up to the moment. How long that takes depends on the size of the database and on how much was written between the backup and the moment.
+The new service is installed like any other. Within a minute or two Ankra switches on the new service's own backups, which also brings the storage access the recovery reads with, and then PostgreSQL replays the backups up to the moment. How long that takes depends on the size of the database and on how much was written between the backup and the moment.
 
 ---
 
@@ -145,10 +145,10 @@ Setup refuses before anything is installed, and says why. Most refusals name the
 | `The backup vault that holds the archive of the service` ... `no longer exists` | The vault was deleted | The backups cannot be read through Ankra any more |
 | `Ankra could not read the backups of the service` | A restore point of the service does not read as Ankra expects, so Ankra will not guess where the backups are | Nothing was changed. Take a new restore point and try again, or [contact support](/platform/support) |
 | `is in the future.` | The moment has not happened yet | Check the time zone of the moment |
-| `is before the first moment Ankra can confirm` | The moment is older than the oldest backup still kept | Choose a moment in the window the message gives, or leave the moment out |
-| `is before the first moment Ankra can confirm` ... `so no moment can be named for` | The service has one backup, or its backups all ended in the same second, so there is no window to choose a moment from yet | Take a restore point of the service, then choose a moment between the first moment the message gives and that restore point. Or leave the moment out |
-| `is after the newest backup Ankra can confirm` | The moment is later than the end of the newest backup | Take a restore point of the service, then try again. If the service no longer runs, leave the moment out |
-| `Ankra could not read the recovery window` | The restore points do not say when their backups ended | Leave the moment out, or take a restore point of the service and try again |
+| `is before the first moment Ankra can confirm` | The moment is older than the oldest restore point still kept, or within a few minutes of it | Choose a moment in the window the message gives, or leave the moment out |
+| `is before the first moment Ankra can confirm` ... `so no moment can be named for` | The service has one restore point, or its restore points were taken within a few minutes of each other, so there is no window to choose a moment from yet | Take a restore point of the service, then choose a moment between the first moment the message gives and that restore point. Or leave the moment out |
+| `is after the last moment Ankra can confirm` | The moment is later than the start of the newest backup | Take a restore point of the service, then try again. If the service no longer runs, leave the moment out |
+| `Ankra could not read the recovery window` | None of the restore points says when its backup ran, or the cluster's clock is far from the right time | Leave the moment out, or take a restore point of the service and try again. If it is refused again, [contact support](/platform/support) |
 | `This version of the PostgreSQL package cannot create a service from another service's archive.` | You named a `postgresql` version before 1.10.0 | Set up `postgresql` 1.10.0 or later |
 | `Only a PostgreSQL service can be created from another service's archive.` or `is not a PostgreSQL service` | The package you set up, or the service you restore from, is not PostgreSQL | Only a PostgreSQL service restores into a PostgreSQL service |
 | `is not a verified backup vault of this organisation` | The vault that holds the backups is registered but its last check failed | Run `ankra backup vaults verify <vault>`, then set the service up again |
@@ -156,6 +156,7 @@ Setup refuses before anything is installed, and says why. Most refusals name the
 | `is in a backup vault of another project, so a service cannot be created from it in this project.` | The vault that holds the backups belongs to another project than the one you are working in | Move the vault into this project, or make it organisation-wide, from the vault's settings. Then run the setup again. See [Projects](/concepts/projects) |
 | `A service can only be created from an archive in the vault its own backups go to.` | `--backup-vault` named another vault than the one that holds the backups. Or you named none, and the organisation's only verified vault is another one, because the vault that holds the backups failed its last check | Leave `--backup-vault` out. If you already did, run `ankra backup vaults verify <vault>` on the vault that holds the backups, then set the service up again |
 | `This organisation has no verified backup vault named` | `--backup-vault` named a vault that does not exist, has not passed its check, or belongs to another project than the one you are working in | Leave `--backup-vault` out: the new service is backed up into the vault that holds the backups |
+| The service is not `ready` after ten minutes, and `ankra cluster get events -n <service> --cluster <cluster>` shows `secret "backup-vault-credentials-..." not found` | The new service's own backups were not switched on, so the recovery has no access to the storage that holds the backups | Run `ankra cluster stacks protect <service> --vault <vault>` with the vault that holds the backups. The recovery starts within a minute |
 | `changed after this service was reviewed` | Between the review and the installation, the service's backups moved to another vault or location | Run the setup again |
 | `The service to create this one from was not found.` | The service is not in your organisation, its cluster is in another project than the one you are working in, or your role cannot read its cluster | Check the name or id with `ankra services list --include-released`, and that you are working in the project of the service's cluster |
 
