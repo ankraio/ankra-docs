@@ -123,10 +123,10 @@ A generated descriptor declares these fifteen options. `target_port` defaults to
 | `image_tag` | string | none | Container image tag to deploy. Use an immutable tag such as `sha-<commit>` or a semver release, never `latest`. |
 | `replicas` | number | `1` | Number of pod replicas. |
 | `target_port` | number | detected | Container port the application listens on. |
-| `cpu_request` | string | `100m` | CPU request per pod. |
-| `cpu_limit` | string | `500m` | CPU limit per pod. |
-| `memory_request` | string | `128Mi` | Memory request per pod. |
-| `memory_limit` | string | `512Mi` | Memory limit per pod. |
+| `cpu_request` | string | by runtime | CPU request per pod. |
+| `cpu_limit` | string | `""` | CPU limit per pod. Empty sets no limit, so the pod can use idle CPU on its node instead of being throttled. |
+| `memory_request` | string | by runtime | Memory request per pod. Keep it equal to `memory_limit`, so the scheduler reserves what the pod may use. |
+| `memory_limit` | string | by runtime | Memory limit per pod. |
 | `ingress_enabled` | boolean | `false` | Expose the service through an Ingress. |
 | `ingress_host` | string | `""` | Ingress hostname, required when the Ingress is enabled. |
 | `ingress_class` | string | `""` | IngressClass name, for example `traefik`. Empty uses the cluster's default IngressClass. |
@@ -134,9 +134,33 @@ A generated descriptor declares these fifteen options. `target_port` defaults to
 | `redirect_hosts` | string | `""` | Comma-separated hostnames that permanently redirect to `ingress_host`, keeping the path and query, for example an old or misspelled domain. Each gets its own DNS record and certificate. At most 5. Needs the `traefik` ingress class. |
 | `env_from_secrets` | string | `""` | Comma-separated names of Secrets in the application's namespace whose keys become environment variables. |
 | `ingress_tls_issuer` | string | `letsencrypt-prod` | cert-manager ClusterIssuer that mints the Ingress certificate. Empty serves plain HTTP. Ankra checks the name against the target cluster at deploy time. |
-| `ingress_https_redirect` | boolean | `true` | Redirect plain HTTP to HTTPS on the generated Ingress when every hostname on it is an Ankra hostname, on clusters where TLS ends at Traefik. An Ingress with your own domain on it is not redirected. Turn it off when a client still needs plain HTTP. |
+| `ingress_https_redirect` | boolean | `true` | Redirect plain HTTP to HTTPS and send an HSTS header on the generated Ingress when every hostname on it is an Ankra hostname, on clusters where TLS ends at the cluster's own Traefik. It starts with the next deploy. The Ingress must be served by Traefik: it names the `traefik` class, or names none on a cluster where Traefik is the default class. A deploy that leaves the Ingress without the redirect for its class says so in its output. An Ingress with your own domain on it is not redirected. Turn it off when a client still needs plain HTTP. |
 
 An application with a detected database carries that database's sizing options as well.
+
+### Size by runtime
+
+A generated descriptor sizes the application for the runtime Ankra detected, with the memory request equal to the limit and no CPU limit.
+
+| Runtime | `cpu_request` | `memory_request` and `memory_limit` |
+|---------|---------------|-------------------------------------|
+| Java (Maven or Gradle) | `250m` | `1Gi` |
+| Go and Rust | `100m` | `256Mi` |
+| Node, Python, a static site, or a stack Ankra did not recognise | `100m` | `512Mi` |
+
+These defaults apply to applications set up from 20 November 2026. An application set up before keeps the sizes it has, and a value in a committed descriptor or set on a deploy always wins.
+
+### Workloads with more than one replica
+
+When a generated Deployment runs two or more replicas, each deploy also gives it:
+
+- A PodDisruptionBudget with `maxUnavailable: 1`, so a node drain or an upgrade takes one replica at a time. On Kubernetes 1.27 and later it also sets `unhealthyPodEvictionPolicy: AlwaysAllow`, so a pod that is already failing can be evicted at once instead of counting against the budget.
+- A spread across nodes (`topologySpreadConstraints` on `kubernetes.io/hostname` with `ScheduleAnyway`), and across zones (`topology.kubernetes.io/zone`) on a cluster whose nodes span two or more, so the replicas prefer different nodes and zones but are never left pending when there are too few.
+- On Kubernetes 1.31 and later, on a cluster whose nodes span two or more zones, `trafficDistribution: PreferClose` on its Service, so traffic stays in the caller's zone when a replica runs there.
+
+This applies to a Deployment Ankra generated, which carries the `ankra.io/generated` annotation; applications set up before 1 September 2026 have a Deployment without it and get none of this. `unhealthyPodEvictionPolicy` and `trafficDistribution` are only written when Ankra knows the cluster's Kubernetes version; the budget and the spread are written either way. Any PodDisruptionBudget committed in the application's manifests turns off the generated budgets, a spread or `trafficDistribution` committed in the repository is kept as written, and a Deployment annotated `ankra.io/deploy-overrides: none` gets none of them.
+
+A deploy checks CPU and memory before it starts, over the deploy API, `ankra application deploy --set` and `ankra application ship --set`, and in chat and MCP. Each of `cpu_request`, `cpu_limit`, `memory_request` and `memory_limit` must be a Kubernetes quantity such as `250m` or `512Mi`, or empty to clear it. A request cannot be above its limit. The limit it is compared with is the one sent, else the one the environment already has, else the default. A deploy that fails the check changes nothing and answers `422` with: "CPU and memory must be quantities such as 250m or 512Mi, and a request cannot be above its limit."
 
 ## Components
 
