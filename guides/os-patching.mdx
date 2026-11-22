@@ -7,7 +7,7 @@ import { CliVersion } from "/snippets/cli-version.jsx";
 
 Ankra-managed nodes install operating system security updates through unattended upgrades. A few packages - systemd, udev, netplan, the container runtime and the packet filter - restart networking when they upgrade, and installing them on every node at once takes the cluster's agents offline. **Rolling OS patching** installs updates one host at a time instead, each drained and returned to service before the next.
 
-On a host whose OS updates are [automatic](#automatic-or-advisory), a rolling run holds those network-restarting packages back from unattended upgrades, and their security fixes reach that host only through rolling runs. A run leaves the unattended-upgrade settings of an advisory host as it finds them, and making a host advisory starts an operation that removes the hold, after which unattended upgrades install those packages again.
+Every node and bastion Ankra builds holds those network-restarting packages back from unattended upgrades, whether its OS updates are [automatic or advisory](#automatic-or-advisory), so their security fixes reach a host only through a rolling run. On an advisory host that run waits for a person to start it. See [The update hold](#the-update-hold).
 
 This guide covers reading where a cluster stands, a dry run, a rolling run, and the per-cluster policy that lets Ankra run it on its own inside a maintenance window.
 
@@ -36,7 +36,7 @@ curl -fsS -H "Authorization: Bearer $ANKRA_API_TOKEN" \
 ```
 </CodeGroup>
 
-The answer carries the cluster's policy, with when the window next opens and whether it is open now, the newest run host by host, the last dry run, and the **security lag** verdict: whether held-back security updates have been pending longer than the policy's `security_lag_days`. A cluster nobody configured reads the default policy, marked as not stored. The policy also carries the cluster's OS updates `mode` (`automatic` or `advisory`), why it has it in `mode_source` (`chosen`, `environment` or `notice_period`) and in a sentence in `mode_reason`, any node group overrides in `node_group_modes`, and, once the organisation has been told that the cluster becomes automatic, the moment it does in `automatic_from`.
+The answer carries the cluster's policy, with when the window next opens and whether it is open now, the newest run host by host, the last dry run, and the **security lag** verdict: whether held-back security updates have been pending longer than the policy's `security_lag_days`, and whether they wait for the maintenance window or, on advisory hosts, for a person to start a run. A cluster nobody configured reads the default policy, marked as not stored. The policy also carries the cluster's OS updates `mode` (`automatic` or `advisory`), why it has it in `mode_source` (`chosen`, `environment` or `notice_period`) and in a sentence in `mode_reason`, any node group overrides in `node_group_modes`, and, once the organisation has been told that the cluster becomes automatic, the moment it does in `automatic_from`.
 
 Over MCP and in chat the same read is `get_os_patch_status`.
 
@@ -177,7 +177,7 @@ curl -fsS -X PATCH -H "Authorization: Bearer $ANKRA_API_TOKEN" \
 
 `default` clears the choice, so what the cluster is used for decides again. On a cluster that was already sent the notice, its date still holds: once it has passed, the cluster is automatic again at once.
 
-Making hosts advisory starts an operation that removes the update hold from them. If it cannot start, for example with no bastion, the answer says why. While a run or a node OS policy operation is in flight, that change is refused with `409` naming the operation: wait for it to finish, or cancel it with `ankra cluster operations cancel <operation-id>`, then change the mode.
+Making hosts advisory keeps the [update hold](#the-update-hold) on them: from then on their held-back security updates wait for a person to start a run, and the answer says so.
 
 ### Per node group
 
@@ -192,6 +192,14 @@ curl -fsS -X PATCH -H "Authorization: Bearer $ANKRA_API_TOKEN" \
 
 A name that is not one of the cluster's node groups is refused with `409`, which lists the groups it has. `inherit` accepts any name, so the override of a node group that no longer exists can still be cleared. The control planes and the bastion always follow the cluster.
 
+### The update hold
+
+On Ankra Cloud, AWS, DigitalOcean, Hetzner, OVHcloud and UpCloud, every node and bastion carries Ankra's update hold, in every mode: unattended upgrades keep installing other security updates, but never systemd, udev, netplan, the container runtime or the packet filter, and never reboot the host. Only a rolling run installs those, one drained host at a time: Ankra's run in the maintenance window on automatic hosts, a run a person starts on advisory ones. A cluster's only control plane is never patched by a run, so its held updates wait for you.
+
+New hosts carry the hold from their first boot. On hosts that existed before, Ankra writes it on its own, a few clusters at a time, as an operation started by the platform, and checks it again after a node is added. Scaleway hosts carry no hold, because Ankra cannot reach them to remove it again.
+
+To opt a cluster out, remove the hold with `ankra cluster hetzner os-patches node-policy <cluster> --all-nodes --include-bastion --revert` or `apply_node_os_policy` with `revert`. Ankra then never writes it back on its own; a node added later still starts with it, so remove it there too. Unattended upgrades can then restart a host's network in place.
+
 ### The daily dry run
 
 Ankra takes the dry run of step 2 on its own, about once a day, on every running cluster it built on the providers above, whatever its mode, so the status read's last dry run and its security-lag verdict stay about a day old at most. It changes nothing on the hosts, never queues ahead of a dry run a person starts, and is listed with the cluster's operations (`ankra cluster operations list` and the cluster's **Operations** page) as started by the platform, not by a person. Ankra leaves a cluster for later while it is not running, while a dry run or another operation that changes its nodes is in flight, and while none of its nodes is up. When a daily dry run fails, the cluster shows one warning, which stands until a later dry run succeeds, and the next daily attempt waits a week rather than a day.
@@ -202,7 +210,6 @@ Ankra takes the dry run of step 2 on its own, about once a day, on every running
 |---|---|
 | `409` naming the window | The maintenance window is closed. Wait for it, or send `"outside_window": true`. |
 | `409` naming a running operation | A run is already in flight. Follow that operation instead of starting another. |
-| `409` saying the policy was not changed because an operation is in progress | The change would make hosts advisory while a run or a node OS policy operation is in flight. Wait for it to finish, or cancel it, then change the mode again. |
 | `409` naming a node group | `node_group_modes` names a group the cluster does not have. The message lists the groups it has. |
 | `409` on an imported cluster, or one of another provider than the path names | Rolling OS patching is for clusters Ankra built on the providers above. Use the cluster's own provider in the path. |
 | `404` | The cluster is not in the token's organisation. |
