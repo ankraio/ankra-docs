@@ -518,7 +518,10 @@ it admits right now. The run reservation, image pre-pull and step workspaces
 modes are shown with whether the agent advertises each; a platform that
 predates a setting shows neither of its lines. The Ankra Workspace class is
 the storage class the cluster's Ankra Workspaces use, and says when they
-inherit it; a platform that predates it shows no such line.
+inherit it; a platform that predates it shows no such line. Run workspaces
+says where a new run's workspace is kept: the storage class set for
+pipelines, the cluster's default StorageClass, or the disk of each run's
+node on a cluster with no StorageClass that creates volumes.
 
 An agent that has not yet re-rendered its release reports pipeline steps as
 not advertised even with a non-zero worker count stored: the capability is
@@ -773,18 +776,35 @@ ankra cluster agent status [flags]
 
 ## ankra cluster agent token
 
-Get or generate agent token for the selected cluster
+Print the agent token and install command for the selected cluster, or
+generate a new one with `--generate`.
+
+A new token replaces the token the running agent holds. When the cluster's
+agent is connected, or checked in within the last 15 minutes, `--generate` says
+so and asks first; with no terminal to ask on it needs `--yes`. When Ankra keeps
+the previous token valid for a while, the output says until when; otherwise
+the running agent is refused from its next check-in until it is redeployed
+with the new install command.
 
 ```bash
 ankra cluster agent token [flags]
+```
+
+**Examples**
+
+```bash
+ankra cluster agent token
+ankra cluster agent token --generate
+ankra cluster agent token --generate --yes -o json
 ```
 
 **Flags**
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--generate` | `false` | Generate a new agent token |
+| `--generate` | `false` | Generate a new agent token (asks first when the cluster's agent is running) |
 | `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+| `-y`, `--yes` | `false` | With `--generate`, skip the confirmation asked when the cluster's agent is running (required then when stdin is not a terminal) |
 
 ## ankra cluster agent upgrade
 
@@ -1417,15 +1437,16 @@ ankra cluster ankracloud nodes restart <cluster_id|name> <node_id> [flags]
 
 ## ankra cluster ankracloud os-patches
 
-Unattended upgrades hold back the packages whose maintainer scripts restart
-networking in place; the rolling OS patch lane installs them instead, one
-host at a time, drained and returned to service before the next.
+On a host whose OS updates are automatic, unattended upgrades hold back the
+packages whose maintainer scripts restart networking in place; the rolling OS
+patch lane installs them instead, one host at a time, drained and returned to
+service before the next.
 
 ```text
 status       the policy, the newest run host by host, the last dry run
 plan         the dry run: what each host would install
 run          start the rolling patch (asks first)
-policy set   change the maintenance window and the opt-in
+policy set   change the maintenance window and the OS updates mode
 node-policy  write or remove the node OS update hold by hand
 ```
 
@@ -1436,7 +1457,7 @@ upgrades away from the packages that restart networking - on the nodes named
 with `--node`, on every node with `--all-nodes`, and on the bastion with
 `--include-bastion`. The rolling OS patch lane writes and lifts it on its own;
 this is the by-hand route. Writing it is refused unless the cluster's OS
-patch policy is enabled; `--revert` removes it and is always allowed.
+updates are automatic; `--revert` removes it and is always allowed.
 
 The command asks first (`--yes` skips, declining exits 4). Needs
 clusters.operate.
@@ -1497,9 +1518,21 @@ ankra cluster ankracloud os-patches policy get <cluster_id|name> [flags]
 ## ankra cluster ankracloud os-patches policy set
 
 Change the cluster's OS patch policy. Only the flags passed are changed.
-Turning the policy off also removes the node OS update hold from every host,
-and is refused while a run or a node OS policy operation is in flight.
-Needs clusters.write.
+
+`--enable` chooses the automatic OS updates mode for the cluster: Ankra starts
+the rolling run on its own inside the maintenance window, no sooner than
+`--cadence-days` after the last run. `--disable` chooses the advisory mode: the
+control planes, the bastion and every node group without a mode of its own
+become advisory, and Ankra starts no run on them on its own. `--disable` does
+not switch OS patching off: a node group set to automatic stays automatic and
+keeps its hold, the daily dry run goes on, and a person can still start a run
+with 'run'.
+
+Making hosts advisory removes the node OS update hold from them, so unattended
+upgrades install the held packages again. That change is refused while a run
+or a node OS policy operation is in flight. To clear the cluster's mode, or to
+give a node group a mode of its own, use 'ankra cluster os-updates set'. Needs
+clusters.write.
 
 ```bash
 ankra cluster hetzner os-patches policy set prod --enable --window-days sat,sun --window-start-hour 2 --window-duration-hours 4
@@ -1515,8 +1548,8 @@ ankra cluster ankracloud os-patches policy set <cluster_id|name> [flags]
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--cadence-days` | `0` | Days between scheduled runs |
-| `--disable` | `false` | Turn the rolling OS patch policy off |
-| `--enable` | `false` | Turn the rolling OS patch policy on |
+| `--disable` | `false` | Choose the advisory OS updates mode for the cluster (does not switch patching off) |
+| `--enable` | `false` | Choose the automatic OS updates mode for the cluster |
 | `--exclude-stateful-nodes` | `false` | Leave nodes running stateful workloads out |
 | `--include-stateful-nodes` | `false` | Patch nodes running stateful workloads |
 | `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
@@ -2342,15 +2375,16 @@ ankra cluster aws nodes restart <cluster_id|name> <node_id> [flags]
 
 ## ankra cluster aws os-patches
 
-Unattended upgrades hold back the packages whose maintainer scripts restart
-networking in place; the rolling OS patch lane installs them instead, one
-host at a time, drained and returned to service before the next.
+On a host whose OS updates are automatic, unattended upgrades hold back the
+packages whose maintainer scripts restart networking in place; the rolling OS
+patch lane installs them instead, one host at a time, drained and returned to
+service before the next.
 
 ```text
 status       the policy, the newest run host by host, the last dry run
 plan         the dry run: what each host would install
 run          start the rolling patch (asks first)
-policy set   change the maintenance window and the opt-in
+policy set   change the maintenance window and the OS updates mode
 node-policy  write or remove the node OS update hold by hand
 ```
 
@@ -2361,7 +2395,7 @@ upgrades away from the packages that restart networking - on the nodes named
 with `--node`, on every node with `--all-nodes`, and on the bastion with
 `--include-bastion`. The rolling OS patch lane writes and lifts it on its own;
 this is the by-hand route. Writing it is refused unless the cluster's OS
-patch policy is enabled; `--revert` removes it and is always allowed.
+updates are automatic; `--revert` removes it and is always allowed.
 
 The command asks first (`--yes` skips, declining exits 4). Needs
 clusters.operate.
@@ -2422,9 +2456,21 @@ ankra cluster aws os-patches policy get <cluster_id|name> [flags]
 ## ankra cluster aws os-patches policy set
 
 Change the cluster's OS patch policy. Only the flags passed are changed.
-Turning the policy off also removes the node OS update hold from every host,
-and is refused while a run or a node OS policy operation is in flight.
-Needs clusters.write.
+
+`--enable` chooses the automatic OS updates mode for the cluster: Ankra starts
+the rolling run on its own inside the maintenance window, no sooner than
+`--cadence-days` after the last run. `--disable` chooses the advisory mode: the
+control planes, the bastion and every node group without a mode of its own
+become advisory, and Ankra starts no run on them on its own. `--disable` does
+not switch OS patching off: a node group set to automatic stays automatic and
+keeps its hold, the daily dry run goes on, and a person can still start a run
+with 'run'.
+
+Making hosts advisory removes the node OS update hold from them, so unattended
+upgrades install the held packages again. That change is refused while a run
+or a node OS policy operation is in flight. To clear the cluster's mode, or to
+give a node group a mode of its own, use 'ankra cluster os-updates set'. Needs
+clusters.write.
 
 ```bash
 ankra cluster hetzner os-patches policy set prod --enable --window-days sat,sun --window-start-hour 2 --window-duration-hours 4
@@ -2440,8 +2486,8 @@ ankra cluster aws os-patches policy set <cluster_id|name> [flags]
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--cadence-days` | `0` | Days between scheduled runs |
-| `--disable` | `false` | Turn the rolling OS patch policy off |
-| `--enable` | `false` | Turn the rolling OS patch policy on |
+| `--disable` | `false` | Choose the advisory OS updates mode for the cluster (does not switch patching off) |
+| `--enable` | `false` | Choose the automatic OS updates mode for the cluster |
 | `--exclude-stateful-nodes` | `false` | Leave nodes running stateful workloads out |
 | `--include-stateful-nodes` | `false` | Patch nodes running stateful workloads |
 | `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
@@ -2787,6 +2833,58 @@ ankra cluster clone <existing_cluster_file_or_url> <new_cluster_path> [flags]
 | `--copy-missing` | `false` | Copy missing files even for skipped stacks |
 | `--force` | `false` | Force merge even when names conflict |
 | `--stack` | `[]` | Clone only specific stacks by name (can be used multiple times) |
+
+## ankra cluster connect
+
+Connect a Kubernetes cluster you already run (AKS, EKS, GKE, k3s,
+on-premises, minikube) to Ankra, without writing a cluster file.
+
+The command registers the cluster under &lt;name&gt; and prints one Helm command.
+Run that command where kubectl and Helm reach the cluster: it installs the
+Ankra agent in the 'ankra' namespace, and the agent connects the cluster to
+this organisation. The agent only makes outbound connections, so nothing is
+opened inbound.
+
+The Helm command carries the cluster's agent token, which is a credential: do
+not share it or commit it to Git. 'ankra cluster agent token `--cluster` &lt;name&gt;'
+prints the command again. With `--generate` it replaces the token, and an agent
+installed with the old one must then be installed again.
+
+`--environment` says what the cluster is for; without it the platform labels
+the cluster development. The reporting level follows the environment, and
+'ankra cluster update' changes either later.
+
+A name another cluster in the organisation already has is refused, and
+nothing is changed. To declare Stacks, add-ons or a GitOps repository on the
+cluster, use 'ankra cluster apply' with an ImportCluster file.
+
+To connect a cluster your cloud provider runs through a cloud credential
+instead, with no command to run against the cluster, see 'ankra cluster
+managed import'.
+
+The name must be 1 to 53 lowercase letters, digits and hyphens, starting with
+a letter and ending with a letter or digit.
+
+```bash
+ankra cluster connect <name> [flags]
+```
+
+**Examples**
+
+```bash
+ankra cluster connect my-cluster
+ankra cluster connect payments-prod --environment production
+ankra cluster connect edge-lab --description "Lab cluster in rack 4" -o json
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--description` |   | Description for the cluster in Ankra (optional) |
+| `--environment` |   | Environment: production, staging, development, testing, local, or a name of your own (server default: development) |
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+| `--timeout` | `2m0s` | Maximum time to wait for the platform to register the cluster |
 
 ## ankra cluster control-plane-heal
 
@@ -3715,15 +3813,16 @@ ankra cluster digitalocean nodes restart <cluster_id|name> <node_id> [flags]
 
 ## ankra cluster digitalocean os-patches
 
-Unattended upgrades hold back the packages whose maintainer scripts restart
-networking in place; the rolling OS patch lane installs them instead, one
-host at a time, drained and returned to service before the next.
+On a host whose OS updates are automatic, unattended upgrades hold back the
+packages whose maintainer scripts restart networking in place; the rolling OS
+patch lane installs them instead, one host at a time, drained and returned to
+service before the next.
 
 ```text
 status       the policy, the newest run host by host, the last dry run
 plan         the dry run: what each host would install
 run          start the rolling patch (asks first)
-policy set   change the maintenance window and the opt-in
+policy set   change the maintenance window and the OS updates mode
 node-policy  write or remove the node OS update hold by hand
 ```
 
@@ -3734,7 +3833,7 @@ upgrades away from the packages that restart networking - on the nodes named
 with `--node`, on every node with `--all-nodes`, and on the bastion with
 `--include-bastion`. The rolling OS patch lane writes and lifts it on its own;
 this is the by-hand route. Writing it is refused unless the cluster's OS
-patch policy is enabled; `--revert` removes it and is always allowed.
+updates are automatic; `--revert` removes it and is always allowed.
 
 The command asks first (`--yes` skips, declining exits 4). Needs
 clusters.operate.
@@ -3795,9 +3894,21 @@ ankra cluster digitalocean os-patches policy get <cluster_id|name> [flags]
 ## ankra cluster digitalocean os-patches policy set
 
 Change the cluster's OS patch policy. Only the flags passed are changed.
-Turning the policy off also removes the node OS update hold from every host,
-and is refused while a run or a node OS policy operation is in flight.
-Needs clusters.write.
+
+`--enable` chooses the automatic OS updates mode for the cluster: Ankra starts
+the rolling run on its own inside the maintenance window, no sooner than
+`--cadence-days` after the last run. `--disable` chooses the advisory mode: the
+control planes, the bastion and every node group without a mode of its own
+become advisory, and Ankra starts no run on them on its own. `--disable` does
+not switch OS patching off: a node group set to automatic stays automatic and
+keeps its hold, the daily dry run goes on, and a person can still start a run
+with 'run'.
+
+Making hosts advisory removes the node OS update hold from them, so unattended
+upgrades install the held packages again. That change is refused while a run
+or a node OS policy operation is in flight. To clear the cluster's mode, or to
+give a node group a mode of its own, use 'ankra cluster os-updates set'. Needs
+clusters.write.
 
 ```bash
 ankra cluster hetzner os-patches policy set prod --enable --window-days sat,sun --window-start-hour 2 --window-duration-hours 4
@@ -3813,8 +3924,8 @@ ankra cluster digitalocean os-patches policy set <cluster_id|name> [flags]
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--cadence-days` | `0` | Days between scheduled runs |
-| `--disable` | `false` | Turn the rolling OS patch policy off |
-| `--enable` | `false` | Turn the rolling OS patch policy on |
+| `--disable` | `false` | Choose the advisory OS updates mode for the cluster (does not switch patching off) |
+| `--enable` | `false` | Choose the automatic OS updates mode for the cluster |
 | `--exclude-stateful-nodes` | `false` | Leave nodes running stateful workloads out |
 | `--include-stateful-nodes` | `false` | Patch nodes running stateful workloads |
 | `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
@@ -5162,7 +5273,10 @@ reordered  both list the same members in another order
 A value the platform does not show is printed as (masked): seeing values needs
 permission to reveal secrets on the cluster (kubernetes.secrets_reveal), and
 some files show no values to anyone. The platform lists at most 50 differences
-per file; the total is always given.
+per file in the preview; the total is always given. `--all` reads every recorded
+difference through snapshot-bound pages, with the same masking. It returns no
+partial output if the file, rules or reveal permission changes. `--all` structured
+output contains complete structural metadata, without either file's content.
 
 The path is the full repository path, as 'ankra cluster gitops preserved list'
 prints it. The cluster is the `--cluster` flag or the currently selected cluster.
@@ -5182,6 +5296,7 @@ ankra cluster gitops preserved show clusters/prod/prod.yaml --cluster prod -o js
 
 | Flag | Default | Description |
 |------|---------|-------------|
+| `--all` | `false` | Read every recorded structural difference; fail without partial output if the snapshot changes |
 | `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
 
 ## ankra cluster gitops status
@@ -5871,15 +5986,16 @@ ankra cluster hetzner nodes restart <cluster_id|name> <node_id> [flags]
 
 ## ankra cluster hetzner os-patches
 
-Unattended upgrades hold back the packages whose maintainer scripts restart
-networking in place; the rolling OS patch lane installs them instead, one
-host at a time, drained and returned to service before the next.
+On a host whose OS updates are automatic, unattended upgrades hold back the
+packages whose maintainer scripts restart networking in place; the rolling OS
+patch lane installs them instead, one host at a time, drained and returned to
+service before the next.
 
 ```text
 status       the policy, the newest run host by host, the last dry run
 plan         the dry run: what each host would install
 run          start the rolling patch (asks first)
-policy set   change the maintenance window and the opt-in
+policy set   change the maintenance window and the OS updates mode
 node-policy  write or remove the node OS update hold by hand
 ```
 
@@ -5890,7 +6006,7 @@ upgrades away from the packages that restart networking - on the nodes named
 with `--node`, on every node with `--all-nodes`, and on the bastion with
 `--include-bastion`. The rolling OS patch lane writes and lifts it on its own;
 this is the by-hand route. Writing it is refused unless the cluster's OS
-patch policy is enabled; `--revert` removes it and is always allowed.
+updates are automatic; `--revert` removes it and is always allowed.
 
 The command asks first (`--yes` skips, declining exits 4). Needs
 clusters.operate.
@@ -5951,9 +6067,21 @@ ankra cluster hetzner os-patches policy get <cluster_id|name> [flags]
 ## ankra cluster hetzner os-patches policy set
 
 Change the cluster's OS patch policy. Only the flags passed are changed.
-Turning the policy off also removes the node OS update hold from every host,
-and is refused while a run or a node OS policy operation is in flight.
-Needs clusters.write.
+
+`--enable` chooses the automatic OS updates mode for the cluster: Ankra starts
+the rolling run on its own inside the maintenance window, no sooner than
+`--cadence-days` after the last run. `--disable` chooses the advisory mode: the
+control planes, the bastion and every node group without a mode of its own
+become advisory, and Ankra starts no run on them on its own. `--disable` does
+not switch OS patching off: a node group set to automatic stays automatic and
+keeps its hold, the daily dry run goes on, and a person can still start a run
+with 'run'.
+
+Making hosts advisory removes the node OS update hold from them, so unattended
+upgrades install the held packages again. That change is refused while a run
+or a node OS policy operation is in flight. To clear the cluster's mode, or to
+give a node group a mode of its own, use 'ankra cluster os-updates set'. Needs
+clusters.write.
 
 ```bash
 ankra cluster hetzner os-patches policy set prod --enable --window-days sat,sun --window-start-hour 2 --window-duration-hours 4
@@ -5969,8 +6097,8 @@ ankra cluster hetzner os-patches policy set <cluster_id|name> [flags]
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--cadence-days` | `0` | Days between scheduled runs |
-| `--disable` | `false` | Turn the rolling OS patch policy off |
-| `--enable` | `false` | Turn the rolling OS patch policy on |
+| `--disable` | `false` | Choose the advisory OS updates mode for the cluster (does not switch patching off) |
+| `--enable` | `false` | Choose the automatic OS updates mode for the cluster |
 | `--exclude-stateful-nodes` | `false` | Leave nodes running stateful workloads out |
 | `--include-stateful-nodes` | `false` | Patch nodes running stateful workloads |
 | `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
@@ -7459,15 +7587,16 @@ ankra cluster morpheus nodes list <cluster_id|name> [flags]
 
 ## ankra cluster morpheus os-patches
 
-Unattended upgrades hold back the packages whose maintainer scripts restart
-networking in place; the rolling OS patch lane installs them instead, one
-host at a time, drained and returned to service before the next.
+On a host whose OS updates are automatic, unattended upgrades hold back the
+packages whose maintainer scripts restart networking in place; the rolling OS
+patch lane installs them instead, one host at a time, drained and returned to
+service before the next.
 
 ```text
 status       the policy, the newest run host by host, the last dry run
 plan         the dry run: what each host would install
 run          start the rolling patch (asks first)
-policy set   change the maintenance window and the opt-in
+policy set   change the maintenance window and the OS updates mode
 node-policy  write or remove the node OS update hold by hand
 ```
 
@@ -7478,7 +7607,7 @@ upgrades away from the packages that restart networking - on the nodes named
 with `--node`, on every node with `--all-nodes`, and on the bastion with
 `--include-bastion`. The rolling OS patch lane writes and lifts it on its own;
 this is the by-hand route. Writing it is refused unless the cluster's OS
-patch policy is enabled; `--revert` removes it and is always allowed.
+updates are automatic; `--revert` removes it and is always allowed.
 
 The command asks first (`--yes` skips, declining exits 4). Needs
 clusters.operate.
@@ -7562,7 +7691,14 @@ ankra cluster morpheus workers <cluster_id|name> [flags]
 
 ## ankra cluster move
 
-Move a cluster into another existing organisation.
+Move a cluster to another organisation (`--organisation`) or to another Ankra
+Cloud zone (`--zone`). The two destinations cannot be combined.
+
+Name the cluster as the argument or with `--cluster`. A move never falls back
+to the cluster selected with 'ankra cluster select': that selection is shared
+by every shell and agent session on the machine.
+
+Organisation move (`--organisation`)
 
 Only an administrator of BOTH the current organisation and the destination can
 move a cluster. The cluster keeps its id, agent, executions, resources, security
@@ -7579,12 +7715,39 @@ the move while operations are running on the cluster, while the cluster is a
 member of a cluster mesh, while it has DNS zones bound to the current
 organisation (a published cluster domain or custom DNS zones), for playground
 and sandbox clusters, and when the destination already has a cluster with the
-same name.
+same name. The destination is resolved among your organisations by id, slug
+or name.
 
-The destination is resolved among your organisations by id, slug or name.
-Name the cluster as the argument or with `--cluster`. A move never falls back
-to the cluster selected with 'ankra cluster select': that selection is shared
-by every shell and agent session on the machine.
+Zone move (`--zone`)
+
+A zone move carries an Ankra Cloud cluster to another zone in steps, and the
+step that moves traffic always waits for you:
+
+1. `--zone` &lt;zone&gt; `--plan` shows what the move would build and carry, and
+   writes nothing: the target cluster's shape, the stacks carried, the data
+   volumes copied with their sizes, what is not carried, and every public
+   hostname with how it is cut over.
+2. `--zone` &lt;zone&gt; starts the move. The platform builds a twin of the cluster
+   in the zone (or uses `--target-cluster`, an empty cluster that already
+   exists), copies the stacks and their data into it and leaves it in
+   standby: its writers are scaled to zero and its CronJobs suspended, so
+   nothing runs twice while the source still serves. The move then rests
+   at ready_for_cutover.
+3. `--cutover` turns the maintenance page on, freezes the source, takes the
+   final copy and switches traffic to the target. The move then soaks.
+4. While it soaks, `--rollback` sends traffic back to the source (writes made
+   on the target since the cutover are not copied back), and `--retire`
+   deprovisions the source, which cannot be undone.
+
+Every data copy the move takes goes through a backup vault. Each stack's
+vault defaults to the stack's backup policy vault, then the organisation's
+only ready vault; when the organisation has several ready vaults, name one
+with `--vault` (the plan shows each carried stack's vault and what chose it).
+
+`--status` shows the latest move and its steps. `--wait` follows the move until it
+rests (ready_for_cutover, soaking, rolled_back, retired or failed), up to
+`--timeout`. Starting a move, `--cutover`, `--rollback` and `--retire` ask for
+confirmation unless `--yes` is given.
 
 ```bash
 ankra cluster move <cluster_name> [flags]
@@ -7593,18 +7756,45 @@ ankra cluster move <cluster_name> [flags]
 **Examples**
 
 ```bash
+# Organisation move
 ankra cluster move edge-01 --organisation acme-prod
 ankra cluster move --cluster edge-01 --organisation 6f1c... --yes
-ankra cluster move edge-01 --organisation "Acme Prod" -o json
+
+# Zone move
+ankra cluster move avura-france --zone se-sto1 --plan
+ankra cluster move avura-france --zone se-sto1 --control-plane-count 3 --storage-tier standard --wait
+ankra cluster move avura-france --zone se-sto1 --target-cluster avura-stockholm
+ankra cluster move avura-france --zone se-sto1 --vault backups --plan
+ankra cluster move avura-france --status --wait
+ankra cluster move avura-france --cutover --wait
+ankra cluster move avura-france --rollback
+ankra cluster move avura-france --retire -o json
 ```
 
 **Flags**
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--organisation` |   | Destination organisation (id, slug or name); you must be an admin there (required) |
+| `--control-plane-count` | `0` | Control plane nodes of the target (default: derived from the source) |
+| `--control-plane-plan` |   | Server plan of the target's control plane nodes (default: derived from the source) |
+| `--cutover` | `false` | Cut the zone move over: maintenance page, final copy, traffic switch |
+| `--organisation` |   | Destination organisation (id, slug or name); you must be an admin there |
 | `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+| `--plan` | `false` | Show what the zone move would build, carry and cut over, and write nothing |
+| `--retire` | `false` | Retire the source of a soaking zone move: deprovisions it, cannot be undone |
+| `--rollback` | `false` | Roll a soaking zone move back: traffic returns to the source |
+| `--soak-days` | `0` | Days the move soaks after the cutover before the source may be retired (default: the platform's) |
+| `--status` | `false` | Show the cluster's latest zone move and its steps |
+| `--storage-tier` |   | Storage tier of the target's volumes (default: the zone's Ankra Storage tier for a local-NVMe source) |
+| `--target-cluster` |   | Move into this existing, empty cluster (name or id) instead of building one |
+| `--target-name` |   | Name of the cluster the move builds (default: &lt;cluster&gt;-&lt;zone&gt;) |
+| `--timeout` | `3h0m0s` | Maximum time to wait when `--wait` is set |
+| `--vault` |   | Backup vault (name or id) the move copies data through (default: the stack's backup policy vault, else the organisation's only ready vault) |
+| `--wait` | `false` | Wait for the operation to finish and report success or failure (default: submit and return immediately) |
+| `--worker-count` | `0` | Workers of the target (default: derived from the source) |
+| `--worker-plan` |   | Server plan of the target's workers (default: derived from the source) |
 | `-y`, `--yes` | `false` | Skip the confirmation prompt |
+| `--zone` |   | Destination Ankra Cloud zone: starts a zone move (with `--plan`, shows its plan) |
 
 ## ankra cluster node-group
 
@@ -8136,6 +8326,193 @@ ankra cluster operations steps <execution_id> [flags]
 | `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
 | `--results` | `false` | Also fetch and show each step's recorded job result (what the step created, deleted, skipped, or failed to reclaim) |
 
+## ankra cluster os-updates
+
+OS updates are automatic or advisory. The mode is set on the cluster and can
+be overridden on a node group; the control planes and the bastion follow the
+cluster.
+
+```text
+automatic  Ankra starts the rolling run on its own, inside the maintenance
+           window and at the cadence: one node at a time, drained first
+           (PodDisruptionBudgets honoured), updated, rebooted only when an
+           update asks for it, and back in service before the next. A
+           failed node stops the run.
+advisory   nothing is drained or rebooted on its own. The daily dry run
+           reports what is pending and how long security updates have
+           waited, and a person starts the same rolling run.
+```
+
+When nobody chose a mode, the cluster's environment decides: automatic for a
+cluster a person marked non-production, 14 days after the organisation was
+told; advisory for production and for a cluster whose environment nobody
+confirmed.
+
+```text
+get   the mode, why the cluster has it, the window and the last runs
+set   choose the mode of the cluster or of a node group, or change the window
+plan  the dry run: what each node would install; nothing changes
+run   start the rolling run (asks first)
+```
+
+These commands work on Hetzner, OVH, UpCloud, DigitalOcean, Scaleway, AWS and Ankra Cloud clusters; the provider is read from the cluster.
+
+Exit codes: 2 a bad flag or a cluster of another kind, 3 the cluster is not
+in the selected organisation, 4 the confirmation was declined, 5 `--timeout` ran
+out, 7 your role lacks the permission, 8 the platform refused (the window is
+closed, a run is in flight, a value is out of bounds) and nothing changed.
+
+## ankra cluster os-updates get
+
+Show the cluster's OS updates mode and why it has it: chosen by a person,
+decided by its environment, or waiting out the 14-day notice before it becomes
+automatic (with the date it does). Also the node groups with a mode of their
+own, the maintenance window, the security-lag verdict, the last dry run and
+the last run. Left out, the cluster is `--cluster` or the one 'ankra cluster
+select' saved. Needs clusters.read.
+
+```bash
+ankra cluster os-updates get [cluster_id|name] [flags]
+```
+
+**Examples**
+
+```bash
+ankra cluster os-updates get prod
+ankra cluster os-updates get prod -o json
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+
+## ankra cluster os-updates plan
+
+Run the dry run on every node and the bastion and show what each would
+install, how many of those are security updates, whether a reboot would
+follow, and the order 'run' would take. Nothing is installed, drained or
+rebooted. The platform waits about 40 seconds; a slower dry run keeps going,
+and 'get' shows its result once it finishes. Needs clusters.operate.
+
+```bash
+ankra cluster os-updates plan <cluster_id|name> [flags]
+```
+
+**Examples**
+
+```bash
+ankra cluster os-updates plan prod
+ankra cluster os-updates plan prod -o json
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+| `--timeout` | `4m0s` | Maximum time to wait for the dry run |
+
+## ankra cluster os-updates run
+
+Start the rolling run, whatever the cluster's mode: each node is drained
+(PodDisruptionBudgets honoured, never forced), updated, rebooted only when an
+update asks for it, and back in service before the next is touched; the
+bastion goes last. A failed node stops the run. Workloads move between nodes
+while it runs, so the command asks first (`--yes` skips, declining exits 4).
+
+A run starts inside the cluster's maintenance window. While the window is
+closed the command says when it next opens and starts nothing (exit 8); a
+cluster whose OS updates are automatic is then run in that window on its own.
+`--now` starts the run at once, outside the window. Nodes carrying
+single-replica stateful workloads follow the policy unless
+`--include-stateful-nodes` or `--exclude-stateful-nodes` says otherwise. Follow
+the run with 'get' or 'ankra cluster operations list'. Needs clusters.operate.
+
+```bash
+ankra cluster os-updates run <cluster_id|name> [flags]
+```
+
+**Examples**
+
+```bash
+ankra cluster os-updates run prod
+ankra cluster os-updates run staging --now --yes
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--exclude-bastion` | `false` | Leave the bastion out of this run |
+| `--exclude-stateful-nodes` | `false` | Leave nodes carrying single-replica stateful workloads out, whatever the policy says |
+| `--include-stateful-nodes` | `false` | Drain nodes carrying single-replica stateful workloads, whatever the policy says |
+| `--now` | `false` | Start at once, even though the maintenance window is closed |
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+| `--timeout` | `4m0s` | Maximum time to wait for the run to start |
+| `-y`, `--yes` | `false` | Skip the confirmation prompt |
+
+## ankra cluster os-updates set
+
+Choose how the cluster's nodes get their OS updates. Only what is passed
+changes.
+
+`--mode` alone sets the cluster's mode, which the control planes, the bastion
+and every node group without a mode of its own follow:
+
+```text
+automatic  Ankra starts the rolling run on its own inside the window
+advisory   nothing is drained or rebooted on its own; a person runs it
+default    let the cluster's environment decide again
+```
+
+With `--node-group`, `--mode` sets that node group's mode instead (repeat
+`--node-group` to set several to the same mode):
+
+```text
+automatic, advisory  the node group's own mode, whatever the cluster's
+inherit              follow the cluster again
+```
+
+A mode chosen here applies at once; choosing advisory before the date 'get'
+shows keeps a cluster in its notice period advisory. Making nodes advisory
+removes the node OS update hold from them, so the distribution's own updater
+installs the held packages again; that change is refused while a run is in
+flight. The window flags change when automatic runs may start. Needs
+clusters.write.
+
+```bash
+ankra cluster os-updates set <cluster_id|name> [flags]
+```
+
+**Examples**
+
+```bash
+ankra cluster os-updates set staging --mode automatic
+ankra cluster os-updates set prod --mode advisory
+ankra cluster os-updates set prod --node-group batch --mode automatic
+ankra cluster os-updates set prod --node-group batch --mode inherit
+ankra cluster os-updates set staging --mode default
+ankra cluster os-updates set staging --window-days sat,sun --window-start-hour 2 --window-duration-hours 4
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--cadence-days` | `0` | Fewest days between two automatic runs (1-90) |
+| `--exclude-stateful-nodes` | `false` | Runs leave nodes that carry single-replica stateful workloads out |
+| `--include-stateful-nodes` | `false` | Runs drain nodes that carry single-replica stateful workloads |
+| `--mode` |   | automatic, advisory or default for the cluster; automatic, advisory or inherit with `--node-group` |
+| `--node-group` | `[]` | Node group whose mode `--mode` sets (repeatable) |
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+| `--security-lag-days` | `0` | Days a held security update may wait before the cluster is reported lagging (1-90) |
+| `--timeout` | `4m0s` | Maximum time to wait for the change |
+| `--window-days` | `[]` | Days the maintenance window opens (mon,tue,wed,thu,fri,sat,sun) |
+| `--window-duration-hours` | `0` | How many hours the window stays open (1-12) |
+| `--window-start-hour` | `0` | Hour of the day (UTC, 0-23) the window opens |
+
 ## ankra cluster ovh
 
 Commands to create, deprovision, and scale OVH Cloud clusters.
@@ -8616,15 +8993,16 @@ ankra cluster ovh nodes restart <cluster_id|name> <node_id> [flags]
 
 ## ankra cluster ovh os-patches
 
-Unattended upgrades hold back the packages whose maintainer scripts restart
-networking in place; the rolling OS patch lane installs them instead, one
-host at a time, drained and returned to service before the next.
+On a host whose OS updates are automatic, unattended upgrades hold back the
+packages whose maintainer scripts restart networking in place; the rolling OS
+patch lane installs them instead, one host at a time, drained and returned to
+service before the next.
 
 ```text
 status       the policy, the newest run host by host, the last dry run
 plan         the dry run: what each host would install
 run          start the rolling patch (asks first)
-policy set   change the maintenance window and the opt-in
+policy set   change the maintenance window and the OS updates mode
 node-policy  write or remove the node OS update hold by hand
 ```
 
@@ -8635,7 +9013,7 @@ upgrades away from the packages that restart networking - on the nodes named
 with `--node`, on every node with `--all-nodes`, and on the bastion with
 `--include-bastion`. The rolling OS patch lane writes and lifts it on its own;
 this is the by-hand route. Writing it is refused unless the cluster's OS
-patch policy is enabled; `--revert` removes it and is always allowed.
+updates are automatic; `--revert` removes it and is always allowed.
 
 The command asks first (`--yes` skips, declining exits 4). Needs
 clusters.operate.
@@ -8696,9 +9074,21 @@ ankra cluster ovh os-patches policy get <cluster_id|name> [flags]
 ## ankra cluster ovh os-patches policy set
 
 Change the cluster's OS patch policy. Only the flags passed are changed.
-Turning the policy off also removes the node OS update hold from every host,
-and is refused while a run or a node OS policy operation is in flight.
-Needs clusters.write.
+
+`--enable` chooses the automatic OS updates mode for the cluster: Ankra starts
+the rolling run on its own inside the maintenance window, no sooner than
+`--cadence-days` after the last run. `--disable` chooses the advisory mode: the
+control planes, the bastion and every node group without a mode of its own
+become advisory, and Ankra starts no run on them on its own. `--disable` does
+not switch OS patching off: a node group set to automatic stays automatic and
+keeps its hold, the daily dry run goes on, and a person can still start a run
+with 'run'.
+
+Making hosts advisory removes the node OS update hold from them, so unattended
+upgrades install the held packages again. That change is refused while a run
+or a node OS policy operation is in flight. To clear the cluster's mode, or to
+give a node group a mode of its own, use 'ankra cluster os-updates set'. Needs
+clusters.write.
 
 ```bash
 ankra cluster hetzner os-patches policy set prod --enable --window-days sat,sun --window-start-hour 2 --window-duration-hours 4
@@ -8714,8 +9104,8 @@ ankra cluster ovh os-patches policy set <cluster_id|name> [flags]
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--cadence-days` | `0` | Days between scheduled runs |
-| `--disable` | `false` | Turn the rolling OS patch policy off |
-| `--enable` | `false` | Turn the rolling OS patch policy on |
+| `--disable` | `false` | Choose the advisory OS updates mode for the cluster (does not switch patching off) |
+| `--enable` | `false` | Choose the automatic OS updates mode for the cluster |
 | `--exclude-stateful-nodes` | `false` | Leave nodes running stateful workloads out |
 | `--include-stateful-nodes` | `false` | Patch nodes running stateful workloads |
 | `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
@@ -9468,15 +9858,16 @@ ankra cluster proxmox nodes restart <cluster_id|name> <node_id> [flags]
 
 ## ankra cluster proxmox os-patches
 
-Unattended upgrades hold back the packages whose maintainer scripts restart
-networking in place; the rolling OS patch lane installs them instead, one
-host at a time, drained and returned to service before the next.
+On a host whose OS updates are automatic, unattended upgrades hold back the
+packages whose maintainer scripts restart networking in place; the rolling OS
+patch lane installs them instead, one host at a time, drained and returned to
+service before the next.
 
 ```text
 status       the policy, the newest run host by host, the last dry run
 plan         the dry run: what each host would install
 run          start the rolling patch (asks first)
-policy set   change the maintenance window and the opt-in
+policy set   change the maintenance window and the OS updates mode
 node-policy  write or remove the node OS update hold by hand
 ```
 
@@ -9487,7 +9878,7 @@ upgrades away from the packages that restart networking - on the nodes named
 with `--node`, on every node with `--all-nodes`, and on the bastion with
 `--include-bastion`. The rolling OS patch lane writes and lifts it on its own;
 this is the by-hand route. Writing it is refused unless the cluster's OS
-patch policy is enabled; `--revert` removes it and is always allowed.
+updates are automatic; `--revert` removes it and is always allowed.
 
 The command asks first (`--yes` skips, declining exits 4). Needs
 clusters.operate.
@@ -10217,15 +10608,16 @@ ankra cluster scaleway nodes restart <cluster_id|name> <node_id> [flags]
 
 ## ankra cluster scaleway os-patches
 
-Unattended upgrades hold back the packages whose maintainer scripts restart
-networking in place; the rolling OS patch lane installs them instead, one
-host at a time, drained and returned to service before the next.
+On a host whose OS updates are automatic, unattended upgrades hold back the
+packages whose maintainer scripts restart networking in place; the rolling OS
+patch lane installs them instead, one host at a time, drained and returned to
+service before the next.
 
 ```text
 status       the policy, the newest run host by host, the last dry run
 plan         the dry run: what each host would install
 run          start the rolling patch (asks first)
-policy set   change the maintenance window and the opt-in
+policy set   change the maintenance window and the OS updates mode
 node-policy  write or remove the node OS update hold by hand
 ```
 
@@ -10269,9 +10661,21 @@ ankra cluster scaleway os-patches policy get <cluster_id|name> [flags]
 ## ankra cluster scaleway os-patches policy set
 
 Change the cluster's OS patch policy. Only the flags passed are changed.
-Turning the policy off also removes the node OS update hold from every host,
-and is refused while a run or a node OS policy operation is in flight.
-Needs clusters.write.
+
+`--enable` chooses the automatic OS updates mode for the cluster: Ankra starts
+the rolling run on its own inside the maintenance window, no sooner than
+`--cadence-days` after the last run. `--disable` chooses the advisory mode: the
+control planes, the bastion and every node group without a mode of its own
+become advisory, and Ankra starts no run on them on its own. `--disable` does
+not switch OS patching off: a node group set to automatic stays automatic and
+keeps its hold, the daily dry run goes on, and a person can still start a run
+with 'run'.
+
+Making hosts advisory removes the node OS update hold from them, so unattended
+upgrades install the held packages again. That change is refused while a run
+or a node OS policy operation is in flight. To clear the cluster's mode, or to
+give a node group a mode of its own, use 'ankra cluster os-updates set'. Needs
+clusters.write.
 
 ```bash
 ankra cluster hetzner os-patches policy set prod --enable --window-days sat,sun --window-start-hour 2 --window-duration-hours 4
@@ -10287,8 +10691,8 @@ ankra cluster scaleway os-patches policy set <cluster_id|name> [flags]
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--cadence-days` | `0` | Days between scheduled runs |
-| `--disable` | `false` | Turn the rolling OS patch policy off |
-| `--enable` | `false` | Turn the rolling OS patch policy on |
+| `--disable` | `false` | Choose the advisory OS updates mode for the cluster (does not switch patching off) |
+| `--enable` | `false` | Choose the automatic OS updates mode for the cluster |
 | `--exclude-stateful-nodes` | `false` | Leave nodes running stateful workloads out |
 | `--include-stateful-nodes` | `false` | Patch nodes running stateful workloads |
 | `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
@@ -11917,15 +12321,16 @@ ankra cluster upcloud nodes restart <cluster_id|name> <node_id> [flags]
 
 ## ankra cluster upcloud os-patches
 
-Unattended upgrades hold back the packages whose maintainer scripts restart
-networking in place; the rolling OS patch lane installs them instead, one
-host at a time, drained and returned to service before the next.
+On a host whose OS updates are automatic, unattended upgrades hold back the
+packages whose maintainer scripts restart networking in place; the rolling OS
+patch lane installs them instead, one host at a time, drained and returned to
+service before the next.
 
 ```text
 status       the policy, the newest run host by host, the last dry run
 plan         the dry run: what each host would install
 run          start the rolling patch (asks first)
-policy set   change the maintenance window and the opt-in
+policy set   change the maintenance window and the OS updates mode
 node-policy  write or remove the node OS update hold by hand
 ```
 
@@ -11936,7 +12341,7 @@ upgrades away from the packages that restart networking - on the nodes named
 with `--node`, on every node with `--all-nodes`, and on the bastion with
 `--include-bastion`. The rolling OS patch lane writes and lifts it on its own;
 this is the by-hand route. Writing it is refused unless the cluster's OS
-patch policy is enabled; `--revert` removes it and is always allowed.
+updates are automatic; `--revert` removes it and is always allowed.
 
 The command asks first (`--yes` skips, declining exits 4). Needs
 clusters.operate.
@@ -11997,9 +12402,21 @@ ankra cluster upcloud os-patches policy get <cluster_id|name> [flags]
 ## ankra cluster upcloud os-patches policy set
 
 Change the cluster's OS patch policy. Only the flags passed are changed.
-Turning the policy off also removes the node OS update hold from every host,
-and is refused while a run or a node OS policy operation is in flight.
-Needs clusters.write.
+
+`--enable` chooses the automatic OS updates mode for the cluster: Ankra starts
+the rolling run on its own inside the maintenance window, no sooner than
+`--cadence-days` after the last run. `--disable` chooses the advisory mode: the
+control planes, the bastion and every node group without a mode of its own
+become advisory, and Ankra starts no run on them on its own. `--disable` does
+not switch OS patching off: a node group set to automatic stays automatic and
+keeps its hold, the daily dry run goes on, and a person can still start a run
+with 'run'.
+
+Making hosts advisory removes the node OS update hold from them, so unattended
+upgrades install the held packages again. That change is refused while a run
+or a node OS policy operation is in flight. To clear the cluster's mode, or to
+give a node group a mode of its own, use 'ankra cluster os-updates set'. Needs
+clusters.write.
 
 ```bash
 ankra cluster hetzner os-patches policy set prod --enable --window-days sat,sun --window-start-hour 2 --window-duration-hours 4
@@ -12015,8 +12432,8 @@ ankra cluster upcloud os-patches policy set <cluster_id|name> [flags]
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--cadence-days` | `0` | Days between scheduled runs |
-| `--disable` | `false` | Turn the rolling OS patch policy off |
-| `--enable` | `false` | Turn the rolling OS patch policy on |
+| `--disable` | `false` | Choose the advisory OS updates mode for the cluster (does not switch patching off) |
+| `--enable` | `false` | Choose the automatic OS updates mode for the cluster |
 | `--exclude-stateful-nodes` | `false` | Leave nodes running stateful workloads out |
 | `--include-stateful-nodes` | `false` | Patch nodes running stateful workloads |
 | `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
