@@ -311,7 +311,7 @@ Variables are the plain-text configuration values stack definitions interpolate 
 | `set_alert_enabled` | `mcp:write` | No | Enable or mute one alert; muting keeps the firing history and settles its open incidents |
 | `delete_alert` | `mcp:write` | No | Permanently delete an alert definition, its rules and its firing history |
 | `query_prometheus` | `mcp:read` | Yes | PromQL instant query. Ankra built-in metrics answer first, then the cluster's connected Prometheus |
-| `query_prometheus_range` | `mcp:read` | Yes | PromQL range query over a time window, answered in the same order |
+| `query_prometheus_range` | `mcp:read` | Yes | PromQL range query over a time window, answered in the same order. `duration` and `step` take a duration such as `5m` or `3h20m` (units largest first, as Prometheus writes them) or a whole number of seconds such as `300` |
 | `list_alert_destinations` | `mcp:read` | No | The Slack / Teams / Discord / PagerDuty / webhook endpoints notifications deliver to (webhook URLs redacted to their host) |
 | `create_alert_destination` | `mcp:write` | No | Create a channel-based alert destination: a Slack channel the organisation's Ankra Slack app posts to, or a Microsoft Teams channel |
 | `list_notification_routes` | `mcp:read` | No | The rules that filter notifications by kind, severity, cluster, source, application and reference pattern onto destinations |
@@ -353,6 +353,8 @@ The CVE surface with CISA KEV and EPSS exploitation intelligence, the bill of ma
 | `get_security_finding` | `mcp:read` | No | One finding with its exploitation intelligence and every current occurrence |
 | `list_security_finding_occurrences` | `mcp:read` | No | Where one finding occurs: every cluster, workload, container and image, one row per occurrence, filtered by scan state (active or resolved) and cluster |
 | `get_security_advisory` | `mcp:read` | No | The platform's advisory for any CVE id: parsed NVD/OSV record, CISA guidance and your fleet exposure |
+| `find_image_declarations` | `mcp:read` | No | Where an image is declared in the stacks you can read: cluster and stack, the GitOps file and line where there is one, how each is changed, the running workloads no stack declares, and whether the search was complete |
+| `find_image_fix_candidates` | `mcp:read` | No | Which newer tag of a running image carries the fix for one CVE: the smallest step that fixes it and the newest release, each with its digest pin and a verdict (carries the fix, still affected, or not scanned, which is never read as fixed) |
 | `list_security_cluster_posture` | `mcp:read` | No | Per-cluster finding counts, known-exploited exposure and scanner freshness |
 | `list_security_workloads` | `mcp:read` | No | Workloads carrying findings, one row per container image with cluster, namespace, add-on attribution and actionable counts, with the findings filters |
 | `list_security_namespaces` | `mcp:read` | No | Namespaces of the fleet or of one cluster with scanned workloads, images, running pods, SBOM coverage and actionable findings |
@@ -415,7 +417,9 @@ Available while the organisation's backups feature is enabled; vault creation wi
 | `create_aws_cluster` | `mcp:write` | No | Create and provision a self-managed Kubernetes cluster on AWS EC2, in a VPC Ankra creates or one you adopt - runs the create preflight first |
 | `create_proxmox_cluster` | `mcp:write` | No | Create and provision a Kubernetes cluster on Proxmox VE |
 | `create_morpheus_cluster` | `mcp:write` | No | Create and provision a Kubernetes cluster on HPE Morpheus |
-| `list_cluster_nodes` | `mcp:read` | No | The provisioned VM nodes of a cluster, with live provider status |
+| `list_cluster_nodes` | `mcp:read` | No | The provisioned VM nodes of a cluster, with live provider status; deleted servers are left out unless `include_deleted` is set |
+| `get_cluster_machine_inventory` | `mcp:read` | No | Compare a cluster's server and bastion records with its provider and its Kubernetes nodes: each record reads `consistent`, `phantom` (the machine is gone), `gone_kept` (a stopped server whose machine is gone), `no_node` or `unknown`. Hetzner, UpCloud, DigitalOcean, AWS and Ankra Cloud |
+| `retire_gone_machine_rows` | `mcp:write` | No | Remove up to 20 server records whose machine the provider confirms is gone; any other answer leaves the record and says why. Never removes a running control plane or bastion |
 | `restart_node` | `mcp:write` | No | Restart one provisioned node - control plane, worker, or bastion |
 | `ssh_diagnose_node` | `mcp:read` | No | Diagnose a node at the OS level over SSH via the bastion |
 | `ssh_repair_node` | `mcp:write` | No | Repair a node's Kubernetes service unit through the node-recovery engine |
@@ -456,7 +460,8 @@ Day-2 operations for Ankra-provisioned clusters on every self-managed provider (
 | `start_cluster` | `mcp:write` | No | Start (re-provision) a stopped cluster, optionally control plane only |
 | `upgrade_preflight` | `mcp:read` | No | Check a Kubernetes version hop without changing anything: the hop plan per node, running operations, PodDisruptionBudgets, CloudNativePG settings, control-plane memory, restore points, control-plane reachability and the k3s address pins, each answered pass, warn, block or skipped |
 | `upgrade_cluster` | `mcp:write` | No | Upgrade the cluster's Kubernetes version. Runs the same preflight first and refuses on a block; never forces past a PodDisruptionBudget |
-| `delete_cluster` | `mcp:write` | No | Deprovision a cluster entirely; requires re-typing the cluster name to confirm |
+| `delete_cluster` | `mcp:write` | No | Deprovision a cluster entirely; requires re-typing the cluster name to confirm. Refuses an imported cluster |
+| `disconnect_cluster` | `mcp:write` | No | Disconnect an imported cluster: removes it from Ankra and revokes its agent, changes nothing inside the cluster, and works while the agent is offline; requires re-typing the cluster name to confirm |
 | `update_cluster` | `mcp:write` | No | Change a cluster's settings, today only its environment label |
 | `set_cluster_agent_auto_upgrade` | `mcp:write` | No | Turn automatic upgrades of the Ankra agent on a cluster on or off |
 | `get_cluster_gateway_api` | `mcp:read` | No | Where the Kubernetes Gateway API stands on a cluster Ankra built: whether it can be served, the recorded option, the phase from off to enabled, the platform's reading of the CRDs, and what the Traefik and cert-manager values would gain or contradict; a phase other than enabled is not a broken cluster |
@@ -513,8 +518,8 @@ Over MCP `watch_pipeline_run` waits for the run and returns it; in the Ankra cha
 | `run_pipeline` | `mcp:write` | No | Start a manual run of a connected repository's committed pipeline at a branch, tag or commit; it always runs the definition of record, and a dispatch identical to a queued one joins it (`already_queued`) |
 | `rerun_pipeline_run` | `mcp:write` | No | Re-run a pipeline run at the same commit: `failed_only` re-runs only the stages that failed, `full_run` runs every stage regardless of path filters; a run dispatched with its own spec also needs `pipelines.manage` |
 | `cancel_pipeline_run` | `mcp:write` | No | Cancel a run that has not concluded; a started run with finally stages runs them first, so cancel again with `force` to stop those too |
-| `get_merge_train` | `mcp:read` | No | A repository's merge train: whether it is on, `max_cars`, auto-admit, the queued pull requests with the run testing each, and the ones that recently left it with the reason |
-| `add_to_merge_train` | `mcp:write` | No | Put a pull request in its repository's merge train, which tests it on top of the ones ahead and merges it when green. Open to an organisation admin, the author or anyone with push access; refused to a service account and to an AI lane acting on its own |
+| `get_merge_train` | `mcp:read` | No | A repository's merge train: whether it is on, `max_cars`, auto-admit, the queued pull requests, each with its `place` (1 is the first car) and the run testing it, and the ones that recently left it with the reason |
+| `add_to_merge_train` | `mcp:write` | No | Put a pull request in its repository's merge train, which tests it on top of the ones ahead and merges it when green. Answers the `place` it took. Open to an organisation admin, the author or anyone with push access; refused to a service account and to an AI lane acting on its own |
 | `remove_from_merge_train` | `mcp:write` | No | Take a pull request out of the merge train by `entry_id` or `pull_request_number`; an entry being merged, or one that already left, is refused |
 | `list_pipeline_schedules` | `mcp:read` | No | A connected repository's cron schedules with timezone, ref, dispatch inputs, whether each is enabled, when it fires next and what it last did |
 | `create_pipeline_schedule` | `mcp:write` | No | Create a five-field cron schedule (UTC unless `timezone`) that starts a repository's pipeline at a ref with its manual inputs; refused for a repository connected for Workspaces only |
@@ -687,7 +692,7 @@ Scheduled stack protection, restore points and the runs behind them. Available w
 | `get_data_run` | `mcp:read` | No | One backup, restore or clone run with every attempt of every step, to explain a failure |
 | `protect_stack` | `mcp:write` | No | Turn on scheduled backup protection for a stack, written through GitOps |
 | `unprotect_stack` | `mcp:write` | No | Turn off scheduled backup protection for a stack while keeping existing restore points |
-| `get_application_backups` | `mcp:read` | No | An application's Backups section: whether it has a database, whether a deploy arms the database-backup default, and for each deployment its cluster, stack and backup posture (protection state, schedule, last restore point, why it is not protected); `ready_vault_count` with `ready_vault_known` says whether the organisation has a verified backup vault at all, and a deployment's restore points are read with `list_restore_points` on its cluster and stack (backups.read) |
+| `get_application_backups` | `mcp:read` | No | An application's Backups section: whether it has a database, whether a deploy arms the database-backup default, and for each deployment its cluster, stack and backup posture (protection state, schedule, last restore point, why it is not protected); each deployment's `keeping` is what its backups keep, as the application's Backups shows it: `keeps_days` and `keeps_everything` for the policy, `kept_count` and `oldest_kept_at` for what is kept now, and `protected_since` and `last_restore_test`. Read `keeping.state` first (`known`, `no_policy` or `unknown`): with `unknown` every fact is null, which never means none, and `keeping` is null until the deployment has a stack. `ready_vault_count` with `ready_vault_known` says whether the organisation has a verified backup vault at all, and a deployment's restore points are read with `list_restore_points` on its cluster and stack (backups.read) |
 | `set_application_database_backup` | `mcp:write` | No | Turn an application's database-backup default on or off: whether a deploy of it arms scheduled backups of its database; it changes what the next deploy does, not the protection of a stack already deployed (`protect_stack` and `unprotect_stack` do that) (backups.manage) |
 | `create_stack_restore_point` | `mcp:write` | No | Take a restore point of a stack now |
 | `restore_restore_point_in_place` | `mcp:write` | No | Replace a stack's current data with a restore point's data, confirmed by typing the stack's name |

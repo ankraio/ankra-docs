@@ -36,7 +36,7 @@ flowchart TB
 1. **Detect.** Ankra reads the files that name a stack: `package.json` (Next.js, Vite, React, Express, NestJS), `requirements.txt` or `pyproject.toml` (FastAPI, Django, Flask), `go.mod`, `Cargo.toml`, `pom.xml` or `build.gradle`, `Gemfile` (Rails), `composer.json` (Laravel) and `mix.exs`. Failing those it counts file types, and a root `index.html` with nothing else is a static site.
 2. **Dockerfile.** A Dockerfile you already have is adopted as it is. Otherwise Ankra generates one whose final stage applies OS package upgrades and runs as a non-root user, on a maintained toolchain release.
 3. **Components.** A monorepo gets one component per service. Ankra decides them in a fixed order: what `.ankra/ankra.yaml` declares (always wins), then what the repository already carries, then what the AI proposed, then what the tree implies. Names stay stable across re-runs, so stage names never shift under you.
-4. **Tailor.** An AI step adapts the standard pipeline to the repository, using the same render and validate tools you can call. With no AI available, rule-based templates produce the same shape.
+4. **Tailor.** An AI step adapts the standard pipeline to the repository, using the same render and validate tools you can call. With no AI available, or while [Stop all AI](/platform/ai-autonomy#stop-ankra-ai) is on, rule-based templates produce the same shape.
 5. **Record.** The pipeline is validated, planned, and stored as the **definition of record** before the pull request even opens.
 
 To read what was stored, open **Applications → &lt;your application&gt; → Pipelines → Configuration**: **Pipeline configuration** shows the definition, and **Validate pipeline** checks it. `ankra application pipeline definition get <application-id>` prints the same file.
@@ -90,6 +90,24 @@ sequenceDiagram
 - **When the setup pull request's own build or gate fails,** Ankra's AI commits a fix to the setup branch, so the pull request you review is one that passes.
 - **After a failed setup**, `ankra application retry <application-id>` runs it again.
 - **The Ankra proof check reads "Off: no staging cluster chosen"** when your organisation has not chosen a staging cluster. Ankra can run a setup there before you merge it: build the commit, deploy it, request its routes and tear it down. With no staging cluster nothing is run and no comment is posted. That says nothing about the setup. An administrator chooses a staging cluster under **Ankra AI → AI workspaces**.
+
+### When your repository already has manifests
+
+A setup never replaces a manifest your repository commits under `.ankra/manifests/`, whether it sits at the path Ankra would write or declares the same object under another filename. Your file stays exactly as committed and Ankra leaves its own version out of the pull request, so running a setup again cannot undo what you tuned by hand: environment variables, Secret references, resource limits, replicas or comments.
+
+Ankra changes one of your manifests only where the application would not run otherwise, and then changes only those lines:
+
+- **A container image that moved registries.** A container deployed at `<repository>:${{ ankra.image_tag }}` is pointed at the repository this application publishes to, when the build after the setup's pull request publishes there and nothing else deploys the old one. That means the old one is not another Ankra organisation's registry and, unless it is in this organisation's own registry, Ankra could read every workflow of your repository and none of them pushes to it.
+- **Database connection variables.** When a setup adds a database for the application, a Deployment that declares none of its connection variables gets them, where its container is laid out the way Ankra's own template writes it. A Deployment laid out another way is left as committed, and one that already declares a connection variable keeps reaching the database it names.
+
+The pull request names each moved image, and each file it adds variables to, under **Your own manifests**. When Ankra leaves an image where it is, the setup says why and, in most cases, what to change:
+
+- **The image is in another Ankra organisation's registry.** The repository is set up there too, and that organisation's application deploys the same manifest, so Ankra does not move it. This organisation cannot pull from that registry. Once the repository is no longer deployed from the other organisation, set the image to `<repository>:${{ ankra.image_tag }}`.
+- **A workflow of your repository publishes the image.** Which build the manifest deploys is yours to choose. To deploy Ankra's build, set the image to `<repository>:${{ ankra.image_tag }}`.
+- **The container runs an image Ankra does not build**, such as `ghcr.io/acme/shop:1.4.2`. To deploy Ankra's build, set the image to `<repository>:${{ ankra.image_tag }}`.
+- **Ankra could not read every workflow of your repository**, so it cannot tell whether one publishes the image. Run the setup again to retry the read, or set the image to `<repository>:${{ ankra.image_tag }}` yourself.
+- **The image line cannot be changed without rewriting the file**, such as a block or multi-line value. Set the image to `<repository>:${{ ankra.image_tag }}` yourself.
+- **Nothing publishes the new repository** after the setup's pull request, so moving the image would deploy an image no build produces.
 
 ### Dependency updates with Dependabot
 

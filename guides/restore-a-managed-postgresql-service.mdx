@@ -1,0 +1,182 @@
+---
+title: Restore a Managed PostgreSQL Service
+description: Create a new PostgreSQL service from the backups of another one, as of a moment you choose or the newest point its backups reach, check the data, then connect your applications to it.
+tag: "Closed Beta"
+---
+
+import { CliVersion } from "/snippets/cli-version.jsx";
+
+<Warning>
+**Closed beta.** Restoring a service is part of [Managed services](/concepts/managed-services), which is in closed beta and enabled per organisation on request. [Contact support](/platform/support) to have it turned on for your organisation.
+</Warning>
+
+Restoring a managed PostgreSQL service creates a **new** service from the backups of another one. You choose a moment, or leave it out to get the newest point the backups reach. The service you restore from is not changed, so you can check the restored data before any application uses it, and nothing is lost if the moment turns out to be the wrong one.
+
+There is no restore over a running service. To go back in time you create the restored service beside the original, move your applications to it, and delete the original when you no longer need it.
+
+---
+
+## Before you start
+
+- **The service you restore from has been backed up.** It is protected into a [backup vault](/guides/backups) and has at least one restore point with the status **Complete**. `ankra cluster stacks restore-points list <service>` lists them. The service itself can be deleted, or on a cluster that no longer exists: what matters is that its backups are still in the vault.
+- **The vault still exists**, and the new service backs up into the same one. A restored service reads the other service's backups with the access its own backups use, so you do not choose a vault: the plan names it as **Backup vault**.
+- **You set up `postgresql` version 1.10.0 or later.** Earlier versions of the package cannot start from a backup, and setup refuses them.
+- **The new service's cluster can run a new PostgreSQL service**: the [native deployment engine](/concepts/deployment-engines), a default StorageClass and Kubernetes 1.30 or later. It can be the cluster the original runs on, or another one.
+- **Your role allows it:**
+
+| Permission | Where |
+|------------|-------|
+| Everything [setting up a service](/guides/set-up-a-managed-service#before-you-start) needs | Your organisation and the new service's cluster |
+| `backups.operate` | Your organisation |
+| `clusters.read` | The cluster of the service you restore from |
+| `kubernetes.exec` | The new service's cluster, to look at the restored data in [Verify](#verify) |
+
+The built-in `owner`, `admin` and `operator` roles hold all of them. See [Roles and access](/guides/roles-and-access).
+
+---
+
+## Choose the moment
+
+Ankra accepts a moment it can confirm from the restore points it has: from a few minutes after the **oldest** kept restore point completed to the time the **newest** backup started. A daily schedule with seven days of retention gives you any moment in roughly the last week, up to the start of last night's backup.
+
+| You want | Do this |
+|----------|---------|
+| The newest data the backups hold | Leave the moment out |
+| A moment before the newest backup started | Name the moment |
+| A moment after the newest backup, such as ten minutes ago | Take a restore point of the service first, then name the moment |
+| A moment before the oldest kept backup | Not possible: those backups are no longer kept |
+
+Taking a restore point first works because a backup that completes proves the service's backups reach the time it started. It does not restart a database that already has a complete restore point:
+
+```bash
+ankra cluster stacks restore-points create orders-db --cluster my-cluster --wait
+```
+
+Leaving the moment out gives you everything that has reached the vault, and that trails the database by up to five minutes: PostgreSQL sends its log to the vault one segment at a time, when the segment is full or after five minutes. If the change you need was made in the last few minutes, take a restore point first.
+
+A service with a single restore point has no moment to name yet. Leave the moment out, or take a second restore point: a moment from five minutes after the first one completed can then be named.
+
+Write the moment in RFC 3339 with its time zone, for example `2026-11-18T09:30:00Z` or `2026-11-18T10:30:00+01:00`.
+
+---
+
+## Restore the service
+
+The portal has no restore action yet. Use the CLI or MCP.
+
+<Tabs>
+  <Tab title="CLI">
+    <CliVersion since="0.83.0" />
+
+    ```bash
+    ankra services setup orders-db-restored --package postgresql --cluster my-cluster \
+      --from orders-db --at 2026-11-18T09:30:00Z
+    ```
+
+    `--from` takes the name or id of the service to restore from. Leave `--at` out for the newest point its backups reach. Size the new service with `--param`, as for any setup: give it at least the storage the original uses.
+
+    A name can mean two services: after a service is retired and set up again under its name, the retired one's backups can still be restored for as long as they are kept. From CLI 0.84.0, `--from` then stops before anything is prepared and exits 2 with `2 services are named "orders-db"`, followed by each service's id, its cluster and whether it is active or when it was retired. Pass the id of the one you mean. Earlier versions took the active service without saying so.
+
+    The command prints the plan before anything is set up. Check the **Created from** line: it names the service, the moment, and what the platform will do. Then answer the question, or pass `--yes`. `--review-only` stops after the plan and prints the command that confirms it.
+
+    `--consumer` is not accepted with `--from`: a restored service starts with no applications.
+  </Tab>
+  <Tab title="MCP">
+    `prepare_service_setup` with `source_instance_id`, and `source_moment` for a moment, returns the plan. Leave `consumer_ids` empty. `confirm_service_setup` confirms it, and `get_service_instance` follows the installation.
+  </Tab>
+</Tabs>
+
+The new service is installed like any other. Within a few minutes Ankra gives it the storage access its own backups use, which is what the recovery reads with, and then PostgreSQL replays the backups up to the moment. How long that takes depends on the size of the database and on how much was written between the backup and the moment.
+
+Once the recovery is complete and the database is up, Ankra switches on the new service's own backups. That restarts the database once, so the new service is unavailable for about half a minute shortly after it first becomes ready. Ankra does this by itself only in the first hour after setup. After a recovery that took longer, take a restore point of the new service once it is ready, which switches its backups on:
+
+```bash
+ankra cluster stacks restore-points create <new-service> --cluster <cluster>
+```
+
+---
+
+## Verify
+
+Follow the service until its readiness reads `ready`:
+
+```bash
+ankra services get orders-db-restored
+```
+
+Then look at the data before you connect anything to it. The service's namespace has its name, its database is `app`, and a new service's first pod is `postgresql-1`:
+
+```bash
+ankra cluster get pods -n orders-db-restored --cluster my-cluster
+ankra cluster exec postgresql-1 -n orders-db-restored --cluster my-cluster -c postgres -- \
+  psql -U postgres -d app -Atc 'select count(*) from orders'
+```
+
+If the data is not what you wanted, [delete the restored service](/guides/delete-a-managed-service) and restore again with another moment. The original is untouched either way.
+
+---
+
+## Connect your applications
+
+Bind the application's namespace, then connect it to the restored service:
+
+```bash
+ankra services consumers bind --application my-app --cluster my-cluster --namespace my-app
+ankra services connect orders-db-restored --consumer <consumer-id>
+```
+
+`consumers bind` prints the consumer id. A namespace that is already bound says so and prints its id. The application receives the connection [the way every connected application does](/guides/connect-to-a-managed-service#how-your-application-receives-the-connection).
+
+The application's namespace must be on the restored service's cluster. An application on another cluster is not connected for you: give it the values as in [Connect from another cluster](/guides/connect-to-a-managed-service#connect-from-another-cluster).
+
+An application connected to both services keeps reading `DATABASE_URL` from the one it already used until you [disconnect it from the original](/guides/disconnect-an-application-from-a-managed-service). Until then it reaches the restored service under that service's [prefixed names](/guides/connect-to-a-managed-service#variable-names) only, and the disconnect asks you which service gives `DATABASE_URL` from then on: the name never moves by itself. When no application uses the original any more, [delete it](/guides/delete-a-managed-service).
+
+---
+
+## What the restored service is
+
+- **A service of its own.** It has its own name, namespace, address and owner password. The connection your applications receive from it is new, including its CA.
+- **The same roles as the original had.** Roles that existed in the original's database at that moment are restored with the passwords they had then. The plan says so before you confirm.
+- **Backed up separately.** Its backups start again in a location of its own, in the same vault. They do not continue the original's.
+- **Sized by you.** Its storage, memory and number of instances come from the setup, not from the original.
+
+---
+
+## Troubleshooting
+
+Setup refuses before anything is installed, and says why. Most refusals name the service you restore from.
+
+| What you see | Cause | Remedy |
+|--------------|-------|--------|
+| `has never been backed up, so it has no archive to create a service from.` | No restore point of the service was ever taken: it was never protected, or its first backup has not run yet | Take a restore point of the service if it is protected, or [protect it](/guides/backups). Moments before that first restore point cannot be restored |
+| `has no completed backup in its archive yet, so nothing can be restored from it.` | No restore point of the service has completed, or every one has expired or been deleted | Take a restore point of the service and try again once it reads **Complete** |
+| `The backup vault that holds the archive of the service` ... `no longer exists` | The vault was deleted | The backups cannot be read through Ankra any more |
+| `Ankra could not read the backups of the service` | A restore point of the service does not read as Ankra expects, so Ankra will not guess where the backups are | Nothing was changed. Take a new restore point and try again, or [contact support](/platform/support) |
+| `is in the future.` | The moment has not happened yet | Check the time zone of the moment |
+| `is before the first moment Ankra can confirm` | The moment is older than the oldest restore point still kept, or within a few minutes of it | Choose a moment in the window the message gives, or leave the moment out |
+| `is before the first moment Ankra can confirm` ... `so no moment can be named for` | The service has one restore point, or its restore points were taken within a few minutes of each other, so there is no window to choose a moment from yet | Take a restore point of the service, then choose a moment between the first moment the message gives and that restore point. Or leave the moment out |
+| `is after the last moment Ankra can confirm` | The moment is later than the start of the newest backup | Take a restore point of the service, then try again. If the service no longer runs, leave the moment out |
+| `Ankra could not read the recovery window` | None of the restore points says when its backup ran, or the cluster's clock is far from the right time | Leave the moment out, or take a restore point of the service and try again. If it is refused again, [contact support](/platform/support) |
+| `This version of the PostgreSQL package cannot create a service from another service's archive.` | You named a `postgresql` version before 1.10.0 | Set up `postgresql` 1.10.0 or later |
+| `Only a PostgreSQL service can be created from another service's archive.` or `is not a PostgreSQL service` | The package you set up, or the service you restore from, is not PostgreSQL | Only a PostgreSQL service restores into a PostgreSQL service |
+| `is not a verified backup vault of this organisation` | The vault that holds the backups is registered but its last check failed | Run `ankra backup vaults verify <vault>`, then set the service up again |
+| `This service would be set up without backups of its own` | The new service would be installed without backups, for example on a playground cluster. The message says why | A restored service reads the backups with the access its own backups use, so it cannot be set up without them. Restore onto a cluster where a PostgreSQL service is backed up |
+| `is in a backup vault of another project, so a service cannot be created from it in this project.` | The vault that holds the backups belongs to another project than the one you are working in | Move the vault into this project, or make it organisation-wide, from the vault's settings. Then run the setup again. See [Projects](/concepts/projects) |
+| `A service can only be created from an archive in the vault its own backups go to.` | `--backup-vault` named another vault than the one that holds the backups. Or you named none, and the organisation's only verified vault is another one, because the vault that holds the backups failed its last check | Leave `--backup-vault` out. If you already did, run `ankra backup vaults verify <vault>` on the vault that holds the backups, then set the service up again |
+| `This organisation has no verified backup vault named` | `--backup-vault` named a vault that does not exist, has not passed its check, or belongs to another project than the one you are working in | Leave `--backup-vault` out: the new service is backed up into the vault that holds the backups |
+| The service is not `ready` after ten minutes, and `ankra cluster get events -n <service> --cluster <cluster>` shows `secret "backup-vault-credentials-..." not found` | The recovery reads the backups with the access the new service's own backups use, and Ankra gives it that access within a few minutes of setup. Here that did not happen, as for a service restored before 14:00 UTC on 20 November 2026 | Run `ankra cluster stacks protect <service> --vault <vault>` with the vault that holds the backups. The recovery starts within a minute |
+| `changed after this service was reviewed` | Between the review and the installation, the service's backups moved to another vault or location | Run the setup again |
+| `The service to create this one from was not found.` | The service is not in your organisation, its cluster is in another project than the one you are working in, or your role cannot read its cluster | Check the name or id with `ankra services list --include-released`, and that you are working in the project of the service's cluster |
+
+---
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Backups and restore points" icon="vault" href="/guides/backups">
+    Protect a Stack, take restore points and read what they hold.
+  </Card>
+  <Card title="Connect to a managed service" icon="plug" href="/guides/connect-to-a-managed-service">
+    How an application receives a service's connection.
+  </Card>
+</CardGroup>
