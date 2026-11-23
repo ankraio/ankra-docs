@@ -1531,7 +1531,7 @@ with 'run'.
 Making hosts advisory removes the node OS update hold from them, so unattended
 upgrades install the held packages again. That change is refused while a run
 or a node OS policy operation is in flight. To clear the cluster's mode, or to
-give a node group a mode of its own, use the API or Ankra's AI. Needs
+give a node group a mode of its own, use 'ankra cluster os-updates set'. Needs
 clusters.write.
 
 ```bash
@@ -2469,7 +2469,7 @@ with 'run'.
 Making hosts advisory removes the node OS update hold from them, so unattended
 upgrades install the held packages again. That change is refused while a run
 or a node OS policy operation is in flight. To clear the cluster's mode, or to
-give a node group a mode of its own, use the API or Ankra's AI. Needs
+give a node group a mode of its own, use 'ankra cluster os-updates set'. Needs
 clusters.write.
 
 ```bash
@@ -3907,7 +3907,7 @@ with 'run'.
 Making hosts advisory removes the node OS update hold from them, so unattended
 upgrades install the held packages again. That change is refused while a run
 or a node OS policy operation is in flight. To clear the cluster's mode, or to
-give a node group a mode of its own, use the API or Ankra's AI. Needs
+give a node group a mode of its own, use 'ankra cluster os-updates set'. Needs
 clusters.write.
 
 ```bash
@@ -6080,7 +6080,7 @@ with 'run'.
 Making hosts advisory removes the node OS update hold from them, so unattended
 upgrades install the held packages again. That change is refused while a run
 or a node OS policy operation is in flight. To clear the cluster's mode, or to
-give a node group a mode of its own, use the API or Ankra's AI. Needs
+give a node group a mode of its own, use 'ankra cluster os-updates set'. Needs
 clusters.write.
 
 ```bash
@@ -7691,7 +7691,14 @@ ankra cluster morpheus workers <cluster_id|name> [flags]
 
 ## ankra cluster move
 
-Move a cluster into another existing organisation.
+Move a cluster to another organisation (`--organisation`) or to another Ankra
+Cloud zone (`--zone`). The two destinations cannot be combined.
+
+Name the cluster as the argument or with `--cluster`. A move never falls back
+to the cluster selected with 'ankra cluster select': that selection is shared
+by every shell and agent session on the machine.
+
+Organisation move (`--organisation`)
 
 Only an administrator of BOTH the current organisation and the destination can
 move a cluster. The cluster keeps its id, agent, executions, resources, security
@@ -7708,12 +7715,39 @@ the move while operations are running on the cluster, while the cluster is a
 member of a cluster mesh, while it has DNS zones bound to the current
 organisation (a published cluster domain or custom DNS zones), for playground
 and sandbox clusters, and when the destination already has a cluster with the
-same name.
+same name. The destination is resolved among your organisations by id, slug
+or name.
 
-The destination is resolved among your organisations by id, slug or name.
-Name the cluster as the argument or with `--cluster`. A move never falls back
-to the cluster selected with 'ankra cluster select': that selection is shared
-by every shell and agent session on the machine.
+Zone move (`--zone`)
+
+A zone move carries an Ankra Cloud cluster to another zone in steps, and the
+step that moves traffic always waits for you:
+
+1. `--zone` &lt;zone&gt; `--plan` shows what the move would build and carry, and
+   writes nothing: the target cluster's shape, the stacks carried, the data
+   volumes copied with their sizes, what is not carried, and every public
+   hostname with how it is cut over.
+2. `--zone` &lt;zone&gt; starts the move. The platform builds a twin of the cluster
+   in the zone (or uses `--target-cluster`, an empty cluster that already
+   exists), copies the stacks and their data into it and leaves it in
+   standby: its writers are scaled to zero and its CronJobs suspended, so
+   nothing runs twice while the source still serves. The move then rests
+   at ready_for_cutover.
+3. `--cutover` turns the maintenance page on, freezes the source, takes the
+   final copy and switches traffic to the target. The move then soaks.
+4. While it soaks, `--rollback` sends traffic back to the source (writes made
+   on the target since the cutover are not copied back), and `--retire`
+   deprovisions the source, which cannot be undone.
+
+Every data copy the move takes goes through a backup vault. Each stack's
+vault defaults to the stack's backup policy vault, then the organisation's
+only ready vault; when the organisation has several ready vaults, name one
+with `--vault` (the plan shows each carried stack's vault and what chose it).
+
+`--status` shows the latest move and its steps. `--wait` follows the move until it
+rests (ready_for_cutover, soaking, rolled_back, retired or failed), up to
+`--timeout`. Starting a move, `--cutover`, `--rollback` and `--retire` ask for
+confirmation unless `--yes` is given.
 
 ```bash
 ankra cluster move <cluster_name> [flags]
@@ -7722,18 +7756,45 @@ ankra cluster move <cluster_name> [flags]
 **Examples**
 
 ```bash
+# Organisation move
 ankra cluster move edge-01 --organisation acme-prod
 ankra cluster move --cluster edge-01 --organisation 6f1c... --yes
-ankra cluster move edge-01 --organisation "Acme Prod" -o json
+
+# Zone move
+ankra cluster move avura-france --zone se-sto1 --plan
+ankra cluster move avura-france --zone se-sto1 --control-plane-count 3 --storage-tier standard --wait
+ankra cluster move avura-france --zone se-sto1 --target-cluster avura-stockholm
+ankra cluster move avura-france --zone se-sto1 --vault backups --plan
+ankra cluster move avura-france --status --wait
+ankra cluster move avura-france --cutover --wait
+ankra cluster move avura-france --rollback
+ankra cluster move avura-france --retire -o json
 ```
 
 **Flags**
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--organisation` |   | Destination organisation (id, slug or name); you must be an admin there (required) |
+| `--control-plane-count` | `0` | Control plane nodes of the target (default: derived from the source) |
+| `--control-plane-plan` |   | Server plan of the target's control plane nodes (default: derived from the source) |
+| `--cutover` | `false` | Cut the zone move over: maintenance page, final copy, traffic switch |
+| `--organisation` |   | Destination organisation (id, slug or name); you must be an admin there |
 | `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+| `--plan` | `false` | Show what the zone move would build, carry and cut over, and write nothing |
+| `--retire` | `false` | Retire the source of a soaking zone move: deprovisions it, cannot be undone |
+| `--rollback` | `false` | Roll a soaking zone move back: traffic returns to the source |
+| `--soak-days` | `0` | Days the move soaks after the cutover before the source may be retired (default: the platform's) |
+| `--status` | `false` | Show the cluster's latest zone move and its steps |
+| `--storage-tier` |   | Storage tier of the target's volumes (default: the zone's Ankra Storage tier for a local-NVMe source) |
+| `--target-cluster` |   | Move into this existing, empty cluster (name or id) instead of building one |
+| `--target-name` |   | Name of the cluster the move builds (default: &lt;cluster&gt;-&lt;zone&gt;) |
+| `--timeout` | `3h0m0s` | Maximum time to wait when `--wait` is set |
+| `--vault` |   | Backup vault (name or id) the move copies data through (default: the stack's backup policy vault, else the organisation's only ready vault) |
+| `--wait` | `false` | Wait for the operation to finish and report success or failure (default: submit and return immediately) |
+| `--worker-count` | `0` | Workers of the target (default: derived from the source) |
+| `--worker-plan` |   | Server plan of the target's workers (default: derived from the source) |
 | `-y`, `--yes` | `false` | Skip the confirmation prompt |
+| `--zone` |   | Destination Ankra Cloud zone: starts a zone move (with `--plan`, shows its plan) |
 
 ## ankra cluster node-group
 
@@ -8264,6 +8325,193 @@ ankra cluster operations steps <execution_id> [flags]
 |------|---------|-------------|
 | `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
 | `--results` | `false` | Also fetch and show each step's recorded job result (what the step created, deleted, skipped, or failed to reclaim) |
+
+## ankra cluster os-updates
+
+OS updates are automatic or advisory. The mode is set on the cluster and can
+be overridden on a node group; the control planes and the bastion follow the
+cluster.
+
+```text
+automatic  Ankra starts the rolling run on its own, inside the maintenance
+           window and at the cadence: one node at a time, drained first
+           (PodDisruptionBudgets honoured), updated, rebooted only when an
+           update asks for it, and back in service before the next. A
+           failed node stops the run.
+advisory   nothing is drained or rebooted on its own. The daily dry run
+           reports what is pending and how long security updates have
+           waited, and a person starts the same rolling run.
+```
+
+When nobody chose a mode, the cluster's environment decides: automatic for a
+cluster a person marked non-production, 14 days after the organisation was
+told; advisory for production and for a cluster whose environment nobody
+confirmed.
+
+```text
+get   the mode, why the cluster has it, the window and the last runs
+set   choose the mode of the cluster or of a node group, or change the window
+plan  the dry run: what each node would install; nothing changes
+run   start the rolling run (asks first)
+```
+
+These commands work on Hetzner, OVH, UpCloud, DigitalOcean, Scaleway, AWS and Ankra Cloud clusters; the provider is read from the cluster.
+
+Exit codes: 2 a bad flag or a cluster of another kind, 3 the cluster is not
+in the selected organisation, 4 the confirmation was declined, 5 `--timeout` ran
+out, 7 your role lacks the permission, 8 the platform refused (the window is
+closed, a run is in flight, a value is out of bounds) and nothing changed.
+
+## ankra cluster os-updates get
+
+Show the cluster's OS updates mode and why it has it: chosen by a person,
+decided by its environment, or waiting out the 14-day notice before it becomes
+automatic (with the date it does). Also the node groups with a mode of their
+own, the maintenance window, the security-lag verdict, the last dry run and
+the last run. Left out, the cluster is `--cluster` or the one 'ankra cluster
+select' saved. Needs clusters.read.
+
+```bash
+ankra cluster os-updates get [cluster_id|name] [flags]
+```
+
+**Examples**
+
+```bash
+ankra cluster os-updates get prod
+ankra cluster os-updates get prod -o json
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+
+## ankra cluster os-updates plan
+
+Run the dry run on every node and the bastion and show what each would
+install, how many of those are security updates, whether a reboot would
+follow, and the order 'run' would take. Nothing is installed, drained or
+rebooted. The platform waits about 40 seconds; a slower dry run keeps going,
+and 'get' shows its result once it finishes. Needs clusters.operate.
+
+```bash
+ankra cluster os-updates plan <cluster_id|name> [flags]
+```
+
+**Examples**
+
+```bash
+ankra cluster os-updates plan prod
+ankra cluster os-updates plan prod -o json
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+| `--timeout` | `4m0s` | Maximum time to wait for the dry run |
+
+## ankra cluster os-updates run
+
+Start the rolling run, whatever the cluster's mode: each node is drained
+(PodDisruptionBudgets honoured, never forced), updated, rebooted only when an
+update asks for it, and back in service before the next is touched; the
+bastion goes last. A failed node stops the run. Workloads move between nodes
+while it runs, so the command asks first (`--yes` skips, declining exits 4).
+
+A run starts inside the cluster's maintenance window. While the window is
+closed the command says when it next opens and starts nothing (exit 8); a
+cluster whose OS updates are automatic is then run in that window on its own.
+`--now` starts the run at once, outside the window. Nodes carrying
+single-replica stateful workloads follow the policy unless
+`--include-stateful-nodes` or `--exclude-stateful-nodes` says otherwise. Follow
+the run with 'get' or 'ankra cluster operations list'. Needs clusters.operate.
+
+```bash
+ankra cluster os-updates run <cluster_id|name> [flags]
+```
+
+**Examples**
+
+```bash
+ankra cluster os-updates run prod
+ankra cluster os-updates run staging --now --yes
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--exclude-bastion` | `false` | Leave the bastion out of this run |
+| `--exclude-stateful-nodes` | `false` | Leave nodes carrying single-replica stateful workloads out, whatever the policy says |
+| `--include-stateful-nodes` | `false` | Drain nodes carrying single-replica stateful workloads, whatever the policy says |
+| `--now` | `false` | Start at once, even though the maintenance window is closed |
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+| `--timeout` | `4m0s` | Maximum time to wait for the run to start |
+| `-y`, `--yes` | `false` | Skip the confirmation prompt |
+
+## ankra cluster os-updates set
+
+Choose how the cluster's nodes get their OS updates. Only what is passed
+changes.
+
+`--mode` alone sets the cluster's mode, which the control planes, the bastion
+and every node group without a mode of its own follow:
+
+```text
+automatic  Ankra starts the rolling run on its own inside the window
+advisory   nothing is drained or rebooted on its own; a person runs it
+default    let the cluster's environment decide again
+```
+
+With `--node-group`, `--mode` sets that node group's mode instead (repeat
+`--node-group` to set several to the same mode):
+
+```text
+automatic, advisory  the node group's own mode, whatever the cluster's
+inherit              follow the cluster again
+```
+
+A mode chosen here applies at once; choosing advisory before the date 'get'
+shows keeps a cluster in its notice period advisory. Making nodes advisory
+removes the node OS update hold from them, so the distribution's own updater
+installs the held packages again; that change is refused while a run is in
+flight. The window flags change when automatic runs may start. Needs
+clusters.write.
+
+```bash
+ankra cluster os-updates set <cluster_id|name> [flags]
+```
+
+**Examples**
+
+```bash
+ankra cluster os-updates set staging --mode automatic
+ankra cluster os-updates set prod --mode advisory
+ankra cluster os-updates set prod --node-group batch --mode automatic
+ankra cluster os-updates set prod --node-group batch --mode inherit
+ankra cluster os-updates set staging --mode default
+ankra cluster os-updates set staging --window-days sat,sun --window-start-hour 2 --window-duration-hours 4
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--cadence-days` | `0` | Fewest days between two automatic runs (1-90) |
+| `--exclude-stateful-nodes` | `false` | Runs leave nodes that carry single-replica stateful workloads out |
+| `--include-stateful-nodes` | `false` | Runs drain nodes that carry single-replica stateful workloads |
+| `--mode` |   | automatic, advisory or default for the cluster; automatic, advisory or inherit with `--node-group` |
+| `--node-group` | `[]` | Node group whose mode `--mode` sets (repeatable) |
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
+| `--security-lag-days` | `0` | Days a held security update may wait before the cluster is reported lagging (1-90) |
+| `--timeout` | `4m0s` | Maximum time to wait for the change |
+| `--window-days` | `[]` | Days the maintenance window opens (mon,tue,wed,thu,fri,sat,sun) |
+| `--window-duration-hours` | `0` | How many hours the window stays open (1-12) |
+| `--window-start-hour` | `0` | Hour of the day (UTC, 0-23) the window opens |
 
 ## ankra cluster ovh
 
@@ -8839,7 +9087,7 @@ with 'run'.
 Making hosts advisory removes the node OS update hold from them, so unattended
 upgrades install the held packages again. That change is refused while a run
 or a node OS policy operation is in flight. To clear the cluster's mode, or to
-give a node group a mode of its own, use the API or Ankra's AI. Needs
+give a node group a mode of its own, use 'ankra cluster os-updates set'. Needs
 clusters.write.
 
 ```bash
@@ -10426,7 +10674,7 @@ with 'run'.
 Making hosts advisory removes the node OS update hold from them, so unattended
 upgrades install the held packages again. That change is refused while a run
 or a node OS policy operation is in flight. To clear the cluster's mode, or to
-give a node group a mode of its own, use the API or Ankra's AI. Needs
+give a node group a mode of its own, use 'ankra cluster os-updates set'. Needs
 clusters.write.
 
 ```bash
@@ -12167,7 +12415,7 @@ with 'run'.
 Making hosts advisory removes the node OS update hold from them, so unattended
 upgrades install the held packages again. That change is refused while a run
 or a node OS policy operation is in flight. To clear the cluster's mode, or to
-give a node group a mode of its own, use the API or Ankra's AI. Needs
+give a node group a mode of its own, use 'ankra cluster os-updates set'. Needs
 clusters.write.
 
 ```bash
