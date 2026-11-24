@@ -143,7 +143,8 @@ The chart enforces non-root defaults matching the image's `ankra` user (UID/GID 
 
 | Value | Default | Description |
 |-------|---------|-------------|
-| `node_selector` / `tolerations` / `affinity` / `topologySpreadConstraints` | empty | Standard scheduling controls |
+| `node_selector` / `tolerations` / `topologySpreadConstraints` | empty | Standard scheduling controls |
+| `affinity` | prefers nodes labelled `ankra.io/egress=direct`, then nodes that are not control planes | See [Where the agent runs](#where-the-agent-runs) |
 | `service_account.name` | `ankra-agent-sa` | Service account name |
 | `service_account.annotations` | `{}` | Service account annotations (e.g. IRSA) |
 | `service.type` / `service.port` | `ClusterIP` / `8080` | Agent HTTP service |
@@ -151,6 +152,29 @@ The chart enforces non-root defaults matching the image's `ankra` user (UID/GID 
 | `service.annotations` | `{}` | Annotations on the agent's Service |
 | `pod_annotations` | `{}` | Extra pod annotations |
 | `log_level` | `INFO` | `DEBUG`, `INFO`, `WARNING` or `ERROR`, in any case. `WARN` is read as `WARNING`, `CRITICAL` and `FATAL` as `ERROR`; anything else falls back to `INFO` |
+
+### Where the agent runs
+
+The chart's default `affinity` carries two preferences:
+
+| The agent prefers | Weight | Since |
+|-------------------|--------|-------|
+| Nodes labelled `ankra.io/egress=direct` | 100 | agent 2.1.1356 |
+| Nodes without the `node-role.kubernetes.io/control-plane` label | 50 | agent 2.1.1354 |
+
+**Nodes with their own way out.** On many clusters most nodes reach the internet through one NAT or managed gateway, such as an OVHcloud gateway. When that gateway fails, the agent loses its connection to Ankra, even though the nodes with their own public IP keep working. Label those nodes and the agent prefers them:
+
+```bash
+ankra cluster patch node db-a-0 db-b-0 --patch '{"metadata":{"labels":{"ankra.io/egress":"direct"}}}'
+```
+
+Label a node only when its traffic really leaves through its own public IP. Prefer workers: a labelled control plane outranks every unlabelled worker. Labelling every node gains nothing, because the preference only counts when some nodes have the label and others do not.
+
+**Not on a small control plane.** On a cluster with workers, the agent runs on a worker that has room, not on a small control-plane node where Kubernetes can evict it when that node runs low on memory. On a cluster Ankra builds, Ankra installs the agent with a toleration for the control-plane taint, so it can still run on a control plane when no worker can take it.
+
+Both are preferences, not requirements: when no preferred node can take the agent, it runs where it could before. Kubernetes reads node labels when the agent's pod starts, so a running agent moves at its next upgrade (`ankra cluster agent upgrade`), not when you set the label.
+
+Helm merges an `affinity` you set with this default. A `nodeAffinity.preferredDuringSchedulingIgnoredDuringExecution` list you set replaces both preferences, any other key you set sits beside them, and `affinity: null` removes the default.
 
 ## Metrics
 
