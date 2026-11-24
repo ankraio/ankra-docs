@@ -36,10 +36,10 @@ flowchart TB
 1. **Detect.** Ankra reads the files that name a stack: `package.json` (Next.js, Vite, React, Express, NestJS), `requirements.txt` or `pyproject.toml` (FastAPI, Django, Flask), `go.mod`, `Cargo.toml`, `pom.xml` or `build.gradle`, `Gemfile` (Rails), `composer.json` (Laravel) and `mix.exs`. Failing those it counts file types, and a root `index.html` with nothing else is a static site.
 2. **Dockerfile.** A Dockerfile you already have is adopted as it is. Otherwise Ankra generates one whose final stage applies OS package upgrades and runs as a non-root user, on a maintained toolchain release.
 3. **Components.** A monorepo gets one component per service. Ankra decides them in a fixed order: what `.ankra/ankra.yaml` declares (always wins), then what the repository already carries, then what the AI proposed, then what the tree implies. Names stay stable across re-runs, so stage names never shift under you.
-4. **Tailor.** An AI step adapts the standard pipeline to the repository, using the same render and validate tools you can call. With no AI available, rule-based templates produce the same shape.
+4. **Tailor.** An AI step adapts the standard pipeline to the repository, using the same render and validate tools you can call. With no AI available, or while [Stop all AI](/platform/ai-autonomy#stop-ankra-ai) is on, rule-based templates produce the same shape.
 5. **Record.** The pipeline is validated, planned, and stored as the **definition of record** before the pull request even opens.
 
-To read what was stored, open **Applications → &lt;your application&gt; → Pipelines → Configuration**: **Pipeline configuration and validation** shows the definition and its validation result. `ankra application pipeline definition get <application-id>` prints the same file.
+To read what was stored, open **Applications → &lt;your application&gt; → Pipelines → Configuration**: **Pipeline configuration** shows the definition, and **Validate pipeline** checks it. `ankra application pipeline definition get <application-id>` prints the same file.
 
 ## What the generated pipeline contains
 
@@ -89,6 +89,55 @@ sequenceDiagram
 - **The pull request is a proposal, not a gate.** Because the definition is already recorded, the next push to your branch builds whether or not you merge it. Merging is how the file reaches Git, where you own it from then on.
 - **When the setup pull request's own build or gate fails,** Ankra's AI commits a fix to the setup branch, so the pull request you review is one that passes.
 - **After a failed setup**, `ankra application retry <application-id>` runs it again.
+- **The Ankra proof check reads "Off: no staging cluster chosen"** when your organisation has not chosen a staging cluster. Ankra can run a setup there before you merge it: build the commit, deploy it, request its routes and tear it down. With no staging cluster nothing is run and no comment is posted. That says nothing about the setup. An administrator chooses a staging cluster under **Ankra AI → AI workspaces**.
+
+### When your repository already has manifests
+
+A setup never replaces a manifest your repository commits under `.ankra/manifests/`, whether it sits at the path Ankra would write or declares the same object under another filename. Your file stays exactly as committed and Ankra leaves its own version out of the pull request, so running a setup again cannot undo what you tuned by hand: environment variables, Secret references, resource limits, replicas or comments.
+
+Ankra changes one of your manifests only where the application would not run otherwise, and then changes only those lines:
+
+- **A container image that moved registries.** A container deployed at `<repository>:${{ ankra.image_tag }}` is pointed at the repository this application publishes to, when the build after the setup's pull request publishes there and nothing else deploys the old one. That means the old one is not another Ankra organisation's registry and, unless it is in this organisation's own registry, Ankra could read every workflow of your repository and none of them pushes to it.
+- **Database connection variables.** When a setup adds a database for the application, a Deployment that declares none of its connection variables gets them, where its container is laid out the way Ankra's own template writes it. A Deployment laid out another way is left as committed, and one that already declares a connection variable keeps reaching the database it names.
+
+The pull request names each moved image, and each file it adds variables to, under **Your own manifests**. When Ankra leaves an image where it is, the setup says why and, in most cases, what to change:
+
+- **The image is in another Ankra organisation's registry.** The repository is set up there too, and that organisation's application deploys the same manifest, so Ankra does not move it. This organisation cannot pull from that registry. Once the repository is no longer deployed from the other organisation, set the image to `<repository>:${{ ankra.image_tag }}`.
+- **A workflow of your repository publishes the image.** Which build the manifest deploys is yours to choose. To deploy Ankra's build, set the image to `<repository>:${{ ankra.image_tag }}`.
+- **The container runs an image Ankra does not build**, such as `ghcr.io/acme/shop:1.4.2`. To deploy Ankra's build, set the image to `<repository>:${{ ankra.image_tag }}`.
+- **Ankra could not read every workflow of your repository**, so it cannot tell whether one publishes the image. Run the setup again to retry the read, or set the image to `<repository>:${{ ankra.image_tag }}` yourself.
+- **The image line cannot be changed without rewriting the file**, such as a block or multi-line value. Set the image to `<repository>:${{ ankra.image_tag }}` yourself.
+- **Nothing publishes the new repository** after the setup's pull request, so moving the image would deploy an image no build produces.
+
+### When setup runs again
+
+When an application's setup runs again while its setup pull request is still open, the pull request is brought in line with what the setup proposes now:
+
+- **What the setup no longer proposes is taken back out.** A file an earlier setup run added or changed, and this run does not propose, is put back to the version on your tracked branch, or removed when the branch does not have it. This is a new commit on the pull request, so its history stays.
+- **A change someone else made to a file the setup no longer proposes stays.** Ankra takes a file back out only when the last commit to change it is one GitHub made for Ankra's GitHub App during a setup run. A file you, a teammate or another Ankra tool changed last is left as it is, and the setup's task list names it. That includes a setup commit someone amended, rebased or cherry-picked, because the commit is then theirs. A file the setup still proposes is committed again with the setup's content, over any change made to it on the pull request.
+- **A pull request with nothing else in it is closed.** When every change in it came from earlier setup runs and this run proposes none of them, Ankra closes the pull request with a comment listing the files. It is not closed when a commit arrived after Ankra read it. The branch stays as it is, and Ankra does not open another setup pull request for the application on its own. To take the changes after all, reopen it.
+- **A pull request someone reopened is not emptied or closed again.** Ankra takes nothing out of it on later runs. A run that still has files to propose commits them onto it, as onto any open setup pull request.
+
+Ankra leaves the pull request as it is, says why on the task list, and checks again on the next run when:
+- it cannot read the pull request's files, or whether someone reopened it;
+- the run could not establish everything it proposes, for example because it could not read one of your manifests or tell whether the application needs a database;
+- it cannot confirm that no other Ankra organisation's application writes to the same setup branch.
+
+A file whose last change Ankra cannot read is left in, and the task list names it; the other files are still taken back out.
+
+When the setup branch already exists and has no open pull request into your tracked branch, Ankra starts a new proposal on it only when nothing on it is unmerged work. That means one of these:
+- the branch's latest commit is one a merged pull request carried;
+- every commit beyond your tracked branch is one a setup run made.
+
+A branch with a pull request open into any branch is left as it is, and so is one with unmerged work on it. The setup names the pull request or the commit. Merge or close that pull request, or delete the branch, and run setup again.
+
+The pull request's title says what it does: **Add** for files your repository does not have yet, and **Update** for manifests it already has that the setup only amends, for example `Add Dockerfile and update Kubernetes manifests`.
+
+#### When another organisation sets up the same repository
+
+When another Ankra organisation also has an application on the same repository and branch, the setup says so on its task list, without saying which organisation. Both receive the repository's pushes, so each can build and deploy from them, and setup pull requests from both target the same branch. One thing changes: Ankra then takes nothing back out of an open setup pull request, because it cannot tell its earlier proposal from theirs.
+
+You are told only when the repository is private, or when your organisation's GitHub App installation is on the account that owns the repository. Anyone can register a public repository, so a setup that reached one through another installation is told nothing either way.
 
 ### Dependency updates with Dependabot
 
@@ -97,6 +146,7 @@ The setup pull request also adds `.github/dependabot.yml`, so once you merge it,
 Every entry in the file asks for the same thing:
 
 - **Weekly.** Dependabot checks each entry once a week.
+- **After a week.** A new release is offered once it has been public for seven days (`cooldown`, `default-days: 7`). Security fixes do not wait.
 - **Grouped.** Minor and patch updates arrive together, in one pull request per ecosystem and directory. Each major update gets a pull request of its own. Security fixes for each ecosystem and directory arrive together in one pull request.
 - **At most 5 open.** Each entry keeps at most five version-update pull requests open at a time. GitHub holds security-update pull requests to a separate limit of its own.
 

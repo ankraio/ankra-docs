@@ -30,6 +30,8 @@ Package `postgresql` 1.8.0: PostgreSQL 18.6, run by the CloudNativePG operator.
 
 Setup refuses the Production tier with any instance count but 3, on a playground, when Ankra has no recent view of the cluster's nodes, and on a cluster with fewer than three nodes that can run them (Ready, not cordoned, and with no `NoSchedule` or `NoExecute` taint). The check runs only at setup: if the cluster later has fewer than three such nodes, the instance that lost its node stays Pending until a node is added, and draining a node that runs another instance waits too.
 
+The Production tier is also refused when the database would come up without backups: in an organisation with no verified [backup vault](/guides/backups) of its own, or with backups not enabled. An organisation with more than one verified vault names the one to use at setup, with `--backup-vault <vault>` on `ankra services setup` from CLI 0.83.0 or `backup_vault` in the API and MCP, and the Production tier is refused until it does. The refusal lists the vaults the setup can name. The Standard tier is not refused for any of these: it comes up without backups and the installation says so.
+
 With one instance the database keeps no PodDisruptionBudget, so draining its node restarts it rather than blocking node maintenance. With 2 or 3 instances, the PodDisruptionBudget lets a drain proceed through a switchover and never takes every instance down at once.
 
 ## Valkey
@@ -96,19 +98,6 @@ Package `victoria-metrics` 1.2.0: VictoriaMetrics 1.153, as a single server.
 | `memory_mib` | 256 to 16384 MiB | 512 | Memory for the server. VictoriaMetrics sizes its caches to 60% of it. |
 | `cpu_millicores` | 100 to 8000 | 250 | CPU for the server. |
 
-## Supabase
-
-Package `supabase` 1.0.0: capability `database`, protocol `supabase`. A Supabase-compatible backend, so an application written against supabase-js runs against it unchanged: PostgreSQL 18.6 run by the CloudNativePG operator, with PostgREST (the data API), GoTrue (sign-in) and Supabase Storage behind an nginx gateway at `http://supabase.<service>.svc:8000`. Realtime, edge functions, image transformations and Studio are not run. Sign-in is by email and password, and accounts are confirmed at sign-up, because no mail server is configured. Applications connected to it receive `SUPABASE_URL`, `SUPABASE_ANON_KEY` and `SUPABASE_PUBLISHABLE_KEY`; the Secret they are given, `supabase-api-keys`, holds only the gateway URL and the publishable key.
-
-| Setting | Range | Default | What it changes |
-|---------|-------|---------|-----------------|
-| `storage_gib` | 1 to 1000 GiB | 5 | Size of the database's data volume. |
-| `file_storage_gib` | 1 to 1000 GiB | 5 | Size of the volume Storage keeps uploaded files on. |
-| `memory_mib` | 256 to 16384 MiB | 384 | Memory for the database. |
-| `cpu_millicores` | 100 to 8000 | 200 | CPU for the database. |
-
-PostgREST, GoTrue, Storage and the gateway have fixed sizes of their own.
-
 ## GPU chat
 
 Package `gpu-chat` 1.1.0: capability `inference`, protocol `openai`. It gives the applications connected to it an OpenAI-compatible endpoint inside the cluster, plus a Secret with its credentials. The endpoint is a LiteLLM broker in front of vLLM, routed by llm-d, on a GPU node, or, at `model_tier` 0, in front of a llama.cpp server on ordinary nodes. It can also run the Open WebUI chat interface.
@@ -137,7 +126,6 @@ Ankra decides a service's [health](/concepts/managed-services#health) from these
 | SeaweedFS | Deployment `seaweedfs-all-in-one`, 1 available | `seaweedfs-all-in-one` | `seaweedfs-s3-secret` |
 | VictoriaLogs | StatefulSet `victoria-logs`, 1 ready | `victoria-logs` | `victoria-logs-credentials` |
 | VictoriaMetrics | StatefulSet `victoria-metrics`, 1 ready | `victoria-metrics` | `victoria-metrics-credentials` |
-| Supabase | Every Deployment in the namespace ready (PostgREST, GoTrue, Storage and the gateway); PostgREST is ready only while it holds a database connection, so this covers the database too | `supabase` | `supabase-api-keys` |
 | GPU chat | Every StatefulSet and Deployment in the namespace ready (the model servers, the router, LiteLLM and its database, and the embedding server and chat UI when chosen); a workload switched off is scaled to zero and set aside | `litellm` | `gpu-chat-credentials` |
 
 Every service is also checked for the stack that owns it: a member that failed to apply or is being removed, or a stack that is gone or being removed, reads `degraded`.
@@ -147,7 +135,7 @@ Every service is also checked for the stack that owns it: a member that failed t
 | About 1 minute | How often each service is observed |
 | 5 minutes | How long an observation stands before it reads `unknown` |
 | 15 minutes | How recent Ankra's view of a resource type on the cluster must be for a missing object to count as missing; older reads `unknown` |
-| 10 minutes (PostgreSQL, OpenSearch, Supabase and packages your organisation publishes), 30.5 minutes (GPU chat, which downloads its model on first start), 5 minutes (the others) | Grace window after a successful deployment, during which a failing check reads `progressing` |
+| 10 minutes (PostgreSQL, OpenSearch and packages your organisation publishes), 30.5 minutes (GPU chat, which downloads its model on first start), 5 minutes (the others) | Grace window after a successful deployment, during which a failing check reads `progressing` |
 | 30 minutes | How long after its last write a stack member's apply still counts as in progress |
 
 ## Readiness check
@@ -163,7 +151,6 @@ Every service has a [readiness](/concepts/managed-services#readiness) check: a s
 | SeaweedFS | `curlimages/curl:8.16.0` | `admin_access_key_id` and `admin_secret_access_key` of `seaweedfs-s3-secret` |
 | VictoriaLogs | `curlimages/curl:8.16.0` | `username` and `password` of `victoria-logs-credentials` |
 | VictoriaMetrics | `curlimages/curl:8.16.0` | `username` and `password` of `victoria-metrics-credentials` |
-| Supabase | `curlimages/curl:8.16.0` | The publishable key of `supabase-api-keys` |
 | GPU chat | `curlimages/curl:8.16.0` | `api-key` and `model` of `gpu-chat-credentials` |
 
 Every check image, PostgreSQL's included, is pinned by digest as well as the tag shown, and the digest decides what the cluster pulls. What each check does is listed under [Readiness](/concepts/managed-services#readiness). The PostgreSQL check runs `psql -h postgresql-rw.<service>.svc.cluster.local -p 5432 -U app -d app -c "SELECT 1"`.
@@ -175,7 +162,7 @@ Every check image, PostgreSQL's included, is pinned by digest as well as the tag
 | Interval | About every 5 minutes, measured from the last attempt |
 | Result stands | 15 minutes |
 | Pod time limit | 60 seconds |
-| Grace window | While no check has passed yet: 10 minutes after a successful deployment for PostgreSQL, OpenSearch, Supabase and packages your organisation publishes, 30.5 minutes for GPU chat, 5 minutes for the other services |
+| Grace window | While no check has passed yet: 10 minutes after a successful deployment for PostgreSQL, OpenSearch and packages your organisation publishes, 30.5 minutes for GPU chat, 5 minutes for the other services |
 | Agent | The checks for services other than PostgreSQL need an agent recent enough to run them. Until it is, the service reads `unverified` and `readiness_check.reason` says to upgrade the agent. |
 
 At most one check pod runs on a cluster at a time.
