@@ -646,6 +646,15 @@ runtime's default. It needs an agent that advertises the capability, applies
 to the next build dispatched with no agent restart, and the next build is
 probed in-cluster again even if the cluster was known to confine the builder.
 
+`--build-apparmor-profile` ankra-managed is the recommended value: Ankra ships
+the profile (ankra-managed-rootless-buildkit), the agent loads it on every
+node builds can run on and keeps builds on the nodes where it is loaded, so
+nothing has to be installed by hand. It needs an agent that advertises
+managed AppArmor support; until it does, builds get no profile at all. get
+shows on how many nodes the profile is loaded and why it is not on the rest.
+Pass an empty value to turn it off: the agent removes its loader and builds
+go back to the runtime's default.
+
 ```bash
 ankra cluster agent ci set [flags]
 ```
@@ -663,7 +672,9 @@ ankra cluster agent ci set --clear-placement
 ankra cluster agent ci set --run-reservation shadow --cluster ci-01
 ankra cluster agent ci set --image-prepull on --cluster ci-01
 ankra cluster agent ci set --step-workspaces shadow --cluster ci-01
+ankra cluster agent ci set --build-apparmor-profile ankra-managed --cluster ci-01
 ankra cluster agent ci set --build-apparmor-profile ankra-rootless-buildkit --cluster ci-01
+ankra cluster agent ci set --build-apparmor-profile '' --cluster ci-01
 ```
 
 **Flags**
@@ -671,7 +682,7 @@ ankra cluster agent ci set --build-apparmor-profile ankra-rootless-buildkit --cl
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--ankra-workspace-storage-class` |   | Storage class for the cluster's Ankra Workspaces, apart from pipeline steps; a different class replaces each workspace on next use; pass empty to inherit `--storage-class` (omit the flag to keep the stored value) |
-| `--build-apparmor-profile` |   | Node-installed AppArmor profile the rootless image builder runs under (Localhost); pass empty to use the runtime's default (omit the flag to keep the stored value) |
+| `--build-apparmor-profile` |   | AppArmor profile the rootless image builder runs under: ankra-managed lets the agent ship and load Ankra's profile on the nodes (recommended), any other name is a Localhost profile installed on the nodes; pass empty to use the runtime's default (omit the flag to keep the stored value) |
 | `--clear-placement` | `false` | Remove the cluster's CI placement |
 | `--image-prepull` |   | Image pre-pull: off (default) pulls the platform's step images on demand, on keeps them pulled on every node pipeline steps can land on |
 | `--node-group` |   | Run every pipeline pod on this Ankra node group: selects its nodes and tolerates its taints |
@@ -2143,7 +2154,7 @@ ankra cluster aws create [flags]
 | `--region` |   | AWS region, e.g. eu-north-1 (required) |
 | `--retention-policy` |   | Teardown policy for EBS volumes and load balancers: retain or delete (server default: retain) |
 | `--root-volume-gib` | `0` | Encrypted gp3 root volume size in GiB per instance, 20-2000 (server default: 40) |
-| `--ssh-key-credential-id` |   | SSH key credential ID (required) |
+| `--ssh-key-credential-id` |   | SSH key credential ID to authorise on the servers (optional: Ankra reaches them with its own key; add yours later with 'ankra cluster ssh-keys set &lt;cluster&gt; `--ssh-key-credential-ids` &lt;id&gt;') |
 | `--ubuntu-series` |   | Ubuntu series for the node AMI, e.g. 24.04 (server default: 24.04; see 'images') |
 | `--vpc-id` |   | Adopt an existing VPC instead of letting Ankra create the network; needs `--node-subnet-ids` and `--bastion-subnet-id` |
 | `--worker-count` | `0` | Default-pool worker count (server default: 1) |
@@ -2593,7 +2604,7 @@ ankra cluster aws preflight [flags]
 | `--region` |   | AWS region, e.g. eu-north-1 (required) |
 | `--retention-policy` |   | Teardown policy for EBS volumes and load balancers: retain or delete (server default: retain) |
 | `--root-volume-gib` | `0` | Encrypted gp3 root volume size in GiB per instance, 20-2000 (server default: 40) |
-| `--ssh-key-credential-id` |   | SSH key credential ID (required) |
+| `--ssh-key-credential-id` |   | SSH key credential ID to authorise on the servers (optional: Ankra reaches them with its own key; add yours later with 'ankra cluster ssh-keys set &lt;cluster&gt; `--ssh-key-credential-ids` &lt;id&gt;') |
 | `--ubuntu-series` |   | Ubuntu series for the node AMI, e.g. 24.04 (server default: 24.04; see 'images') |
 | `--vpc-id` |   | Adopt an existing VPC instead of letting Ankra create the network; needs `--node-subnet-ids` and `--bastion-subnet-id` |
 | `--worker-count` | `0` | Default-pool worker count (server default: 1) |
@@ -3643,7 +3654,7 @@ ankra cluster digitalocean create [flags]
 | `--network-ip-range` |   | VPC IP range (optional). Left unset, the platform derives a /24 from the cluster id, so clusters in one account do not all ask for the same range; pass one only to pin it |
 | `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
 | `--region` |   | DigitalOcean region (required) |
-| `--ssh-key-credential-id` |   | SSH key credential ID (required) |
+| `--ssh-key-credential-id` |   | SSH key credential ID to authorise on the servers (optional: Ankra reaches them with its own key; add yours later with 'ankra cluster ssh-keys set &lt;cluster&gt; `--ssh-key-credential-ids` &lt;id&gt;') |
 | `--worker-count` | `1` | Number of worker nodes |
 | `--worker-size` |   | Worker droplet size (server default: s-2vcpu-4gb) |
 
@@ -5327,10 +5338,11 @@ ankra cluster gitops status [cluster_name] [flags]
 
 ## ankra cluster held-updates
 
-On a cluster that is production, or that nobody has confirmed is not production,
-Ankra holds every update of a platform add-on's version or image and raises a
-"held platform update" card on the cluster instead of applying it. Taking the
-card is how you accept one set of those updates without editing YAML.
+Ankra does not move a platform add-on of a running cluster to a newer version
+or image on its own. It holds each update and raises a "held platform update"
+card on the cluster instead of applying it. Taking the card is how you accept
+one set of those updates without editing YAML. A new cluster starts on the
+versions Ankra pins at the time.
 
 ## ankra cluster held-updates take
 
@@ -7495,7 +7507,7 @@ ankra cluster morpheus create [flags]
 | `--name` |   | Cluster name (required) |
 | `--network-id` | `0` | Morpheus network ID (required; see 'ankra cluster morpheus networks') |
 | `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
-| `--ssh-key-credential-id` |   | SSH key credential ID (required) |
+| `--ssh-key-credential-id` |   | SSH key credential ID to authorise on the servers (optional: Ankra reaches them with its own key; add yours later with 'ankra cluster ssh-keys set &lt;cluster&gt; `--ssh-key-credential-ids` &lt;id&gt;') |
 | `--virtual-image-id` | `0` | Morpheus virtual image ID (optional) |
 | `--worker-count` | `1` | Number of worker nodes |
 | `--worker-plan-id` | `0` | Service plan ID for worker nodes (required) |
@@ -8767,7 +8779,7 @@ ankra cluster ovh create [flags]
 | `--network-vlan-id` | `0` | Network VLAN ID |
 | `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
 | `--region` |   | OVH Cloud region (required) |
-| `--ssh-key-credential-id` |   | SSH key credential ID (required) |
+| `--ssh-key-credential-id` |   | SSH key credential ID to authorise on the servers (optional: Ankra reaches them with its own key; add yours later with 'ankra cluster ssh-keys set &lt;cluster&gt; `--ssh-key-credential-ids` &lt;id&gt;') |
 | `--subnet-cidr` | `10.0.1.0/24` | Subnet CIDR |
 | `--worker-count` | `1` | Number of worker nodes |
 | `--worker-flavor-id` |   | Worker instance flavor (server default: b3-16) |
@@ -9370,7 +9382,7 @@ ankra cluster playground plans
 
 ## ankra cluster playground resize
 
-Move the playground's server to another Ankra Cloud plan in place. Ankra Cloud stops the server, moves it to the new plan and starts it again, so nothing on the playground answers for a few minutes (Ankra Cloud allows up to 30). Ankra Cloud bills the new plan to your Ankra Cloud account from the change. A plan the playground cannot move to is refused with the plans it can. A free trial keeps its size: add a payment method to your Ankra Cloud account and it becomes an ordinary playground you can resize. Requires permission to manage the organisation's billing.
+Move the playground to another Ankra Cloud plan in place. For a playground that runs on an Ankra Cloud dev cluster, Ankra Cloud stops its server, moves it to the new plan and starts it again, so nothing on the playground answers for a few minutes (Ankra Cloud allows up to 30). A playground that runs on Ankra Cloud Kubernetes cannot be resized yet, and the command says so. `ankra cluster playground status` shows which one a playground runs on. Ankra Cloud bills the new plan to your Ankra Cloud account from the change. A plan the playground cannot move to is refused with the plans it can. A free trial keeps its size: add a payment method to your Ankra Cloud account and it becomes an ordinary playground you can resize. Requires permission to manage the organisation's billing.
 
 ```bash
 ankra cluster playground resize <cluster_id|name> [flags]
@@ -9517,6 +9529,49 @@ ankra cluster power-schedules update <schedule_id> [flags]
 | `--preserve-state` |   | For delete_resources stop schedules: omit to capture the cluster's state (an encrypted etcd snapshot the next start restores) whenever the provider and distribution support it; 'false' to tear down without it; 'true' to state the default explicitly. On update, omitting it keeps the schedule's current choice |
 | `--stop-mode` |   | How a stop schedule stops the cluster: delete_resources (default on create; terminates the VMs), scale_to_zero (deletes the worker servers at every stop and creates new ones at start: data on their own disks is lost; the control plane and etcd, cloud volumes and addresses are kept and keep billing) or pause (powers every server off and keeps it with its disks; k3s on Hetzner, UpCloud and DigitalOcean, and what a stop always does on AWS and Scaleway). pause saves no compute cost on Hetzner, DigitalOcean or UpCloud, which bill a powered-off server in full; use scale_to_zero or delete_resources to save. On update, omitting it keeps the schedule's current mode |
 | `--timezone` |   | IANA timezone the cron expression is evaluated in, e.g. Europe/Stockholm (default UTC) |
+
+## ankra cluster provider-status
+
+Show the open incidents the cluster's cloud provider lists on its own public
+status page for the cluster's region and the zones its machines are in. When a
+cluster loses its agent or its nodes, this answers whether the provider itself
+reports an outage there.
+
+An incident matches on a zone when it names a zone one of the cluster's
+machines is in, and on the region when it names the cluster's region. Ankra
+never guesses a zone: when a machine has no recorded zone, an incident in a
+zone of the cluster's region matches on the region and says the zone is not
+known. An incident the page scopes to the whole provider is listed as
+provider-wide.
+
+When the status page cannot be read, does not list the cluster's region and
+zones, or Ankra has none recorded for the cluster, the answer says so: an
+empty list then means the provider's status could not be checked, not that it
+reports nothing. Status pages are read for
+OVHcloud, UpCloud, DigitalOcean and Scaleway; for other providers the read
+says there is no status page Ankra reads, and for a managed Kubernetes
+cluster that Ankra does not read where its nodes run yet. The platform caches
+each page for a few minutes.
+
+Left out, the cluster is `--cluster` or the one 'ankra cluster select' saved.
+Needs clusters.read.
+
+```bash
+ankra cluster provider-status [cluster] [flags]
+```
+
+**Examples**
+
+```bash
+ankra cluster provider-status prod-multi-az
+ankra cluster provider-status --cluster prod-multi-az -o json
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
 
 ## ankra cluster provision
 
@@ -9775,7 +9830,7 @@ ankra cluster proxmox create [flags]
 | `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
 | `--placement-nodes` | `[]` | Two or more host nodes for host-spread placement (comma-separated or repeated; optional) |
 | `--site-public-ip` |   | Public address other sites dial this cluster's bastion on for the overlay (required with `--network-mode` wireguard_mesh); the site forwards the overlay UDP port range from it to the bastion |
-| `--ssh-key-credential-id` |   | SSH key credential ID (required) |
+| `--ssh-key-credential-id` |   | SSH key credential ID to authorise on the servers (optional: Ankra reaches them with its own key; add yours later with 'ankra cluster ssh-keys set &lt;cluster&gt; `--ssh-key-credential-ids` &lt;id&gt;') |
 | `--storage` |   | Storage for VM disks (default local-lvm; see 'ankra cluster proxmox storages') |
 | `--template` |   | VM template name (optional). Omitted, Ankra clones its own template, ankra-ubuntu-24-04, which saving the Proxmox credential builds, and refuses the create when that template is not on the node; it never picks one of your own templates unless you name it |
 | `--worker-count` | `1` | Number of worker nodes |
@@ -10353,7 +10408,7 @@ ankra cluster scaleway create [flags]
 | `--region` |   | Scaleway region, e.g. fr-par (required) |
 | `--retention-policy` |   | Teardown policy for volumes and load balancers: retain or delete (server default: retain) |
 | `--runtime-credential-id` |   | Scaleway credential for the in-cluster CCM/CSI (defaults to the provisioning credential) |
-| `--ssh-key-credential-id` |   | SSH key credential ID (required) |
+| `--ssh-key-credential-id` |   | SSH key credential ID to authorise on the servers (optional: Ankra reaches them with its own key; add yours later with 'ankra cluster ssh-keys set &lt;cluster&gt; `--ssh-key-credential-ids` &lt;id&gt;') |
 | `--worker-count` | `0` | Default-pool worker count (server default: 1) |
 | `--worker-type` |   | Worker commercial type (server default: DEV1-M) |
 | `--zone` |   | Scaleway zone in that region, e.g. fr-par-1 (required) |
@@ -10791,7 +10846,7 @@ ankra cluster scaleway preflight [flags]
 | `--region` |   | Scaleway region, e.g. fr-par (required) |
 | `--retention-policy` |   | Teardown policy for volumes and load balancers: retain or delete (server default: retain) |
 | `--runtime-credential-id` |   | Scaleway credential for the in-cluster CCM/CSI (defaults to the provisioning credential) |
-| `--ssh-key-credential-id` |   | SSH key credential ID (required) |
+| `--ssh-key-credential-id` |   | SSH key credential ID to authorise on the servers (optional: Ankra reaches them with its own key; add yours later with 'ankra cluster ssh-keys set &lt;cluster&gt; `--ssh-key-credential-ids` &lt;id&gt;') |
 | `--worker-count` | `0` | Default-pool worker count (server default: 1) |
 | `--worker-type` |   | Worker commercial type (server default: DEV1-M) |
 | `--zone` |   | Scaleway zone in that region, e.g. fr-par-1 (required) |
@@ -12036,7 +12091,7 @@ ankra cluster upcloud create [flags]
 | `--network-ip-range` |   | Private network IP range (optional). Left unset, the platform derives a 10.x.y.0/24 from the cluster id and does not check it against your UpCloud account; set this flag when that range is already taken by one of your private networks. A range you pass is checked against your account's private networks in every zone, and one that overlaps is refused |
 | `--network-mode` |   | Network mode: private_network or wireguard_mesh. Derived when omitted (wireguard_mesh for a multi-zone pool). Pass wireguard_mesh on a single-zone kubeadm cluster to make it mesh-capable so zones can be added later with 'ankra cluster upcloud zones'; a mesh cannot be retrofitted |
 | `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
-| `--ssh-key-credential-id` |   | SSH key credential ID (required) |
+| `--ssh-key-credential-id` |   | SSH key credential ID to authorise on the servers (optional: Ankra reaches them with its own key; add yours later with 'ankra cluster ssh-keys set &lt;cluster&gt; `--ssh-key-credential-ids` &lt;id&gt;') |
 | `--worker-count` | `1` | Number of worker nodes |
 | `--worker-plan` |   | Worker plan (server default: PREMIUM-2xCPU-4GB) |
 | `--zone` |   | UpCloud zone (required); the primary zone of a multi-zone cluster (bastion, first control plane, default network) |
