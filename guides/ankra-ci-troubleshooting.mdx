@@ -218,9 +218,324 @@ For what node-local storage is and when it applies, see [Workspace storage](/gui
 
 ## The build step fails before the Dockerfile is read
 
-`build_runtime_confined` means the cluster's nodes stop the rootless image builder from starting - common with AppArmor on Ubuntu or k3s nodes.
+`build_runtime_confined` means the cluster's nodes stop the rootless image builder from starting - common with AppArmor on Ubuntu or k3s nodes. The build step's log ends in a rootlesskit error such as:
 
-When AppArmor is the cause, install an AppArmor profile that allows mount and pivot_root on every node builds can run on, and name it with `ankra cluster agent ci set --build-apparmor-profile <name> --cluster <cluster>`. The builder then runs under that profile, on an agent that supports the setting. A node without the profile makes the build wait rather than run. Otherwise Ankra can build the image on its own build cluster instead, and the scan, gate and publish still run as usual. Two things must both hold: the organisation's build fallback is on (**Build on Ankra when your cluster cannot**, under **Build rules** in **Build & delivery → Builds and clusters**, or `ankra org ci-settings set --build-fallback platform_builders`), and Ankra has enabled platform builds for the organisation. `ankra org ci-settings get` shows both. Only Ankra can enable platform builds: if it says no, [contact support](/platform/support). What leaves your cluster when this happens is on [Where your pipeline runs](/pipelines/where-pipelines-run).
+```text
+[rootlesskit:child ] error: failed to share mount point: /: permission denied
+```
+
+The build pod names no AppArmor profile of its own, so the container runtime applies its default one. containerd's default profile (`cri-containerd.apparmor.d`) denies `mount`, and rootlesskit needs it to set up the builder's own user namespace. The `ankra-ci-build` namespace enforces Pod Security Baseline, which forbids an `Unconfined` profile but admits a `Localhost` one: a profile loaded on the node by name. So the way to keep builds in your cluster is to run the builder under an AppArmor profile that allows `mount`, `pivot_root` and `userns`. There are three ways out, in this order of preference:
+
+1. [Let Ankra load the profile](#let-ankra-load-the-apparmor-profile) on your nodes.
+2. [Install the profile yourself](#install-the-apparmor-profile-yourself), when you want to own its text.
+3. [Build on Ankra instead](#build-on-ankra-instead), on Ankra's own build cluster.
+
+### Let Ankra load the AppArmor profile
+
+```bash
+ankra cluster agent ci set --build-apparmor-profile ankra-managed --cluster <cluster>
+```
+
+With `ankra-managed`, Ankra ships the profile, loads it and sends builds only where it is loaded:
+
+- **The profile.** The agent carries a profile named `ankra-managed-rootless-buildkit`. Its rules are exactly those of the [profile you can install yourself](#install-the-apparmor-profile-yourself), under its own name. Its version is the first 12 characters of the sha256 of its text, so an agent release that changes the profile reloads it on every node.
+- **Loading it.** The agent runs a DaemonSet, `ankra-ci-apparmor-loader`, with the profile in the ConfigMap `ankra-ci-apparmor-profile`. It covers every node the cluster's [step placement](/guides/ankra-pipelines#step-placement) admits, or every node except the control plane when the cluster has no placement, including nodes the autoscaler adds later. It loads the profile with each node's own `apparmor_parser` and checks that it is enforced.
+- **Routing builds.** Each node where the profile is loaded gets the label `apparmor.ankra.io/ankra-managed-rootless-buildkit=<version>`, and a build pod only schedules on a node with that label. A node where the profile cannot be loaded, such as one without AppArmor, gets no builds. When no node has it, the build waits.
+
+The agent starts the loader with the first build after you set it, so that build can wait while the nodes load the profile. That build is also tried in your cluster again, even if the cluster was known to confine the builder.
+
+It needs an agent that advertises managed AppArmor. Until the agent does, Ankra sends it no profile, and builds run as if none was set. To read the state, run:
+
+```bash
+ankra cluster agent ci get --cluster <cluster>
+```
+
+```text
+Build AppArmor:        ankra-managed (ankra-managed-rootless-buildkit <version>)
+Managed AppArmor:      advertised
+Profile loaded on:     <loaded> of <nodes> nodes (reported <time>)
+```
+
+`Managed AppArmor` says whether the agent advertises it; `not advertised` means upgrade the agent. `Profile loaded on` is what the last build that ran with the setting reported, followed by one line for each node where the profile is not loaded, with the reason. `-o json` carries the raw fields, `supports_build_apparmor_managed` and `build_apparmor_managed_status`.
+
+To turn it off, clear the setting. The agent then removes the DaemonSet, the ConfigMap and the node label. The profile file left on the nodes is inert, because nothing names it.
+
+```bash
+ankra cluster agent ci set --build-apparmor-profile '' --cluster <cluster>
+```
+
+### Install the AppArmor profile yourself
+
+Use this when you want to own the profile text, or while your agent does not advertise managed AppArmor yet. Ankra runs this exact profile on its own Ubuntu 24.04 and Debian 13 build nodes. It is containerd's default container profile with two changes: `deny mount,` becomes `mount,` and `pivot_root,`, and `userns,` is added. Every `/proc` and `/sys` deny of the default profile is kept.
+
+- **Ubuntu 24.04** needs no sysctl change. `kernel.apparmor_restrict_unprivileged_userns=1` only restricts unconfined processes, and the builder is confined by this profile. `userns,` changes nothing there, because a profile with no `abi` rule is compiled without user namespace mediation.
+- **Debian 13** pins the AppArmor 4 feature set, which mediates creating a user namespace. Without `userns,` the builder fails with `[rootlesskit:parent] error: failed to start the child: fork/exec /proc/self/exe: permission denied`. Keep the rule on every distribution.
+- **`mount,` is not narrowed** to a list of filesystem types. Inside its own unprivileged user namespace, the builder makes `/` private, bind-mounts, mounts proc, sysfs, tmpfs and overlay for each `RUN`, remounts read-only and pivots into each build container's root. The kernel's user namespace rules already bound all of that: the builder runs as uid 1000 with only `SETUID` and `SETGID`, so it cannot mount in any namespace it does not own. A per-type list would break on a BuildKit release that mounts something new.
+
+<Steps>
+<Step title="Add the profile and its loader to a Stack">
+Save these two manifests next to your cluster's ImportCluster file. The ConfigMap holds the profile, and the DaemonSet loads it on every node except the control plane, including nodes that join later.
+
+```yaml manifests/rootless-buildkit-apparmor-profile.yaml
+# The AppArmor profile Ankra's rootless image builder runs under. The loader
+# DaemonSet beside it writes it to /etc/apparmor.d on every worker node and
+# loads it.
+#
+# The unscoped `mount,` is safe because of what the build pod is given: the
+# builder runs as uid 1000 with only SETUID and SETGID in its bounding set, so
+# the only mounts the kernel lets it make are inside its own unprivileged user
+# namespace. Do not reuse this profile for a pod granted CAP_SYS_ADMIN.
+#
+# When you change the profile text, set the loader's ankra.io/profile-sha256
+# annotation to the sha256 of the new ankra-rootless-buildkit value, or the
+# loader pods are not restarted and the nodes keep the old profile.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: rootless-buildkit-apparmor
+  namespace: kube-system
+  labels:
+    app.kubernetes.io/name: rootless-buildkit-apparmor
+    app.kubernetes.io/part-of: ankra-pipelines
+data:
+  ankra-rootless-buildkit: |
+    # ankra-rootless-buildkit: the AppArmor profile Ankra's rootless image builder
+    # runs under. It is containerd 2.2's default container profile
+    # (cri-containerd.apparmor.d) with two changes. `deny mount,` is replaced by
+    # `mount,` and `pivot_root,`, so rootlesskit can make its mount namespace
+    # private and runc can pivot into a build container's rootfs inside the
+    # builder's own unprivileged user namespace. `userns,` lets rootlesskit create
+    # that user namespace where the policy mediates it (AppArmor 4 feature sets,
+    # as on Debian 13). Every /proc and /sys deny of the default profile is kept.
+    #include <tunables/global>
+
+    profile ankra-rootless-buildkit flags=(attach_disconnected,mediate_deleted) {
+      #include <abstractions/base>
+
+      network,
+      capability,
+      file,
+      umount,
+      mount,
+      pivot_root,
+      userns,
+      signal (receive) peer=unconfined,
+      signal (receive) peer=runc,
+      signal (receive) peer=crun,
+      signal (send,receive) peer=ankra-rootless-buildkit,
+
+      deny @{PROC}/* w,
+      deny @{PROC}/{[^1-9],[^1-9][^0-9],[^1-9s][^0-9y][^0-9s],[^1-9][^0-9][^0-9][^0-9]*}/** w,
+      deny @{PROC}/sys/[^k]** w,
+      deny @{PROC}/sys/kernel/{?,??,[^s][^h][^m]**} w,
+      deny @{PROC}/sysrq-trigger rwklx,
+      deny @{PROC}/mem rwklx,
+      deny @{PROC}/kmem rwklx,
+      deny @{PROC}/kcore rwklx,
+
+      deny /sys/[^f]*/** wklx,
+      deny /sys/f[^s]*/** wklx,
+      deny /sys/fs/[^c]*/** wklx,
+      deny /sys/fs/c[^g]*/** wklx,
+      deny /sys/fs/cg[^r]*/** wklx,
+      deny /sys/firmware/** rwklx,
+      deny /sys/devices/virtual/powercap/** rwklx,
+      deny /sys/kernel/security/** rwklx,
+
+      ptrace (trace,tracedby,read,readby) peer=ankra-rootless-buildkit,
+    }
+```
+
+```yaml manifests/rootless-buildkit-apparmor-loader.yaml
+# Loads the ankra-rootless-buildkit AppArmor profile on every worker node
+# (every node that is not a control plane, including nodes that join later).
+#
+# An init container writes the profile from the ConfigMap to
+# /etc/apparmor.d/ankra-rootless-buildkit on the host and loads it with the
+# host's own apparmor_parser (chroot /host), so the parser always matches the
+# node's kernel and AppArmor features. A pause container then keeps the pod
+# Running. The node's apparmor.service also loads the file at every boot.
+#
+# Only the init container is privileged, and only while the load runs. It
+# mounts the host root because it runs the host's apparmor_parser in a chroot.
+# kube-system is used because a namespace that enforces Pod Security baseline
+# or restricted refuses a privileged pod with a host path.
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: rootless-buildkit-apparmor-loader
+  namespace: kube-system
+  labels:
+    app.kubernetes.io/name: rootless-buildkit-apparmor-loader
+    app.kubernetes.io/part-of: ankra-pipelines
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: rootless-buildkit-apparmor-loader
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 25%
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: rootless-buildkit-apparmor-loader
+        app.kubernetes.io/part-of: ankra-pipelines
+      annotations:
+        # sha256 of the ConfigMap's ankra-rootless-buildkit value. Change it
+        # with the profile so every node reloads it.
+        ankra.io/profile-sha256: "1b6081e090fdfb759b85fb86d7d0f44a02d1f57eb40ad17fde1432b0724745aa"
+    spec:
+      # Scheduled ahead of everything else on a node that just joined: a build
+      # pod on a node without the profile waits until it is loaded.
+      priorityClassName: system-node-critical
+      # Every node but the control plane. A build pod can land on any worker
+      # node its run reaches, so every worker needs the profile.
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: node-role.kubernetes.io/control-plane
+                    operator: DoesNotExist
+      # Tolerating every taint keeps the loader on any worker a build pod could
+      # reach; the affinity alone decides where it runs.
+      tolerations:
+        - operator: Exists
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      terminationGracePeriodSeconds: 0
+      initContainers:
+        - name: load-profile
+          image: busybox:1.37.0@sha256:bdf57e528e45e4433820e045b29b4597825a1c9e38353532d90a01445013f82e
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -eu
+              name=ankra-rootless-buildkit
+              target="/host/etc/apparmor.d/${name}"
+              if ! cmp -s "/profiles/${name}" "${target}"; then
+                cp "/profiles/${name}" "${target}.tmp"
+                mv "${target}.tmp" "${target}"
+              fi
+              chroot /host apparmor_parser -r "/etc/apparmor.d/${name}"
+              grep -q "^${name} (enforce)" /host/sys/kernel/security/apparmor/profiles
+              echo "loaded ${name} on ${NODE_NAME}"
+
+          env:
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+          securityContext:
+            privileged: true
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              memory: 64Mi
+          volumeMounts:
+            - name: host
+              mountPath: /host
+              mountPropagation: HostToContainer
+            - name: profiles
+              mountPath: /profiles
+              readOnly: true
+      containers:
+        - name: pause
+          image: registry.k8s.io/pause:3.10.2@sha256:f548e0e8e3dc1896ca956272154dde3314e8cc4fde0a57577ee9fa1c63f5baf4
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65535
+            runAsGroup: 65535
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+            seccompProfile:
+              type: RuntimeDefault
+          resources:
+            requests:
+              cpu: 1m
+              memory: 8Mi
+            limits:
+              memory: 16Mi
+      volumes:
+        - name: host
+          hostPath:
+            path: /
+            type: Directory
+        - name: profiles
+          configMap:
+            name: rootless-buildkit-apparmor
+```
+
+Both run in `kube-system`: the loader's init container is privileged and mounts the host root, so that it can run the node's own `apparmor_parser`, and a namespace that enforces Pod Security Baseline or Restricted refuses it. The long-running container is an unprivileged pause. The images are `busybox` and `registry.k8s.io/pause`, pinned by digest; mirror them if your nodes cannot pull from Docker Hub and registry.k8s.io.
+
+Then declare a Stack with both manifests, the loader after the profile:
+
+```yaml
+apiVersion: v1
+kind: ImportCluster
+metadata:
+  name: my-cluster
+spec:
+  stacks:
+  - name: ci-build-apparmor
+    manifests:
+    - name: rootless-buildkit-apparmor-profile
+      from_file: manifests/rootless-buildkit-apparmor-profile.yaml
+    - name: rootless-buildkit-apparmor-loader
+      from_file: manifests/rootless-buildkit-apparmor-loader.yaml
+      parents:
+      - name: rootless-buildkit-apparmor-profile
+        kind: manifest
+```
+
+Commit it to the cluster's GitOps repository and let Ankra sync it, or apply it:
+
+```bash
+ankra cluster apply -f my-cluster.yaml
+```
+
+[Create and change a Stack](/guides/create-and-change-a-stack) covers staging it as a draft first.
+</Step>
+<Step title="Check the profile is loaded on every node">
+A loader pod runs on every node except the control plane:
+
+```bash
+ankra cluster get pods -n kube-system --name rootless-buildkit-apparmor-loader
+```
+
+Each pod's init container logs `loaded ankra-rootless-buildkit on <node>`:
+
+```bash
+ankra cluster logs -n kube-system -l app.kubernetes.io/name=rootless-buildkit-apparmor-loader -c load-profile --follow=false
+```
+
+A pod that does not get past `Init` names the reason in that log (add `--previous` once it has restarted), for example a node without `apparmor_parser`. A build that lands on that node waits until the profile is loaded there.
+</Step>
+<Step title="Name the profile">
+`ankra cluster agent ci get` must show `AppArmor support: advertised`, then:
+
+```bash
+ankra cluster agent ci set --build-apparmor-profile ankra-rootless-buildkit --cluster <cluster>
+```
+
+It applies to the next build dispatched, with no agent restart, and that build is tried in your cluster again even if the cluster was known to confine the builder.
+</Step>
+</Steps>
+
+To change the profile, edit the ConfigMap and set the DaemonSet's `ankra.io/profile-sha256` annotation to the sha256 of the new `ankra-rootless-buildkit` value. Without a new annotation the loader pods do not restart and the nodes keep the old text.
+
+To back out, clear the setting with `--build-apparmor-profile ''`, then remove the Stack if you like. The profile stays loaded on the nodes that had it, which is harmless while nothing names it, until the node is replaced. To move to [the profile Ankra loads](#let-ankra-load-the-apparmor-profile), set `ankra-managed`, and remove your Stack once `Profile loaded on` covers your nodes and a build has passed. The two profiles have different names, so both can be loaded at once.
+
+### Build on Ankra instead
+
+Ankra can build the image on its own build cluster instead, and the scan, gate and publish still run as usual. Two things must both hold: the organisation's build fallback is on (**Build on Ankra when your cluster cannot**, under **Build rules** in **Build & delivery → Builds and clusters**, or `ankra org ci-settings set --build-fallback platform_builders`), and Ankra has enabled platform builds for the organisation. `ankra org ci-settings get` shows both. Only Ankra can enable platform builds: if it says no, [contact support](/platform/support). What leaves your cluster when this happens is on [Where your pipeline runs](/pipelines/where-pipelines-run).
 
 ## The check says `action_required`
 
