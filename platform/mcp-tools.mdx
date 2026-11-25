@@ -22,7 +22,7 @@ Creating a credential is deliberately **not** available over MCP or chat. Creati
 
 | Tool | Scope | Cluster-scoped | Description |
 | --- | --- | --- | --- |
-| `list_clusters` | `mcp:read` | No | List every cluster in the organisation with state, environment, Kubernetes version, and its `portal_url` |
+| `list_clusters` | `mcp:read` | No | List the organisation's clusters with state, environment, Kubernetes version, and its `portal_url`, one page at a time: `limit` (1-100, default 100) and `page`, and each answer gives `total_count` and the `next_page` to read, `null` on the last page |
 | `get_cluster_details` | `mcp:read` | No | Detailed information about one cluster by name or ID, with its `portal_url` |
 | `get_cluster_attention_summary` | `mcp:read` | No | The exact signals behind a cluster's Needs Attention badge |
 | `get_cluster_baseline` | `mcp:read` | No | A cluster's Ankra Baseline score: ten checks from the latest nightly evaluation, each pass, fail or unknown with its evidence, gaps heaviest first; an unknown check counts as coverage, never as a pass, and `computed` false means not scored yet, not a score of zero |
@@ -353,6 +353,7 @@ The CVE surface with CISA KEV and EPSS exploitation intelligence, the bill of ma
 | `get_security_finding` | `mcp:read` | No | One finding with its exploitation intelligence and every current occurrence |
 | `list_security_finding_occurrences` | `mcp:read` | No | Where one finding occurs: every cluster, workload, container and image, one row per occurrence, filtered by scan state (active or resolved) and cluster |
 | `get_security_advisory` | `mcp:read` | No | The platform's advisory for any CVE id: parsed NVD/OSV record, CISA guidance and your fleet exposure |
+| `find_image_declarations` | `mcp:read` | No | Where an image is declared in the stacks you can read: cluster and stack, the GitOps file and line where there is one, how each is changed, the running workloads no stack declares, and whether the search was complete |
 | `find_image_fix_candidates` | `mcp:read` | No | Which newer tag of a running image carries the fix for one CVE: the smallest step that fixes it and the newest release, each with its digest pin and a verdict (carries the fix, still affected, or not scanned, which is never read as fixed) |
 | `list_security_cluster_posture` | `mcp:read` | No | Per-cluster finding counts, known-exploited exposure and scanner freshness |
 | `list_security_workloads` | `mcp:read` | No | Workloads carrying findings, one row per container image with cluster, namespace, add-on attribution and actionable counts, with the findings filters |
@@ -382,7 +383,7 @@ The CVE surface with CISA KEV and EPSS exploitation intelligence, the bill of ma
 | `get_cluster_network_policy_overprivilege` | `mcp:read` | No | One cluster's NetworkPolicy over-privilege score on ingress and egress, computed live from its policies and workloads |
 | `enable_security_baseline` | `mcp:write` | No | Publish the curated security baseline stack on a cluster: trivy-operator plus the pod-security policies in audit mode, committed to its GitOps repository |
 | `get_cluster_security_history` | `mcp:read` | No | One cluster's daily security posture trend from its stored snapshots, oldest first: findings by severity, fixable critical/high, workloads and namespaces scanned, risk score and the actionable / acknowledged / accepted-risk split per day (`days`, 1 to 365, default 90) |
-| `get_cluster_security_report_schedule` | `mcp:read` | No | The cluster's scheduled security report: whether one is configured, weekly or monthly, the email recipients, enabled or paused, when it last went out and when it is next due |
+| `get_cluster_security_report_schedule` | `mcp:read` | No | The cluster's scheduled security report: whether one is configured, daily, weekly or monthly, the email recipients, enabled or paused, when it last went out and when it is next due |
 | `set_cluster_security_report_schedule` | `mcp:write` | No | Store the cluster's scheduled security report: frequency, up to 20 recipients and whether sending is enabled; replaces the whole schedule (clusters.write) |
 | `send_cluster_security_report_now` | `mcp:write` | No | Email the cluster's security report to its scheduled recipients within the next minute; refuses when no schedule is configured (clusters.write) |
 | `get_security_sbom_component` | `mcp:read` | No | Follow one exact package (name, version and ecosystem) to the images, workloads and clusters that run it |
@@ -459,7 +460,8 @@ Day-2 operations for Ankra-provisioned clusters on every self-managed provider (
 | `start_cluster` | `mcp:write` | No | Start (re-provision) a stopped cluster, optionally control plane only |
 | `upgrade_preflight` | `mcp:read` | No | Check a Kubernetes version hop without changing anything: the hop plan per node, running operations, PodDisruptionBudgets, CloudNativePG settings, control-plane memory, restore points, control-plane reachability and the k3s address pins, each answered pass, warn, block or skipped |
 | `upgrade_cluster` | `mcp:write` | No | Upgrade the cluster's Kubernetes version. Runs the same preflight first and refuses on a block; never forces past a PodDisruptionBudget |
-| `delete_cluster` | `mcp:write` | No | Deprovision a cluster entirely; requires re-typing the cluster name to confirm |
+| `delete_cluster` | `mcp:write` | No | Deprovision a cluster entirely; requires re-typing the cluster name to confirm. Refuses an imported cluster |
+| `disconnect_cluster` | `mcp:write` | No | Disconnect an imported cluster: removes it from Ankra and revokes its agent, changes nothing inside the cluster, and works while the agent is offline; requires re-typing the cluster name to confirm |
 | `update_cluster` | `mcp:write` | No | Change a cluster's settings, today only its environment label |
 | `set_cluster_agent_auto_upgrade` | `mcp:write` | No | Turn automatic upgrades of the Ankra agent on a cluster on or off |
 | `get_cluster_gateway_api` | `mcp:read` | No | Where the Kubernetes Gateway API stands on a cluster Ankra built: whether it can be served, the recorded option, the phase from off to enabled, the platform's reading of the CRDs, and what the Traefik and cert-manager values would gain or contradict; a phase other than enabled is not a broken cluster |
@@ -516,8 +518,8 @@ Over MCP `watch_pipeline_run` waits for the run and returns it; in the Ankra cha
 | `run_pipeline` | `mcp:write` | No | Start a manual run of a connected repository's committed pipeline at a branch, tag or commit; it always runs the definition of record, and a dispatch identical to a queued one joins it (`already_queued`) |
 | `rerun_pipeline_run` | `mcp:write` | No | Re-run a pipeline run at the same commit: `failed_only` re-runs only the stages that failed, `full_run` runs every stage regardless of path filters; a run dispatched with its own spec also needs `pipelines.manage` |
 | `cancel_pipeline_run` | `mcp:write` | No | Cancel a run that has not concluded; a started run with finally stages runs them first, so cancel again with `force` to stop those too |
-| `get_merge_train` | `mcp:read` | No | A repository's merge train: whether it is on, `max_cars`, auto-admit, the queued pull requests with the run testing each, and the ones that recently left it with the reason |
-| `add_to_merge_train` | `mcp:write` | No | Put a pull request in its repository's merge train, which tests it on top of the ones ahead and merges it when green. Open to an organisation admin, the author or anyone with push access; refused to a service account and to an AI lane acting on its own |
+| `get_merge_train` | `mcp:read` | No | A repository's merge train: whether it is on, `max_cars`, auto-admit, the queued pull requests, each with its `place` (1 is the first car) and the run testing it, and the ones that recently left it with the reason |
+| `add_to_merge_train` | `mcp:write` | No | Put a pull request in its repository's merge train, which tests it on top of the ones ahead and merges it when green. Answers the `place` it took. Open to an organisation admin, the author or anyone with push access; refused to a service account and to an AI lane acting on its own |
 | `remove_from_merge_train` | `mcp:write` | No | Take a pull request out of the merge train by `entry_id` or `pull_request_number`; an entry being merged, or one that already left, is refused |
 | `list_pipeline_schedules` | `mcp:read` | No | A connected repository's cron schedules with timezone, ref, dispatch inputs, whether each is enabled, when it fires next and what it last did |
 | `create_pipeline_schedule` | `mcp:write` | No | Create a five-field cron schedule (UTC unless `timezone`) that starts a repository's pipeline at a ref with its manual inputs; refused for a repository connected for Workspaces only |
