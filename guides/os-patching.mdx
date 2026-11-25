@@ -83,10 +83,25 @@ The CLI asks before it starts (`--yes` skips the question). The body is optional
 | `outside_window` | `--outside-window` | `true` starts the run now although the maintenance window is closed. Without it, a run outside the window is refused. |
 | `include_stateful_nodes` | `--include-stateful-nodes`, `--exclude-stateful-nodes` | `true` also drains nodes that carry single-replica stateful workloads and database node pools. They are skipped by default, because draining a single-replica database is an outage. |
 | `include_bastion` | `--exclude-bastion` | `false` leaves the bastion out. By default it is patched last. |
+| `accept_api_downtime` | None yet | `true` also patches the cluster's only control plane, see [A cluster with one control plane](#a-cluster-with-one-control-plane). |
 
-A node that is not up, and a cluster's only control plane, are never patched by a run: they are skipped and reported. Sending the same request twice cannot start two runs. While one is in flight, a second is refused with `409`, naming the operation already running.
+A node that is not up is never patched by a run: it is skipped and reported, and so is a cluster's only control plane unless you accept its downtime. Sending the same request twice cannot start two runs. While one is in flight, a second is refused with `409`, naming the operation already running.
 
 The tool is `run_os_patches`, and Ankra's AI asks you to confirm it before it runs.
+
+A run you start installs only versions that passed the [canary test](#tested-on-a-canary-node-first), the same as an automatic run.
+
+- **The cluster's update set passed within the last 7 days.** The run starts at once.
+- **The set has not passed yet.** Ankra records your request and starts the test. If no dry run has recorded a set yet, it starts that dry run first. The answer has `state` `waiting_for_canary`, and `operation_id` is the test or the dry run to follow. The run then starts on its own once the set passes. The status read shows the request under `run_request`: `waiting`, then `started` with the run's operation. A request whose set has not passed within 24 hours expires.
+- **The set failed its test.** The run is refused with `409`, which gives the reason. Nothing installs that set. A later dry run that finds different versions starts over.
+
+### A cluster with one control plane
+
+A run skips a cluster's only control plane, because patching it makes the Kubernetes API unavailable while the node reboots. The network-restarting packages are held back from unattended upgrades, so their security fixes reach that node only through a run. To patch it, send `"accept_api_downtime": true` with the run.
+
+The control plane is then patched first. Ankra checks that its etcd member is healthy and takes an etcd snapshot on the node. It then drains the node, installs the tested versions, and reboots the node if they need it. The Kubernetes API is unavailable until the node is back, so nothing can be scheduled or changed through it meanwhile.
+
+Automatic runs never patch a cluster's only control plane. Adding control planes removes the downtime.
 
 ## 4. Set the policy
 
@@ -133,6 +148,22 @@ Each host's OS updates are automatic or advisory:
 - **Advisory.** Nothing patches the host on its own. The [daily dry run](#the-daily-dry-run) still reports what is pending, and a person starts the run.
 
 The control planes and the bastion follow the cluster's mode. A node group can override it ([Per node group](#per-node-group)), so one node group of a production cluster can be automatic while the rest stay advisory. A run Ankra starts in the window patches the automatic hosts only and lists the advisory ones as left out. A run a person starts, as in step 3, patches every host it can, whatever its mode.
+
+### Tested on a canary node first
+
+Before any OS patch run, automatic or one you start, Ankra tests the run's exact package versions on a temporary node of the cluster. The run starts only after that test passes. Unattended upgrades, which keep installing the security updates that are not held back, are not part of this test.
+
+1. The daily dry run records the exact package versions a run would install. This list is the cluster's **update set**.
+2. Ankra adds one temporary node to the cluster's first worker node group. It has the same size and network as the group's nodes, and is tainted so no workload lands on it.
+3. The node installs exactly those versions and reboots if they ask for it.
+4. Ankra checks the node. Everything that worked before the install must still work after it: DNS, outbound IPv4 (through NAT64 on an IPv6-only cluster), outbound IPv6, and a test pod that reaches the Kubernetes API and the internet.
+5. Ankra removes the node, whatever the result.
+
+A set that passes stays valid for 7 days. A run installs exactly the set's versions, never newer ones. A host that is offered a different version stops the run before it is drained, and the next dry run records a new set to test.
+
+When a set fails its test, nothing is installed on your hosts and the organisation gets one warning. The status read shows the set under `update_set` and whether an automatic run may start under `automatic_run`, with the reason.
+
+The temporary node is billed like any other node of the group for as long as it exists, at most about three hours.
 
 ### When nobody chose a mode
 
