@@ -144,7 +144,7 @@ The chart enforces non-root defaults matching the image's `ankra` user (UID/GID 
 | Value | Default | Description |
 |-------|---------|-------------|
 | `node_selector` / `tolerations` / `topologySpreadConstraints` | empty | Standard scheduling controls |
-| `affinity` | prefers nodes that are not control planes | See [Where the agent runs](#where-the-agent-runs) |
+| `affinity` | prefers nodes labelled `ankra.io/egress=direct`, then nodes that are not control planes | See [Where the agent runs](#where-the-agent-runs) |
 | `service_account.name` | `ankra-agent-sa` | Service account name |
 | `service_account.annotations` | `{}` | Service account annotations (e.g. IRSA) |
 | `service.type` / `service.port` | `ClusterIP` / `8080` | Agent HTTP service |
@@ -155,11 +155,28 @@ The chart enforces non-root defaults matching the image's `ankra` user (UID/GID 
 
 ### Where the agent runs
 
-From agent 2.1.1354, the chart's default `affinity` prefers nodes without the `node-role.kubernetes.io/control-plane` label. On a cluster with workers, the agent therefore runs on a worker that has room, not on a small control-plane node where Kubernetes can evict it when that node runs low on memory.
+The chart's default `affinity` carries two preferences:
 
-It is a preference, not a requirement: when no worker can take the agent, it runs where it could before. On a cluster Ankra builds, Ankra installs the agent with a toleration for the control-plane taint, so it can run on a control plane when no worker can take it. Kubernetes applies it when the agent's pod starts, so a running agent moves at its next upgrade.
+| The agent prefers | Weight | Since |
+|-------------------|--------|-------|
+| Nodes labelled `ankra.io/egress=direct` | 100 | agent 2.1.1356 |
+| Nodes without the `node-role.kubernetes.io/control-plane` label | 50 | agent 2.1.1354 |
 
-Helm merges an `affinity` you set with this default. A `nodeAffinity.preferredDuringSchedulingIgnoredDuringExecution` list you set replaces the default preference, and any other key you set sits beside it.
+**Nodes with their own way out.** On many clusters most nodes reach the internet through one NAT or managed gateway, such as an OVHcloud gateway. When that gateway fails, the agent loses its connection to Ankra, even though the nodes with their own public IP keep working. Label those nodes and the agent prefers them:
+
+```bash
+ankra cluster patch node worker-a worker-b --patch '{"metadata":{"labels":{"ankra.io/egress":"direct"}}}'
+```
+
+The agent must be able to run on the node. A node with a taint the agent does not tolerate, such as a node kept for databases, is never chosen, whatever its label. The chart's default `tolerations` is empty. If you installed the agent with Helm, set `tolerations` for that taint; where Ankra installs the agent for you, there is no setting for it yet.
+
+Label a node only when its traffic really leaves through its own public IP. Prefer workers: a labelled control plane outranks every unlabelled worker. Labelling every node gains nothing, because the preference only counts when some nodes have the label and others do not.
+
+**Not on a small control plane.** On a cluster with workers, the agent runs on a worker that has room, not on a small control-plane node where Kubernetes can evict it when that node runs low on memory. On a cluster Ankra builds, Ankra installs the agent with a toleration for the control-plane taint, so it can still run on a control plane when no worker can take it. An agent installed before November 2026 may have lost that toleration at an earlier upgrade; it then stays pending when no worker can take it.
+
+Both are preferences, not requirements: when no preferred node can take the agent, it runs where it could before. Kubernetes reads node labels when the agent's pod starts, so a running agent moves when its pod is next created, at its next upgrade or restart, not when you set the label.
+
+Helm merges an `affinity` you set with this default. A `nodeAffinity.preferredDuringSchedulingIgnoredDuringExecution` list you set replaces both preferences, any other key you set sits beside them, and `affinity: null` removes the default.
 
 ## Metrics
 
