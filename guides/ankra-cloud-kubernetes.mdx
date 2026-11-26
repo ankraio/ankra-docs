@@ -212,8 +212,32 @@ See [Accessing Clusters with kubectl](/guides/kubeconfig).
 
 - **Node pools** - add, scale and delete pools on the cluster's node management page (`/next/clusters/<cluster-id>/node-groups`) or with the API. Labels and taints are set when a pool is created.
 - **Autoscaling** - set `min_count` and `max_count` on a pool and Ankra Cloud scales it between them; clear autoscaling to return to a fixed count. See [Managed Kubernetes - day-2 operations](/guides/managed-kubernetes#day-2-operations).
-- **Upgrades** - Ankra Cloud upgrades one minor version at a time.
+- **Upgrades** - Ankra Cloud upgrades one minor version at a time, or to a newer patch release of the minor a cluster runs, and can upgrade a cluster by itself in a weekly maintenance window. See [Upgrades](#upgrades).
 - **Deletion** - deleting the cluster waits for Ankra Cloud to release its nodes, volumes and load balancers, then removes the network Ankra created for it.
+
+## Upgrades
+
+A cluster runs the exact patch release it was created, upgraded or restored on, such as `v1.36.5`. It moves only when it is upgraded: a newer patch that Ankra Cloud starts offering does not reach a running cluster by itself, and restoring an etcd snapshot runs the control plane on the patch release the snapshot was taken on.
+
+Upgrade controls are rolling out account by account. Once your account has them, the cluster's page in the [Ankra Cloud console](https://cloud.ankra.app) shows an **Upgrades** card, and the Ankra Cloud API reports `upgrade_controls: true` on the cluster.
+
+### Manual or automatic
+
+- **Manual** (every cluster's default): the cluster is upgraded only when you start an upgrade. **Update to v1.36.6** moves to the newer patch release of the minor it runs (`available_patch_upgrade`), and **Upgrade to 1.37** to the next minor (`available_upgrade`).
+- **Automatic**: Ankra Cloud upgrades the cluster by itself in a weekly maintenance window, set in UTC, that may run past midnight. The **patch** channel takes the newest patch release of the minor the cluster runs. The **stable** channel also moves to the next minor, one minor at a time, once that minor has been offered for the number of days you choose (14 by default).
+
+Choose with **Upgrade settings** on the **Upgrades** card, or with `update_kubernetes_cluster` (`PATCH /v1/kubernetes-clusters/{id}`) and its `upgrade_policy`, which `create_kubernetes_cluster` also takes. **Skip a release** leaves one release, such as `v1.36.6` or `1.37`, alone; a newer one is taken again. The card and `next_automatic_upgrade` show the next planned upgrade, its window and anything that holds it.
+
+An automatic upgrade starts only inside the window and at least 30 minutes before it closes, and never while the control plane is unhealthy, missing an etcd member, unstable over the last hour, asleep, or busy with another operation. Ankra Cloud notifies you, in the console and by email, about a day before the window and again once the upgrade finished or failed. Ankra Cloud staff can pause automatic upgrades for everyone, for example while a release is investigated; a paused upgrade shows as held.
+
+### What every upgrade does
+
+1. It checks that the control plane is healthy, that etcd has all its members, and that your quota has room for one extra node per node pool.
+2. It takes an etcd snapshot, `pre-upgrade-<time>`, and stops if the snapshot fails. You can restore it from **Snapshots**. A development cluster on shared storage has no snapshots of its own.
+3. It moves the API servers to the new release. If they are not ready within 45 minutes, the control plane and its add-ons are put back on the release the cluster ran, by themselves. Your data in etcd is never rolled back.
+4. It rolls each node pool one node at a time: a new node joins before an old one is cordoned and drained. Pods are evicted only as their PodDisruptionBudget allows. A node that does not drain within the **node drain timeout** (30 minutes by default, 5 to 240) stops the upgrade with the pods that block it named; the node serves again, and the nodes that already rolled keep the new release.
+
+The operations list of the cluster records each step of every upgrade and of a rollback.
 
 ## Cost
 
