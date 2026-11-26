@@ -29,16 +29,18 @@ A cluster comes in one of three shapes. You choose when you create it, and the c
 
 | | Production control plane | Development control plane | Dev cluster |
 |---|---|---|---|
-| Control plane | Three replicas, run by the Ankra team | One replica, run by the Ankra team | k3s on the cluster's one server |
-| Highly available | Yes | No | No |
+| Control plane | Three API servers and a dedicated etcd, with reserved CPU and memory, run by the Ankra team | Two API servers on separate host machines over shared, highly available storage, run by the Ankra team | k3s on the cluster's one server |
+| Highly available | Yes | Yes | No |
+| Uptime commitment | 99.95% monthly Kubernetes API uptime, with service credits | None (best effort) | None |
+| Support | Named engineers and a shared Slack channel | Documentation and community | Documentation and community |
 | Control-plane fee | A monthly fee per cluster | None | None |
 | Nodes | Node pools, billed as servers | Node pools, billed as servers | One server, billed as a server |
 | Autoscaling | Yes | Yes | No |
 | Use it for | Anything that must stay up | Development, test and preview environments | A small cluster to try something on |
 
-The **production** control plane is what the API and the CLI create unless you ask for another. Its three replicas keep the Kubernetes API available through an upgrade or the loss of a host node. In the portal, the preselected control plane follows the answer to **What will this cluster run?**: development for **Development** and **Testing**, production otherwise. You can change it before you create the cluster.
+The **production** control plane is what the API and the CLI create unless you ask for another. Its three replicas keep the Kubernetes API available through an upgrade or the loss of a host node, on an etcd of its own with CPU and memory set aside for it. In the portal, the preselected control plane follows the answer to **What will this cluster run?**: development for **Development** and **Testing**, production otherwise. You can change it before you create the cluster.
 
-The **development** control plane has no fee of its own: you pay for the nodes only. It is not for production. With one replica, an upgrade or a host node failure interrupts the Kubernetes API while the control plane restarts, and you cannot deploy or change anything until it is back.
+The **development** control plane has no fee of its own: you pay for the nodes only. It is highly available too: its two API servers run on separate host machines and are upgraded one at a time, so the Kubernetes API keeps answering through an upgrade or the loss of a host machine. It shares its storage and the host's capacity with other development clusters, within the [plan limits](#plan-limits), and comes with no uptime commitment and documentation and community support. A development cluster created before this change keeps one API server until Ankra moves it.
 
 On either control plane, a slow disk under the control plane's etcd makes the Kubernetes API answer slowly. An API server is restarted only after it has had no answer from etcd for over a minute.
 
@@ -136,6 +138,20 @@ Every option is optional and goes in an `ankracloud_k8s` block on the create req
 
 Without `private_network_id`, Ankra creates a network named `ankra-<cluster-name>` and deletes it again when the cluster is deleted. A network you named is never deleted.
 
+### Plan limits
+
+Each control plane is sized for a cluster of up to:
+
+| | Development | Production |
+|---|---|---|
+| Nodes, across every node pool | 30 | 200 |
+| Pods (fair use) | About 1,000 | About 10,000 |
+| Kubernetes objects stored | 400 MB | 8 GB |
+
+Every node pool counts at what it may hold: its node count, or its autoscaling maximum when that is higher. A cluster create, a new node pool or a scale-up past the node limit is refused with `422` and `reason: plan_limit`, which names the limit. A quota request does not raise it; a production control plane does.
+
+The pod count is fair use: nothing refuses a pod, and Ankra contacts you when a cluster stays above it. A development cluster whose stored objects reach 400 MB keeps running and accepting changes, but its node pools do not grow until it is back under, and the same `422` says so. Old ReplicaSets, Helm release history, Events and unused ConfigMaps and Secrets are what usually pile up. A development cluster's API servers also serve a bounded number of requests at a time, so one busy cluster cannot slow the others down.
+
 ### Limits
 
 | Limit | Value |
@@ -220,7 +236,7 @@ See [Accessing Clusters with kubectl](/guides/kubeconfig).
 What a cluster costs depends on its control plane:
 
 - **Production control plane**: a monthly fee per cluster, for three replicas that keep the Kubernetes API highly available. The **Control plane** choice in the create form shows the fee Ankra Cloud lists today, and so does `GET /api/v1/clusters/managed/ankracloud_k8s/options`.
-- **Development control plane**: no control-plane fee. You pay for the nodes only. It runs one replica and is not for production, because an upgrade or a host node failure interrupts the Kubernetes API while it restarts.
+- **Development control plane**: no control-plane fee. You pay for the nodes only. It is highly available, within the [plan limits](#plan-limits), with no uptime commitment.
 - **Dev cluster**: no control-plane fee. You pay for its one server.
 
 Nodes are billed by Ankra Cloud as servers, at their plan price, whichever control plane you choose. A public IPv4 address on the API endpoint is billed on top, on both control planes. The create form reads the fees live from Ankra Cloud and includes them in the **Estimated monthly cost** card. For the current price of each line, see [Billing](https://cloud.ankra.app/docs/billing) in the Ankra Cloud documentation.
