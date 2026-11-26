@@ -239,8 +239,8 @@ ankra cluster agent ci set --build-apparmor-profile ankra-managed --cluster <clu
 With `ankra-managed`, Ankra ships the profile, loads it and sends builds only where it is loaded:
 
 - **The profile.** The agent carries a profile named `ankra-managed-rootless-buildkit`. Its rules are exactly those of the [profile you can install yourself](#install-the-apparmor-profile-yourself), under its own name. Its version is the first 12 characters of the sha256 of its text, so an agent release that changes the profile reloads it on every node.
-- **Loading it.** The agent runs a DaemonSet, `ankra-ci-apparmor-loader`, with the profile in the ConfigMap `ankra-ci-apparmor-profile`. With a required [step placement](/guides/ankra-pipelines#step-placement), it runs on the nodes the placement selects, with its tolerations. Otherwise it runs on every node, control plane included, and tolerates every taint, because a single-node or untainted k3s server runs builds on its control plane. Either way it covers nodes the autoscaler adds later. It loads the profile with each node's own `apparmor_parser` and checks that it is enforced.
-- **Routing builds.** Each node where the profile is loaded gets the label `apparmor.ankra.io/ankra-managed-rootless-buildkit=<version>`, and a build pod only schedules on a node with that label. A build waits until a node it can run on has the label. On a node with AppArmor disabled the profile cannot be loaded, so it never gets the label, and the per-node report says `AppArmor is not enabled on <node>`.
+- **Loading it.** The agent runs a DaemonSet, `ankra-ci-apparmor-loader`, with the profile in the ConfigMap `ankra-ci-apparmor-profile`. With a required [step placement](/guides/ankra-pipelines#step-placement), it runs on the nodes the placement's node selector picks. Otherwise it runs on every node, control plane included, because a single-node or untainted k3s server runs builds on its control plane. Either way it tolerates every taint and covers nodes the autoscaler adds later. It loads the profile with each node's own `apparmor_parser` and checks that it is enforced.
+- **Routing builds.** Each node where the profile is loaded gets the label `apparmor.ankra.io/ankra-managed-rootless-buildkit=<version>`, and a build pod only schedules on a node with that label. A build waits until a node it can run on has the label. On a node with AppArmor disabled the profile cannot be loaded, so it never gets the label, and the per-node report says `AppArmor is not enabled on <node>`. A node with AppArmor 3, such as Ubuntu 22.04 or Debian 12, cannot parse the profile, so it never gets the label either, and the report says loading failed, with the parser's error.
 
 The agent starts the loader with the first build after you set it, so that build can wait while the nodes load the profile. That build is also tried in your cluster again, even if the cluster was known to confine the builder.
 
@@ -251,14 +251,15 @@ ankra cluster agent ci get --cluster <cluster>
 ```
 
 ```text
-Build AppArmor:        ankra-managed (ankra-managed-rootless-buildkit 79142a0eefe6)
-Managed AppArmor:      advertised
-Profile loaded on:     <loaded> of <nodes> nodes (reported <time>)
+  Build AppArmor:        ankra-managed (ankra-managed-rootless-buildkit 79142a0eefe6)
+  AppArmor support:      advertised
+  Managed AppArmor:      advertised
+  Profile loaded on:     <loaded> of <nodes> nodes (last build's report, <time> ago)
 ```
 
-`Managed AppArmor` says whether the agent advertises it; `not advertised` means upgrade the agent. `Profile loaded on` is what the last build that ran with the setting reported, followed by one line for each node where the profile is not loaded, with the reason. `-o json` carries the raw fields, `supports_build_apparmor_managed` and `build_apparmor_managed_status`.
+`AppArmor support` and `Managed AppArmor` say whether the agent advertises a build profile and the managed one; `not advertised` on either means upgrade the agent. `Profile loaded on` is what the last build that ran with the setting reported, followed by one line for each node where the profile is not loaded, with the reason. Until a build has reported, it reads `not reported yet (the next build reports it)`. `-o json` carries the raw fields, `supports_build_apparmor_managed` and `build_apparmor_managed_status`.
 
-To turn it off, clear the setting. The agent then removes the DaemonSet, the ConfigMap and the node label. The profile file left on the nodes is inert, because nothing names it.
+To turn it off, clear the setting. When the next build reaches the agent, it removes the DaemonSet, the ConfigMap and the node label. Until then they stay. The profile file left on the nodes is inert, because nothing names it.
 
 ```bash
 ankra cluster agent ci set --build-apparmor-profile '' --cluster <cluster>
@@ -269,12 +270,13 @@ ankra cluster agent ci set --build-apparmor-profile '' --cluster <cluster>
 Use this when you want to own the profile text, or while your agent does not advertise managed AppArmor yet. Ankra runs this exact profile on its own Ubuntu 24.04 and Debian 13 build nodes. It is containerd's default container profile with two changes: `deny mount,` becomes `mount,` and `pivot_root,`, and `userns,` is added. Every `/proc` and `/sys` deny of the default profile is kept.
 
 - **Ubuntu 24.04** needs no sysctl change. `kernel.apparmor_restrict_unprivileged_userns=1` only restricts unconfined processes, and the builder is confined by this profile. `userns,` changes nothing there, because a profile with no `abi` rule is compiled without user namespace mediation.
-- **Debian 13** pins the AppArmor 4 feature set, which mediates creating a user namespace. Without `userns,` the builder fails with `[rootlesskit:parent] error: failed to start the child: fork/exec /proc/self/exe: permission denied`. Keep the rule on every distribution.
+- **Debian 13** pins the AppArmor 4 feature set, which mediates creating a user namespace. Without `userns,` the builder fails with `[rootlesskit:parent] error: failed to start the child: fork/exec /proc/self/exe: permission denied`. Keep the rule.
+- **Ubuntu 22.04 and Debian 12** run AppArmor 3, whose parser does not know `userns,` and refuses the whole profile with `syntax error, unexpected TOK_END_OF_RULE, expecting TOK_MODE`. On those nodes, [build on Ankra instead](#build-on-ankra-instead).
 - **`mount,` is not narrowed** to a list of filesystem types. Inside its own unprivileged user namespace, the builder makes `/` private, bind-mounts, mounts proc, sysfs, tmpfs and overlay for each `RUN`, remounts read-only and pivots into each build container's root. The kernel's user namespace rules already bound all of that: the builder runs as uid 1000 with only `SETUID` and `SETGID`, so it cannot mount in any namespace it does not own. A per-type list would break on a BuildKit release that mounts something new.
 
 <Steps>
 <Step title="Add the profile and its loader to a Stack">
-Save these two manifests next to your cluster's ImportCluster file. The ConfigMap holds the profile, and the DaemonSet loads it on every node except the control plane, including nodes that join later.
+Save these two manifests next to your cluster's ImportCluster file. The ConfigMap holds the profile, and the DaemonSet loads it on every node except the control plane, including nodes that join later. If builds can run on a control-plane node, as on a single-node or untainted k3s server, delete the loader's `affinity` block so it loads the profile there too.
 
 ```yaml manifests/rootless-buildkit-apparmor-profile.yaml
 # The AppArmor profile Ankra's rootless image builder runs under. The loader
@@ -390,7 +392,9 @@ spec:
       # pod on a node without the profile waits until it is loaded.
       priorityClassName: system-node-critical
       # Every node but the control plane. A build pod can land on any worker
-      # node its run reaches, so every worker needs the profile.
+      # node its run reaches, so every worker needs the profile. Where builds
+      # also run on a control-plane node (a single-node or untainted k3s
+      # server), delete this affinity block.
       affinity:
         nodeAffinity:
           requiredDuringSchedulingIgnoredDuringExecution:
