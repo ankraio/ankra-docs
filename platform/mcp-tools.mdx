@@ -22,7 +22,7 @@ Creating a credential is deliberately **not** available over MCP or chat. Creati
 
 | Tool | Scope | Cluster-scoped | Description |
 | --- | --- | --- | --- |
-| `list_clusters` | `mcp:read` | No | List every cluster in the organisation with state, environment, Kubernetes version, and its `portal_url` |
+| `list_clusters` | `mcp:read` | No | List the organisation's clusters with state, environment, Kubernetes version, and its `portal_url`, one page at a time: `limit` (1-100, default 100) and `page`, and each answer gives `total_count` and the `next_page` to read, `null` on the last page |
 | `get_cluster_details` | `mcp:read` | No | Detailed information about one cluster by name or ID, with its `portal_url` |
 | `get_cluster_attention_summary` | `mcp:read` | No | The exact signals behind a cluster's Needs Attention badge |
 | `get_cluster_baseline` | `mcp:read` | No | A cluster's Ankra Baseline score: ten checks from the latest nightly evaluation, each pass, fail or unknown with its evidence, gaps heaviest first; an unknown check counts as coverage, never as a pass, and `computed` false means not scored yet, not a score of zero |
@@ -76,9 +76,10 @@ Creating a credential is deliberately **not** available over MCP or chat. Creati
 | `reconcile_cluster` | `mcp:write` | No | Re-render every stack member against the committed definitions and variables and re-apply drift (takes a `cluster_id` argument) |
 | `get_node_usage` | `mcp:read` | No | Live CPU and memory per node from metrics-server, with allocatable capacity and percentages (never a cached answer) |
 | `get_pod_usage` | `mcp:read` | No | Live CPU and memory per pod from metrics-server, optionally per container, filtered by namespace |
-| `get_cluster_agent_status` | `mcp:read` | No | The Ankra agent's online state, version against the latest release, upgrade posture and last check-in |
+| `get_cluster_agent_status` | `mcp:read` | No | The Ankra agent's online state, version against the latest release, upgrade posture and last check-in, and the tolerations Ankra holds for it (`held_tolerations`) |
 | `upgrade_cluster_agent` | `mcp:write` | No | Upgrade the agent to the latest release now instead of waiting for the fleet rollout (agents.manage) |
 | `set_cluster_agent_resources` | `mcp:write` | No | Set the Ankra agent's memory and CPU limits and requests on a cluster, for example after it was OOMKilled; the agent restarts onto the new sizing, Ankra holds it for later upgrades and reinstalls, and `survives_agent_upgrades` in the result says whether that holds on this agent (agents.manage) |
+| `set_cluster_agent_tolerations` | `mcp:write` | No | Set the extra tolerations Ankra holds for the Ankra agent on a cluster, so it can run on tainted nodes. The call replaces the whole list, up to eight; an online agent that accepts it restarts with it, and an empty list stops holding any (agents.manage) |
 | `list_helm_releases` | `mcp:read` | No | Every Helm release installed on the cluster, Ankra-managed or not, for drift detection |
 | `get_cluster_dns_zone` | `mcp:read` | No | The cluster's generated DNS zone and the public domain hostnames publish under |
 | `get_sops_config` | `mcp:read` | No | Whether SOPS is enabled and the AGE public key secrets are encrypted with |
@@ -417,7 +418,7 @@ Available while the organisation's backups feature is enabled; vault creation wi
 | `create_aws_cluster` | `mcp:write` | No | Create and provision a self-managed Kubernetes cluster on AWS EC2, in a VPC Ankra creates or one you adopt - runs the create preflight first |
 | `create_proxmox_cluster` | `mcp:write` | No | Create and provision a Kubernetes cluster on Proxmox VE |
 | `create_morpheus_cluster` | `mcp:write` | No | Create and provision a Kubernetes cluster on HPE Morpheus |
-| `list_cluster_nodes` | `mcp:read` | No | The provisioned VM nodes of a cluster, with live provider status; deleted servers are left out unless `include_deleted` is set |
+| `list_cluster_nodes` | `mcp:read` | No | The provisioned VM nodes of a cluster, with live provider status and each machine's availability zone and where it was read (`availability_zone`, `availability_zone_source`); deleted servers are left out unless `include_deleted` is set |
 | `get_cluster_machine_inventory` | `mcp:read` | No | Compare a cluster's server and bastion records with its provider and its Kubernetes nodes: each record reads `consistent`, `phantom` (the machine is gone), `gone_kept` (a stopped server whose machine is gone), `no_node` or `unknown`. Hetzner, UpCloud, DigitalOcean, AWS and Ankra Cloud |
 | `retire_gone_machine_rows` | `mcp:write` | No | Remove up to 20 server records whose machine the provider confirms is gone; any other answer leaves the record and says why. Never removes a running control plane or bastion |
 | `restart_node` | `mcp:write` | No | Restart one provisioned node - control plane, worker, or bastion |
@@ -431,6 +432,7 @@ Available while the organisation's backups feature is enabled; vault creation wi
 | `get_provider_quotas` | `mcp:read` | No | What a cloud-provider credential may still create, with per-dimension limits and usage |
 | `request_provider_quota_increase` | `mcp:write` | No | Raise a cloud-provider limit for a credential (Azure), or produce the exact request to submit by hand for other providers |
 | `get_bastion_health` | `mcp:read` | Yes | The bastion health verdict the platform last recorded for an Ankra-provisioned cluster |
+| `get_provider_incidents` | `mcp:read` | Yes | The open incidents the cluster's cloud provider lists on its own status page for the cluster's region and zones (OVHcloud, UpCloud, DigitalOcean, Scaleway). A page that cannot be read, or does not list the cluster's places, reads unknown, never "nothing reported" |
 | `diagnose_bastion` | `mcp:read` | Yes | Inspect an Ankra-provisioned cluster's SSH bastion host, including sshd configuration, failed logins, disk and pending security updates |
 | `get_os_patch_status` | `mcp:read` | No | The rolling OS patch policy, the newest run host by host, the last dry run and the security-lag verdict of an Ankra-provisioned cluster ([OS security patching](/guides/os-patching)) |
 | `plan_os_patches` | `mcp:read` | No | Dry-run the pending OS security updates on every host of an Ankra-provisioned cluster, with the order a run would take and the hosts it would skip |
@@ -458,9 +460,9 @@ Day-2 operations for Ankra-provisioned clusters on every self-managed provider (
 | `change_control_plane` | `mcp:write` | No | Change the control plane's node count or instance type. Growing the count and resizing three or more controllers run live; reducing the count runs on a stopped cluster. Resizing the only controller of a running Hetzner cluster takes the Kubernetes API down for a few minutes and needs `accept_api_downtime: true` |
 | `stop_cluster` | `mcp:write` | No | Stop a cluster and keep its configuration: on Hetzner, OVHcloud, UpCloud, DigitalOcean, Proxmox VE and HPE Morpheus the virtual machines are deleted after an etcd snapshot (a Hetzner, UpCloud or DigitalOcean k3s cluster can pause instead and keep them powered off); AWS EC2, Scaleway and Ankra Cloud power the servers off and keep them |
 | `start_cluster` | `mcp:write` | No | Start (re-provision) a stopped cluster, optionally control plane only |
-| `upgrade_preflight` | `mcp:read` | No | Check a Kubernetes version hop without changing anything: the hop plan per node, running operations, PodDisruptionBudgets, CloudNativePG settings, control-plane memory, restore points, control-plane reachability and the k3s address pins, each answered pass, warn, block or skipped |
+| `upgrade_preflight` | `mcp:read` | No | Check a Kubernetes version hop without changing anything: the hop plan per node, running operations, PodDisruptionBudgets, CloudNativePG settings, control-plane memory, restore points, control-plane reachability, the k3s address pins and the kubeadm etcd upgrade path, each answered pass, warn, block or skipped |
 | `upgrade_cluster` | `mcp:write` | No | Upgrade the cluster's Kubernetes version. Runs the same preflight first and refuses on a block; never forces past a PodDisruptionBudget |
-| `delete_cluster` | `mcp:write` | No | Deprovision a cluster entirely; requires re-typing the cluster name to confirm. Refuses an imported cluster |
+| `delete_cluster` | `mcp:write` | No | Deletes nothing over MCP: answers `approval_url`, the page in the Ankra portal where a person deletes the cluster after the review it shows. See [Deleting a cluster needs a person](/platform/mcp-server#deleting-a-cluster-needs-a-person) |
 | `disconnect_cluster` | `mcp:write` | No | Disconnect an imported cluster: removes it from Ankra and revokes its agent, changes nothing inside the cluster, and works while the agent is offline; requires re-typing the cluster name to confirm |
 | `update_cluster` | `mcp:write` | No | Change a cluster's settings, today only its environment label |
 | `set_cluster_agent_auto_upgrade` | `mcp:write` | No | Turn automatic upgrades of the Ankra agent on a cluster on or off |
@@ -804,10 +806,10 @@ Cloudflare DNS records in the organisation's own Cloudflare account, and the ext
 | Tool | Scope | Cluster-scoped | Description |
 | --- | --- | --- | --- |
 | `list_playground_plans` | `mcp:read` | No | The orderable playground sizes with prices, availability and the organisation's memory budget |
-| `get_playground_status` | `mcp:read` | No | A playground's provisioning phase, expiry, starter app URL, size and price |
+| `get_playground_status` | `mcp:read` | No | A playground's provisioning phase, expiry, starter app URL, size and price. On Ankra Cloud also its trial: when a free playground is deleted, and `trial.keep_url`, the page where you save a card to keep it |
 | `create_playground` | `mcp:write` | No | Order a hosted playground Kubernetes namespace at a named size, or the free trial |
 | `resize_playground` | `mcp:write` | No | Resize a paid playground in place to another size |
-| `destroy_playground` | `mcp:write` | No | Permanently destroy a playground and everything deployed in it |
+| `destroy_playground` | `mcp:write` | No | Destroys nothing over MCP: answers `approval_url`, the page in the Ankra portal where a person destroys the playground and everything deployed in it |
 
 ## Agent MCP Tool Servers
 
