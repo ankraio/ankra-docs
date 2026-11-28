@@ -80,6 +80,18 @@ service's consumers and receives the connection as environment variables
 of its running pods reads the connection, otherwise at its next deploy.
 'ankra services get &lt;service&gt;' shows its pickup.
 
+Which credential the application connects with is printed when it is
+connected. On a PostgreSQL service that can carry one, Ankra gives the
+application a database role of its own: it acts as the database owner in the
+shared database, so the application reads and writes the same tables, and
+disconnecting the application stops the role logging in and removes it.
+Otherwise the application gets the service's owner credential, shared by
+every application on it, which disconnecting one application cannot revoke.
+`--credential` owner asks for the shared owner credential instead, and
+`--credential` shared_role asks for a role and is refused, with the reason,
+where the service cannot carry one. An application that is already connected
+keeps the credential it has.
+
 Connecting is refused while the service is still being installed, while it is
 being retired, and when the service changed after this command read it: run
 the command again.
@@ -98,6 +110,7 @@ ankra services connect <service> [flags]
 ```bash
 ankra services consumers bind --application storefront --cluster prod --namespace storefront
 ankra services connect orders-db --consumer 0b7c4d19-5f6a-4b8c-9d0e-1f2a3b4c5d6f
+ankra services connect orders-db --consumer 0b7c4d19-5f6a-4b8c-9d0e-1f2a3b4c5d6f --credential owner
 ankra services connect orders-db --cluster prod --consumer 0b7c4d19-5f6a-4b8c-9d0e-1f2a3b4c5d6f -o json
 ```
 
@@ -107,6 +120,7 @@ ankra services connect orders-db --cluster prod --consumer 0b7c4d19-5f6a-4b8c-9d
 |------|---------|-------------|
 | `--cluster` |   | The cluster the service runs on, when its name is not unique (name or id) |
 | `--consumer` |   | Consumer binding id of the application's namespace ('ankra services consumers bind') |
+| `--credential` |   | The credential the application connects with: owner (the service's shared owner credential) or shared_role (a database role of its own); left out, Ankra chooses |
 | `-o`, `--output` |   | Output format: json or yaml (default: human-readable) |
 
 ## ankra services consumers
@@ -216,10 +230,11 @@ still pending that names the binding can no longer be confirmed.
 
 The platform removes a binding only at the revision you last read. Without
 `--revision` the current one is read from the binding. A binding whose
-application or cluster has since been removed can still be unbound, but it can
-no longer be read by id: pass `--revision` with the revision 'ankra services
-consumers list `--application` &lt;application&gt;' shows. Asks first; `--yes` skips the
-question.
+application or cluster has since been removed, or whose application was
+removed from its cluster ('ankra application remove'), can still be unbound,
+but it can no longer be read by id: pass `--revision` with the revision 'ankra
+services consumers list `--application` &lt;application&gt;' shows. Asks first; `--yes`
+skips the question.
 
 ```bash
 ankra services consumers unbind <consumer-id> [flags]
@@ -526,8 +541,7 @@ ankra services delete orders-db --cluster prod --acknowledge-data-loss --yes --w
 ## ankra services disconnect
 
 Disconnect one application environment from a managed service. The service
-keeps running for its other applications, and nothing is deleted: the service,
-its data and its credentials stay.
+keeps running for its other applications, and the service and its data stay.
 
 It is two steps on the platform. First a disconnection review is prepared: the
 platform works out what disconnecting does and stores that plan with a digest
@@ -538,11 +552,16 @@ platform's own words:
 Variables         the variables the application stops receiving (DATABASE_URL,
                   ...) and, when another service of the same kind is
                   connected, who gives the conventional names from now on
-Credential        every application of a service shares one credential
-                  today, so it is not revoked: the application keeps the
-                  password it has. What that cannot guarantee, and how to
-                  make sure the application can no longer authenticate
-                  (rotate the password, for every application)
+Credential        what happens to the credential the application connects
+                  with, which depends on the connection. A database role
+                  of its own (PostgreSQL): Ankra stops it logging in and
+                  removes it, and no rotation is needed. A credential it
+                  shares with the service's other applications: it is not
+                  revoked, the application keeps the password it has, and
+                  the review says what that cannot guarantee and how to
+                  make sure it can no longer authenticate.
+                  'ankra services get <service>' shows which credential
+                  each application uses
 Secret            the connection Secret in the application's namespace,
                   which Ankra keeps until no pod reads it
 Workloads         the deployed workloads that read it: those Ankra attached
@@ -1232,6 +1251,13 @@ region and data boundary default to the cluster's placement policy. Parameters
 (`--param`) default to the package's defaults; 'ankra services packages get
 &lt;package&gt;' lists them with their bounds.
 
+`--package` with a name alone sets up the package's newest version; a name two
+publishers share is refused, so pass name@version or the id. A version
+of an Ankra package older than the oldest one a new service can use is
+refused, and the refusal names that oldest version. So is a cluster whose Ankra
+agent is older than 2.1.1347 or has not reported its version: upgrade it with
+'ankra cluster agent upgrade'. A service that already runs is not changed.
+
 `--from` creates a PostgreSQL service from the backups of another PostgreSQL
 service of the organisation, named by its name or id. The new service starts
 with the other's data as of `--at` (a time in RFC 3339, for example
@@ -1239,8 +1265,10 @@ with the other's data as of `--at` (a time in RFC 3339, for example
 is left out. The moment must be inside the window Ankra can confirm from the
 other service's backups: the platform refuses any other moment, and a window
 it could not read. The other service is not changed and may be retired or on
-a cluster that no longer exists, as long as its backups are still kept. The
-review names the source and the moment before anything is set up. The new
+a cluster that no longer exists, as long as its backups are still kept. A
+name that an active and a retired service share, or two of either, is refused
+with the id of each: pass the id of the one you mean. The review names the
+source and the moment before anything is set up. The new
 service starts with no applications: connect them with 'ankra services
 connect' once it runs. `--consumer` is refused with `--from`.
 
@@ -1262,7 +1290,7 @@ ankra services setup <name> [flags]
 
 ```bash
 ankra services setup orders-db --package postgresql --cluster prod --consumer 0b7c4d19-5f6a-4b8c-9d0e-1f2a3b4c5d6f
-ankra services setup orders-db --package postgresql@1.0.0 --consumer <id> --param storage_gib=20 --param instances=3
+ankra services setup orders-db --package postgresql@1.11.0 --consumer <id> --param storage_gib=20 --param instances=3
 ankra services setup orders-db --package postgresql --consumer <id> --review-only
 ankra services setup orders-db --package postgresql --consumer <id> --yes -o json
 ankra services setup orders-db-copy --package postgresql --cluster prod --from orders-db --at 2026-11-18T09:30:00Z

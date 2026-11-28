@@ -28,7 +28,7 @@ Both need the `agents.manage` permission, because the command contains the agent
 
 ## Values across upgrades
 
-When Ankra upgrades the agent, the agent reads the values you set on its release and passes them to the new release, so a value you set with `--set` survives the upgrade. Five values are Ankra's and are not carried: `config.ankra_url`, `config.token` and the pipeline values `ci_worker_count` and `ci_storage_class` come from Ankra, and `image.tag` is dropped so the image follows the chart version. The CPU and memory values are carried separately, see [Set through Ankra](#set-through-ankra).
+When Ankra upgrades the agent, the agent reads the values you set on its release and passes them to the new release, so a value you set with `--set` survives the upgrade. Six values are Ankra's and are not carried: `config.ankra_url`, `config.token`, the pipeline values `ci_worker_count` and `ci_storage_class`, and `platform_tolerations` come from Ankra, and `image.tag` is dropped so the image follows the chart version. The CPU and memory values are carried separately, see [Set through Ankra](#set-through-ankra).
 
 If the release's values cannot be read, the agent refuses the upgrade rather than reset your values to the chart defaults. The refusal starts `Refused the cluster agent upgrade: the current values of the ankra-agent release could not be read`, gives the reason, and ends `upgrading without them would reset the customer's chart values to the defaults.`
 
@@ -143,7 +143,9 @@ The chart enforces non-root defaults matching the image's `ankra` user (UID/GID 
 
 | Value | Default | Description |
 |-------|---------|-------------|
-| `node_selector` / `tolerations` / `affinity` / `topologySpreadConstraints` | empty | Standard scheduling controls |
+| `node_selector` / `tolerations` / `topologySpreadConstraints` | empty | Standard scheduling controls |
+| `platform_tolerations` | empty | The tolerations Ankra holds for this cluster's agent, rendered after `tolerations`. **Set through Ankra**, see [Let the agent run on tainted nodes](#let-the-agent-run-on-tainted-nodes) |
+| `affinity` | prefers nodes labelled `ankra.io/egress=direct`, then nodes that are not control planes | See [Where the agent runs](#where-the-agent-runs) |
 | `service_account.name` | `ankra-agent-sa` | Service account name |
 | `service_account.annotations` | `{}` | Service account annotations (e.g. IRSA) |
 | `service.type` / `service.port` | `ClusterIP` / `8080` | Agent HTTP service |
@@ -151,6 +153,49 @@ The chart enforces non-root defaults matching the image's `ankra` user (UID/GID 
 | `service.annotations` | `{}` | Annotations on the agent's Service |
 | `pod_annotations` | `{}` | Extra pod annotations |
 | `log_level` | `INFO` | `DEBUG`, `INFO`, `WARNING` or `ERROR`, in any case. `WARN` is read as `WARNING`, `CRITICAL` and `FATAL` as `ERROR`; anything else falls back to `INFO` |
+
+### Where the agent runs
+
+The chart's default `affinity` carries two preferences:
+
+| The agent prefers | Weight | Since |
+|-------------------|--------|-------|
+| Nodes labelled `ankra.io/egress=direct` | 100 | agent 2.1.1356 |
+| Nodes without the `node-role.kubernetes.io/control-plane` label | 50 | agent 2.1.1354 |
+
+**Nodes with their own way out.** On many clusters most nodes reach the internet through one NAT or managed gateway, such as an OVHcloud gateway. When that gateway fails, the agent loses its connection to Ankra, even though the nodes with their own public IP keep working. Label those nodes and the agent prefers them:
+
+```bash
+ankra cluster patch node worker-a worker-b --patch '{"metadata":{"labels":{"ankra.io/egress":"direct"}}}'
+```
+
+The agent must be able to run on the node. A node with a taint the agent does not tolerate, such as a node kept for databases, is never chosen, whatever its label. The chart's default `tolerations` is empty: let the agent tolerate that taint with `ankra cluster agent tolerations set`, see [Let the agent run on tainted nodes](#let-the-agent-run-on-tainted-nodes).
+
+Label a node only when its traffic really leaves through its own public IP. Prefer workers: a labelled control plane outranks every unlabelled worker. Labelling every node gains nothing, because the preference only counts when some nodes have the label and others do not.
+
+**Not on a small control plane.** On a cluster with workers, the agent runs on a worker that has room, not on a small control-plane node where Kubernetes can evict it when that node runs low on memory. On a cluster Ankra builds, Ankra installs the agent with a toleration for the control-plane taint, so it can still run on a control plane when no worker can take it. An agent installed before November 2026 may have lost that toleration at an earlier upgrade; it then stays pending when no worker can take it.
+
+Both are preferences, not requirements: when no preferred node can take the agent, it runs where it could before. Kubernetes reads node labels when the agent's pod starts, so a running agent moves when its pod is next created, at its next upgrade or restart, not when you set the label.
+
+Helm merges an `affinity` you set with this default. A `nodeAffinity.preferredDuringSchedulingIgnoredDuringExecution` list you set replaces both preferences, any other key you set sits beside them, and `affinity: null` removes the default.
+
+### Let the agent run on tainted nodes
+
+<CliVersion since="0.90.0" command="cluster agent tolerations set" />
+
+Kubernetes keeps the agent off every node with a `NoSchedule` or `NoExecute` taint it does not tolerate, and avoids a node with a `PreferNoSchedule` taint when it can. To let it run on nodes you have tainted, for example the only nodes with their own public IP, store the taints in Ankra:
+
+```bash
+ankra cluster agent tolerations set --toleration purpose=db:NoSchedule --cluster my-cluster
+```
+
+Write each one as `key[=value]:Effect`, where the effect is `NoSchedule`, `PreferNoSchedule` or `NoExecute`. Without a value it matches any value of the key. Repeat `--toleration` for more, up to eight; the list you pass replaces the stored one. Ankra adds them to the `tolerations` the agent's release lists, in every install, upgrade and re-render it generates, so they survive upgrades and a reinstall. A toleration you add to the agent's Deployment by hand is undone by the next upgrade, and one you set with `helm upgrade --set tolerations...` replaces the list the install set and is gone after a reinstall. A toleration lets the agent run on a node; to make it prefer one, label the node as above.
+
+Tolerating a `NoExecute` taint also means the agent is not evicted from a node while the node carries it. Ankra refuses the taints Kubernetes puts on a node that cannot run pods (`node.kubernetes.io/...` and `node.cloudprovider.kubernetes.io/...`), the Cluster Autoscaler's `ToBeDeletedByClusterAutoscaler` and `DeletionCandidateOfClusterAutoscaler`, and every key under `karpenter.sh/`, `node.cilium.io/`, `ankra.io/` and `ankra.cloud/`, which those tools use to keep pods off a node they remove, prepare or reserve.
+
+The command prints how the list was applied. An online agent from 2.1.1360 restarts with it straight away. An older agent gets it from the first upgrade or re-render after it runs 2.1.1360 or later, because the older agent runs the upgrade that brings the setting; run `set` again once it is upgraded to apply it straight away. Read the list back with `ankra cluster agent tolerations get`. The MCP tools are `set_cluster_agent_tolerations` and `get_cluster_agent_status`, and the API route is `GET` and `PUT /api/v1/org/clusters/{cluster_id}/agent/tolerations`.
+
+`ankra cluster agent tolerations clear` removes the list and asks first: if every node with room for the agent carries a taint it no longer tolerates, the agent stays Pending and the cluster shows as offline. Setting and clearing need `agents.manage`.
 
 ## Metrics
 
